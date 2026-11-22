@@ -30,7 +30,8 @@ std::string ExtraInfoGenerator::WriteCoreParamData(const ModelInfo &model_info,
     std::vector<std::string> tiling_data_name_vec{tiling_data_name.first};
     if (TilingDataGenUtils::NeedWrittenTilingData(tiling_data_name_vec, tiling_data_vars)) {
       printer.AddLine(tiling_data_name.second);
-      TilingDataGenUtils::WriteTilingDataElement(printer, tiling_data_vars, tiling_data_name_vec);
+      TilingDataGenUtils::WriteTilingDataElement(printer, tiling_data_vars, tiling_data_name_vec,
+                                                 model_info.dynamic_size_var_names);
       GELOGD("Write tiling data: name[%s]", tiling_data_name.first.c_str());
     }
   }

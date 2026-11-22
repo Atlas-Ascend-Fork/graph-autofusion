@@ -56,7 +56,7 @@ using optimize::autoschedule::AxisGroup;
 
 namespace {
 std::string ToString(const Expression &e) {
-  return std::string(e.Serialize().get());
+  return std::string(e.Str().get());
 }
 class GraphBuilder {
  public:
@@ -900,7 +900,7 @@ TEST_F(OptimizerSt, TestSoftmaxGraph_OptimizeSuccess) {
   ::ascir::FusedScheduledResult fused_scheduled_result;
   Status res = optimizer.Optimize(graph, fused_scheduled_result);
   EXPECT_EQ(res, af::SUCCESS);
-  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 2UL);
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 3UL);
 }
 
 TEST_F(OptimizerSt, TestPackGraph_OptimizeSuccess) {
@@ -1574,25 +1574,40 @@ TEST_F(OptimizerSt, ScalarBroadcastOptimization_Api_Not_Support_Scalar) {
   ::ascir::FusedScheduledResult fused_scheduled_result;
   Status res = optimizer.Optimize(graph, fused_scheduled_result);
   EXPECT_EQ(res, af::SUCCESS);
-  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 1UL);
-  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups.size(), 1UL);
-  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs.size(), 5UL);
+  // 新增 Brc workspace 候选(恒为 result0): brc2->brc3 断边切分为生产/消费两个调度组,
+  // 原 recompute 模板为 fallback 候选(result1), 二者在 tiling 期打分竞争
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 2UL);
+  const auto &ws_result = fused_scheduled_result.node_idx_to_scheduled_results[0][0];
+  ASSERT_EQ(ws_result.schedule_groups.size(), 2UL);
+  // 生产侧: 小张量链经 Store 写入 workspace, 不含 brc3
+  ASSERT_EQ(ws_result.schedule_groups[0].impl_graphs.size(), 2UL);
+  EXPECT_NE(ws_result.schedule_groups[0].impl_graphs[0].FindNode("brc2_to_brc3_Store_0"), nullptr);
+  EXPECT_EQ(ws_result.schedule_groups[0].impl_graphs[0].FindNode("brc3"), nullptr);
+  // 消费侧: workspace Load 后完成首轴扩展
+  ASSERT_EQ(ws_result.schedule_groups[1].impl_graphs.size(), 2UL);
+  EXPECT_NE(ws_result.schedule_groups[1].impl_graphs[0].FindNode("brc2_to_brc3_Load_0"), nullptr);
+  EXPECT_NE(ws_result.schedule_groups[1].impl_graphs[0].FindNode("brc3"), nullptr);
 
-  auto impl_graph = fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs[0];
+  // fallback 候选: 原 5 个广播消除变体结构保持
+  const auto &fallback_result = fused_scheduled_result.node_idx_to_scheduled_results[0][1];
+  ASSERT_EQ(fallback_result.schedule_groups.size(), 1UL);
+  ASSERT_EQ(fallback_result.schedule_groups[0].impl_graphs.size(), 5UL);
+
+  auto impl_graph = fallback_result.schedule_groups[0].impl_graphs[0];
   auto compute_graph = af::AscGraphUtils::GetComputeGraph(impl_graph);
   EXPECT_EQ(compute_graph->GetAllNodesSize(), 8);
   EXPECT_EQ(compute_graph->FindNode("brc1"), nullptr);
   EXPECT_EQ(compute_graph->FindNode("brc2"), nullptr);
   EXPECT_NE(compute_graph->FindNode("brc3"), nullptr);
 
-  auto impl_graph_1 = fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs[1];
+  auto impl_graph_1 = fallback_result.schedule_groups[0].impl_graphs[1];
   auto compute_graph_1 = af::AscGraphUtils::GetComputeGraph(impl_graph_1);
   EXPECT_EQ(compute_graph_1->GetAllNodesSize(), 8);
   EXPECT_EQ(compute_graph_1->FindNode("brc1"), nullptr);
   EXPECT_NE(compute_graph_1->FindNode("brc2"), nullptr);
   EXPECT_EQ(compute_graph_1->FindNode("brc3"), nullptr);
 
-  auto impl_graph_2 = fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs[2];
+  auto impl_graph_2 = fallback_result.schedule_groups[0].impl_graphs[2];
   auto compute_graph_2 = af::AscGraphUtils::GetComputeGraph(impl_graph_2);
   EXPECT_EQ(compute_graph_2->GetAllNodesSize(), 8);
   EXPECT_NE(compute_graph_2->FindNode("brc1"), nullptr);
@@ -1625,25 +1640,40 @@ TEST_F(OptimizerSt, ScalarBroadcastOptimization_Same_Input) {
   ::ascir::FusedScheduledResult fused_scheduled_result;
   Status res = optimizer.Optimize(graph, fused_scheduled_result);
   EXPECT_EQ(res, af::SUCCESS);
-  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 1UL);
-  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups.size(), 1UL);
-  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs.size(), 5UL);
+  // 新增 Brc workspace 候选(恒为 result0): brc2->brc3 断边切分, 原 recompute 模板为 fallback 候选(result1)
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 2UL);
+  const auto &ws_result = fused_scheduled_result.node_idx_to_scheduled_results[0][0];
+  ASSERT_EQ(ws_result.schedule_groups.size(), 2UL);
+  // 生产侧: add 重计算到广播前的小张量上, 经 Store 写入 workspace
+  ASSERT_EQ(ws_result.schedule_groups[0].impl_graphs.size(), 2UL);
+  EXPECT_NE(ws_result.schedule_groups[0].impl_graphs[0].FindNode("brc2_to_brc3_Store_0"), nullptr);
+  EXPECT_NE(ws_result.schedule_groups[0].impl_graphs[0].FindNode("add"), nullptr);
+  EXPECT_EQ(ws_result.schedule_groups[0].impl_graphs[0].FindNode("brc3"), nullptr);
+  // 消费侧: workspace Load + brc3 扩展
+  ASSERT_EQ(ws_result.schedule_groups[1].impl_graphs.size(), 2UL);
+  EXPECT_NE(ws_result.schedule_groups[1].impl_graphs[0].FindNode("brc2_to_brc3_Load_0"), nullptr);
+  EXPECT_NE(ws_result.schedule_groups[1].impl_graphs[0].FindNode("brc3"), nullptr);
 
-  auto impl_graph = fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs[0];
+  // fallback 候选: 原 5 个广播消除变体结构保持
+  const auto &fallback_result = fused_scheduled_result.node_idx_to_scheduled_results[0][1];
+  ASSERT_EQ(fallback_result.schedule_groups.size(), 1UL);
+  ASSERT_EQ(fallback_result.schedule_groups[0].impl_graphs.size(), 5UL);
+
+  auto impl_graph = fallback_result.schedule_groups[0].impl_graphs[0];
   auto compute_graph = af::AscGraphUtils::GetComputeGraph(impl_graph);
   EXPECT_EQ(compute_graph->GetAllNodesSize(), 6);
   EXPECT_EQ(compute_graph->FindNode("brc1"), nullptr);
   EXPECT_EQ(compute_graph->FindNode("brc2"), nullptr);
   EXPECT_NE(compute_graph->FindNode("brc3"), nullptr);
 
-  auto impl_graph_1 = fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs[1];
+  auto impl_graph_1 = fallback_result.schedule_groups[0].impl_graphs[1];
   auto compute_graph_1 = af::AscGraphUtils::GetComputeGraph(impl_graph_1);
   EXPECT_EQ(compute_graph_1->GetAllNodesSize(), 6);
   EXPECT_EQ(compute_graph_1->FindNode("brc1"), nullptr);
   EXPECT_NE(compute_graph_1->FindNode("brc2"), nullptr);
   EXPECT_EQ(compute_graph_1->FindNode("brc3"), nullptr);
 
-  auto impl_graph_2 = fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs[2];
+  auto impl_graph_2 = fallback_result.schedule_groups[0].impl_graphs[2];
   auto compute_graph_2 = af::AscGraphUtils::GetComputeGraph(impl_graph_2);
   EXPECT_EQ(compute_graph_2->GetAllNodesSize(), 6);
   EXPECT_NE(compute_graph_2->FindNode("brc1"), nullptr);
@@ -1808,12 +1838,23 @@ TEST_F(OptimizerSt, ScalarBroadcastOptimization_Add_Le_Common_Scalar_Failed) {
   ::ascir::FusedScheduledResult fused_scheduled_result;
   Status res = optimizer.Optimize(graph, fused_scheduled_result);
   EXPECT_EQ(res, af::SUCCESS);
-  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 1UL);
-  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups.size(), 1UL);
-  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs.size(), 3UL);
+  // 新增 Brc workspace 候选(恒为 result0): brc2->brc3 断边切分, 原 recompute 模板为 fallback 候选(result1)
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 2UL);
+  const auto &ws_result = fused_scheduled_result.node_idx_to_scheduled_results[0][0];
+  ASSERT_EQ(ws_result.schedule_groups.size(), 2UL);
+  ASSERT_EQ(ws_result.schedule_groups[0].impl_graphs.size(), 2UL);
+  EXPECT_NE(ws_result.schedule_groups[0].impl_graphs[0].FindNode("brc2_to_brc3_Store_0"), nullptr);
+  EXPECT_EQ(ws_result.schedule_groups[0].impl_graphs[0].FindNode("brc3"), nullptr);
+  ASSERT_EQ(ws_result.schedule_groups[1].impl_graphs.size(), 2UL);
+  EXPECT_NE(ws_result.schedule_groups[1].impl_graphs[0].FindNode("brc2_to_brc3_Load_0"), nullptr);
+  EXPECT_NE(ws_result.schedule_groups[1].impl_graphs[0].FindNode("brc3"), nullptr);
 
-  auto compute_graph = af::AscGraphUtils::GetComputeGraph(
-      fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs[0]);
+  // fallback 候选: 原 3 个广播消除变体结构保持
+  const auto &fallback_result = fused_scheduled_result.node_idx_to_scheduled_results[0][1];
+  ASSERT_EQ(fallback_result.schedule_groups.size(), 1UL);
+  ASSERT_EQ(fallback_result.schedule_groups[0].impl_graphs.size(), 3UL);
+
+  auto compute_graph = af::AscGraphUtils::GetComputeGraph(fallback_result.schedule_groups[0].impl_graphs[0]);
   EXPECT_EQ(compute_graph->GetAllNodesSize(), 9);
   EXPECT_NE(compute_graph->FindNode("brc1"), nullptr);
   EXPECT_EQ(compute_graph->FindNode("brc2"), nullptr);
@@ -1883,10 +1924,23 @@ TEST_F(OptimizerSt, MultiBroadcastCancellation_All_One) {
   ::ascir::FusedScheduledResult fused_scheduled_result;
   Status res = optimizer.Optimize(graph, fused_scheduled_result);
   EXPECT_EQ(res, af::SUCCESS);
-  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 1UL);
-  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups.size(), 1UL);
+  // 新增 Brc workspace 候选(恒为 result0): brc3->brc4 断边切分, 原 recompute 模板为 fallback 候选(result1)
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 2UL);
+  const auto &ws_result = fused_scheduled_result.node_idx_to_scheduled_results[0][0];
+  ASSERT_EQ(ws_result.schedule_groups.size(), 2UL);
+  // 生产侧: abs0/exp0/add0 重计算到广播前的小张量上, 4 个 brc 消除变体
+  ASSERT_EQ(ws_result.schedule_groups[0].impl_graphs.size(), 4UL);
+  EXPECT_NE(ws_result.schedule_groups[0].impl_graphs[0].FindNode("brc3_to_brc4_Store_0"), nullptr);
+  EXPECT_EQ(ws_result.schedule_groups[0].impl_graphs[0].FindNode("brc4"), nullptr);
+  // 消费侧: workspace Load + brc4 扩展
+  ASSERT_EQ(ws_result.schedule_groups[1].impl_graphs.size(), 2UL);
+  EXPECT_NE(ws_result.schedule_groups[1].impl_graphs[0].FindNode("brc3_to_brc4_Load_0"), nullptr);
+  EXPECT_NE(ws_result.schedule_groups[1].impl_graphs[0].FindNode("brc4"), nullptr);
 
-  auto impl_graphs = fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs;
+  // fallback 候选: 原 9 个广播消除变体结构保持
+  const auto &fallback_result = fused_scheduled_result.node_idx_to_scheduled_results[0][1];
+  ASSERT_EQ(fallback_result.schedule_groups.size(), 1UL);
+  auto impl_graphs = fallback_result.schedule_groups[0].impl_graphs;
   EXPECT_EQ(impl_graphs.size(), 9);
 
   EXPECT_EQ(impl_graphs[0].FindNode("brc0"), nullptr);
@@ -1961,9 +2015,24 @@ TEST_F(OptimizerSt, ScalarBroadcastOptimization_Two_Scalar) {
   ::ascir::FusedScheduledResult fused_scheduled_result;
   Status res = optimizer.Optimize(graph, fused_scheduled_result);
   EXPECT_EQ(res, af::SUCCESS);
-  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 1UL);
-  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups.size(), 1UL);
-  auto impl_graphs = fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs;
+  // 新增 Brc workspace 候选(恒为 result0): brc2->brc3 断边切分, 原 recompute 模板为 fallback 候选(result1)
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 2UL);
+  const auto &ws_result = fused_scheduled_result.node_idx_to_scheduled_results[0][0];
+  ASSERT_EQ(ws_result.schedule_groups.size(), 2UL);
+  // 生产侧: pow 重计算到广播前的小张量上, 链上 brc 消除变体
+  ASSERT_EQ(ws_result.schedule_groups[0].impl_graphs.size(), 2UL);
+  EXPECT_NE(ws_result.schedule_groups[0].impl_graphs[0].FindNode("brc2_to_brc3_Store_0"), nullptr);
+  EXPECT_NE(ws_result.schedule_groups[0].impl_graphs[0].FindNode("pow"), nullptr);
+  EXPECT_EQ(ws_result.schedule_groups[0].impl_graphs[0].FindNode("brc3"), nullptr);
+  // 消费侧: workspace Load + brc3 扩展
+  ASSERT_EQ(ws_result.schedule_groups[1].impl_graphs.size(), 2UL);
+  EXPECT_NE(ws_result.schedule_groups[1].impl_graphs[0].FindNode("brc2_to_brc3_Load_0"), nullptr);
+  EXPECT_NE(ws_result.schedule_groups[1].impl_graphs[0].FindNode("brc3"), nullptr);
+
+  // fallback 候选: 原 3 个广播消除变体结构保持
+  const auto &fallback_result = fused_scheduled_result.node_idx_to_scheduled_results[0][1];
+  ASSERT_EQ(fallback_result.schedule_groups.size(), 1UL);
+  auto impl_graphs = fallback_result.schedule_groups[0].impl_graphs;
   EXPECT_EQ(impl_graphs.size(), 3);
   auto impl_graph0 = af::AscGraphUtils::GetComputeGraph(impl_graphs[0]);
   EXPECT_EQ(impl_graph0->GetAllNodesSize(), 8);
@@ -2002,12 +2071,12 @@ TEST_F(OptimizerSt, RemoveRedundantBroadcast) {
   EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups.size(), 1UL);
   auto impl_graphs = fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs;
   EXPECT_EQ(impl_graphs.size(), 4);
-  // consumer split creates clone for exp1; common-axis backward removes brc0/brc1 from add0's chain
+  // consumer split creates clone for exp1; sibling removal deletes the original brc0 (add0
+  // reads abs0/exp0 directly) and the surviving clone is renamed back to "brc0"
   auto impl_grp_0_exp1 = impl_graphs[0].FindNode("exp1");
   EXPECT_NE(impl_grp_0_exp1, nullptr);
   EXPECT_EQ(impl_grp_0_exp1->GetAllInDataAnchorsSize(), 1);
-  EXPECT_EQ(impl_grp_0_exp1->GetInDataAnchor(0)->GetPeerOutAnchor()->GetOwnerNode()->GetName(),
-            "brc0_consumer_split_1");
+  EXPECT_EQ(impl_grp_0_exp1->GetInDataAnchor(0)->GetPeerOutAnchor()->GetOwnerNode()->GetName(), "brc0");
 
   auto impol_grp_0_add0 = impl_graphs[0].FindNode("add0");
   EXPECT_NE(impol_grp_0_add0, nullptr);
@@ -2015,7 +2084,8 @@ TEST_F(OptimizerSt, RemoveRedundantBroadcast) {
   EXPECT_EQ(impol_grp_0_add0->GetInDataAnchor(0)->GetPeerOutAnchor()->GetOwnerNode()->GetName(), "abs0");
   EXPECT_EQ(impol_grp_0_add0->GetInDataAnchor(1)->GetPeerOutAnchor()->GetOwnerNode()->GetName(), "exp0");
 
-  EXPECT_NE(impl_graphs[0].FindNode("brc0_consumer_split_1"), nullptr);
+  EXPECT_NE(impl_graphs[0].FindNode("brc0"), nullptr);
+  EXPECT_EQ(impl_graphs[0].FindNode("brc0_consumer_split_1"), nullptr);
 
   // check remove brc in unaligned template
   auto impl_grp_1_exp1 = impl_graphs[1].FindNode("exp1");
@@ -2198,13 +2268,29 @@ TEST_F(OptimizerSt, RemoveContinuesBroadcast_BAB) {
   ::ascir::FusedScheduledResult fused_scheduled_result;
   Status res = optimizer.Optimize(graph, fused_scheduled_result);
   EXPECT_EQ(res, af::SUCCESS);
-  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 1UL);
-  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups.size(), 1UL);
-  auto impl_graphs = fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs;
+  // 新增 Brc workspace 候选(恒为 result0): brc0->brc1 断边切分, 原连续广播消除模板为 fallback 候选(result1)
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 2UL);
+  const auto &ws_result = fused_scheduled_result.node_idx_to_scheduled_results[0][0];
+  ASSERT_EQ(ws_result.schedule_groups.size(), 2UL);
+  // 生产侧: brc0 输出经 Store 写入 workspace
+  ASSERT_EQ(ws_result.schedule_groups[0].impl_graphs.size(), 2UL);
+  EXPECT_NE(ws_result.schedule_groups[0].impl_graphs[0].FindNode("brc0_to_brc1_Store_0"), nullptr);
+  EXPECT_NE(ws_result.schedule_groups[0].impl_graphs[0].FindNode("brc0"), nullptr);
+  EXPECT_EQ(ws_result.schedule_groups[0].impl_graphs[0].FindNode("brc1"), nullptr);
+  // 消费侧: workspace Load + brc1 首轴扩展
+  ASSERT_EQ(ws_result.schedule_groups[1].impl_graphs.size(), 2UL);
+  EXPECT_NE(ws_result.schedule_groups[1].impl_graphs[0].FindNode("brc0_to_brc1_Load_0"), nullptr);
+  EXPECT_NE(ws_result.schedule_groups[1].impl_graphs[0].FindNode("brc1"), nullptr);
+
+  // fallback 候选: 原 5 个连续广播消除变体结构保持
+  const auto &fallback_result = fused_scheduled_result.node_idx_to_scheduled_results[0][1];
+  EXPECT_EQ(fallback_result.schedule_groups.size(), 1UL);
+  auto impl_graphs = fallback_result.schedule_groups[0].impl_graphs;
   EXPECT_EQ(impl_graphs.size(), 5);
   EXPECT_EQ(impl_graphs[0].FindNode("brc0"), nullptr);
   EXPECT_NE(impl_graphs[0].FindNode("brc1"), nullptr);
   auto impl_grp_0_brc1 = impl_graphs[0].FindNode("brc1");
+  ASSERT_NE(impl_grp_0_brc1, nullptr);
   auto brc1_input_repeats = ExpressToStr(impl_grp_0_brc1->inputs[0].attr.repeats);
   EXPECT_EQ(brc1_input_repeats, "1, 1, 1, s1, 1, ");
 }
@@ -3684,7 +3770,9 @@ TEST_F(OptimizerSt, ReduceNeedAlignment) {
   ::ascir::FusedScheduledResult fused_scheduled_result;
   Status res = optimizer.Optimize(graph, fused_scheduled_result);
   EXPECT_EQ(res, af::SUCCESS);
-  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 5UL);
+  // Max 对 {0,2} 两根轴归约, 单 reduce 双 R 轴: phase-1 各 tiling case 切分结构不同(relation 不一致),
+  // AppendReduceFirstStageGroup 回退逐 case 展开, 6 = Common 1 + RCore 展开 4 + AllLoad 1
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 6UL);
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups.size(), 1UL);
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs.size(), 4UL);
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][1].schedule_groups.size(), 2UL);
@@ -3982,15 +4070,23 @@ TEST_F(OptimizerSt, NodeCacheMarkerRemovepad) {
   Status res = optimizer.Optimize(graph, fused_scheduled_result);
   EXPECT_EQ(res, af::SUCCESS);
   EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 1UL);
-  const auto &impl_graphs = fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs;
+  auto &impl_graphs = fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs;
   EXPECT_EQ(impl_graphs.size(), 2);
-  const auto &impl0 = impl_graphs[0];
+  auto &impl0 = impl_graphs[0];
   const auto &impl0_scalar_node = impl0.FindNode("data0");
   EXPECT_NE(impl0_scalar_node, nullptr);
   EXPECT_EQ(impl0_scalar_node->attr.sched.exec_condition, ExecuteCondition::kNoCache);
   const auto &impl0_load1_node = impl0.FindNode("load1");
   EXPECT_NE(impl0_load1_node, nullptr);
-  EXPECT_EQ(impl0_load1_node->attr.sched.exec_condition, ExecuteCondition::kCacheBlockSplitFusedBroadcastAxis);
+  // load1 通过外提判定（IsNodeCacheable 验证了 NodeCacheMarker 的标记）后被转换为 TBuf，
+  // exec_condition 被复位为 kNoCache，loop_axis 被置为其最外层 BlockOuter 轴（block层级一次执行）
+  EXPECT_EQ(impl0_load1_node->attr.sched.exec_condition, ExecuteCondition::kNoCache);
+  const auto load1_loop_axis = impl0_load1_node->attr.sched.loop_axis;
+  ASSERT_NE(load1_loop_axis, af::kIdNone);
+  const auto load1_loop_axis_ptr = impl0.FindAxis(load1_loop_axis);
+  ASSERT_NE(load1_loop_axis_ptr, nullptr);
+  EXPECT_EQ(load1_loop_axis_ptr->type, af::Axis::kAxisTypeBlockOuter);
+  EXPECT_EQ(impl0_load1_node->outputs[0].attr.mem.alloc_type, af::AllocType::kAllocTypeBuffer);
   const auto &impl0_brc1_node = impl0.FindNode("brc1");
   EXPECT_NE(impl0_brc1_node, nullptr);
   EXPECT_EQ(impl0_brc1_node->attr.sched.exec_condition, ExecuteCondition::kCacheBlockSplitFusedBroadcastAxis);
@@ -4076,7 +4172,8 @@ TEST_F(OptimizerSt, NodeCacheMarkerReduce) {
   ::ascir::FusedScheduledResult fused_scheduled_result;
   Status res = optimizer.Optimize(graph, fused_scheduled_result);
   EXPECT_EQ(res, af::SUCCESS);
-  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 3UL);
+  // R-core phase-1 两个 tiling case 收敛为同 group 多 impl, RCore 任务的结果数 2 -> 1, 调度结果由 3 减为 2
+  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 2UL);
   const auto &impl_graphs = fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs;
   EXPECT_EQ(impl_graphs.size(), 2);
 

@@ -24,7 +24,7 @@ import sys
 import time
 from pathlib import Path
 
-UINT32_MAX = 0xFFFFFFFF
+INT64_MAX = 0x7FFFFFFFFFFFFFFF
 
 
 def run_codegen(command, repeat):
@@ -41,8 +41,8 @@ def run_tiling(so_path, abi_width, warmup, repeat, shape, expected_shape_count):
         raise ValueError(
             f"shape count mismatch: expected {expected_shape_count}, got {len(shape)}"
         )
-    if any(not 0 <= dim <= UINT32_MAX for dim in shape):
-        raise ValueError("shape dimensions must fit uint32_t")
+    if any(not 0 <= dim <= INT64_MAX for dim in shape):
+        raise ValueError("shape dimensions must fit int64_t")
     lib = ctypes.CDLL(so_path)
     lib.GetTilingDataSize.restype = ctypes.c_size_t
     tiling_size = lib.GetTilingDataSize()
@@ -50,7 +50,7 @@ def run_tiling(so_path, abi_width, warmup, repeat, shape, expected_shape_count):
         raise ValueError("GetTilingDataSize returned an invalid size")
     tiling = ctypes.create_string_buffer(tiling_size)
     workspace_type = ctypes.c_uint32 if abi_width == 32 else ctypes.c_uint64
-    lib.AutofuseTiling.argtypes = [ctypes.c_uint32] * len(shape) + [
+    lib.AutofuseTiling.argtypes = [ctypes.c_int64] * len(shape) + [
         ctypes.c_void_p,
         ctypes.POINTER(workspace_type),
         ctypes.POINTER(ctypes.c_uint32),

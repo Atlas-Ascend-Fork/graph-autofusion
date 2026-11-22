@@ -43,6 +43,7 @@ target_compile_options(optimize_ut PRIVATE ${ASCGEN_DT_COMPILE_OPTION}
 target_link_libraries(optimize_ut ${ASCGEN_COMMON_LINK_OPTION}
         -Wl,--no-as-needed
         optimize
+        codegen
         ascir
         aihac_ir
         aihac_ir_register

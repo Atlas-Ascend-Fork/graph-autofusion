@@ -1,0 +1,36 @@
+# reg 侧接管表，M2 落地后（2026-10-19）。
+#
+# **只量 6 格，不是 200 格。** 口径见 2026-10-18-afir-vector-func-implementation-design.md
+# 的「只量 6 格的理由」：M1 基线（2026-10-19-legacy-takeover-table-reg-m1.txt）里首因落在
+# VF 下降那一层的只有这 6 格，其余 194 格停在 M2 一处都没动过的更早闸门上，而 M2 的能力判据
+# 是 M1 的严格放宽，所以新增硬失败只可能出现在这 6 格里。
+#
+# 全表外推：takeover 5 -> 7、hard-failure 66 -> 66（不增加）、fallback 127 -> 125、
+# out-of-scope 2 不变。
+#
+# 复跑（**先把 build 配成 legacy ST 那一档**，而且本机那一档必须 -j 2，-j 6 会 OOM）：
+#   bash autofuse/mlir/test/probe/legacy_takeover_table.sh -j 2 \
+#     -R '^(abs_uint8|relu_uint8|cast_abs|cast_abs_float16_float|load_brc|load_compare_where_store)_test_codegen_v2$'
+#
+
+case                                                 state         gate                     shortfall  first diagnostic
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+abs_uint8_test_codegen_v2                            fallback      lowering                 yes        error: UnsupportedOperation: VectorFunc node 'abs_uint8_test_0_B0Y2_S0G0C0_VfNode_0' reads 'int16', which the register-form lowering does not model ye
+cast_abs_float16_float_test_codegen_v2               takeover      none                     no
+cast_abs_test_codegen_v2                             takeover      none                     no
+load_brc_test_codegen_v2                             fallback      lowering                 yes        error: UnsupportedOperation: 'afir.mul' has no register-form lowering; the modeled operations are afir.add, afir.div, afir.abs, afir.exp, afir.relu, a
+load_compare_where_store_test_codegen_v2             fallback      lowering                 yes        error: UnsupportedOperation: 'afir.eq' has no register-form lowering; the modeled operations are afir.add, afir.div, afir.abs, afir.exp, afir.relu, af
+relu_uint8_test_codegen_v2                           fallback      lowering                 yes        error: UnsupportedOperation: VectorFunc node 'relu_uint8_test_0_B0Y3_S0G0C0_VfNode_0' reads 'uint8', which the register-form lowering does not model y
+
+state                              count
+------------------------------------------------
+fallback                           4
+takeover                           2
+
+gate                               count
+------------------------------------------------
+lowering                           4
+none                               2
+
+二进制不存在的行: 0
+没打出标签的行: 0

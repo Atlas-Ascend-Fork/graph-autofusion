@@ -1,9 +1,9 @@
 # -----------------------------------------------------------------------------------------------------------
 # Copyright (c) 2025 Huawei Technologies Co., Ltd.
-# This program is free software, you can redistribute it and/or modify it under the terms and conditions of 
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
 # CANN Open Software License Agreement Version 2.0 (the "License").
 # Please refer to the License for details. You may not use this file except in compliance with the License.
-# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED, 
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
@@ -25,6 +25,7 @@ file(GLOB_RECURSE ATT_SRCS CONFIGURE_DEPENDS
 
 target_sources(aihac_codegen PRIVATE
     ${CODE_ROOT_DIR}/att/gen_tiling_impl.cpp
+    ${CODE_ROOT_DIR}/att/program/axes_solve_runtime.cpp
     ${ATT_SRCS}
 )
 
@@ -44,3 +45,10 @@ target_include_directories(aihac_codegen PRIVATE
     ${CODE_ROOT_DIR}/att/gen_model_info
     ${CMAKE_BINARY_DIR}/proto/metadef_protos_af
 )
+
+include(${CODE_ROOT_DIR}/att/cmake/axes_solver_resources.cmake)
+target_link_libraries(aihac_codegen PRIVATE att_axes_solver_resources)
+
+include(${CODE_ROOT_DIR}/att/cmake/tiling_core.cmake)
+add_att_tiling_core(att_tiling_core)
+target_link_libraries(aihac_codegen PRIVATE att_tiling_core)

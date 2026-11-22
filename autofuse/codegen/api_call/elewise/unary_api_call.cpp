@@ -45,10 +45,20 @@ Status UnaryApiCall::Generate(const TPipe &tpipe, const std::vector<ascir::AxisI
         tpipe.cv_fusion_type == ascir::CubeTemplateType::kUBFuse && x.id == tpipe.cube_output_tensor_id;
     const std::string input_stride = input_is_cube_output ? "curAlignN" : GenBlockAlignNExpr(x, "curAivN");
     ss << y.actual_size << " = curAivM * " << output_stride << ";" << std::endl;
+    const auto flat_condition = GenCvUbFuseFlatApiCondition(tpipe, inputs, y);
+    if (!flat_condition.empty()) {
+      ss << "if (" << flat_condition << ") {" << std::endl;
+      ss << "  " << this->api_name_ << "(" << y << "[0], " << x << "[0], ConvertToUint32(curAivM * curAivN));"
+         << std::endl;
+      ss << "} else {" << std::endl;
+    }
     ss << "for (uint32_t cv_row = 0; cv_row < ConvertToUint32(curAivM); cv_row++) {" << std::endl;
     ss << "  " << this->api_name_ << "(" << y << "[cv_row * ConvertToUint32(" << output_stride << ")], " << x
        << "[cv_row * ConvertToUint32(" << input_stride << ")], ConvertToUint32(curAivN));" << std::endl;
     ss << "}" << std::endl;
+    if (!flat_condition.empty()) {
+      ss << "}" << std::endl;
+    }
     result = ss.str();
     return af::SUCCESS;
   }

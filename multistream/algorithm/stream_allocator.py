@@ -20,6 +20,7 @@ from ..minidag.node import DAGNode
 from ..minidag.types import INVALID_STREAM_ID, MergeStrategy, NodeCost, _cost_of
 from .merger import StreamMergeOptions, _Merger
 from .path_cover import HopcroftKarp
+from .weighted_merger import WeightedStreamMergeOptions, _WeightedMerger
 
 
 DEFAULT_MAX_PHYSICAL_STREAMS = 8
@@ -38,6 +39,8 @@ class _StreamAllocConfig:
         "required_streams",
         "base_stream_id",
         "merge_strategy",
+        "profiling_hit_indices",
+        "use_profiling_weights",
         "core_limits",
     )
 
@@ -47,13 +50,36 @@ class _StreamAllocConfig:
         required_streams: int = 0,
         base_stream_id: int = 0,
         merge_strategy: MergeStrategy = MergeStrategy.LOAD_BALANCE,
+        profiling_hit_indices: "frozenset[int]" = frozenset(),
+        use_profiling_weights: bool = False,
         core_limits: Optional[object] = None,
     ) -> None:
         self.max_stream_id = max_stream_id
         self.required_streams = required_streams
         self.base_stream_id = base_stream_id
         self.merge_strategy = merge_strategy
+        # Indices of the nodes whose cost came from a profiling sample.  The
+        # allocator turns this into the weighted routing decision once it
+        # knows which nodes really take part in ordinary path merging.
+        self.profiling_hit_indices = frozenset(profiling_hit_indices)
+        self.use_profiling_weights = use_profiling_weights
         self.core_limits = core_limits
+
+    def _resolve_weighted_routing(self, participating_indices) -> None:
+        """Decide whether this allocation uses the weighted merger.
+
+        For either base strategy, the weighted merger runs when a profiling
+        sample hit a node that actually takes part in ordinary path merging,
+        so an excluded node or a separately appended serial group cannot
+        select it.  With no recorded hit the field keeps the value the caller
+        set, which is how the allocator tests drive the weighted merger
+        directly.
+        """
+
+        if self.profiling_hit_indices:
+            self.use_profiling_weights = not frozenset(
+                participating_indices
+            ).isdisjoint(self.profiling_hit_indices)
 
 
 class _SerialGraphSplit:
@@ -282,6 +308,7 @@ def _path_cover_routes(graph) -> List[List[int]]:
 
 def _by_path_cover_core(
     graph,
+    costs: Sequence[NodeCost],
     config: _StreamAllocConfig,
     residual_to_original: Optional[Sequence[DAGNode]] = None,
 ) -> Tuple[List[int], int, List[DAGNode]]:
@@ -299,14 +326,18 @@ def _by_path_cover_core(
     strategy = config.merge_strategy
     strategy_value = getattr(strategy, "value", strategy)
     strategy_text = str(strategy_value).strip().lower().replace("-", "_")
-    if strategy_text in ("loadbalance", "load_balance", "0"):
-        strategy_value = "load_balance"
+    if config.use_profiling_weights:
+        options = WeightedStreamMergeOptions(physical_stream_limit=physical_limit)
+        mapping = _WeightedMerger(options).merge(graph, routes, costs)
     else:
-        strategy_value = "main_stream"
-    options = StreamMergeOptions(
-        strategy=strategy_value, physical_stream_limit=physical_limit
-    )
-    mapping = _Merger(options).merge(graph, routes)
+        if strategy_text in ("loadbalance", "load_balance", "0"):
+            strategy_value = "load_balance"
+        else:
+            strategy_value = "main_stream"
+        options = StreamMergeOptions(
+            strategy=strategy_value, physical_stream_limit=physical_limit
+        )
+        mapping = _Merger(options).merge(graph, routes)
     if len(mapping) != len(routes):
         raise RuntimeError(
             "multistream internal error: merger returned an invalid mapping"
@@ -364,8 +395,10 @@ def by_path_cover(
         logger.error("graph contains a cycle; stream allocation requires a DAG")
         raise RuntimeError("graph contains a cycle; stream allocation requires a DAG")
     split = _split_serial_graph(graph, costs)
+    config._resolve_weighted_routing(node._index for node in split.residual_to_original)
+    residual_costs = [_cost_of(node, costs) for node in split.residual_to_original]
     residual_ids, required, _ = _by_path_cover_core(
-        split.residual_graph, config, split.residual_to_original
+        split.residual_graph, residual_costs, config, split.residual_to_original
     )
 
     stream_ids: Dict[int, int] = {}

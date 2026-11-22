@@ -20,10 +20,16 @@ export PYTHONPATH="${WHL_INSTALL_DIR_PATH}"
 export PIP_BREAK_SYSTEM_PACKAGES=1
 
 python3 -m pip uninstall -y superkernel >/dev/null 2>&1 || pip3 uninstall -y superkernel >/dev/null 2>&1 || true
+if [ -d "${WHL_INSTALL_DIR_PATH}/multistream" ] ||
+    compgen -G "${WHL_INSTALL_DIR_PATH}/multistream-*.dist-info" >/dev/null 2>&1; then
+    python3 -m pip uninstall -y multistream >/dev/null 2>&1 || pip3 uninstall -y multistream >/dev/null 2>&1 || true
+fi
 
 rm -fr "${WHL_INSTALL_DIR_PATH}/superkernel" 2>/dev/null
 rm -fr "${WHL_INSTALL_DIR_PATH}"/superkernel-*.dist-info 2>/dev/null
+rm -fr "${WHL_INSTALL_DIR_PATH}/multistream" 2>/dev/null
+rm -fr "${WHL_INSTALL_DIR_PATH}"/multistream-*.dist-info 2>/dev/null
 chmod +w -R "${WHL_INSTALL_DIR_PATH}/autofuse/__pycache__" 2>/dev/null || true
 rm -fr "${WHL_INSTALL_DIR_PATH}/autofuse/__pycache__" 2>/dev/null
 
-echo "================ graph_autofusion rpm/deb prerm done: package=superkernel, site_packages=${WHL_INSTALL_DIR_PATH:-unknown} ================"
+echo "================ graph_autofusion rpm/deb prerm done: packages=superkernel,multistream, site_packages=${WHL_INSTALL_DIR_PATH:-unknown} ================"

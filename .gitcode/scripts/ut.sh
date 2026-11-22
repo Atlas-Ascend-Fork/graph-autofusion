@@ -49,6 +49,10 @@ touch test1.log
 coverage_save="true"
 if [ "${target_branch}" == "master" ] || [ "${target_branch}" == "develop" ]; then
 	case "${ut_type}" in
+		UT_Test_Python_multistream)
+			bash build.sh -u -c --module=multistream --no-autofuse -f ${WORKSPACE}/pr_filelist.txt
+			ret=$?
+			;;
 		UT_Test_Python_superkernel)
 			bash build.sh -u -c --impl=py --module=superkernel --cann_3rd_lib_path="/home/jenkins/opensource" -j20 -f ${WORKSPACE}/pr_filelist.txt
 			ret=$?
@@ -88,6 +92,11 @@ if [ "${target_branch}" == "master" ] || [ "${target_branch}" == "develop" ]; th
 			ret=$?
 			coverage_save="true"
 			;;
+		ST_Test_autofuse_v35_1|ST_Test_autofuse_v35_2|ST_Test_autofuse_v35_3)
+			bash build.sh -s -c --module=${ut_type#ST_Test_} --cann_3rd_lib_path="/home/jenkins/opensource" -j20 -f ${WORKSPACE}/pr_filelist.txt
+			ret=$?
+			coverage_save="true"
+			;;
         *)
             echo "Skip UT test execution for ${ut_type} on non-master branch"
             exit 0
@@ -95,6 +104,10 @@ if [ "${target_branch}" == "master" ] || [ "${target_branch}" == "develop" ]; th
 	esac
 else
 	case "${ut_type}" in
+		UT_Test_Python_multistream)
+			bash build.sh -u -c --module=multistream --no-autofuse
+			ret=$?
+			;;
 		UT_Test_Python_superkernel)
 			bash build.sh -u -c --impl=py --module=superkernel --cann_3rd_lib_path="/home/jenkins/opensource"
 			ret=$?

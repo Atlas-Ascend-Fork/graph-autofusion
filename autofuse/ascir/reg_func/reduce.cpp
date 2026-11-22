@@ -105,9 +105,9 @@ std::vector<std::unique_ptr<TmpBufDesc>> CalcReduceTmpSize(const AscNode &node) 
     }
     Expression ub_size = GetByteSize(a_in_ub_exp);
 
-    // ArgMax 和 ArgMaxMultiRPhase2 需要额外的 tmp_buf
+    // Argmax 和 ArgMaxMultiRPhase2 需要额外的 tmp_buf
     // ArgMaxMultiRPhase1只需要生命周期为0的tmp_buf
-    if (node.GetType() == "ArgMax" || node.GetType() == "ArgMaxMultiRPhase2") {
+    if (node.GetType() == "Argmax" || node.GetType() == "ArgMaxMultiRPhase2") {
       // 生命周期为0的第一个tmp_buf：当前迭代的index临时存储
       TmpBufDesc desc2 = {sym::Mul(ub_size, Symbol(2)), 0};
       tmp_buf_desc.emplace_back(std::make_unique<TmpBufDesc>(desc2));

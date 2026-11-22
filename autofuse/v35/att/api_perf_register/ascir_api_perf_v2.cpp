@@ -9,6 +9,7 @@
  */
 #include "perf_param_v2.h"
 #include "nddma_model.h"
+#include "base/att_const_values.h"
 #include "v35/att/api_perf_register/ascir_reduce_api_perf_v2.h"
 #include "v35/att/api_perf_register/ascendc_api_perf/broadcast_api_perf_v2.h"
 #include "v35/att/api_perf_register/ascendc_regbase_perf.h"
@@ -20,12 +21,25 @@ constexpr int32_t kMaxDmaLen = 4;
 constexpr int32_t kMaxNddmaLen = 5;
 PerfParamTableV2 perf_param_table_v2;
 TilingScheduleConfigTableV2 tiling_schedule_config_table_v2;
+ArgReduceTilingScheduleConfigTableV2 arg_reduce_tiling_schedule_config_table_v2;
 
 std::vector<int64_t> GetNddmaVectorizedAxis(const af::AscNodePtr &node) {
   if (node == nullptr || node->outputs().empty()) {
     return {};
   }
   return node->outputs[0].attr.vectorized_axis;
+}
+
+std::vector<bool> GetNddmaTileInner(const NodeInfo &node, size_t rank) {
+  std::vector<bool> tile_inner;
+  if (node.outputs.empty() || node.outputs[0] == nullptr || node.outputs[0]->dim_info.size() != rank) {
+    return tile_inner;
+  }
+  tile_inner.reserve(node.outputs[0]->dim_info.size());
+  for (const auto *axis : node.outputs[0]->dim_info) {
+    tile_inner.push_back(axis != nullptr && axis->axis_type == AxisPosition::INNER && !axis->is_bind_multi_core);
+  }
+  return tile_inner;
 }
 
 af::Status TryNewNddmaModel(const TensorShapeInfo &shape_info, const NodeInfo &node, NodeDetail &node_detail,
@@ -56,14 +70,7 @@ af::Status TryNewNddmaModel(const TensorShapeInfo &shape_info, const NodeInfo &n
     LogNddmaFallback(node_detail.name, shape_info.data_type, nullptr, result);
     return af::SUCCESS;
   }
-  std::vector<bool> tile_inner;
-  if (!node.outputs.empty() && node.outputs[0] != nullptr &&
-      node.outputs[0]->dim_info.size() == shape_info.repeats.size()) {
-    tile_inner.reserve(node.outputs[0]->dim_info.size());
-    for (const auto *axis : node.outputs[0]->dim_info) {
-      tile_inner.push_back(axis != nullptr && axis->axis_type == AxisPosition::INNER && !axis->is_bind_multi_core);
-    }
-  }
+  const auto tile_inner = GetNddmaTileInner(node, shape_info.repeats.size());
   const auto build_reason =
       BuildNddmaDescriptor(shape_info, GetNddmaVectorizedAxis(node.node_ptr), descriptor, tile_inner);
   if (build_reason != NddmaFallbackReason::kNone) {
@@ -668,6 +675,16 @@ REGISTER_EVAL_FUNC_TAG(kReduceAll, V2, ascir_reduce_v2::ReduceAllApi);
 REGISTER_EVAL_FUNC_TAG(kReduceSum, V2, ascir_reduce_v2::ReduceSumApi);
 REGISTER_EVAL_FUNC_TAG(kReduceMean, V2, ascir_reduce_v2::ReduceMeanApi);
 REGISTER_EVAL_FUNC_TAG(kReduceProd, V2, ascir_reduce_v2::ReduceProdApi);
+REGISTER_EVAL_FUNC_TAG(kArgmax, V2, ascir_reduce_v2::ArgmaxApi);
+REGISTER_EVAL_FUNC_TAG(kArgMaxMultiRPhase1, V2, ascir_reduce_v2::ArgMaxMultiRPhase1Api);
+REGISTER_EVAL_FUNC_TAG(kArgMaxMultiRPhase2, V2, ascir_reduce_v2::ArgMaxMultiRPhase2Api);
+REGISTER_EVAL_FUNC_TAG(kArgmaxWithValue, V2, ascir_reduce_v2::ArgmaxWithValueApi);
+REGISTER_EVAL_FUNC_TAG(kArgMaxMultiRPhase2WithValue, V2, ascir_reduce_v2::ArgMaxMultiRPhase2WithValueApi);
+REGISTER_EVAL_FUNC_TAG(kArgmin, V2, ascir_reduce_v2::ArgminApi);
+REGISTER_EVAL_FUNC_TAG(kArgMinMultiRPhase1, V2, ascir_reduce_v2::ArgminApi);
+REGISTER_EVAL_FUNC_TAG(kArgMinMultiRPhase2, V2, ascir_reduce_v2::ArgminApi);
+REGISTER_EVAL_FUNC_TAG(kArgminWithValue, V2, ascir_reduce_v2::ArgminApi);
+REGISTER_EVAL_FUNC_TAG(kArgMinMultiRPhase2WithValue, V2, ascir_reduce_v2::ArgminApi);
 REGISTER_EVAL_FUNC_TAG(kNeg, V2, ascir_v2::NegApi);
 REGISTER_EVAL_FUNC_TAG(kMean, V2, ascir_reduce_v2::MeanApi);
 REGISTER_EVAL_FUNC_TAG(kAdd, V2, ascir_v2::AddApi);
@@ -765,6 +782,35 @@ ApiPerfRegister<ApiPerf> max_api_perf_v2(ApiPerfRegisterV2(kMax, kMax + "V2", nu
 ApiPerfRegister<ApiPerf> reduce_max_api_perf_v2(ApiPerfRegisterV2(kReduceMax, kReduceMax + "V2", nullptr,
                                                                   &perf_param_table_v2,
                                                                   &tiling_schedule_config_table_v2));
+ApiPerfRegister<ApiPerf> argmax_api_perf_v2(ApiPerfRegisterV2(kArgmax, kArgmax + "V2", nullptr, &perf_param_table_v2,
+                                                              &arg_reduce_tiling_schedule_config_table_v2));
+ApiPerfRegister<ApiPerf> argmax_multir_phase1_api_perf_v2(
+    ApiPerfRegisterV2(kArgMaxMultiRPhase1, kArgMaxMultiRPhase1 + "V2", nullptr, &perf_param_table_v2,
+                      &arg_reduce_tiling_schedule_config_table_v2));
+ApiPerfRegister<ApiPerf> argmax_multir_phase2_api_perf_v2(
+    ApiPerfRegisterV2(kArgMaxMultiRPhase2, kArgMaxMultiRPhase2 + "V2", nullptr, &perf_param_table_v2,
+                      &arg_reduce_tiling_schedule_config_table_v2));
+ApiPerfRegister<ApiPerf> argmax_with_value_api_perf_v2(ApiPerfRegisterV2(kArgmaxWithValue, kArgmaxWithValue + "V2",
+                                                                         nullptr, &perf_param_table_v2,
+                                                                         &arg_reduce_tiling_schedule_config_table_v2));
+ApiPerfRegister<ApiPerf> argmax_multir_phase2_with_value_api_perf_v2(
+    ApiPerfRegisterV2(kArgMaxMultiRPhase2WithValue, kArgMaxMultiRPhase2WithValue + "V2", nullptr, &perf_param_table_v2,
+                      &arg_reduce_tiling_schedule_config_table_v2));
+// Min uses the same loop/workspace geometry and schedule policy, with direction-specific compute instructions.
+ApiPerfRegister<ApiPerf> argmin_api_perf_v2(ApiPerfRegisterV2(kArgmin, kArgmin + "V2", nullptr, &perf_param_table_v2,
+                                                              &arg_reduce_tiling_schedule_config_table_v2));
+ApiPerfRegister<ApiPerf> argmin_phase1_api_perf_v2(ApiPerfRegisterV2(kArgMinMultiRPhase1, kArgMinMultiRPhase1 + "V2",
+                                                                     nullptr, &perf_param_table_v2,
+                                                                     &arg_reduce_tiling_schedule_config_table_v2));
+ApiPerfRegister<ApiPerf> argmin_phase2_api_perf_v2(ApiPerfRegisterV2(kArgMinMultiRPhase2, kArgMinMultiRPhase2 + "V2",
+                                                                     nullptr, &perf_param_table_v2,
+                                                                     &arg_reduce_tiling_schedule_config_table_v2));
+ApiPerfRegister<ApiPerf> argmin_with_value_api_perf_v2(ApiPerfRegisterV2(kArgminWithValue, kArgminWithValue + "V2",
+                                                                         nullptr, &perf_param_table_v2,
+                                                                         &arg_reduce_tiling_schedule_config_table_v2));
+ApiPerfRegister<ApiPerf> argmin_phase2_with_value_api_perf_v2(
+    ApiPerfRegisterV2(kArgMinMultiRPhase2WithValue, kArgMinMultiRPhase2WithValue + "V2", nullptr, &perf_param_table_v2,
+                      &arg_reduce_tiling_schedule_config_table_v2));
 ApiPerfRegister<ApiPerf> min_api_perf_v2(ApiPerfRegisterV2(kMin, kMin + "V2", nullptr, &perf_param_table_v2,
                                                            &tiling_schedule_config_table_v2));
 ApiPerfRegister<ApiPerf> reduce_min_api_perf_v2(ApiPerfRegisterV2(kReduceMin, kReduceMin + "V2", nullptr,
@@ -983,6 +1029,29 @@ ApiPerfRegister<ApiPerf> i0e_api_perf_v2(ApiPerfRegisterV2(kI0e, kUnitVector, nu
                                                            &tiling_schedule_config_table_v2));
 ApiPerfRegister<ApiPerf> i1e_api_perf_v2(ApiPerfRegisterV2(kI1e, kUnitVector, nullptr, &perf_param_table_v2,
                                                            &tiling_schedule_config_table_v2));
+ApiPerfRegister<ApiPerf> i1_api_perf_v2(ApiPerfRegisterV2(kI1, kUnitVector, nullptr, &perf_param_table_v2,
+                                                          &tiling_schedule_config_table_v2));
+ApiPerfRegister<ApiPerf> identity_api_perf_v2(ApiPerfRegisterV2(kIdentity, kUnitVector, nullptr, &perf_param_table_v2,
+                                                                &tiling_schedule_config_table_v2));
+ApiPerfRegister<ApiPerf> device_assert_async_api_perf_v2(ApiPerfRegisterV2(kDeviceAssertAsync, kUnitVector, nullptr,
+                                                                           &perf_param_table_v2,
+                                                                           &tiling_schedule_config_table_v2));
+ApiPerfRegister<ApiPerf> inline_asm_elementwise_api_perf_v2(ApiPerfRegisterV2(kInlineAsmElementwise, kUnitVector,
+                                                                              nullptr, &perf_param_table_v2,
+                                                                              &tiling_schedule_config_table_v2));
+ApiPerfRegister<ApiPerf> masked_api_perf_v2(ApiPerfRegisterV2(kMasked, kUnitVector, nullptr, &perf_param_table_v2,
+                                                              &tiling_schedule_config_table_v2));
+ApiPerfRegister<ApiPerf> randint64_api_perf_v2(ApiPerfRegisterV2(kRandint64, kUnitVector, nullptr, &perf_param_table_v2,
+                                                                 &tiling_schedule_config_table_v2));
+ApiPerfRegister<ApiPerf> xor_sum_api_perf_v2(ApiPerfRegisterV2(kXorSum, kUnitVector, nullptr, &perf_param_table_v2,
+                                                               &tiling_schedule_config_table_v2));
+ApiPerfRegister<ApiPerf> welford_api_perf_v2(ApiPerfRegisterV2(kWelford, kUnitVector, nullptr, &perf_param_table_v2,
+                                                               &tiling_schedule_config_table_v2));
+ApiPerfRegister<ApiPerf> scan_api_perf_v2(ApiPerfRegisterV2(kScan, kUnitVector, nullptr, &perf_param_table_v2,
+                                                            &tiling_schedule_config_table_v2));
+ApiPerfRegister<ApiPerf> store_reduction_api_perf_v2(ApiPerfRegisterV2(kStoreReduction, kUnitVector, nullptr,
+                                                                       &perf_param_table_v2,
+                                                                       &tiling_schedule_config_table_v2));
 ApiPerfRegister<ApiPerf> bessel_j0_api_perf_v2(ApiPerfRegisterV2(kBesselJ0, kUnitVector, nullptr, &perf_param_table_v2,
                                                                  &tiling_schedule_config_table_v2));
 ApiPerfRegister<ApiPerf> bessel_j1_api_perf_v2(ApiPerfRegisterV2(kBesselJ1, kUnitVector, nullptr, &perf_param_table_v2,
@@ -1013,6 +1082,8 @@ ApiPerfRegister<ApiPerf> ndtri_api_perf_v2(ApiPerfRegisterV2(kNdtri, kUnitVector
 ApiPerfRegister<ApiPerf> logndtr_api_perf_v2(ApiPerfRegisterV2(kLogNdtr, kUnitVector, nullptr, &perf_param_table_v2,
                                                                &tiling_schedule_config_table_v2));
 ApiPerfRegister<ApiPerf> nextafter_api_perf_v2(ApiPerfRegisterV2(kNextAfter, kUnitVector, nullptr, &perf_param_table_v2,
+                                                                 &tiling_schedule_config_table_v2));
+ApiPerfRegister<ApiPerf> bucketize_api_perf_v2(ApiPerfRegisterV2(kBucketize, kUnitVector, nullptr, &perf_param_table_v2,
                                                                  &tiling_schedule_config_table_v2));
 ApiPerfRegister<ApiPerf> polygamma_api_perf_v2(ApiPerfRegisterV2(kPolyGamma, kUnitVector, nullptr, &perf_param_table_v2,
                                                                  &tiling_schedule_config_table_v2));
@@ -1060,6 +1131,8 @@ ApiPerfRegister<ApiPerf> rand_api_perf_v2(ApiPerfRegisterV2(kRand, kUnitVector, 
                                                             &tiling_schedule_config_table_v2));
 ApiPerfRegister<ApiPerf> randn_api_perf_v2(ApiPerfRegisterV2(kRandn, kUnitVector, nullptr, &perf_param_table_v2,
                                                              &tiling_schedule_config_table_v2));
+ApiPerfRegister<ApiPerf> rand_int_api_perf_v2(ApiPerfRegisterV2(kRandInt, kUnitVector, nullptr, &perf_param_table_v2,
+                                                                &tiling_schedule_config_table_v2));
 ApiPerfRegister<ApiPerf> square_api_perf_v2(ApiPerfRegisterV2(kSquare, kSquare + "V2", nullptr, &perf_param_table_v2,
                                                               &tiling_schedule_config_table_v2));
 

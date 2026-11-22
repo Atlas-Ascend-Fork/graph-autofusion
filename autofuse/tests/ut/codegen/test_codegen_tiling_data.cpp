@@ -16,6 +16,88 @@
 #include "codegen_tiling_data.h"
 #include "tests/common/codegen_workspace_test_utils.h"
 
+namespace {
+std::string WithoutFinalTilingMetadata(std::string value) {
+  const size_t begin = value.find("#ifndef AUTOFUSE_FINAL_TILING_SELECTION_SNAPSHOT_DEFINED");
+  if (begin != std::string::npos) {
+    const size_t end = value.find("#endif", begin);
+    const size_t end_size = end == std::string::npos ? 0U : strlen("#endif") + 1U;
+    if (end != std::string::npos) {
+      value.erase(begin, end + end_size - begin);
+    }
+  }
+  const std::string vector_include = "#include <vector>\n";
+  const size_t include_pos = value.find(vector_include);
+  if (include_pos != std::string::npos) {
+    value.erase(include_pos, vector_include.size());
+  }
+  const std::string selections = "  std::vector<FinalTilingSelectionSnapshot> final_tiling_selections;\n";
+  const size_t selections_pos = value.find(selections);
+  if (selections_pos != std::string::npos) {
+    value.erase(selections_pos, selections.size());
+  }
+  return value;
+}
+
+const char kMultiGroupTilingDataExpected[] = R"rawliteral(#ifndef __TestKernel_Tiling_Data_H__
+#define __TestKernel_Tiling_Data_H__
+#include <stdint.h>
+#include "kernel_tiling/kernel_tiling.h"
+#define BEGIN_TILING_DATA_DEF_T(name) struct name {
+#define TILING_DATA_FIELD_DEF_T(type, name) \
+  type name; \
+  inline void set_##name(type value) { name = value; } \
+  inline type get_##name() const { return name; } \
+  inline type* get_addr_##name() {return &name;}
+#define END_TILING_DATA_DEF_T };
+#define TILING_DATA_FIELD_DEF_T_STRUCT(struct_type, filed_name) \
+  struct_type filed_name;
+
+BEGIN_TILING_DATA_DEF_T(AscGraph0ScheduleResult0G0TilingData)
+  TILING_DATA_FIELD_DEF_T(uint16_t, block_dim);
+  TILING_DATA_FIELD_DEF_T(uint16_t, tiling_key);
+  TILING_DATA_FIELD_DEF_T(uint32_t, ub_size);
+  TILING_DATA_FIELD_DEF_T(int64_t, s0);
+  TILING_DATA_FIELD_DEF_T(int64_t, s1);
+  TILING_DATA_FIELD_DEF_T(int64_t, s2);
+END_TILING_DATA_DEF_T;
+
+BEGIN_TILING_DATA_DEF_T(AscGraph0ScheduleResult1G0TilingData)
+  TILING_DATA_FIELD_DEF_T(uint16_t, block_dim);
+  TILING_DATA_FIELD_DEF_T(uint16_t, tiling_key);
+  TILING_DATA_FIELD_DEF_T(uint32_t, ub_size);
+  TILING_DATA_FIELD_DEF_T(int64_t, s0);
+  TILING_DATA_FIELD_DEF_T(int64_t, s1);
+  TILING_DATA_FIELD_DEF_T(int64_t, s2);
+END_TILING_DATA_DEF_T;
+
+BEGIN_TILING_DATA_DEF_T(AscGraph0ScheduleResult1G1TilingData)
+  TILING_DATA_FIELD_DEF_T(uint16_t, block_dim);
+  TILING_DATA_FIELD_DEF_T(uint16_t, tiling_key);
+  TILING_DATA_FIELD_DEF_T(uint32_t, ub_size);
+  TILING_DATA_FIELD_DEF_T(int64_t, s0);
+  TILING_DATA_FIELD_DEF_T(int64_t, s1);
+  TILING_DATA_FIELD_DEF_T(int64_t, s2);
+END_TILING_DATA_DEF_T;
+
+BEGIN_TILING_DATA_DEF_T(TestKernelTilingData)
+  TILING_DATA_FIELD_DEF_T(uint16_t, block_dim);
+  TILING_DATA_FIELD_DEF_T(uint16_t, graph0_tiling_key);
+  TILING_DATA_FIELD_DEF_T(uint32_t, ub_size);
+  TILING_DATA_FIELD_DEF_T_STRUCT(AscGraph0ScheduleResult0G0TilingData, graph0_result0_g0_tiling_data);
+  TILING_DATA_FIELD_DEF_T_STRUCT(AscGraph0ScheduleResult1G0TilingData, graph0_result1_g0_tiling_data);
+  TILING_DATA_FIELD_DEF_T_STRUCT(AscGraph0ScheduleResult1G1TilingData, graph0_result1_g1_tiling_data);
+END_TILING_DATA_DEF_T;
+
+using AutofuseTilingData = TestKernelTilingData;
+struct AutofuseTilingDataPerf {
+  AutofuseTilingData tiling_data;
+  double best_perf;
+};
+#endif
+)rawliteral";
+}  // namespace
+
 class TestCodegenTilingData : public testing::Test, public codegen::TilingData {
  protected:
   TestCodegenTilingData() : codegen::TilingData("TestKernel", "TilingData") {}
@@ -27,11 +109,6 @@ TEST_F(TestCodegenTilingData, ClassBegin) {
 
 TEST_F(TestCodegenTilingData, ClassEnd) {
   EXPECT_EQ(this->ClassEnd(), "END_TILING_DATA_DEF_T;");
-}
-
-TEST_F(TestCodegenTilingData, DataFieldDefine) {
-  af::SizeVar s0(af::Symbol("s0"));
-  EXPECT_EQ(this->DataFieldDefine(s0), "TILING_DATA_FIELD_DEF_T(uint32_t, s0);");
 }
 
 TEST_F(TestCodegenTilingData, ClassRegister) {
@@ -60,6 +137,8 @@ TEST_F(TestCodegenTilingData, SingleGroupGenerateTilingData) {
 
   ascir::FusedScheduledResult fused_schedule_result;
   fused_schedule_result.node_idx_to_scheduled_results.push_back(schedule_results);
+  fused_schedule_result.frontend_shape_vars = {af::Symbol("s0"), af::Symbol("s1"), af::Symbol("s2")};
+  fused_schedule_result.frontend_shape_vars_collected = true;
   const std::string test_res = R"rawliteral(#ifndef __TestKernel_Tiling_Data_H__
 #define __TestKernel_Tiling_Data_H__
 #include <stdint.h>
@@ -75,14 +154,12 @@ TEST_F(TestCodegenTilingData, SingleGroupGenerateTilingData) {
   struct_type filed_name;
 
 BEGIN_TILING_DATA_DEF_T(TestKernelTilingData)
-  TILING_DATA_FIELD_DEF_T(uint32_t, block_dim);
-  TILING_DATA_FIELD_DEF_T(uint32_t, corenum);
+  TILING_DATA_FIELD_DEF_T(uint16_t, block_dim);
+  TILING_DATA_FIELD_DEF_T(uint16_t, tiling_key);
   TILING_DATA_FIELD_DEF_T(uint32_t, ub_size);
-  TILING_DATA_FIELD_DEF_T(uint32_t, hbm_size);
-  TILING_DATA_FIELD_DEF_T(uint32_t, tiling_key);
-  TILING_DATA_FIELD_DEF_T(uint32_t, s0);
-  TILING_DATA_FIELD_DEF_T(uint32_t, s1);
-  TILING_DATA_FIELD_DEF_T(uint32_t, s2);
+  TILING_DATA_FIELD_DEF_T(int64_t, s0);
+  TILING_DATA_FIELD_DEF_T(int64_t, s1);
+  TILING_DATA_FIELD_DEF_T(int64_t, s2);
 END_TILING_DATA_DEF_T;
 
 using AutofuseTilingData = TestKernelTilingData;
@@ -92,7 +169,54 @@ struct AutofuseTilingDataPerf {
 };
 #endif
 )rawliteral";
-  EXPECT_EQ(this->Generate(fused_schedule_result), test_res);
+  EXPECT_EQ(WithoutFinalTilingMetadata(this->Generate(fused_schedule_result)), test_res);
+}
+
+TEST_F(TestCodegenTilingData, GenerateFrontendKsSizeVarUsesInt64) {
+  af::AscGraph graph("test_graph_ks");
+  graph.CreateSizeVar("ks0");
+  graph.CreateSizeVar("ks1");
+
+  std::vector<ascir::ImplGraph> impl_graphs{graph};
+  std::vector<ascir::ScheduledResult> schedule_results;
+  ascir::ScheduledResult schedule_result;
+  ascir::ScheduleGroup schedule_group;
+  schedule_group.impl_graphs = impl_graphs;
+  schedule_result.schedule_groups.push_back(schedule_group);
+  schedule_results.push_back(schedule_result);
+
+  ascir::FusedScheduledResult fused_schedule_result;
+  fused_schedule_result.node_idx_to_scheduled_results.push_back(schedule_results);
+  fused_schedule_result.frontend_shape_vars = {af::Symbol("ks0"), af::Symbol("ks1")};
+  fused_schedule_result.frontend_shape_vars_collected = true;
+
+  const std::string result = this->Generate(fused_schedule_result);
+  EXPECT_NE(result.find("TILING_DATA_FIELD_DEF_T(int64_t, ks0);"), std::string::npos);
+  EXPECT_NE(result.find("TILING_DATA_FIELD_DEF_T(int64_t, ks1);"), std::string::npos);
+  EXPECT_EQ(result.find("TILING_DATA_FIELD_DEF_T(uint32_t, ks0);"), std::string::npos);
+}
+
+TEST_F(TestCodegenTilingData, GenerateFollowsFrontendShapeVarSet) {
+  af::AscGraph graph("test_graph_frontend_set");
+  graph.CreateSizeVar("rows");      // 前端 ABI 符号，非 s/ks 命名，命中集合 → int64_t
+  graph.CreateSizeVar("z0t_size");  // 派生字段，不在集合内 → uint32_t
+
+  std::vector<ascir::ImplGraph> impl_graphs{graph};
+  std::vector<ascir::ScheduledResult> schedule_results;
+  ascir::ScheduledResult schedule_result;
+  ascir::ScheduleGroup schedule_group;
+  schedule_group.impl_graphs = impl_graphs;
+  schedule_result.schedule_groups.push_back(schedule_group);
+  schedule_results.push_back(schedule_result);
+
+  ascir::FusedScheduledResult fused_schedule_result;
+  fused_schedule_result.node_idx_to_scheduled_results.push_back(schedule_results);
+  fused_schedule_result.frontend_shape_vars = {af::Symbol("rows")};
+  fused_schedule_result.frontend_shape_vars_collected = true;
+
+  const std::string result = this->Generate(fused_schedule_result);
+  EXPECT_NE(result.find("TILING_DATA_FIELD_DEF_T(int64_t, rows);"), std::string::npos);
+  EXPECT_NE(result.find("TILING_DATA_FIELD_DEF_T(uint32_t, z0t_size);"), std::string::npos);
 }
 
 TEST_F(TestCodegenTilingData, GenerateWorkspaceFieldsShouldUseUint64) {
@@ -124,9 +248,7 @@ TEST_F(TestCodegenTilingData, SingleGroupGenerateTilingDataWithTranspose) {
   af::ascir_op::Transpose transpose_op("Transpose");
   graph1.AddNode(transpose_op);
 
-  std::vector<ascir::ImplGraph> impl_graphs;
-  impl_graphs.push_back(graph0);
-  impl_graphs.push_back(graph1);
+  std::vector<ascir::ImplGraph> impl_graphs{graph0, graph1};
 
   std::vector<ascir::ScheduledResult> schedule_results;
   ascir::ScheduledResult schedule_result;
@@ -136,6 +258,8 @@ TEST_F(TestCodegenTilingData, SingleGroupGenerateTilingDataWithTranspose) {
   schedule_results.push_back(schedule_result);
   ascir::FusedScheduledResult fused_schedule_result;
   fused_schedule_result.node_idx_to_scheduled_results.push_back(schedule_results);
+  fused_schedule_result.frontend_shape_vars = {af::Symbol("s0"), af::Symbol("s1"), af::Symbol("s2")};
+  fused_schedule_result.frontend_shape_vars_collected = true;
   const std::string test_res = R"rawliteral(#ifndef __TestKernel_Tiling_Data_H__
 #define __TestKernel_Tiling_Data_H__
 #include <stdint.h>
@@ -151,14 +275,12 @@ TEST_F(TestCodegenTilingData, SingleGroupGenerateTilingDataWithTranspose) {
   struct_type filed_name;
 
 BEGIN_TILING_DATA_DEF_T(TestKernelTilingData)
-  TILING_DATA_FIELD_DEF_T(uint32_t, block_dim);
-  TILING_DATA_FIELD_DEF_T(uint32_t, corenum);
+  TILING_DATA_FIELD_DEF_T(uint16_t, block_dim);
+  TILING_DATA_FIELD_DEF_T(uint16_t, tiling_key);
   TILING_DATA_FIELD_DEF_T(uint32_t, ub_size);
-  TILING_DATA_FIELD_DEF_T(uint32_t, hbm_size);
-  TILING_DATA_FIELD_DEF_T(uint32_t, tiling_key);
-  TILING_DATA_FIELD_DEF_T(uint32_t, s0);
-  TILING_DATA_FIELD_DEF_T(uint32_t, s1);
-  TILING_DATA_FIELD_DEF_T(uint32_t, s2);
+  TILING_DATA_FIELD_DEF_T(int64_t, s0);
+  TILING_DATA_FIELD_DEF_T(int64_t, s1);
+  TILING_DATA_FIELD_DEF_T(int64_t, s2);
   TILING_DATA_FIELD_DEF_T_STRUCT(ConfusionTransposeTiling, Transpose_tilingData_1);
 END_TILING_DATA_DEF_T;
 
@@ -169,7 +291,7 @@ struct AutofuseTilingDataPerf {
 };
 #endif
 )rawliteral";
-  EXPECT_EQ(this->Generate(fused_schedule_result), test_res);
+  EXPECT_EQ(WithoutFinalTilingMetadata(this->Generate(fused_schedule_result)), test_res);
 }
 
 TEST_F(TestCodegenTilingData, SingleGroupGenerateConstTilingDataWithTranspose) {
@@ -206,9 +328,21 @@ void replaceSubstring(std::string& ori_str, const std::string& old_sub_str, cons
   }
 }
 
+std::string GenTilingDataFieldConstDefFunc(const std::string &f_name, uint16_t value) {
+  std::stringstream ss_mid;
+  ss_mid << "const uint16_t ";
+  ss_mid << f_name << " = " << std::to_string(value) << ";" << std::endl;
+  return ss_mid.str();
+}
 std::string GenTilingDataFieldConstDefFunc(const std::string &f_name, uint32_t value) {
   std::stringstream ss_mid;
   ss_mid << "const uint32_t ";
+  ss_mid << f_name << " = " << std::to_string(value) << ";" << std::endl;
+  return ss_mid.str();
+}
+std::string GenTilingDataFieldConstDefFunc(const std::string &f_name, int64_t value) {
+  std::stringstream ss_mid;
+  ss_mid << "const int64_t ";
   ss_mid << f_name << " = " << std::to_string(value) << ";" << std::endl;
   return ss_mid.str();
 }
@@ -238,10 +372,8 @@ extern "C" const char* GenConstTilingData(char* config_file, int aiv_num, int ub
     return "";
   }
   std::string GenTilingDataValue_block_dim_field_DeclareFunc_def = GenTilingDataFieldConstDefFunc("block_dim", TilingDataValue.block_dim);
-  std::string GenTilingDataValue_corenum_field_DeclareFunc_def = GenTilingDataFieldConstDefFunc("corenum", TilingDataValue.corenum);
-  std::string GenTilingDataValue_ub_size_field_DeclareFunc_def = GenTilingDataFieldConstDefFunc("ub_size", TilingDataValue.ub_size);
-  std::string GenTilingDataValue_hbm_size_field_DeclareFunc_def = GenTilingDataFieldConstDefFunc("hbm_size", TilingDataValue.hbm_size);
   std::string GenTilingDataValue_tiling_key_field_DeclareFunc_def = GenTilingDataFieldConstDefFunc("tiling_key", TilingDataValue.tiling_key);
+  std::string GenTilingDataValue_ub_size_field_DeclareFunc_def = GenTilingDataFieldConstDefFunc("ub_size", TilingDataValue.ub_size);
   std::string GenTilingDataValue_s0_field_DeclareFunc_def = GenTilingDataFieldConstDefFunc("s0", TilingDataValue.s0);
   std::string GenTilingDataValue_s1_field_DeclareFunc_def = GenTilingDataFieldConstDefFunc("s1", TilingDataValue.s1);
   std::string GenTilingDataValue_s2_field_DeclareFunc_def = GenTilingDataFieldConstDefFunc("s2", TilingDataValue.s2);
@@ -280,10 +412,8 @@ extern "C" const char* GenConstTilingData(char* config_file, int aiv_num, int ub
 
 BEGIN_TILING_DATA_DEF_T(TestKernelTilingData)
   GenTilingDataValue_block_dim_field_DeclareFunc_def
-  GenTilingDataValue_corenum_field_DeclareFunc_def
-  GenTilingDataValue_ub_size_field_DeclareFunc_def
-  GenTilingDataValue_hbm_size_field_DeclareFunc_def
   GenTilingDataValue_tiling_key_field_DeclareFunc_def
+  GenTilingDataValue_ub_size_field_DeclareFunc_def
   GenTilingDataValue_s0_field_DeclareFunc_def
   GenTilingDataValue_s1_field_DeclareFunc_def
   GenTilingDataValue_s2_field_DeclareFunc_def
@@ -299,10 +429,8 @@ struct AutofuseTilingDataPerf {
 #endif
 )";
   replaceSubstring(tiling_data_const_gen_result, "GenTilingDataValue_block_dim_field_DeclareFunc_def",GenTilingDataValue_block_dim_field_DeclareFunc_def);
-  replaceSubstring(tiling_data_const_gen_result, "GenTilingDataValue_corenum_field_DeclareFunc_def",GenTilingDataValue_corenum_field_DeclareFunc_def);
-  replaceSubstring(tiling_data_const_gen_result, "GenTilingDataValue_ub_size_field_DeclareFunc_def",GenTilingDataValue_ub_size_field_DeclareFunc_def);
-  replaceSubstring(tiling_data_const_gen_result, "GenTilingDataValue_hbm_size_field_DeclareFunc_def",GenTilingDataValue_hbm_size_field_DeclareFunc_def);
   replaceSubstring(tiling_data_const_gen_result, "GenTilingDataValue_tiling_key_field_DeclareFunc_def",GenTilingDataValue_tiling_key_field_DeclareFunc_def);
+  replaceSubstring(tiling_data_const_gen_result, "GenTilingDataValue_ub_size_field_DeclareFunc_def",GenTilingDataValue_ub_size_field_DeclareFunc_def);
   replaceSubstring(tiling_data_const_gen_result, "GenTilingDataValue_s0_field_DeclareFunc_def",GenTilingDataValue_s0_field_DeclareFunc_def);
   replaceSubstring(tiling_data_const_gen_result, "GenTilingDataValue_s1_field_DeclareFunc_def",GenTilingDataValue_s1_field_DeclareFunc_def);
   replaceSubstring(tiling_data_const_gen_result, "GenTilingDataValue_s2_field_DeclareFunc_def",GenTilingDataValue_s2_field_DeclareFunc_def);
@@ -329,7 +457,7 @@ struct AutofuseTilingDataPerf {
 }
 
 )rawliteral";
-  EXPECT_EQ(this->GenerateConst(fused_schedule_result), test_res);
+  EXPECT_EQ(WithoutFinalTilingMetadata(this->GenerateConst(fused_schedule_result)), test_res);
 }
 
 TEST_F(TestCodegenTilingData, multiGroupGenerateConstTilingDataWithTranspose) {
@@ -369,9 +497,21 @@ void replaceSubstring(std::string& ori_str, const std::string& old_sub_str, cons
   }
 }
 
+std::string GenTilingDataFieldConstDefFunc(const std::string &f_name, uint16_t value) {
+  std::stringstream ss_mid;
+  ss_mid << "const uint16_t ";
+  ss_mid << f_name << " = " << std::to_string(value) << ";" << std::endl;
+  return ss_mid.str();
+}
 std::string GenTilingDataFieldConstDefFunc(const std::string &f_name, uint32_t value) {
   std::stringstream ss_mid;
   ss_mid << "const uint32_t ";
+  ss_mid << f_name << " = " << std::to_string(value) << ";" << std::endl;
+  return ss_mid.str();
+}
+std::string GenTilingDataFieldConstDefFunc(const std::string &f_name, int64_t value) {
+  std::stringstream ss_mid;
+  ss_mid << "const int64_t ";
   ss_mid << f_name << " = " << std::to_string(value) << ";" << std::endl;
   return ss_mid.str();
 }
@@ -401,15 +541,11 @@ extern "C" const char* GenConstTilingData(char* config_file, int aiv_num, int ub
     return "";
   }
   std::string GenTilingDataValue_block_dim_field_DeclareFunc_def = GenTilingDataFieldConstDefFunc("block_dim", TilingDataValue.block_dim);
-  std::string GenTilingDataValue_corenum_field_DeclareFunc_def = GenTilingDataFieldConstDefFunc("corenum", TilingDataValue.corenum);
-  std::string GenTilingDataValue_ub_size_field_DeclareFunc_def = GenTilingDataFieldConstDefFunc("ub_size", TilingDataValue.ub_size);
-  std::string GenTilingDataValue_hbm_size_field_DeclareFunc_def = GenTilingDataFieldConstDefFunc("hbm_size", TilingDataValue.hbm_size);
   std::string GenTilingDataValue_graph0_tiling_key_field_DeclareFunc_def = GenTilingDataFieldConstDefFunc("graph0_tiling_key", TilingDataValue.graph0_tiling_key);
+  std::string GenTilingDataValue_ub_size_field_DeclareFunc_def = GenTilingDataFieldConstDefFunc("ub_size", TilingDataValue.ub_size);
   std::string GenTilingDataValue_graph0_result0_g0_tiling_data_block_dim_field_DeclareFunc_def = GenTilingDataFieldConstDefFunc("block_dim", TilingDataValue.graph0_result0_g0_tiling_data.block_dim);
-  std::string GenTilingDataValue_graph0_result0_g0_tiling_data_corenum_field_DeclareFunc_def = GenTilingDataFieldConstDefFunc("corenum", TilingDataValue.graph0_result0_g0_tiling_data.corenum);
-  std::string GenTilingDataValue_graph0_result0_g0_tiling_data_ub_size_field_DeclareFunc_def = GenTilingDataFieldConstDefFunc("ub_size", TilingDataValue.graph0_result0_g0_tiling_data.ub_size);
-  std::string GenTilingDataValue_graph0_result0_g0_tiling_data_hbm_size_field_DeclareFunc_def = GenTilingDataFieldConstDefFunc("hbm_size", TilingDataValue.graph0_result0_g0_tiling_data.hbm_size);
   std::string GenTilingDataValue_graph0_result0_g0_tiling_data_tiling_key_field_DeclareFunc_def = GenTilingDataFieldConstDefFunc("tiling_key", TilingDataValue.graph0_result0_g0_tiling_data.tiling_key);
+  std::string GenTilingDataValue_graph0_result0_g0_tiling_data_ub_size_field_DeclareFunc_def = GenTilingDataFieldConstDefFunc("ub_size", TilingDataValue.graph0_result0_g0_tiling_data.ub_size);
   std::string GenTilingDataValue_graph0_result0_g0_tiling_data_s0_field_DeclareFunc_def = GenTilingDataFieldConstDefFunc("s0", TilingDataValue.graph0_result0_g0_tiling_data.s0);
   std::string GenTilingDataValue_graph0_result0_g0_tiling_data_s1_field_DeclareFunc_def = GenTilingDataFieldConstDefFunc("s1", TilingDataValue.graph0_result0_g0_tiling_data.s1);
   std::string GenTilingDataValue_graph0_result0_g0_tiling_data_s2_field_DeclareFunc_def = GenTilingDataFieldConstDefFunc("s2", TilingDataValue.graph0_result0_g0_tiling_data.s2);
@@ -432,10 +568,8 @@ extern "C" const char* GenConstTilingData(char* config_file, int aiv_num, int ub
   std::string GenTilingDataValue_graph0_result0_g0_tiling_data_Transpose_tilingData_1_param16_field_DeclareFunc_field_def = GenTilingDataFieldConstValueFunc(TilingDataValue.graph0_result0_g0_tiling_data.Transpose_tilingData_1.param16);
   std::string GenTilingDataValue_graph0_result0_g0_tiling_data_Transpose_tilingData_1_param17_field_DeclareFunc_field_def = GenTilingDataFieldConstValueFunc(TilingDataValue.graph0_result0_g0_tiling_data.Transpose_tilingData_1.param17);
   std::string GenTilingDataValue_graph0_result0_g1_tiling_data_block_dim_field_DeclareFunc_def = GenTilingDataFieldConstDefFunc("block_dim", TilingDataValue.graph0_result0_g1_tiling_data.block_dim);
-  std::string GenTilingDataValue_graph0_result0_g1_tiling_data_corenum_field_DeclareFunc_def = GenTilingDataFieldConstDefFunc("corenum", TilingDataValue.graph0_result0_g1_tiling_data.corenum);
-  std::string GenTilingDataValue_graph0_result0_g1_tiling_data_ub_size_field_DeclareFunc_def = GenTilingDataFieldConstDefFunc("ub_size", TilingDataValue.graph0_result0_g1_tiling_data.ub_size);
-  std::string GenTilingDataValue_graph0_result0_g1_tiling_data_hbm_size_field_DeclareFunc_def = GenTilingDataFieldConstDefFunc("hbm_size", TilingDataValue.graph0_result0_g1_tiling_data.hbm_size);
   std::string GenTilingDataValue_graph0_result0_g1_tiling_data_tiling_key_field_DeclareFunc_def = GenTilingDataFieldConstDefFunc("tiling_key", TilingDataValue.graph0_result0_g1_tiling_data.tiling_key);
+  std::string GenTilingDataValue_graph0_result0_g1_tiling_data_ub_size_field_DeclareFunc_def = GenTilingDataFieldConstDefFunc("ub_size", TilingDataValue.graph0_result0_g1_tiling_data.ub_size);
   std::string GenTilingDataValue_graph0_result0_g1_tiling_data_s0_field_DeclareFunc_def = GenTilingDataFieldConstDefFunc("s0", TilingDataValue.graph0_result0_g1_tiling_data.s0);
   std::string GenTilingDataValue_graph0_result0_g1_tiling_data_s1_field_DeclareFunc_def = GenTilingDataFieldConstDefFunc("s1", TilingDataValue.graph0_result0_g1_tiling_data.s1);
   std::string GenTilingDataValue_graph0_result0_g1_tiling_data_s2_field_DeclareFunc_def = GenTilingDataFieldConstDefFunc("s2", TilingDataValue.graph0_result0_g1_tiling_data.s2);
@@ -474,10 +608,8 @@ extern "C" const char* GenConstTilingData(char* config_file, int aiv_num, int ub
 
 BEGIN_TILING_DATA_DEF_T(AscGraph0ScheduleResult0G0TilingData)
   GenTilingDataValue_graph0_result0_g0_tiling_data_block_dim_field_DeclareFunc_def
-  GenTilingDataValue_graph0_result0_g0_tiling_data_corenum_field_DeclareFunc_def
-  GenTilingDataValue_graph0_result0_g0_tiling_data_ub_size_field_DeclareFunc_def
-  GenTilingDataValue_graph0_result0_g0_tiling_data_hbm_size_field_DeclareFunc_def
   GenTilingDataValue_graph0_result0_g0_tiling_data_tiling_key_field_DeclareFunc_def
+  GenTilingDataValue_graph0_result0_g0_tiling_data_ub_size_field_DeclareFunc_def
   GenTilingDataValue_graph0_result0_g0_tiling_data_s0_field_DeclareFunc_def
   GenTilingDataValue_graph0_result0_g0_tiling_data_s1_field_DeclareFunc_def
   GenTilingDataValue_graph0_result0_g0_tiling_data_s2_field_DeclareFunc_def
@@ -487,10 +619,8 @@ END_TILING_DATA_DEF_T;
 
 BEGIN_TILING_DATA_DEF_T(AscGraph0ScheduleResult0G1TilingData)
   GenTilingDataValue_graph0_result0_g1_tiling_data_block_dim_field_DeclareFunc_def
-  GenTilingDataValue_graph0_result0_g1_tiling_data_corenum_field_DeclareFunc_def
-  GenTilingDataValue_graph0_result0_g1_tiling_data_ub_size_field_DeclareFunc_def
-  GenTilingDataValue_graph0_result0_g1_tiling_data_hbm_size_field_DeclareFunc_def
   GenTilingDataValue_graph0_result0_g1_tiling_data_tiling_key_field_DeclareFunc_def
+  GenTilingDataValue_graph0_result0_g1_tiling_data_ub_size_field_DeclareFunc_def
   GenTilingDataValue_graph0_result0_g1_tiling_data_s0_field_DeclareFunc_def
   GenTilingDataValue_graph0_result0_g1_tiling_data_s1_field_DeclareFunc_def
   GenTilingDataValue_graph0_result0_g1_tiling_data_s2_field_DeclareFunc_def
@@ -500,10 +630,8 @@ END_TILING_DATA_DEF_T;
 
 BEGIN_TILING_DATA_DEF_T(TestKernelTilingData)
   GenTilingDataValue_block_dim_field_DeclareFunc_def
-  GenTilingDataValue_corenum_field_DeclareFunc_def
-  GenTilingDataValue_ub_size_field_DeclareFunc_def
-  GenTilingDataValue_hbm_size_field_DeclareFunc_def
   GenTilingDataValue_graph0_tiling_key_field_DeclareFunc_def
+  GenTilingDataValue_ub_size_field_DeclareFunc_def
   TILING_DATA_FIELD_DEF_T_STRUCT(AscGraph0ScheduleResult0G0TilingData, graph0_result0_g0_tiling_data);
   TILING_DATA_FIELD_DEF_T_STRUCT(AscGraph0ScheduleResult0G1TilingData, graph0_result0_g1_tiling_data);
 END_TILING_DATA_DEF_T;
@@ -516,15 +644,11 @@ struct AutofuseTilingDataPerf {
 #endif
 )";
   replaceSubstring(tiling_data_const_gen_result, "GenTilingDataValue_block_dim_field_DeclareFunc_def",GenTilingDataValue_block_dim_field_DeclareFunc_def);
-  replaceSubstring(tiling_data_const_gen_result, "GenTilingDataValue_corenum_field_DeclareFunc_def",GenTilingDataValue_corenum_field_DeclareFunc_def);
-  replaceSubstring(tiling_data_const_gen_result, "GenTilingDataValue_ub_size_field_DeclareFunc_def",GenTilingDataValue_ub_size_field_DeclareFunc_def);
-  replaceSubstring(tiling_data_const_gen_result, "GenTilingDataValue_hbm_size_field_DeclareFunc_def",GenTilingDataValue_hbm_size_field_DeclareFunc_def);
   replaceSubstring(tiling_data_const_gen_result, "GenTilingDataValue_graph0_tiling_key_field_DeclareFunc_def",GenTilingDataValue_graph0_tiling_key_field_DeclareFunc_def);
+  replaceSubstring(tiling_data_const_gen_result, "GenTilingDataValue_ub_size_field_DeclareFunc_def",GenTilingDataValue_ub_size_field_DeclareFunc_def);
   replaceSubstring(tiling_data_const_gen_result, "GenTilingDataValue_graph0_result0_g0_tiling_data_block_dim_field_DeclareFunc_def",GenTilingDataValue_graph0_result0_g0_tiling_data_block_dim_field_DeclareFunc_def);
-  replaceSubstring(tiling_data_const_gen_result, "GenTilingDataValue_graph0_result0_g0_tiling_data_corenum_field_DeclareFunc_def",GenTilingDataValue_graph0_result0_g0_tiling_data_corenum_field_DeclareFunc_def);
-  replaceSubstring(tiling_data_const_gen_result, "GenTilingDataValue_graph0_result0_g0_tiling_data_ub_size_field_DeclareFunc_def",GenTilingDataValue_graph0_result0_g0_tiling_data_ub_size_field_DeclareFunc_def);
-  replaceSubstring(tiling_data_const_gen_result, "GenTilingDataValue_graph0_result0_g0_tiling_data_hbm_size_field_DeclareFunc_def",GenTilingDataValue_graph0_result0_g0_tiling_data_hbm_size_field_DeclareFunc_def);
   replaceSubstring(tiling_data_const_gen_result, "GenTilingDataValue_graph0_result0_g0_tiling_data_tiling_key_field_DeclareFunc_def",GenTilingDataValue_graph0_result0_g0_tiling_data_tiling_key_field_DeclareFunc_def);
+  replaceSubstring(tiling_data_const_gen_result, "GenTilingDataValue_graph0_result0_g0_tiling_data_ub_size_field_DeclareFunc_def",GenTilingDataValue_graph0_result0_g0_tiling_data_ub_size_field_DeclareFunc_def);
   replaceSubstring(tiling_data_const_gen_result, "GenTilingDataValue_graph0_result0_g0_tiling_data_s0_field_DeclareFunc_def",GenTilingDataValue_graph0_result0_g0_tiling_data_s0_field_DeclareFunc_def);
   replaceSubstring(tiling_data_const_gen_result, "GenTilingDataValue_graph0_result0_g0_tiling_data_s1_field_DeclareFunc_def",GenTilingDataValue_graph0_result0_g0_tiling_data_s1_field_DeclareFunc_def);
   replaceSubstring(tiling_data_const_gen_result, "GenTilingDataValue_graph0_result0_g0_tiling_data_s2_field_DeclareFunc_def",GenTilingDataValue_graph0_result0_g0_tiling_data_s2_field_DeclareFunc_def);
@@ -547,10 +671,8 @@ struct AutofuseTilingDataPerf {
   replaceSubstring(tiling_data_const_gen_result, "GenTilingDataValue_graph0_result0_g0_tiling_data_Transpose_tilingData_1_param16_field_DeclareFunc_field_def",GenTilingDataValue_graph0_result0_g0_tiling_data_Transpose_tilingData_1_param16_field_DeclareFunc_field_def);
   replaceSubstring(tiling_data_const_gen_result, "GenTilingDataValue_graph0_result0_g0_tiling_data_Transpose_tilingData_1_param17_field_DeclareFunc_field_def",GenTilingDataValue_graph0_result0_g0_tiling_data_Transpose_tilingData_1_param17_field_DeclareFunc_field_def);
   replaceSubstring(tiling_data_const_gen_result, "GenTilingDataValue_graph0_result0_g1_tiling_data_block_dim_field_DeclareFunc_def",GenTilingDataValue_graph0_result0_g1_tiling_data_block_dim_field_DeclareFunc_def);
-  replaceSubstring(tiling_data_const_gen_result, "GenTilingDataValue_graph0_result0_g1_tiling_data_corenum_field_DeclareFunc_def",GenTilingDataValue_graph0_result0_g1_tiling_data_corenum_field_DeclareFunc_def);
-  replaceSubstring(tiling_data_const_gen_result, "GenTilingDataValue_graph0_result0_g1_tiling_data_ub_size_field_DeclareFunc_def",GenTilingDataValue_graph0_result0_g1_tiling_data_ub_size_field_DeclareFunc_def);
-  replaceSubstring(tiling_data_const_gen_result, "GenTilingDataValue_graph0_result0_g1_tiling_data_hbm_size_field_DeclareFunc_def",GenTilingDataValue_graph0_result0_g1_tiling_data_hbm_size_field_DeclareFunc_def);
   replaceSubstring(tiling_data_const_gen_result, "GenTilingDataValue_graph0_result0_g1_tiling_data_tiling_key_field_DeclareFunc_def",GenTilingDataValue_graph0_result0_g1_tiling_data_tiling_key_field_DeclareFunc_def);
+  replaceSubstring(tiling_data_const_gen_result, "GenTilingDataValue_graph0_result0_g1_tiling_data_ub_size_field_DeclareFunc_def",GenTilingDataValue_graph0_result0_g1_tiling_data_ub_size_field_DeclareFunc_def);
   replaceSubstring(tiling_data_const_gen_result, "GenTilingDataValue_graph0_result0_g1_tiling_data_s0_field_DeclareFunc_def",GenTilingDataValue_graph0_result0_g1_tiling_data_s0_field_DeclareFunc_def);
   replaceSubstring(tiling_data_const_gen_result, "GenTilingDataValue_graph0_result0_g1_tiling_data_s1_field_DeclareFunc_def",GenTilingDataValue_graph0_result0_g1_tiling_data_s1_field_DeclareFunc_def);
   replaceSubstring(tiling_data_const_gen_result, "GenTilingDataValue_graph0_result0_g1_tiling_data_s2_field_DeclareFunc_def",GenTilingDataValue_graph0_result0_g1_tiling_data_s2_field_DeclareFunc_def);
@@ -577,7 +699,7 @@ struct AutofuseTilingDataPerf {
 }
 
 )rawliteral";
-  EXPECT_EQ(this->GenerateConst(fused_schedule_result), test_res);
+  EXPECT_EQ(WithoutFinalTilingMetadata(this->GenerateConst(fused_schedule_result)), test_res);
 }
 
 TEST_F(TestCodegenTilingData, MultiGroupGenerateTilingData) {
@@ -638,72 +760,10 @@ TEST_F(TestCodegenTilingData, MultiGroupGenerateTilingData) {
 
   ascir::FusedScheduledResult fused_schedule_result;
   fused_schedule_result.node_idx_to_scheduled_results.push_back(schedule_results);
-  const std::string test_res = R"rawliteral(#ifndef __TestKernel_Tiling_Data_H__
-#define __TestKernel_Tiling_Data_H__
-#include <stdint.h>
-#include "kernel_tiling/kernel_tiling.h"
-#define BEGIN_TILING_DATA_DEF_T(name) struct name {
-#define TILING_DATA_FIELD_DEF_T(type, name) \
-  type name; \
-  inline void set_##name(type value) { name = value; } \
-  inline type get_##name() const { return name; } \
-  inline type* get_addr_##name() {return &name;}
-#define END_TILING_DATA_DEF_T };
-#define TILING_DATA_FIELD_DEF_T_STRUCT(struct_type, filed_name) \
-  struct_type filed_name;
-
-BEGIN_TILING_DATA_DEF_T(AscGraph0ScheduleResult0G0TilingData)
-  TILING_DATA_FIELD_DEF_T(uint32_t, block_dim);
-  TILING_DATA_FIELD_DEF_T(uint32_t, corenum);
-  TILING_DATA_FIELD_DEF_T(uint32_t, ub_size);
-  TILING_DATA_FIELD_DEF_T(uint32_t, hbm_size);
-  TILING_DATA_FIELD_DEF_T(uint32_t, tiling_key);
-  TILING_DATA_FIELD_DEF_T(uint32_t, s0);
-  TILING_DATA_FIELD_DEF_T(uint32_t, s1);
-  TILING_DATA_FIELD_DEF_T(uint32_t, s2);
-END_TILING_DATA_DEF_T;
-
-BEGIN_TILING_DATA_DEF_T(AscGraph0ScheduleResult1G0TilingData)
-  TILING_DATA_FIELD_DEF_T(uint32_t, block_dim);
-  TILING_DATA_FIELD_DEF_T(uint32_t, corenum);
-  TILING_DATA_FIELD_DEF_T(uint32_t, ub_size);
-  TILING_DATA_FIELD_DEF_T(uint32_t, hbm_size);
-  TILING_DATA_FIELD_DEF_T(uint32_t, tiling_key);
-  TILING_DATA_FIELD_DEF_T(uint32_t, s0);
-  TILING_DATA_FIELD_DEF_T(uint32_t, s1);
-  TILING_DATA_FIELD_DEF_T(uint32_t, s2);
-END_TILING_DATA_DEF_T;
-
-BEGIN_TILING_DATA_DEF_T(AscGraph0ScheduleResult1G1TilingData)
-  TILING_DATA_FIELD_DEF_T(uint32_t, block_dim);
-  TILING_DATA_FIELD_DEF_T(uint32_t, corenum);
-  TILING_DATA_FIELD_DEF_T(uint32_t, ub_size);
-  TILING_DATA_FIELD_DEF_T(uint32_t, hbm_size);
-  TILING_DATA_FIELD_DEF_T(uint32_t, tiling_key);
-  TILING_DATA_FIELD_DEF_T(uint32_t, s0);
-  TILING_DATA_FIELD_DEF_T(uint32_t, s1);
-  TILING_DATA_FIELD_DEF_T(uint32_t, s2);
-END_TILING_DATA_DEF_T;
-
-BEGIN_TILING_DATA_DEF_T(TestKernelTilingData)
-  TILING_DATA_FIELD_DEF_T(uint32_t, block_dim);
-  TILING_DATA_FIELD_DEF_T(uint32_t, corenum);
-  TILING_DATA_FIELD_DEF_T(uint32_t, ub_size);
-  TILING_DATA_FIELD_DEF_T(uint32_t, hbm_size);
-  TILING_DATA_FIELD_DEF_T(uint32_t, graph0_tiling_key);
-  TILING_DATA_FIELD_DEF_T_STRUCT(AscGraph0ScheduleResult0G0TilingData, graph0_result0_g0_tiling_data);
-  TILING_DATA_FIELD_DEF_T_STRUCT(AscGraph0ScheduleResult1G0TilingData, graph0_result1_g0_tiling_data);
-  TILING_DATA_FIELD_DEF_T_STRUCT(AscGraph0ScheduleResult1G1TilingData, graph0_result1_g1_tiling_data);
-END_TILING_DATA_DEF_T;
-
-using AutofuseTilingData = TestKernelTilingData;
-struct AutofuseTilingDataPerf {
-  AutofuseTilingData tiling_data;
-  double best_perf;
-};
-#endif
-)rawliteral";
-  EXPECT_EQ(this->Generate(fused_schedule_result), test_res);
+  fused_schedule_result.frontend_shape_vars = {af::Symbol("s0"), af::Symbol("s1"), af::Symbol("s2")};
+  fused_schedule_result.frontend_shape_vars_collected = true;
+  const std::string test_res = kMultiGroupTilingDataExpected;
+  EXPECT_EQ(WithoutFinalTilingMetadata(this->Generate(fused_schedule_result)), test_res);
 }
 
 TEST_F(TestCodegenTilingData, AddApiTilingData) {

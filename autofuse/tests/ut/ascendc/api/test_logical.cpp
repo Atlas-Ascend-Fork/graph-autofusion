@@ -68,15 +68,15 @@ void TestLogicalCommon(const std::string &logical, uint32_t size) {
   uint8_t expect[size];
 
   for (int i = 0; i < size; i++) {
-    T tmp1 = std::rand() % 2;
+    T tmp1 = std::is_same_v<T, int64_t> ? static_cast<T>(std::rand() % 21 - 10) : static_cast<T>(std::rand() % 2);
     x1[i] = tmp1;
 
-    T tmp2 = std::rand() % 2;
+    T tmp2 = std::is_same_v<T, int64_t> ? static_cast<T>(std::rand() % 21 - 10) : static_cast<T>(std::rand() % 2);
     x2[i] = tmp2;
     if (logical == "or") {
-      expect[i] = std::max(tmp1, tmp2);
+      expect[i] = static_cast<uint8_t>((static_cast<float>(tmp1) != 0.0f) || (static_cast<float>(tmp2) != 0.0f));
     } else {
-      expect[i] = tmp1 * tmp2;
+      expect[i] = static_cast<uint8_t>((static_cast<float>(tmp1) != 0.0f) && (static_cast<float>(tmp2) != 0.0f));
     }
   }
 
@@ -143,16 +143,16 @@ void TestLogicalCommonScalarExtend(const std::string &logical, uint32_t size) {
 
   uint8_t expect[size];
 
-  T tmp2 = std::rand() % 2;
+  T tmp2 = std::is_same_v<T, int64_t> ? static_cast<T>(std::rand() % 21 - 10) : static_cast<T>(std::rand() % 2);
   auto x2 = tmp2;
   for (int i = 0; i < size; i++) {
-    T tmp1 = std::rand() % 2;
+    T tmp1 = std::is_same_v<T, int64_t> ? static_cast<T>(std::rand() % 21 - 10) : static_cast<T>(std::rand() % 2);
     x1[i] = tmp1;
 
     if (logical == "orScalarExtend") {
-      expect[i] = std::max(tmp1, tmp2);
+      expect[i] = static_cast<uint8_t>((static_cast<float>(tmp1) != 0.0f) || (static_cast<float>(tmp2) != 0.0f));
     } else {
-      expect[i] = tmp1 * tmp2;
+      expect[i] = static_cast<uint8_t>((static_cast<float>(tmp1) != 0.0f) && (static_cast<float>(tmp2) != 0.0f));
     }
   }
 
@@ -535,8 +535,7 @@ TEST(TestApiLogical, Test_1_blk_unalign) {
   TestLogicalCommonUnalign<int8_t>("or", size);
   TestLogicalCommonUnalign<int16_t>("or", size);
   TestLogicalCommonUnalign<int32_t>("or", size);
-  // TestLogicalCommonUnalign<int64_t>("or", size);     // CAST_NONE from int64_t to float not supported on specified
-  // device
+  TestLogicalCommonUnalign<int64_t>("or", size);
 
   TestLogicalCommonUnalign<float>("and", size);
   TestLogicalCommonUnalign<half>("and", size);
@@ -544,6 +543,5 @@ TEST(TestApiLogical, Test_1_blk_unalign) {
   TestLogicalCommonUnalign<int8_t>("and", size);
   TestLogicalCommonUnalign<int16_t>("and", size);
   TestLogicalCommonUnalign<int32_t>("and", size);
-  // TestLogicalCommonUnalign<int64_t>("and", size);     // CAST_NONE from int64_t to float not supported on specified
-  // device
+  TestLogicalCommonUnalign<int64_t>("and", size);
 }

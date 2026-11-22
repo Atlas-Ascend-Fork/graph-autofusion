@@ -238,3 +238,35 @@ TEST_F(TestImprovePrecisionUT, SharedTransposeMovesDowncastWhenAllStoresUseSameL
   EXPECT_EQ(store1->GetInDataNodes().at(0)->GetName(), "transpose0");
   EXPECT_EQ(CountNodesByType(graph, Cast::Type), 1U);
 }
+
+// 复现 Inductor frexp 融合图：data(fp32) -> load -> frexp(mantissa:fp32 / exponent:int32)
+//   -> store0(fp32) / store1(int32)。多输出异构 dtype 算子的非 0 号输出直连 Store 时，
+// 不应按 peer 输出 0 的 dtype 误判插入 Cast（曾导致 Store 输入 half / 输出 int32 校验失败）
+TEST_F(TestImprovePrecisionUT, MultiOutputHeteroDtypeOpBeforeStore_NoCastInserted) {
+  auto graph = AscGraphBuilder("ut_frexp_hetero_dtype_store")
+                   .Loops({Sym("s0")})
+                   .Data("data0", 0, ge::DT_FLOAT)
+                   .Load("load0", "data0")
+                   .Frexp("frexp0", "load0")
+                   .Store("store0", "frexp0:0")
+                   .Output("output0", "store0", 0, ge::DT_FLOAT)
+                   .Store("store1", "frexp0:1")
+                   .Output("output1", "store1", 1, ge::DT_INT32)
+                   .Build();
+
+  ASSERT_EQ(ImprovePrecisionForAscGraph(graph), af::SUCCESS);
+
+  EXPECT_EQ(CountNodesByType(graph, Cast::Type), 0U);
+  const auto frexp = graph.FindNode("frexp0");
+  ASSERT_NE(frexp, nullptr);
+  EXPECT_EQ(frexp->GetOpDesc()->GetOutputDesc(0).GetDataType(), ge::DT_FLOAT);
+  EXPECT_EQ(frexp->GetOpDesc()->GetOutputDesc(1).GetDataType(), ge::DT_INT32);
+  const auto store0 = graph.FindNode("store0");
+  const auto store1 = graph.FindNode("store1");
+  ASSERT_NE(store0, nullptr);
+  ASSERT_NE(store1, nullptr);
+  ASSERT_EQ(store0->GetInDataNodes().size(), 1U);
+  EXPECT_EQ(store0->GetInDataNodes().at(0)->GetName(), "frexp0");
+  ASSERT_EQ(store1->GetInDataNodes().size(), 1U);
+  EXPECT_EQ(store1->GetInDataNodes().at(0)->GetName(), "frexp0");
+}

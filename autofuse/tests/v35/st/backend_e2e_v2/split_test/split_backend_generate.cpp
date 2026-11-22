@@ -26,8 +26,7 @@ class TestBackendSplitE2e : public testing::Test {
   void SetUp() override {
     dlog_setlevel(ASCGEN_MODULE_NAME, DLOG_ERROR, 0);
     ge::PlatformContext::GetInstance().Reset();
-    auto stub_v2 = std::make_shared<af::RuntimeStubV2>();
-    ge::RuntimeStub::SetInstance(stub_v2);
+    af::InstallV35SocPerfRuntimeStub();
   }
   void TearDown() override {
     dlog_setlevel(ASCGEN_MODULE_NAME, DLOG_ERROR, 0);
@@ -154,10 +153,10 @@ TEST_F(TestBackendSplitE2e, SplitAllAligned) {
     const auto &kernel = RemoveSubDirInclude(result.kernel);
     std::string expected =
         "constexpr SplitTilingAllAligned<2> split_tiling {\n"
-        "  .src_col_size = 64,\n"
-        "  .dst_col_sizes = { 32, 32, },\n"
-        "  .src_offsets = { 0, 32, },\n"
-        "};\n";
+        "      .src_col_size = 64,\n"
+        "      .dst_col_sizes = { 32, 32, },\n"
+        "      .src_offsets = { 0, 32, },\n"
+        "    };\n";
     EXPECT_TRUE(kernel.find(expected) != std::string::npos);
     expected = "SplitAllAligned<int8_t, 2>(";
     EXPECT_TRUE(kernel.find(expected) != std::string::npos);
@@ -255,10 +254,10 @@ TEST_F(TestBackendSplitE2e, SplitNotAllAligned_B8ToB16) {
 
     std::string expected =
         "const split::SplitTiling<2> split_tiling {\n"
-        "  .num_rows = static_cast<uint32_t>(z0t_actual_size), \n"
-        "  .num_src_cols = 14, \n"
-        "  .num_dsts_cols = {7, 7, }\n"
-        "};\n";
+        "      .num_rows = static_cast<uint32_t>(z0t_actual_size), \n"
+        "      .num_src_cols = 14, \n"
+        "      .num_dsts_cols = {7, 7, }\n"
+        "    };\n";
     EXPECT_TRUE(kernel.find(expected) != std::string::npos);
     expected = "split::SplitExtend<uint16_t, 2>((__ubuf__ uint16_t *)";
     EXPECT_TRUE(kernel.find(expected) != std::string::npos);
@@ -277,7 +276,7 @@ TEST_F(TestBackendSplitE2e, SplitNotAllAligned) {
  )";
 
   af::AscGraph graph("split_v2_test");
-  CreateSplitAscGraph(graph, {"s0", "s1"});
+  CreateSplitAscGraph(graph, {"s0", "s1"}, af::DT_UINT8);
   std::map<std::string, std::string> shape_info({{"s0", "stub_s0"}, {"s1", "stub_s1"}});
   std::cout << "KERNEL_SRC_LIST=" << KERNEL_SRC_LIST << std::endl;
   std::vector<std::string> parts = splitString(KERNEL_SRC_LIST, ':');

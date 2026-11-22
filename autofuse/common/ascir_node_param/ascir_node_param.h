@@ -13,6 +13,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <map>
 #include <string>
 #include <variant>
 #include <vector>
@@ -20,6 +21,39 @@
 #include "codegen_api_param/codegen_api_param.h"
 
 namespace ascir_param {
+enum class CacheGuardKind { kNone, kOriginBroadcast, kFusedBroadcast };
+
+struct CacheGuardInfo {
+  CacheGuardKind kind{CacheGuardKind::kNone};
+  ge::Expression guard_axis;
+  ge::Expression period;
+  ge::Expression block_inner_extent;
+  ge::Expression loop_extent;
+  bool address_invariant{false};
+  // Only Codegen/scheduler expressions with a proven positive range may set this.
+  bool positive_range_proven{false};
+  bool clip_to_period{true};
+};
+
+enum class CacheExecutionMode { kUnknown, kNoGuard, kOriginBroadcast, kFusedBroadcast, kReduceDoubleTile };
+enum class ReduceCacheCondition { kA, kR, kControl };
+
+struct CacheLoopInfo {
+  int64_t axis_id{-1};
+  ge::Expression axis;
+  ge::Expression extent;
+};
+
+struct CacheExecutionParams {
+  CacheExecutionMode mode{CacheExecutionMode::kUnknown};
+  int64_t call_loop_axis_id{-1};
+  CacheGuardInfo guard;
+  // One record per emitted call. Repeated generation replaces the same stage.
+  uint32_t stage{0U};
+  std::vector<CacheLoopInfo> loops;
+  std::map<ReduceCacheCondition, CacheGuardInfo> reduce_guards;
+};
+
 enum class ParamBuildStatus {
   // ASCIR 参数构建前的默认状态。
   kUnknown,
@@ -67,6 +101,22 @@ struct ReduceNodeParams {
   // 规范参数丢失表达式语义时使用的语义配方。
   ReduceParamExprs exprs;
 };
+
+struct ArgmaxNodeParams {
+  bool valid{false};
+  bool is_ar{false};
+  bool is_phase2{false};
+  bool with_value{false};
+  bool has_tile_merge{false};
+  bool has_index_cast{false};
+  bool has_accumulate{false};
+  std::vector<ge::Expression> src_shape;
+  ge::Expression valid_extent;
+  ge::Expression valid_a{ge::Symbol(0U)};
+};
+
+// Both directions have the same shape/loop contract. Keep the original type for source/ABI compatibility.
+using ArgReduceNodeParams = ArgmaxNodeParams;
 
 struct VectorFuncNodeParams {
   bool is_double_loop{false};
@@ -129,9 +179,9 @@ struct TransposeNodeParams {
   std::vector<ge::Expression> output_strides;
 };
 
-using AnySpecificParams =
-    std::variant<std::monostate, ReduceNodeParams, VectorFuncNodeParams, CastNodeParams, BroadcastNodeParams,
-                 CompareNodeParams, WhereNodeParams, UnaryBitWidthChangeNodeParams, TransposeNodeParams>;
+using AnySpecificParams = std::variant<std::monostate, ReduceNodeParams, VectorFuncNodeParams, CastNodeParams,
+                                       BroadcastNodeParams, CompareNodeParams, WhereNodeParams,
+                                       UnaryBitWidthChangeNodeParams, TransposeNodeParams, ArgmaxNodeParams>;
 
 struct AscirNodeParams {
   // 扩展属性载荷版本，用于后续兼容。
@@ -142,12 +192,15 @@ struct AscirNodeParams {
   ParamBuildStatus status{ParamBuildStatus::kUnknown};
   // API 专用参数，跳过构建或载荷为空时使用 std::monostate。
   AnySpecificParams specific_params;
+  // Final call-site decision; independent of API-specific build status.
+  std::vector<CacheExecutionParams> cache_executions;
 };
 
 using AscirNodeParamsPtr = std::shared_ptr<AscirNodeParams>;
 
 AscirNodeParamsPtr GetAscirNodeParams(af::AscNodePtr node);
 AscirNodeParamsPtr GetOrCreateAscirNodeParams(af::AscNodePtr node);
+void RecordCacheExecution(AscirNodeParams &params, const CacheExecutionParams &execution);
 const codegen::ReduceSpecificParams &GetCanonicalReduceParams(const ReduceNodeParams &params);
 ge::Expression ResolveForAtt(const ParamExprProduct &expr);
 af::Status ValidateReduceNodeParams(const ReduceNodeParams &params);

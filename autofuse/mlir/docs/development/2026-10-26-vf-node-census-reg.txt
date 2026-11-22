@@ -1,0 +1,367 @@
+# VectorFunc 普查 —— reg 侧（NpuArch 3510 / Ascend950PR_9599），2026-10-26 重量
+#
+# 上一张是 2026-10-17-vf-node-census-reg.txt。重量的理由：本期补过 12 个 bf16 用例样板漏设的
+# `Output` dtype（`tests/framework/share_graph/src/share_graph.cc`），那是**输入图**的改动，
+# 调度融不融 VF 可能跟着变，所以 110 这个数不能照抄。
+#
+# 量具: autofuse/mlir/test/probe/vf_node_census.sh -t <2026-10-26 的 reg 全量接管表>
+# 代码: 6a525700 + 本期两个广播补丁（bf16 开位、形态 B 带填充），在隔离 worktree
+#       /mnt/workspace/agent/claude/brc-bf16-wt 上量。环境: 远端 AF_MLIR_0814。
+#
+# 汇总: 含 VF 110 / 不含 VF 90，没产出 0 —— **与 10-17 那张逐个相等**。所以那 12 行 Output
+# dtype 没有改变调度的 VF 融合，设计文档「110 不应该因本设计而变」这条回归口径成立。
+#
+# **变的是它的内部分布，而那才是排期该看的数**（左列含不含 VF，上行是接管表状态）：
+#
+#                 takeover   fallback(首因是 VF)   fallback(其他)   hard-failure   out-of-scope
+#   含 VF  110        24              8                  27              50             1
+#   无 VF   90        39              —                  34              16             1
+#
+#   10-17 那张的含 VF 一行是：takeover 0 / 首因是 VF 17 / 其他 34 / hard-failure 58 / oos 1。
+#
+# 三条结论：
+#
+#   1. **「只差 VF」17 -> 8 格。** 接 VF 的直接收益降了一半多。
+#   2. **「VF 是那 55% 的必要条件」已被实测否证。** 旧文档原话是「不接它，补 op、补 dtype
+#      一格也换不回来」；实际本期补 op / 补 dtype 换回来的 48 格里有 **24 格是含 VF 的**。
+#      成因：普查是**关掉 MLIR** 量的（口径见脚本头部第 1 条），量的是「legacy 调度融不融
+#      VF」；MLIR 开着时 plan selection 可能选到另一个不含 VF 的 plan。所以「legacy 侧含
+#      VF」不等于「MLIR 这条路非接 VF 不可」。
+#   3. 含 VF 但被更早缺口挡住：93 -> 78 格（27 fallback + 50 hard-failure + 1 oos）。其中
+#      **50 格是硬失败**，首因在 plan selection 那一层（与功能需求 6 的 F-4 同族），量级比
+#      VF 自己大得多。
+#
+# 今天那 8 格「只差 VF」的成因只有两类：
+#   - 6 格卡 VF 的 dtype 白名单（bf16 四格 abs/abs_fma/add_exp/truediv，uint8 两格 abs/relu）；
+#   - 2 格卡 VF 子图里的 `Scalar` 节点没建模（abs_brc_add、load_compare_scalar_where_store）。
+#
+# **量具这一轮修过一处**：`first_is_vf` 原先只认 `of type 'VectorFunc'` 这一种措辞，而本期
+# VF 那道闸门的诊断换成了按 dtype / 按子图节点分的两条，于是「只差 VF」静默读成 0 格。改法
+# 与理由记在脚本里那条判据上面。**先读到 0 的那一版不是结论，是假 0。**
+#
+case                                                 state     vf_funcs   generated files
+--------------------------------------------------------------------------------------------
+abs_bf16_test_codegen_v2                             vf        1          2
+abs_brc_add_test_codegen_v2                          vf        1          2
+abs_clip_by_value_test_codegen_v2                    no-vf     0          2
+abs_fma_bf16_test_codegen_v2                         vf        15         2
+abs_fma_test_codegen_v2                              no-vf     0          2
+abs_uint8_test_codegen_v2                            vf        15         2
+acos_bf16_test_codegen_v2                            vf        14         2
+acosh_bf16_test_codegen_v2                           vf        14         2
+add_abs_float_scalar_test_codegen_v2                 vf        1          2
+add_abs_half_scalar_test_codegen_v2                  vf        1          2
+add_abs_int8_scalar_test_codegen_v2                  vf        1          2
+add_abs_test_codegen_v2                              vf        1          2
+add_exp2_test_codegen_v2                             no-vf     0          2
+add_exp_bf16_test_codegen_v2                         vf        1          2
+add_floor_bf16_test_codegen_v2                       vf        14         2
+add_floor_test_codegen_v2                            no-vf     0          2
+asin_bf16_test_codegen_v2                            vf        14         2
+asinh_bf16_test_codegen_v2                           vf        14         2
+atan2_bf16_test_codegen_v2                           vf        14         2
+atan_bf16_test_codegen_v2                            vf        14         2
+atanh_bf16_test_codegen_v2                           vf        14         2
+bessel_j0_store_test_codegen_v2                      no-vf     0          2
+bessel_j1_store_test_codegen_v2                      no-vf     0          2
+bessel_y0_store_test_codegen_v2                      no-vf     0          2
+bessel_y1_store_test_codegen_v2                      no-vf     0          2
+bf16_add_test_codegen_v2                             no-vf     0          2
+bf16_nddma_add_test_codegen_v2                       no-vf     0          2
+binary_api_scalar_test_codegen_v2                    vf        1          2
+bitwise_bool_store_test_codegen_v2                   no-vf     0          2
+bool_mask_flow_test_codegen_v2                       vf        1          2
+brc_reduce_test_codegen_v2                           no-vf     0          2
+cast_abs_float16_float_test_codegen_v2               vf        1          2
+cast_abs_test_codegen_v2                             vf        1          2
+cast_nan_test_codegen_v2                             no-vf     0          2
+ceil2int_bf16_test_codegen_v2                        vf        14         2
+ceil_bf16_test_codegen_v2                            vf        14         2
+chebyshev_polynomial_t_store_test_codegen_v2         no-vf     0          2
+chebyshev_polynomial_u_store_test_codegen_v2         no-vf     0          2
+chebyshev_polynomial_v_store_test_codegen_v2         no-vf     0          2
+chebyshev_polynomial_w_store_test_codegen_v2         no-vf     0          2
+concat_test_codegen_v2                               no-vf     0          2
+continues_brc_test_codegen_v2                        vf        1          2
+copysign_bf16_test_codegen_v2                        no-vf     0          2
+cos_bf16_test_codegen_v2                             vf        14         2
+cosh_bf16_test_codegen_v2                            vf        14         2
+digamma_bf16_test_codegen_v2                         vf        14         2
+div_abs_test_codegen_v2                              vf        1          2
+erf_bf16_test_codegen_v2                             vf        14         2
+erfc_bf16_test_codegen_v2                            vf        14         2
+erfcx_test_codegen_v2                                vf        14         2
+expm1_test_codegen_v2                                vf        14         2
+float_logical_not_test_codegen_v2                    no-vf     0          2
+floor_div_int32_store_test_codegen_v2                no-vf     0          2
+floordiv_abs_test_codegen_v2                         vf        14         2
+floordiv_mul_le_select_test_codegen_v2               vf        5          2
+floortoint_float_test_codegen_v2                     no-vf     0          2
+fmod_float_test_codegen_v2                           no-vf     0          2
+frexp_store_test_codegen_v2                          no-vf     0          2
+gather_reduce_store_test_codegen_v2                  no-vf     0          2
+half_logical_not_test_codegen_v2                     no-vf     0          2
+hermite_polynomial_h_store_test_codegen_v2           no-vf     0          2
+hermite_polynomial_he_store_test_codegen_v2          no-vf     0          2
+hypot_float_test_codegen_v2                          no-vf     0          2
+i0_store_test_codegen_v2                             no-vf     0          2
+i0e_store_test_codegen_v2                            no-vf     0          2
+i1e_store_test_codegen_v2                            no-vf     0          2
+indirect_load_add_il_reduce_test_codegen_v2          vf        22         2
+indirect_load_both_transpose_simd_fallback_test_codegen_v2 vf        8          2
+indirect_load_both_transpose_simd_nddma_test_codegen_v2 vf        8          2
+indirect_load_both_transpose_simd_test_codegen_v2    vf        8          2
+indirect_load_both_transpose_simt_test_codegen_v2    vf        8          2
+indirect_load_broadcast_axis_simd_test_codegen_v2    vf        8          2
+indirect_load_broadcast_axis_simt_test_codegen_v2    vf        8          2
+indirect_load_broadcast_continuous_index_simt_test_codegen_v2 vf        8          2
+indirect_load_broadcast_continuous_simd_test_codegen_v2 vf        8          2
+indirect_load_broadcast_cross_boundary_simt_fallback_test_codegen_v2 vf        8          2
+indirect_load_broadcast_cross_boundary_simt_test_codegen_v2 vf        8          2
+indirect_load_broadcast_elements_sk_test_codegen_v2  vf        10         2
+indirect_load_broadcast_index_abs_simt_test_codegen_v2 vf        8          2
+indirect_load_broadcast_index_mixed_view_simt_test_codegen_v2 vf        22         2
+indirect_load_broadcast_index_physical_view_simt_test_codegen_v2 vf        8          2
+indirect_load_broadcast_index_where_simt_test_codegen_v2 vf        22         2
+indirect_load_broadcast_inner_adjacent_simd_test_codegen_v2 vf        8          2
+indirect_load_broadcast_reduce_simt_fallback_test_codegen_v2 vf        22         2
+indirect_load_broadcast_retained_simd_test_codegen_v2 vf        10         2
+indirect_load_broadcast_retained_simt_test_codegen_v2 vf        8          2
+indirect_load_complex_broadcast_simd_test_codegen_v2 vf        12         2
+indirect_load_complex_broadcast_simt_test_codegen_v2 vf        8          2
+indirect_load_complex_input_broadcast_simd_test_codegen_v2 vf        10         2
+indirect_load_embedding_reduce_simt_test_codegen_v2  vf        8          2
+indirect_load_embedding_tail_simd_codegen_v2         vf        22         2
+indirect_load_embedding_test_codegen_v2              vf        24         2
+indirect_load_graph_hint_embedding_slice_codegen_v2  vf        22         2
+indirect_load_graph_hint_reduce_simt_test_codegen_v2 vf        22         2
+indirect_load_graph_hint_simd_repro_codegen_v2       vf        8          2
+indirect_load_index_binary_same_view_simd_test_codegen_v2 vf        10         2
+indirect_load_mixed_rank4_axis2_simd_codegen_v2      vf        28         2
+indirect_load_rank2_axis1_simd_codegen_v2            vf        26         2
+indirect_load_rank3_axis1_float_int64_gather_codegen_v2 vf        8          2
+indirect_load_rank3_axis1_input_index_gap_simd_test_codegen_v2 vf        8          2
+indirect_load_rank3_axis1_input_index_gap_simt_test_codegen_v2 vf        8          2
+indirect_load_rank3_axis1_input_index_outer_gap_simt_test_codegen_v2 vf        8          2
+indirect_load_rank3_axis1_torch_gather_frontend_codegen_v2 vf        8          2
+indirect_load_rank4_axis1_full_prefix_bessel_k0_sum_simd_codegen_v2 vf        10         2
+indirect_load_user_dtype_sweep_codegen_v2            vf        40         10
+indirect_load_user_dynamic_shape_sweep_codegen_v2    vf        16         4
+indirect_load_user_embedding_exp_abs_add_simt_codegen_v2 vf        8          2
+indirect_load_user_embedding_sum_codegen_v2          vf        8          2
+indirect_load_user_embedding_sum_rank2_codegen_v2    vf        8          2
+indirect_load_user_embedding_sum_simd_codegen_v2     vf        8          2
+indirect_load_user_fanout_direct_reduce_simt_codegen_v2 vf        22         2
+indirect_load_user_fanout_direct_stores_simd_codegen_v2 vf        10         2
+indirect_load_user_fanout_direct_stores_simt_codegen_v2 vf        22         2
+indirect_load_user_fanout_post_reduce_simt_codegen_v2 vf        22         2
+indirect_load_user_fanout_post_stores_simd_codegen_v2 vf        10         2
+indirect_load_user_fanout_post_stores_simt_codegen_v2 vf        22         2
+indirect_load_user_fanout_side_input_simt_codegen_v2 vf        22         2
+indirect_load_user_int64_dense_sweep_codegen_v2      vf        24         6
+indirect_load_user_layernorm_codegen_v2              vf        22         2
+indirect_load_user_masked_embedding_minimal_codegen_v2 vf        22         2
+indirect_load_user_masked_embedding_sum_full_auto_codegen_v2 vf        22         2
+indirect_load_user_position_bias_codegen_v2          vf        22         2
+indirect_load_user_side_input_fanout_simd_codegen_v2 vf        42         2
+indirect_load_user_side_input_fanout_simt_codegen_v2 vf        22         2
+int16_logical_not_test_codegen_v2                    no-vf     0          2
+int32_logical_not_test_codegen_v2                    no-vf     0          2
+laguerre_polynomial_l_store_test_codegen_v2          no-vf     0          2
+le_bool_store_test_codegen_v2                        no-vf     0          2
+legendre_polynomial_p_store_test_codegen_v2          no-vf     0          2
+lgamma_float_test_codegen_v2                         no-vf     0          2
+load_airy_ai_store_test_codegen_v2                   no-vf     0          2
+load_bitwise_and_store_test_codegen_v2               no-vf     0          2
+load_bitwise_not_store_test_codegen_v2               no-vf     0          2
+load_bitwise_or_store_test_codegen_v2                no-vf     0          2
+load_bitwise_xor_store_test_codegen_v2               no-vf     0          2
+load_brc_test_codegen_v2                             vf        13         2
+load_compare_cast_sum_store_test_codegen_v2          vf        14         2
+load_compare_scalar_where_store_test_codegen_v2      vf        1          2
+load_compare_store_test_codegen_v2                   vf        14         2
+load_compare_where_store_test_codegen_v2             vf        1          2
+load_erfinv_store_test_codegen_v2                    no-vf     0          2
+load_gather_one_axis_split_b_t_abs_store_test_codegen_v2 no-vf     0          2
+load_gather_split_b_t_abs_store_test_codegen_v2      no-vf     0          2
+load_gather_tail_split_b_t_abs_store_test_codegen_v2 no-vf     0          2
+load_leaky_relu_store_test_codegen_v2                no-vf     0          2
+load_log2_store_test_codegen_v2                      no-vf     0          2
+load_logicaland_store_test_codegen_v2                no-vf     0          2
+load_logicalor_store_test_codegen_v2                 no-vf     0          2
+load_loop_mode_test_codegen_v2                       no-vf     0          2
+load_lshift_store_test_codegen_v2                    no-vf     0          2
+load_modified_bessel_i0_store_test_codegen_v2        no-vf     0          2
+load_modified_bessel_i1_store_test_codegen_v2        no-vf     0          2
+load_modified_bessel_k0_store_test_codegen_v2        no-vf     0          2
+load_modified_bessel_k1_store_test_codegen_v2        no-vf     0          2
+load_tanh_store_test_codegen_v2                      no-vf     0          2
+load_where_store_test_codegen_v2                     no-vf     0          2
+load_where_x2_is_ubscalar_store_test_codegen_v2      no-vf     0          2
+load_where_x2_x3_is_ubscalar_store_test_codegen_v2   no-vf     0          2
+load_where_x3_is_ubscalar_store_test_codegen_v2      no-vf     0          2
+log10_float_test_codegen_v2                          no-vf     0          2
+log1p_bfloat16_test_codegen_v2                       vf        14         2
+log_ndtr_store_test_codegen_v2                       no-vf     0          2
+logicalxor_float_test_codegen_v2                     no-vf     0          2
+matmul_compare_scalar_test_codegen_v2                no-vf     0          4
+matmul_elemwise_brc_test_codegen_v2                  vf        20         6
+mod_test_codegen_v2                                  no-vf     0          2
+ndtr_store_test_codegen_v2                           no-vf     0          2
+ndtri_store_test_codegen_v2                          no-vf     0          2
+next_after_store_test_codegen_v2                     no-vf     0          2
+poly_gamma_store_test_codegen_v2                     no-vf     0          2
+pow_bf16_test_codegen_v2                             no-vf     0          2
+rand_store_test_codegen_v2                           no-vf     0          2
+randn_store_test_codegen_v2                          no-vf     0          2
+reciprocal_bf16_test_codegen_v2                      vf        14         2
+relu_uint8_test_codegen_v2                           vf        1          2
+remainder_int32_store_test_codegen_v2                no-vf     0          2
+round_bf16_test_codegen_v2                           vf        14         2
+round_to_int_float_to_int32_test_codegen_v2          vf        14         2
+rshift_uint8_test_codegen_v2                         no-vf     0          2
+scalar_brc_test_codegen_v2                           no-vf     0          2
+scalar_cast_add_test_codegen_v2                      vf        14         2
+scalar_div_inf_test_codegen_v2                       no-vf     0          2
+scaled_modified_bessel_k0_store_test_codegen_v2      no-vf     0          2
+scaled_modified_bessel_k1_store_test_codegen_v2      no-vf     0          2
+select_bool_test_codegen_v2                          vf        1          2
+shifted_chebyshev_polynomial_t_store_test_codegen_v2 no-vf     0          2
+shifted_chebyshev_polynomial_u_store_test_codegen_v2 no-vf     0          2
+shifted_chebyshev_polynomial_v_store_test_codegen_v2 no-vf     0          2
+shifted_chebyshev_polynomial_w_store_test_codegen_v2 no-vf     0          2
+sign_bf16_test_codegen_v2                            vf        14         2
+sign_uint8_test_codegen_v2                           vf        14         2
+signbit_store_test_codegen_v2                        no-vf     0          2
+spherical_bessel_j0_store_test_codegen_v2            no-vf     0          2
+tail_brc_tail_reduce_test_codegen_v2                 no-vf     0          2
+transpose_bool_test_codegen_v2                       no-vf     0          2
+truediv_bf16_test_codegen_v2                         vf        1          2
+trunc_to_int_bf16_to_int32_test_codegen_v2           vf        14         2
+ub_scalar_brc_abs_add_test_codegen_v2                vf        1          2
+uint8_logical_not_test_codegen_v2                    no-vf     0          2
+zeta_store_test_codegen_v2                           no-vf     0          2
+
+state                              count
+------------------------------------------------
+no-vf                              90
+vf                                 110
+
+没有产出的行: 0
+
+VF         接管表状态          首因             count
+无 VF       hard-failure   首因不是 VF        16
+无 VF       takeover       首因不是 VF        39
+含 VF       out-of-scope   首因不是 VF        1
+无 VF       fallback       首因不是 VF        34
+无 VF       out-of-scope   首因不是 VF        1
+含 VF       takeover       首因不是 VF        24
+含 VF       fallback       首因是 VF         8
+含 VF       hard-failure   首因不是 VF        50
+含 VF       fallback       首因不是 VF        27
+
+含 VF 但首因不是 VF 的格（修掉记下来那条原因也进不来）:
+--------------------------------------------------------------------------------------------------------------------------------------------
+acos_bf16_test_codegen_v2                            takeover      none
+acosh_bf16_test_codegen_v2                           takeover      none
+add_abs_float_scalar_test_codegen_v2                 fallback      lowering                 error: 'afir.load' op has no supported Ascend implementation
+add_abs_half_scalar_test_codegen_v2                  fallback      lowering                 error: 'afir.load' op has no supported Ascend implementation
+add_abs_int8_scalar_test_codegen_v2                  fallback      lowering                 error: UnsupportedOperation: element type 'int8' is not in the AFIR supply table
+add_abs_test_codegen_v2                              takeover      none
+add_floor_bf16_test_codegen_v2                       fallback      lowering                 error: 'afir.add' op has no supported Ascend implementation
+asin_bf16_test_codegen_v2                            takeover      none
+asinh_bf16_test_codegen_v2                           takeover      none
+atan2_bf16_test_codegen_v2                           takeover      none
+atan_bf16_test_codegen_v2                            takeover      none
+atanh_bf16_test_codegen_v2                           takeover      none
+binary_api_scalar_test_codegen_v2                    hard-failure  candidate-preparation
+bool_mask_flow_test_codegen_v2                       fallback      lowering                 error: UnsupportedOperation: scheduler dtype value 12 is not modeled by AFIR
+cast_abs_float16_float_test_codegen_v2               takeover      none
+cast_abs_test_codegen_v2                             takeover      none
+ceil2int_bf16_test_codegen_v2                        fallback      lowering                 error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'ceil2int' of type 'Ceil2Int'
+ceil_bf16_test_codegen_v2                            takeover      none
+continues_brc_test_codegen_v2                        takeover      none
+cos_bf16_test_codegen_v2                             takeover      none
+cosh_bf16_test_codegen_v2                            takeover      none
+digamma_bf16_test_codegen_v2                         takeover      none
+div_abs_test_codegen_v2                              takeover      none
+erf_bf16_test_codegen_v2                             takeover      none
+erfc_bf16_test_codegen_v2                            takeover      none
+erfcx_test_codegen_v2                                takeover      none
+expm1_test_codegen_v2                                takeover      none
+floordiv_abs_test_codegen_v2                         fallback      lowering                 error: UnsupportedOperation: element type 'int8' is not in the AFIR supply table
+floordiv_mul_le_select_test_codegen_v2               hard-failure  candidate-preparation
+indirect_load_add_il_reduce_test_codegen_v2          fallback      lowering                 error: UnsupportedOperation: element type 'int64' is not in the AFIR supply table
+indirect_load_both_transpose_simd_fallback_test_codegen_v2 hard-failure  candidate-preparation
+indirect_load_both_transpose_simd_nddma_test_codegen_v2 hard-failure  candidate-preparation
+indirect_load_both_transpose_simd_test_codegen_v2    hard-failure  candidate-preparation
+indirect_load_both_transpose_simt_test_codegen_v2    fallback      lowering                 error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'input_transpose' of type 'Transpose'
+indirect_load_broadcast_axis_simd_test_codegen_v2    hard-failure  candidate-preparation
+indirect_load_broadcast_axis_simt_test_codegen_v2    hard-failure  candidate-preparation
+indirect_load_broadcast_continuous_index_simt_test_codegen_v2 fallback      lowering                 error: UnsupportedOperation: element type 'int64' is not in the AFIR supply table
+indirect_load_broadcast_continuous_simd_test_codegen_v2 hard-failure  candidate-preparation
+indirect_load_broadcast_cross_boundary_simt_fallback_test_codegen_v2 fallback      lowering                 error: UnsupportedOperation: element type 'int64' is not in the AFIR supply table
+indirect_load_broadcast_cross_boundary_simt_test_codegen_v2 fallback      lowering                 error: UnsupportedOperation: element type 'int64' is not in the AFIR supply table
+indirect_load_broadcast_elements_sk_test_codegen_v2  hard-failure  candidate-preparation
+indirect_load_broadcast_index_abs_simt_test_codegen_v2 hard-failure  candidate-preparation
+indirect_load_broadcast_index_mixed_view_simt_test_codegen_v2 fallback      lowering                 error: UnsupportedOperation: element type 'int64' is not in the AFIR supply table
+indirect_load_broadcast_index_physical_view_simt_test_codegen_v2 hard-failure  candidate-preparation
+indirect_load_broadcast_index_where_simt_test_codegen_v2 fallback      lowering                 error: UnsupportedOperation: element type 'int64' is not in the AFIR supply table
+indirect_load_broadcast_inner_adjacent_simd_test_codegen_v2 hard-failure  candidate-preparation
+indirect_load_broadcast_reduce_simt_fallback_test_codegen_v2 hard-failure  candidate-preparation
+indirect_load_broadcast_retained_simd_test_codegen_v2 hard-failure  candidate-preparation
+indirect_load_broadcast_retained_simt_test_codegen_v2 hard-failure  candidate-preparation
+indirect_load_complex_broadcast_simd_test_codegen_v2 hard-failure  candidate-preparation
+indirect_load_complex_broadcast_simt_test_codegen_v2 fallback      lowering                 error: UnsupportedOperation: element type 'int64' is not in the AFIR supply table
+indirect_load_complex_input_broadcast_simd_test_codegen_v2 hard-failure  candidate-preparation
+indirect_load_embedding_reduce_simt_test_codegen_v2  hard-failure  candidate-preparation
+indirect_load_embedding_tail_simd_codegen_v2         hard-failure  candidate-preparation
+indirect_load_embedding_test_codegen_v2              hard-failure  candidate-preparation
+indirect_load_graph_hint_embedding_slice_codegen_v2  fallback      lowering                 error: UnsupportedOperation: element type 'int64' is not in the AFIR supply table
+indirect_load_graph_hint_reduce_simt_test_codegen_v2 fallback      lowering                 error: UnsupportedOperation: element type 'int64' is not in the AFIR supply table
+indirect_load_graph_hint_simd_repro_codegen_v2       hard-failure  candidate-preparation
+indirect_load_index_binary_same_view_simd_test_codegen_v2 hard-failure  candidate-preparation
+indirect_load_mixed_rank4_axis2_simd_codegen_v2      hard-failure  candidate-preparation
+indirect_load_rank2_axis1_simd_codegen_v2            fallback      lowering                 error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'indirect_load' of type 'IndirectLoad'
+indirect_load_rank3_axis1_float_int64_gather_codegen_v2 hard-failure  candidate-preparation
+indirect_load_rank3_axis1_input_index_gap_simd_test_codegen_v2 hard-failure  candidate-preparation
+indirect_load_rank3_axis1_input_index_gap_simt_test_codegen_v2 hard-failure  candidate-preparation
+indirect_load_rank3_axis1_input_index_outer_gap_simt_test_codegen_v2 hard-failure  candidate-preparation
+indirect_load_rank3_axis1_torch_gather_frontend_codegen_v2 fallback      lowering                 error: UnsupportedOperation: element type 'int64' is not in the AFIR supply table
+indirect_load_rank4_axis1_full_prefix_bessel_k0_sum_simd_codegen_v2 hard-failure  candidate-preparation
+indirect_load_user_dtype_sweep_codegen_v2            hard-failure  candidate-preparation
+indirect_load_user_dynamic_shape_sweep_codegen_v2    hard-failure  candidate-preparation
+indirect_load_user_embedding_exp_abs_add_simt_codegen_v2 hard-failure  candidate-preparation
+indirect_load_user_embedding_sum_codegen_v2          hard-failure  candidate-preparation
+indirect_load_user_embedding_sum_rank2_codegen_v2    hard-failure  candidate-preparation
+indirect_load_user_embedding_sum_simd_codegen_v2     hard-failure  candidate-preparation
+indirect_load_user_fanout_direct_reduce_simt_codegen_v2 hard-failure  candidate-preparation
+indirect_load_user_fanout_direct_stores_simd_codegen_v2 hard-failure  candidate-preparation
+indirect_load_user_fanout_direct_stores_simt_codegen_v2 hard-failure  candidate-preparation
+indirect_load_user_fanout_post_reduce_simt_codegen_v2 hard-failure  candidate-preparation
+indirect_load_user_fanout_post_stores_simd_codegen_v2 hard-failure  candidate-preparation
+indirect_load_user_fanout_post_stores_simt_codegen_v2 hard-failure  candidate-preparation
+indirect_load_user_fanout_side_input_simt_codegen_v2 hard-failure  candidate-preparation
+indirect_load_user_int64_dense_sweep_codegen_v2      hard-failure  candidate-preparation
+indirect_load_user_layernorm_codegen_v2              hard-failure  candidate-preparation
+indirect_load_user_masked_embedding_minimal_codegen_v2 hard-failure  candidate-preparation
+indirect_load_user_masked_embedding_sum_full_auto_codegen_v2 hard-failure  candidate-preparation
+indirect_load_user_position_bias_codegen_v2          fallback      lowering                 error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'transpose' of type 'Transpose'
+indirect_load_user_side_input_fanout_simd_codegen_v2 hard-failure  candidate-preparation
+indirect_load_user_side_input_fanout_simt_codegen_v2 fallback      lowering                 error: UnsupportedOperation: element type 'int64' is not in the AFIR supply table
+load_brc_test_codegen_v2                             fallback      lowering                 error: UnsupportedOperation: 'afir.mul' has no register-form lowering; the modeled operations are afir.add, afir.div, afir.abs, afir.exp, afir.relu, a
+load_compare_cast_sum_store_test_codegen_v2          hard-failure  candidate-preparation
+load_compare_store_test_codegen_v2                   takeover      none
+load_compare_where_store_test_codegen_v2             fallback      lowering                 error: UnsupportedOperation: 'afir.eq' has no register-form lowering; the modeled operations are afir.add, afir.div, afir.abs, afir.exp, afir.relu, af
+log1p_bfloat16_test_codegen_v2                       takeover      none
+matmul_elemwise_brc_test_codegen_v2                  out-of-scope  cube-fusion
+reciprocal_bf16_test_codegen_v2                      fallback      lowering                 error: 'afir.reciprocal' op has no supported Ascend implementation
+round_bf16_test_codegen_v2                           takeover      none
+round_to_int_float_to_int32_test_codegen_v2          fallback      lowering                 error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'round_to_int' of type 'RoundToInt'
+scalar_cast_add_test_codegen_v2                      hard-failure  lowering                 error: 'afir.cast' op operand #0 must be Tensor or MemRef of 4-bit signless integer or 8-bit signless integer or 8-bit unsigned integer or 16-bit sign
+select_bool_test_codegen_v2                          fallback      lowering                 error: UnsupportedOperation: scheduler dtype value 12 is not modeled by AFIR
+sign_bf16_test_codegen_v2                            takeover      none
+sign_uint8_test_codegen_v2                           hard-failure  lowering                 error: 'afir.store' op transfer source and destination must have the same element type
+trunc_to_int_bf16_to_int32_test_codegen_v2           fallback      lowering                 error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'trunc_to_int' of type 'TruncToInt'
+ub_scalar_brc_abs_add_test_codegen_v2                hard-failure  candidate-preparation
+小计: 102

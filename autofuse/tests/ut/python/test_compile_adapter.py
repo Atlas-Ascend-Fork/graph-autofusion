@@ -38,6 +38,223 @@ def _host_compile_args(tmpdir):
     )()
 
 
+def _device_compile_args(tmpdir):
+    return type(
+        "Args",
+        (),
+        {
+            "stage": "device",
+            "temp_dir": str(tmpdir),
+            "graph_name": "graph",
+            "trace_stage": "device_compile",
+        },
+    )()
+
+
+AIV_SPLIT_KEY = "graph_op_kernel_aiv.cpp"
+
+
+def _make_rt_launch_kernel_impl(
+    aiv_body='extern "C" __global__ void graph_aiv() {}', aiv_key=AIV_SPLIT_KEY
+):
+    """rtLaunch 双单元形态的 kernel 源：主内容在 marker 外，AIV 入口在 marker 段内。"""
+    return "\n".join(
+        [
+            "// common part + MIX entry",
+            'extern "C" __global__ void graph() {}',
+            f"// AUTOFUSE_SPLIT_FILE_BEGIN: {aiv_key}",
+            aiv_body,
+            f"// AUTOFUSE_SPLIT_FILE_END: {aiv_key}",
+        ]
+    )
+
+
+def test_split_device_sources_extracts_aiv_unit(compile_adapter_module):
+    main_code, split_files = compile_adapter_module.split_device_sources(
+        _make_rt_launch_kernel_impl()
+    )
+
+    assert 'extern "C" __global__ void graph() {}' in main_code
+    assert "AUTOFUSE_SPLIT_FILE_BEGIN" not in main_code
+    assert "graph_aiv" not in main_code
+    assert list(split_files.keys()) == [AIV_SPLIT_KEY]
+    assert 'extern "C" __global__ void graph_aiv() {}' in split_files[AIV_SPLIT_KEY]
+    assert "AUTOFUSE_SPLIT_FILE_BEGIN" not in split_files[AIV_SPLIT_KEY]
+
+
+def test_split_device_sources_keeps_legacy_content_intact(compile_adapter_module):
+    legacy = 'extern "C" int64_t AutofuseLaunch() { return 0; }\n'
+    main_code, split_files = compile_adapter_module.split_device_sources(legacy)
+
+    assert main_code == legacy
+    assert split_files == {}
+
+
+def test_split_device_sources_rejects_nested_and_mismatched_markers(
+    compile_adapter_module,
+):
+    nested = (
+        f"// AUTOFUSE_SPLIT_FILE_BEGIN: {AIV_SPLIT_KEY}\n"
+        "// AUTOFUSE_SPLIT_FILE_BEGIN: other.cpp\n"
+        "// AUTOFUSE_SPLIT_FILE_END: other.cpp\n"
+        f"// AUTOFUSE_SPLIT_FILE_END: {AIV_SPLIT_KEY}\n"
+    )
+    with pytest.raises(compile_adapter_module.ascendc_compile.CompileError):
+        compile_adapter_module.split_device_sources(nested)
+
+    mismatched = (
+        f"// AUTOFUSE_SPLIT_FILE_BEGIN: {AIV_SPLIT_KEY}\n"
+        "// AUTOFUSE_SPLIT_FILE_END: other.cpp\n"
+    )
+    with pytest.raises(compile_adapter_module.ascendc_compile.CompileError):
+        compile_adapter_module.split_device_sources(mismatched)
+
+    unclosed = f"// AUTOFUSE_SPLIT_FILE_BEGIN: {AIV_SPLIT_KEY}\n"
+    with pytest.raises(compile_adapter_module.ascendc_compile.CompileError):
+        compile_adapter_module.split_device_sources(unclosed)
+
+
+def test_write_compile_device_sources_writes_dual_units(compile_adapter_module, tmpdir):
+    args = _device_compile_args(tmpdir)
+
+    compile_adapter_module.write_compile_device_sources(
+        {
+            "tiling_struct_code": "struct AutofuseTilingData {};",
+            "host_impl_code": None,
+            "kernel_impl_code": _make_rt_launch_kernel_impl(),
+        },
+        args,
+        "autofuse_tiling_data.h",
+        "graph_op_kernel.cpp",
+    )
+
+    device_dir = os.path.join(str(tmpdir), "device")
+    assert args.device_files == os.path.join(device_dir, "graph_op_kernel.cpp")
+    assert args.device_files_aiv == os.path.join(device_dir, AIV_SPLIT_KEY)
+    assert os.path.exists(args.device_files)
+    with open(args.device_files_aiv) as f:
+        assert "graph_aiv" in f.read()
+
+
+def test_write_compile_device_sources_cleans_stale_aiv_unit(
+    compile_adapter_module, tmpdir
+):
+    args = _device_compile_args(tmpdir)
+    device_dir = os.path.join(str(tmpdir), "device")
+    os.makedirs(device_dir, exist_ok=True)
+    stale_aiv = os.path.join(device_dir, AIV_SPLIT_KEY)
+    with open(stale_aiv, "w") as f:
+        f.write("stale aiv unit")
+
+    # legacy 形态（无 marker）：残留的 stale AIV 源必须被清理，防止被误编进双 bin 链路。
+    compile_adapter_module.write_compile_device_sources(
+        {
+            "tiling_struct_code": "struct AutofuseTilingData {};",
+            "host_impl_code": None,
+            "kernel_impl_code": 'extern "C" int64_t AutofuseLaunch() { return 0; }',
+        },
+        args,
+        "autofuse_tiling_data.h",
+        "graph_op_kernel.cpp",
+    )
+
+    assert not os.path.exists(stale_aiv)
+    assert args.device_files == os.path.join(device_dir, "graph_op_kernel.cpp")
+    assert args.device_files_aiv is None
+
+
+def test_write_compile_device_sources_fits_long_aiv_unit(
+    compile_adapter_module, tmpdir
+):
+    graph_name = _long_kernel_name(op_count=80)
+    aiv_key = f"{graph_name}_op_kernel_aiv.cpp"
+    assert len(aiv_key.encode()) > 255
+    args = _device_compile_args(tmpdir)
+    args.graph_name = graph_name
+
+    compile_adapter_module.write_compile_device_sources(
+        {
+            "tiling_struct_code": "struct AutofuseTilingData {};",
+            "host_impl_code": None,
+            "kernel_impl_code": _make_rt_launch_kernel_impl(aiv_key=aiv_key),
+        },
+        args,
+        "autofuse_tiling_data.h",
+        "graph_op_kernel.cpp",
+    )
+
+    aiv_name = os.path.basename(args.device_files_aiv)
+    assert os.path.exists(args.device_files_aiv)
+    assert len(aiv_name.encode()) <= 255
+    assert len((aiv_name + ".o").encode()) <= 255
+    assert aiv_name.startswith("autofused_")
+    assert aiv_name.endswith("_op_kernel_aiv.cpp")
+    assert "_cut" in aiv_name
+    assert "_20fd52a523aa877ef4c42f6134c141de" in aiv_name
+
+
+def test_write_compile_device_sources_cleans_stale_aiv_unit_for_long_name(
+    compile_adapter_module, tmpdir
+):
+    graph_name = _long_kernel_name(op_count=80)
+    args = _device_compile_args(tmpdir)
+    args.graph_name = graph_name
+    device_dir = os.path.join(str(tmpdir), "device")
+    os.makedirs(device_dir, exist_ok=True)
+    stale_name = compile_adapter_module.fitted_device_aiv_file_name(graph_name)
+    stale_aiv = os.path.join(device_dir, stale_name)
+    with open(stale_aiv, "w") as f:
+        f.write("stale aiv unit")
+
+    compile_adapter_module.write_compile_device_sources(
+        {
+            "tiling_struct_code": "struct AutofuseTilingData {};",
+            "host_impl_code": None,
+            "kernel_impl_code": 'extern "C" int64_t AutofuseLaunch() { return 0; }',
+        },
+        args,
+        "autofuse_tiling_data.h",
+        "graph_op_kernel.cpp",
+    )
+
+    assert not os.path.exists(stale_aiv)
+    assert args.device_files_aiv is None
+
+
+def test_execute_compile_fits_long_graph_name_for_device_units(
+    compile_adapter_module, tmpdir
+):
+    captured = {}
+
+    def fake_main(args):
+        captured["args"] = args
+
+    compile_adapter_module.ascendc_compile.main = fake_main
+    graph_name = _long_kernel_name(op_count=80)
+    aiv_key = f"{graph_name}_op_kernel_aiv.cpp"
+    args = _device_compile_args(tmpdir)
+    args.graph_name = graph_name
+
+    compile_adapter_module.execute_compile(
+        {
+            "tiling_struct_code": "struct AutofuseTilingData {};",
+            "host_impl_code": None,
+            "kernel_impl_code": _make_rt_launch_kernel_impl(aiv_key=aiv_key),
+        },
+        args,
+    )
+
+    for path in (captured["args"].device_files, captured["args"].device_files_aiv):
+        base_name = os.path.basename(path)
+        assert os.path.exists(path)
+        assert len((base_name + ".o").encode()) <= 255
+    main_name = os.path.basename(captured["args"].device_files)
+    aiv_name = os.path.basename(captured["args"].device_files_aiv)
+    assert captured["args"].device_files_aiv.endswith("_op_kernel_aiv.cpp")
+    # find_aiv_device_source 的回退约定：主源名去掉 .cpp 加 _aiv.cpp 必须等于 AIV 源名。
+    assert main_name[: -len("_op_kernel.cpp")] + "_op_kernel_aiv.cpp" == aiv_name
+
+
 def _scheme_a_sources():
     return {
         "tiling_struct_code": "struct AutofuseTilingData {};",
@@ -379,6 +596,121 @@ def test_execute_compile_merges_host_files_when_below_threshold(
     assert os.path.exists(host_files)
 
 
+def _long_kernel_name(op_count=45, md5="20fd52a523aa877ef4c42f6134c141de"):
+    ops = ["op{}".format(i) for i in range(op_count)]
+    return "autofused_{}_{}".format("_".join(ops), md5)
+
+
+def test_fit_kernel_name_for_file_name_keeps_fitting_name(compile_adapter_module):
+    name = "autofused_pow_sum_885af2aa3e03bf3e76a84c7c178790c9"
+    suffix = "_tiling_func_solver_func.cpp"
+
+    assert compile_adapter_module.fit_kernel_name_for_file_name(name, suffix) == name
+
+
+def test_fit_kernel_name_for_file_name_truncates_ops_only(compile_adapter_module):
+    md5 = "20fd52a523aa877ef4c42f6134c141de"
+    name = _long_kernel_name(md5=md5)
+    suffix = "_tiling_func_asc_graph0_schedule_result0_g0.cpp"
+    assert len(name.encode()) + len(suffix.encode()) > 255
+
+    fitted = compile_adapter_module.fit_kernel_name_for_file_name(name, suffix)
+
+    marker = "_" + compile_adapter_module.KERNEL_NAME_TRUNCATE_MARKER
+    hash_part = "_" + md5
+    prefix_len = len("autofused_")
+    hash_len = len(hash_part)
+    cut_len = len(marker) + hash_len
+    assert len(fitted.encode()) + len(suffix.encode()) <= 255
+    assert len(fitted.encode()) + len(suffix.encode()) + len(".o") <= 255
+    # autofused_ 前缀和 md5 后缀必须原样保留
+    assert fitted.startswith("autofused_")
+    assert fitted.endswith(hash_part)
+    # 截断处有 _cut 标记
+    assert fitted[prefix_len:-hash_len].endswith(marker)
+    # 只整段删除算子名，保留部分是原算子名序列的前缀（不会出现半个算子名）
+    kept = fitted[prefix_len:-cut_len]
+    original = name[prefix_len:-hash_len]
+    assert original.startswith(kept + "_") or original == kept
+
+
+def test_fit_kernel_name_for_file_name_reserves_object_suffix(compile_adapter_module):
+    name = _long_kernel_name(op_count=80)
+    suffix = "_tiling_func_solver_func.cpp"
+
+    fitted = compile_adapter_module.fit_kernel_name_for_file_name(name, suffix)
+
+    source_name = fitted + suffix
+    assert len(source_name.encode()) <= 255
+    assert len((source_name + ".o").encode()) <= 255
+
+
+def test_fit_kernel_name_for_file_name_keeps_no_hash_names_unique(
+    compile_adapter_module,
+):
+    prefix = "kernel_" + "_".join("op{}".format(i) for i in range(80))
+    suffix = "_tiling_func_solver_func.cpp"
+    assert len((prefix + "_aaaa").encode()) + len(suffix.encode()) > 255
+
+    first = compile_adapter_module.fit_kernel_name_for_file_name(
+        prefix + "_aaaa", suffix
+    )
+    second = compile_adapter_module.fit_kernel_name_for_file_name(
+        prefix + "_bbbb", suffix
+    )
+
+    assert first != second
+
+
+def test_write_split_host_sources_fits_long_graph_name(tmpdir, compile_adapter_module):
+    threshold = compile_adapter_module.HOST_SPLIT_COMPILE_THRESHOLD
+    host_impl = _make_many_split_host_impl(threshold)
+
+    host_files = compile_adapter_module.write_split_host_sources(
+        str(tmpdir), _long_kernel_name(), host_impl
+    )
+
+    assert len(host_files) == threshold
+    for source_file in host_files:
+        base_name = os.path.basename(source_file)
+        assert os.path.exists(source_file)
+        assert len((base_name + ".o").encode()) <= 255
+        assert "_cut" in base_name
+        assert base_name.startswith("autofused_")
+        assert "_20fd52a523aa877ef4c42f6134c141de" in base_name
+
+
+def test_execute_compile_fits_long_graph_name_for_merged_host(
+    compile_adapter_module, tmpdir
+):
+    captured = {}
+
+    def fake_main(args):
+        captured["args"] = args
+
+    compile_adapter_module.ascendc_compile.main = fake_main
+    host_impl = _make_many_split_host_impl(1)
+    args = _host_compile_args(tmpdir)
+    # 名字长到连合并路径的 {graph_name}_tiling_func.cpp(229 字节) 都会超限
+    args.graph_name = _long_kernel_name(op_count=80)
+
+    compile_adapter_module.execute_compile(
+        {
+            "tiling_struct_code": "struct AutofuseTilingData {};",
+            "host_impl_code": host_impl,
+            "kernel_impl_code": None,
+        },
+        args,
+    )
+
+    host_file = captured["args"].host_files
+    base_name = os.path.basename(host_file)
+    assert os.path.exists(host_file)
+    assert len((base_name + ".o").encode()) <= 255
+    assert "_cut" in base_name
+    assert base_name.endswith("_tiling_func.cpp")
+
+
 def test_write_split_host_sources_writes_split_headers_without_injecting_common(
     tmpdir, compile_adapter_module
 ):
@@ -556,6 +888,28 @@ def test_write_inductor_pgo_sources_classifies_exact_versioned_splits(
     )
     assert "int main()" in open(runner_file).read()
     assert "__aicore__ void graph()" in open(device_file).read()
+
+
+def test_write_inductor_pgo_sources_fits_long_graph_name(
+    compile_adapter_module, tmpdir
+):
+    graph_name = _long_kernel_name(op_count=80)
+    host_dir = str(tmpdir.mkdir("host"))
+    device_dir = str(tmpdir.mkdir("device"))
+
+    host_files, runner_file, device_file = (
+        compile_adapter_module.write_inductor_pgo_sources(
+            host_dir, device_dir, graph_name, _make_scheme_a_split_host_impl()
+        )
+    )
+
+    for path in [*host_files, runner_file, device_file]:
+        base_name = os.path.basename(path)
+        assert os.path.exists(path)
+        assert len((base_name + ".o").encode()) <= 255
+        assert "_cut" in base_name
+    assert os.path.basename(device_file).endswith("_pgo_device.cpp")
+    assert "_20fd52a523aa877ef4c42f6134c141de" in os.path.basename(device_file)
 
 
 def test_write_inductor_pgo_sources_supports_final_split_headers(
@@ -834,3 +1188,38 @@ def test_host_compile_and_jit_compile_signatures_keep_stable(compile_adapter_mod
         "tiling_impl_code",
         "argv",
     ]
+
+
+def test_parse_compile_args_reads_const_tiling_baked(compile_adapter_module):
+    args, _, _ = compile_adapter_module.prepare_compile_context(
+        ["--output_file=x.so", "--const_tiling_baked=True"], "link", None
+    )
+    assert args.const_tiling_baked is True
+
+    args, _, _ = compile_adapter_module.prepare_compile_context(
+        ["--output_file=x.so", "--const_tiling_baked=False"], "link", None
+    )
+    assert args.const_tiling_baked is False
+
+    args, _, _ = compile_adapter_module.prepare_compile_context(
+        ["--output_file=x.so"], "link", None
+    )
+    assert args.const_tiling_baked is False
+
+
+def test_compile_result_carries_baked_for_device_obj(compile_adapter_module):
+    result = {
+        "kernel_obj_path": "/tmp/k.o",
+        "kernel_source_path": "/tmp/k.cpp",
+        "baked": True,
+    }
+    out = compile_adapter_module._compile_result(
+        types.SimpleNamespace(stage="device_obj"), result
+    )
+    assert out["baked"] is True
+
+    out = compile_adapter_module._compile_result(
+        types.SimpleNamespace(stage="device_obj"),
+        {"kernel_obj_path": "/tmp/k.o", "kernel_source_path": "/tmp/k.cpp"},
+    )
+    assert out["baked"] is False

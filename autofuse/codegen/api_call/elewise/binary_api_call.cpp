@@ -107,11 +107,21 @@ Status BinaryApiCall::Generate(const TPipe &tpipe, const std::vector<ascir::Axis
                    : GenBlockAlignNExpr(t, "curAivN");
       };
       ss << y.actual_size << " = curAivM * " << output_stride << ";" << std::endl;
+      const auto flat_condition = GenCvUbFuseFlatApiCondition(tpipe, inputs, y);
+      if (!flat_condition.empty()) {
+        ss << "if (" << flat_condition << ") {" << std::endl;
+        ss << "  " << this->api_name_ << "(" << y << "[0], " << x1 << "[0], " << x2
+           << "[0], ConvertToUint32(curAivM * curAivN));" << std::endl;
+        ss << "} else {" << std::endl;
+      }
       ss << "for (uint32_t cv_row = 0; cv_row < ConvertToUint32(curAivM); cv_row++) {" << std::endl;
       ss << "  " << this->api_name_ << "(" << y << "[cv_row * ConvertToUint32(" << output_stride << ")], " << x1
          << "[cv_row * ConvertToUint32(" << gen_input_stride(x1) << ")], " << x2 << "[cv_row * ConvertToUint32("
          << gen_input_stride(x2) << ")], ConvertToUint32(curAivN));" << std::endl;
       ss << "}" << std::endl;
+      if (!flat_condition.empty()) {
+        ss << "}" << std::endl;
+      }
       result = ss.str();
       return af::SUCCESS;
     }
@@ -178,20 +188,18 @@ Status BinaryApiCall::BrcInlineGenerate(const TPipe &tpipe, const std::vector<as
                      : v_strides);
   }
 
-  int64_t type_size = GetSizeByDataType(y.dtype);
   stringstream ss;
   std::string dtype_name;
   GE_CHK_STATUS_RET(Tensor::DtypeName(x1.dtype, dtype_name), "Codegen get data type:%d failed",
                     static_cast<int32_t>(x1.dtype));
 
-  ss << "BinaryBrcInlineApiWithTwoVectorizedAxis<" << dtype_name << ">" << "(" << y << "["
+  ss << "BinaryBrcInlineApiWithTwoVectorizedAxisV2<" << dtype_name << ">(" << y << "["
      << tpipe.tiler.TensorVectorizedOffset(current_axis, y) << "], " << x1 << "["
      << tpipe.tiler.TensorVectorizedOffset(current_axis, x1) << "], " << x2 << "["
      << tpipe.tiler.TensorVectorizedOffset(current_axis, x2) << "], " << tpipe.tiler.ActualSize(meger_shape[0]) << ", "
      << tpipe.tiler.ActualSize(meger_shape[1]) << ", " << static_cast<int>(input_idx_2_brc_inline[0] == 0) << ", "
-     << static_cast<int>(input_idx_2_brc_inline[1] == 0) << ", " << tpipe.tiler.ActualSize(v_strides) << ", "
-     << static_cast<int>(type_size) << ", &" << GetAscendApiName(this->api_name_) << ", &"
-     << GetAscendApiName(this->api_name_) << ");" << std::endl;
+     << static_cast<int>(input_idx_2_brc_inline[1] == 0) << ", " << tpipe.tiler.ActualSize(v_strides) << ", &"
+     << GetAscendApiName(this->api_name_) << "<" << dtype_name << ", false>);" << std::endl;
   result = ss.str();
   return af::SUCCESS;
 }

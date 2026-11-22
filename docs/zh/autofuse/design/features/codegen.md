@@ -46,6 +46,16 @@ ImplGraph 是 Schedule 与 Codegen 之间唯一的接口，Codegen 不做任何�
 - **性能建模在 ATT 侧**：Codegen 在组装 API 参数时会计算 `outer_call_count`（API 外层调用次数）等信息写入节点参数，Auto Tiling 的性能公式（耗时 ≈ API 调用次数 × 单次耗时）以此为输入做 tiling 候选评估。性能公式本体不在 Codegen 中，Codegen 新增 API 参数时需确认 ATT 侧公式是否依赖该参数；
 - **PGO/TopN 的兜底限制**：tiling_key 数量超过上限（10000）时 PGO 搜索自动关闭，回退到常规 tiling 生成；tiling_key 数量超过单编译单元上限时，kernel 会自动拆分为多个编译单元分别编译，两处上限不同，独立生效。
 
+### 3.2.1 缓存执行次数：Codegen 与 ATT 必须共用同一份条件
+
+Reduce/Broadcast 链上的 cache guard 会跳过重复的 Load/Broadcast 调用，ATT 需要按同一条件估算"这个调用实际执行几次"，否则搬运成本失真、模板选错。这条链路有三条必须一起改的约束：
+
+- **条件只能有一个来源**。Codegen 在 `Loop::GenerateBody` 组装 `ApiCall` 时，把真正发射到设备代码里的条件（`enable_cache_origin_brc_axis`、`enable_cache_fused_brc_axis`，或 DoubleTile 的 `dis_enable_cache_a` / `dis_enable_cache_r` / `control_dis_enable_cache_a`）以 `CacheExecutionParams` 记录到节点参数，普通 Origin/Fused 与 DoubleTile 均在条件定义的发射点绑定所用循环轴、周期及块内范围，common 不再次扫描轴来推导条件。ATT 只读不重建。ATT 早期按调度轴关系反推 guard，对 NDDMA 放宽尾随向量轴限制并假设地址不变，与实际发射不符：曾把小输入广播场景的 NDDMA 从 20 次误算成 1 次，MTE2 估值低估约 49k cycle，默认解因此选中慢模板（约 93 μs，快解约 45 μs）。**任何"从轴关系推断缓存条件"的做法都会重新引入这类低估，禁止在 ATT 侧恢复。**
+- **记录缺失或不一致时保留完整次数**。记录为空、`mode` 为 `kUnknown`/`kNoGuard`、调用轴与记录不符、或表达式无法校验时，ATT 一律返回原始基数 `E_base`，不做任何压缩。保守放大只让候选显得更贵，低估才会让慢模板胜出，两者代价不对称，因此所有不确定分支都必须偏向高估。
+- **计数必须与谓词语义逐项对齐**。普通 guard 用 `Ceiling(L / P)` 表达命中；DoubleTile 的 R 条件 `(i<1) || (i%P<1)` 不含 `block_dim`，可精确计为 `1 + Floor((L-1)/P)`；A 条件含 `block_dim × block_inner_extent`，而 DoubleTile 记录的 `block_inner_extent` 与 `period` 来自两条不同轴（`codegen_kernel_loop.cpp` 的 `bind`），符号化下无法证明块间相位一致，此时取与相位无关的上界 `1 + Ceiling((L-1)/P)` 作为命中上界、再算跳过次数的下界，保证 `次数 ≥ 真实值`。修改 `IsBlockCountUniform` 或 `CountGuardHits` 时必须同步更新这三条语义，并保留枚举型 UT 作为独立 oracle。
+
+缓存只在 `WaitInputs`/`AllocOutputs` 之后、`SyncOutputs`/`FreeInputs` 之前包住一次 API 调用，buffer 生命周期不受 guard 影响；这一骨架见 6.2.2。
+
 ### 3.3 与外部 tiling 库的依赖
 
 Host 侧 tiling 函数的实际生成逻辑位于外部 gen_tiling 库中，Codegen 通过函数指针（`TilingLibCodegenFunc`，指向 gen_tiling.so 的 `CodegenTiling` 符号）回调生成，再由 Codegen 负责组装头文件、拼接翻译单元。这意味着：
@@ -58,6 +68,7 @@ Host 侧 tiling 函数的实际生成逻辑位于外部 gen_tiling 库中，Code
 - 不同 SoC 版本（如 3510、5102、9201、9202）的指令集和 API 形态存在差异，版本差异通过 IR 注册表按 SoC 版本路由到不同的实现（V2 实现），Codegen 主流程不感知具体芯片；
 - 新增 SoC 版本支持时，需同时提供该版本的 ApiCall 实现和 API 源码模板注册，不能复用其他版本的模板；
 - Kernel 文件中调用的 AscendC API 源码由 `AscendCApiRegistry` 在构建期从源码头文件打包为字符串注册，生成时内联。API 模板更新后必须重新编译 Codegen 模块，否则生成结果仍是旧模板。
+- int64 比较的多行向量实现中，`CastTensorToHalfNormal` 的 `PairReduceSum` 将每个 repeat 的中间结果按 4 个 32B block 的步长布局。`CalcWeightedTensorNormal` 的加权乘法必须使用该压缩后的步长；回归测试需包含多行正负数、相等值、小内轴和尾部 repeat，单行输入无法暴露此类错位。
 
 ### 3.5 其他限制
 
@@ -397,6 +408,36 @@ VfCall（主框架 ApiCall，生成函数定义与调用点）
 
 - **API 参数 dump**：`CodegenApiParam::DumpGraphApiParams`（autofuse/codegen/codegen_api_param_dump.cpp）可将每张 ImplGraph 中所有节点的 API 入参序列化为文本文件，用于调试和对比生成的调用参数，开发新 ApiCall 时可通过该工具核验参数组装是否正确。
 - **表达式转换**：`ExpressionItem/CombinedExpression` 提供符号表达式到 C++ 代码的统一渲染，并附带工厂函数（`ExprItemFactory/CombinedExprFactory`）用于组装常见表达式模式（如 `SizeMinusActualSize` 尾块计算）。
+
+<a id="template-semantic-naming"></a>
+
+### 6.7 新增模板的语义命名规范
+
+新增模板、实现策略、API 选择或回退分支，以及影响名称的分组、图改写和 reuse 映射变更，必须同步适配 `semantic_name`。仅调整 tile、核数、dtype 或 buffer 数量且未改变实现分类时，说明沿用既有名称的依据，不为数值组合新增分类。
+
+名称格式如下，方括号表示可选部分，`|` 分隔多个 API feature，`+` 分隔成功转换：
+
+```text
+<family>/<strategy>[@<role>][#<api-feature>|...][+<transform>+...]
+Reduce/RCore@Phase1
+Reduce/Common@Norm#AR|NoReuseSrc
+Concat/UB#OneAxis
+IndirectLoad/SIMT@Strided#Offset32
+```
+
+`family` 表示实现家族，`strategy` 表示实现策略，`role` 表示逻辑阶段或职责，`api-feature` 表示最终 API 实现特征，`transform` 表示已成功的图或搬运转换。数值参数保留在原 tiling 信息中。协议使用 `semantic_schema=1`，字段和名称不加 `v2` 后缀。
+
+- **统一入口**：词表统一定义在 `autofuse/common/common_utils.h` 的 `ascgen_utils::template_semantic` 中；枚举到名称的映射也使用公共 helper。实际选择点只引用公共常量，保持原选择条件。`common_utils.cpp` 的 `NormalizeTemplateSemanticName()` 在生成 `ModelInfo` 时规范化一次。ATT、TopN、summary 和离线工具消费规范值，不各建 role 表、重新分类或另写模板选型算法；不得从 Torch 算子名、测试标签、图名或生成源码猜测实现。
+- **采集与传递**：Schedule 按[模板语义信息传递规则](schedule.md#template-semantic-propagation)记录策略、组级角色和成功转换；Codegen 在最终 API 选择成功点通过 `CodegenApiParam.semantic_feature` 或现有 `SetSemanticFeature` 记录 feature。回退后清理或替换旧信息，不能沿用失败分支的标签。
+- **身份与生命周期**：名称必须对应当前调用、候选及完整的 graph/result/group/key/subcase/template 身份。reuse 后恢复当前逻辑身份；最终选择快照随胜出 tiling data 一起提交，不能只按 `group_id` 或共享 primary 最后一次选择推断。cache/PGO 无精确快照时按当前 key 回退，不借用历史状态，不补做求解。
+- **不确定信息**：仅在运行时分支未定、独立 `GenerateTiling` 缺少最终 API 信息等明确条件下使用父名或 `Adaptive`，并给出条件及测试。身份匹配不唯一标 `ambiguous`，信息缺失标 `unavailable`；不得用默认父名或 `Adaptive` 掩盖接入遗漏。
+- **行为与性能**：观测不改变公开 ABI、tiling/cache 数据、候选选择或真实求解异常；诊断失败仅降级观测。INFO 关闭时不做新增的诊断字符串和快照容器构造，不新增求解、图扫描、IO 或 kernel launch。沿用原功能及编译、tiling、kernel 性能 gate，不放宽阈值；INFO 关闭时测性能，开启时单独报告观测开销，未执行项明确列出。
+
+新增模板或分支的设计及 PR 说明必须给出分类或继承理由、真实采集点及复制/失效/回退时机、完整身份与 reuse 处理、不确定状态，以及测试入口、实际分支、期望名称和代码/产物版本。不适用项说明原因。
+
+复用现有 UT 和 backend/生成代码执行测试，验证实际 API 或分支、完整身份、名称及状态的对应关系，不能只检查非空字符串或文件存在。按本次变更覆盖复制、失败、回退、多 group/reuse（含跨 graph/result 同号 group）、同 key 多 subcase、cache/PGO 和 INFO 关闭及诊断失败等受影响边界。名称适配、设备执行、精度和性能分别记录；TopN 候选覆盖不等于设备执行或精度通过。
+
+以上为开发和评审要求。模板注册项与名称测试的自动对应 CI 检查仍待实施，不维护另一份全量模板清单，也不能宣称当前 CI 已能自动拦截所有遗漏。
 
 ## 7. 关键文件索引
 

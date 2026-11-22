@@ -489,6 +489,18 @@ aclError aclmdlRITaskSetParams(aclmdlRITask task, aclmdlRITaskParams *params) {
   return ACL_ERROR_NONE;
 }
 
+aclError aclmdlRITaskGetEnabled(aclmdlRITask task, uint32_t *isEnabled) {
+  if (task == nullptr || isEnabled == nullptr) {
+    return ACL_ERROR_INVALID_PARAM;
+  }
+  const aclError ret = SkUtGetTaskGetEnabledRet();
+  if (ret != ACL_SUCCESS) {
+    return ret;
+  }
+  *isEnabled = sk::test::TaskEnabled(task) ? 1U : 0U;
+  return ACL_SUCCESS;
+}
+
 aclError aclmdlRITaskDisable(aclmdlRITask task) {
   if (task == nullptr) {
     return ACL_ERROR_INVALID_PARAM;

@@ -46,6 +46,16 @@ ImplGraph is the only interface between Schedule and Codegen; Codegen makes no s
 - **Performance modeling is on the ATT side**: When assembling API parameters, Codegen computes information such as `outer_call_count` (the number of outer API calls) and writes it into node parameters. The performance formula of Auto Tiling (latency ≈ API call count × per-call latency) takes this as input for tiling candidate evaluation. The performance formula itself is not in Codegen; when Codegen adds new API parameters, it must confirm whether the formulas on the ATT side depend on them;
 - **Fallback limits of PGO/TopN**: When the number of tiling_keys exceeds the upper limit (10000), the PGO search is automatically disabled and falls back to regular tiling generation; when the number of tiling_keys exceeds the limit of a single compilation unit, the kernel is automatically split into multiple compilation units for separate compilation. The two limits are different and take effect independently.
 
+### 3.2.1 Cache execution count: Codegen and ATT must share one condition
+
+Cache guards on the Reduce/Broadcast chain skip repeated Load/Broadcast calls, so ATT must estimate "how many times this call really executes" from the same condition; otherwise the movement cost is wrong and the tiling picks the wrong template. Three rules have to move together:
+
+- **There is exactly one source for the condition.** When `Loop::GenerateBody` assembles an `ApiCall`, Codegen records the condition it actually emits into the device code (`enable_cache_origin_brc_axis`, `enable_cache_fused_brc_axis`, or the DoubleTile `dis_enable_cache_a` / `dis_enable_cache_r` / `control_dis_enable_cache_a`) as `CacheExecutionParams` on the node parameters. Both ordinary Origin/Fused and DoubleTile conditions bind their loop axis, period, and block-inner extent where the condition definition is emitted; common does not infer them by rescanning axes. ATT only reads it. An earlier ATT rebuilt the guard from scheduling axes, relaxed the trailing vector axis rule for NDDMA, and assumed the address was invariant. That did not match what was emitted: in a small-input broadcast scenario, NDDMA was costed as 1 call instead of 20, the MTE2 estimate was ~49k cycles low, and the default solution picked the slow template (~93 us against ~45 us). **Any "derive the cache condition from axis relations" approach reintroduces this class of underestimate and must not be restored on the ATT side.**
+- **Keep the full count whenever the record is missing or inconsistent.** An empty record, a `kUnknown`/`kNoGuard` mode, a call axis that does not match the record, or an expression that fails validation all make ATT return the original base count `E_base` with no compression. Overestimating only makes a candidate look more expensive; underestimating silently promotes a slow template. The two costs are asymmetric, so every uncertain branch must err on the high side.
+- **Counting must track the predicate semantics term by term.** A plain guard hits `Ceiling(L / P)` times. The DoubleTile R condition `(i < 1) || (i % P < 1)` does not reference `block_dim` and counts exactly as `1 + Floor((L-1)/P)`. The A condition contains `block_dim × block_inner_extent`, and a DoubleTile record takes `block_inner_extent` and `period` from two different axes (see `bind` in `codegen_kernel_loop.cpp`), so the per-block phase cannot be proven equal under a symbolic `block_dim`. In that case ATT uses the phase-independent bound `1 + Ceiling((L-1)/P)` as the hit upper bound and derives a lower bound on skipped calls, which keeps `count ≥ true value`. Changing `IsBlockCountUniform` or `CountGuardHits` requires updating all three rules, and the enumerated UT must stay as an independent oracle.
+
+The guard wraps a single API call between `WaitInputs`/`AllocOutputs` and `SyncOutputs`/`FreeInputs`, so buffer lifetime is unaffected; see 6.2.2 for that skeleton.
+
 ### 3.3 Dependency on the External Tiling Library
 
 The actual generation logic of Host-side tiling functions resides in an external gen_tiling library. Codegen calls back to generate via a function pointer (`TilingLibCodegenFunc`, pointing to the `CodegenTiling` symbol in gen_tiling.so), and Codegen is responsible for assembling headers and concatenating translation units. This means:
@@ -58,6 +68,7 @@ The actual generation logic of Host-side tiling functions resides in an external
 - Different SoC versions (e.g., 3510, 5102, 9201, 9202) differ in instruction sets and API forms. Version differences are routed to different implementations (V2 implementations) through the IR registry by SoC version; the main Codegen flow is unaware of the specific chip;
 - Adding support for a new SoC version requires providing both the ApiCall implementations and the API source template registrations of that version; templates of other versions must not be reused;
 - The AscendC API source code called in kernel files is packed into strings from source headers at build time and registered by `AscendCApiRegistry`, then inlined during generation. After an API template is updated, the Codegen module must be recompiled; otherwise the generation result still uses the old template.
+- In the multi-row int64 comparison implementation, `PairReduceSum` in `CastTensorToHalfNormal` lays out every repeat with a four-32-byte-block stride. The weighted multiply in `CalcWeightedTensorNormal` must use this compressed stride. Regression tests must include multi-row positive, negative, equal, small-inner-axis, and tail-repeat values because single-row inputs cannot expose this misalignment.
 
 ### 3.5 Other Limitations
 
@@ -397,6 +408,36 @@ This mechanism also supports kernel generation for the CV-UB fusion scenario.
 
 - **API parameter dump**: `CodegenApiParam::DumpGraphApiParams` (autofuse/codegen/codegen_api_param_dump.cpp) can serialize the API input parameters of all nodes in each ImplGraph into text files, used for debugging and comparing generated call parameters. When developing a new ApiCall, this tool can be used to verify whether parameter assembly is correct.
 - **Expression conversion**: `ExpressionItem/CombinedExpression` provide unified rendering from symbolic expressions to C++ code, with factory functions (`ExprItemFactory/CombinedExprFactory`) for assembling common expression patterns (such as the `SizeMinusActualSize` tail block computation).
+
+<a id="template-semantic-naming"></a>
+
+### 6.7 Semantic Naming Requirements for New Templates
+
+New templates, implementation strategies, API selection or fallback branches, and naming-related changes to grouping, graph rewrites, or reuse mappings must adapt `semantic_name`. If only tile size, core count, dtype, or buffer count changes without changing the implementation category, explain why the existing name still applies; do not create categories for numeric combinations.
+
+The format below uses brackets for optional parts, `|` between API features, and `+` between successful transformations:
+
+```text
+<family>/<strategy>[@<role>][#<api-feature>|...][+<transform>+...]
+Reduce/RCore@Phase1
+Reduce/Common@Norm#AR|NoReuseSrc
+Concat/UB#OneAxis
+IndirectLoad/SIMT@Strided#Offset32
+```
+
+`family` identifies the implementation family, `strategy` the implementation strategy, `role` the logical phase or responsibility, `api-feature` the final API implementation feature, and `transform` a successful graph or data-movement transformation. Numeric parameters remain in the original tiling information. The protocol uses `semantic_schema=1`; fields and names have no `v2` suffix.
+
+- **Single source**: Define vocabulary in `ascgen_utils::template_semantic` in `autofuse/common/common_utils.h`; use shared helpers for enum-to-name mappings too. Selection sites reference shared constants and retain their original selection conditions. `NormalizeTemplateSemanticName()` in `common_utils.cpp` normalizes names once when generating `ModelInfo`. ATT, TopN, summary, and offline tools consume normalized values without maintaining separate role tables, reclassifying implementations, or duplicating template selection. Do not infer implementations from Torch operator names, test labels, graph names, or generated source.
+- **Collection and propagation**: Schedule records strategies, group roles, and successful transformations under the [semantic propagation rules](schedule.md#template-semantic-propagation). Codegen records features through `CodegenApiParam.semantic_feature` or the existing `SetSemanticFeature` at the successful final API selection point. Clear or replace stale information after fallback; do not retain failed-branch tags.
+- **Identity and lifetime**: Associate names with the current invocation, candidate, and complete graph/result/group/key/subcase/template identity. Restore the current logical identity after reuse. Commit final selection snapshots together with the winning tiling data; neither `group_id` alone nor the last selection of a shared primary establishes ownership. For cache/PGO paths without an exact snapshot, fall back using the current key without borrowing historical state or solving again.
+- **Uncertainty**: Use a parent name or `Adaptive` only for stated conditions such as an unresolved runtime branch or missing final API information in standalone `GenerateTiling`, with corresponding tests. Report non-unique identity matches as `ambiguous` and missing information as `unavailable`; default parent names or `Adaptive` must not hide missing integration.
+- **Behavior and performance**: Observation must not change public ABI, tiling/cache data, candidate selection, or real solver exceptions; diagnostic failures only disable or degrade observation. With INFO disabled, avoid added diagnostic string and snapshot-container construction. Do not add solving, graph scans, IO, or kernel launches. Retain existing functional, compilation, tiling, and kernel performance gates without relaxing thresholds. Measure performance with INFO disabled and report observation overhead separately with INFO enabled; explicitly list checks not run.
+
+The design and PR description for a new template or branch must state its category or inheritance rationale, actual collection points and copy/invalidation/fallback timing, complete identity and reuse handling, uncertainty states, test entry points, actual branches, expected names, and code/artifact versions. Explain items that do not apply.
+
+Reuse existing UT and backend/generated-code execution tests to verify the correspondence between actual APIs or branches, complete identity, names, and states; non-empty strings or file existence alone are insufficient. Cover boundaries affected by the change: copying, failure, fallback, multiple groups/reuse (including equal group IDs across graphs/results), multiple subcases for one key, cache/PGO, INFO disabled, and diagnostic failures. Record naming integration, device execution, accuracy, and performance separately; TopN candidate coverage does not establish device execution or accuracy.
+
+These are development and review requirements. Automatic CI checks linking template registrations to naming tests remain to be implemented. Do not maintain a duplicate full template inventory or claim that current CI automatically rejects every omission.
 
 ## 7. Key File Index
 

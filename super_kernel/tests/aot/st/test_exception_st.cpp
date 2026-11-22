@@ -24,7 +24,7 @@ rtExceptionErrRegInfo_t Core(uint32_t id, rtCoreType_t type, uint64_t pc = 0, ui
   result.currentPC = pc;
   // Runtime register transport slots documented by the exception decoder:
   // DAV_2201 uses 20/21; DAV_3510 uses 32/33. COND is emitted by set_cond
-  // as scope bits | (task index << 8) | state (0..4). No SK memory is decoded.
+  // with state in bits [7:0]. WAIT states identify a per-core queue slot.
   for (size_t slot : {20U, 32U}) {
     result.errReg[slot] = static_cast<uint32_t>(cond);
     result.errReg[slot + 1] = static_cast<uint32_t>(cond >> 32);
@@ -44,6 +44,7 @@ TEST_F(AotSystemTest, ExceptionCallbackReportsRealFusedQueuesAndMatchedSubkernel
     model.AddKernel(stream, "exception_second_" + std::to_string(type), spec);
     aclmdlRITaskParams original{};
     ASSERT_EQ(aclmdlRITaskGetParams(first, &original), ACL_SUCCESS);
+    const auto originalArgs = model.Snapshot(first).args;
     const auto pc = sk::test::RegisterExceptionBinary(first);
     ASSERT_EQ(aclskOptimize(model.Handle(), nullptr), ACL_SUCCESS);
     sk::test::Exception exception(first);
@@ -68,7 +69,12 @@ TEST_F(AotSystemTest, ExceptionCallbackReportsRealFusedQueuesAndMatchedSubkernel
     EXPECT_EQ(mode, Adx::ExceptionDumpMode::DUMP_MODE_OVERWRITE);
     EXPECT_STREQ(dumps[0].kernelName, ("exception_first_" + std::to_string(type)).c_str());
     EXPECT_EQ(dumps[0].argSize, original.kernelTaskParams.argsSize);
-    EXPECT_EQ(dumps[0].argAddr, original.kernelTaskParams.args);
+    EXPECT_NE(dumps[0].argAddr, original.kernelTaskParams.args);
+    std::vector<unsigned char> copiedArgs(originalArgs.size(), 0xff);
+    ASSERT_EQ(aclrtMemcpy(copiedArgs.data(), copiedArgs.size(), dumps[0].argAddr, copiedArgs.size(),
+                          ACL_MEMCPY_DEVICE_TO_HOST),
+              ACL_SUCCESS);
+    EXPECT_EQ(copiedArgs, originalArgs);
     EXPECT_EQ(dumps[0].coreType, coreType);
     EXPECT_EQ(dumps[0].extraTensorNum, 1U);
     EXPECT_EQ(dumps[0].extraTensor[0].tensorSize, exception.argsSize);
@@ -89,10 +95,11 @@ TEST_F(AotSystemTest, ExceptionCallbackDecodesCondStatesFromExternalRegisters) {
   sk::test::Exception exception(task);
   const char *messages[] = {"No SK entry executed yet",     "SK entry launched, no sub-kernel executed yet",
                             "Currently running sub-kernel", "finished, about to run next",
-                            "SK entry execution completed", "Unknown opState=5"};
-  for (uint32_t state = 0; state < 6; ++state) {
+                            "SK entry execution completed", "Currently executing waitfunc",
+                            "Last completed waitfunc",      "Unknown opState=7"};
+  for (uint32_t state = 0; state < 8; ++state) {
     SCOPED_TRACE(state);
-    exception.registers = {Core(0, RT_CORE_TYPE_AIV, 0, (1ULL << 16) | state)};
+    exception.registers = {Core(0, RT_CORE_TYPE_AIV, 0, (1ULL << 24) | state)};
     ut_log::LogBuffer::Instance().Clear();
     exception.Raise();
     ExpectExceptionLog(messages[state]);

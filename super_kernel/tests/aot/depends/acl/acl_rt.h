@@ -65,6 +65,17 @@ typedef void *aclmdlRI;
 typedef void *aclrtTask;  // void* as per user request
 typedef int aclError;
 
+typedef enum aclrtKernelArgsType {
+  ACL_RT_KERNEL_ARGS_ARRAY = 1,
+  ACL_RT_KERNEL_ARGS_HOST_BUFFER = 2,
+  ACL_RT_KERNEL_ARGS_DEVICE_BUFFER = 3,
+} aclrtKernelArgsType;
+
+typedef struct aclrtPlaceHolderInfo {
+  uint32_t addrOffset;
+  uint32_t dataOffset;
+} aclrtPlaceHolderInfo;
+
 typedef enum aclrtLaunchKernelAttrId {
   ACL_RT_LAUNCH_KERNEL_ATTR_SCHEM_MODE = 1,
   ACL_RT_LAUNCH_KERNEL_ATTR_DYN_UBUF_SIZE = 2,
@@ -126,6 +137,7 @@ typedef enum aclrtMemcpyKind {
 typedef enum aclrtDevAttr {
   ACL_DEV_ATTR_CUBE_CORE_NUM,
   ACL_DEV_ATTR_VECTOR_CORE_NUM,
+  ACL_DEV_ATTR_NPU_ARCH = 601U,
 } aclrtDevAttr;
 
 // Task types
@@ -175,7 +187,21 @@ typedef struct aclmdlRIKernelTaskParams {
   uint32_t isHostArgs;
   size_t argsSize;
   uint32_t numBlocks;
-  uint32_t rsv[10];
+  aclrtKernelArgsType argsType;
+  union {
+    void **argsArray;
+    struct {
+      void *hostArgs;
+      size_t hostArgsSize;
+      aclrtPlaceHolderInfo *placeHolderArray;
+      size_t placeHolderNum;
+    } hostBuffer;
+    struct {
+      void *deviceArgs;
+      size_t deviceArgsSize;
+    } deviceBuffer;
+  };
+  uint32_t rsv[2];
 } aclmdlRIKernelTaskParams;
 
 typedef struct aclmdlRIValueWriteTaskParams {
@@ -257,6 +283,7 @@ aclError aclmdlRITaskGetType(aclmdlRITask task, aclmdlRITaskType *type);
 aclError aclmdlRITaskGetParams(aclmdlRITask task, aclmdlRITaskParams *params);
 aclError aclmdlRITaskSetParams(aclmdlRITask task, aclmdlRITaskParams *params);
 aclError aclmdlRITaskDisable(aclmdlRITask task);
+aclError aclmdlRITaskGetEnabled(aclmdlRITask task, uint32_t *isEnabled);
 aclError aclmdlRITaskGetSeqId(aclmdlRITask task, uint32_t *id);
 aclError aclmdlRIGetTasksByStream(aclrtStream stream, aclmdlRITask *tasks, uint32_t *numTasks);
 aclError aclmdlRIKernelTaskGetAttribute(aclmdlRITask task, aclrtLaunchKernelAttrId attrId,

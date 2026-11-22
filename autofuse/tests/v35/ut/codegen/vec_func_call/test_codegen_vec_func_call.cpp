@@ -43,6 +43,16 @@ std::string GetLineContaining(const std::string &text, const std::string &needle
                      line_end == std::string::npos ? std::string::npos : line_end - line_begin - 1UL);
 }
 
+size_t CountOccurrences(const std::string &text, const std::string &needle) {
+  size_t count = 0;
+  size_t offset = 0;
+  while ((offset = text.find(needle, offset)) != std::string::npos) {
+    ++count;
+    offset += needle.size();
+  }
+  return count;
+}
+
 class FailingMicroApiCall final : public MicroApiCall {
  public:
   FailingMicroApiCall() : MicroApiCall("FailingMicroApiCall") {}
@@ -347,6 +357,33 @@ TEST(VFLoopTest, PropagatesFailureWhenMicroApiCallFails) {
   EXPECT_NE(loop.Generate(tpipe, tensor_manager, 0, result, loop_size, max_depth, loop_sizes), af::SUCCESS);
   EXPECT_NE(loop.GenerateCvUbFuse(tpipe, tensor_manager, result, loop_size), af::SUCCESS);
   loop.Destruct();
+}
+
+TEST(VFLoopTest, DeduplicatesSiblingLoopDeclarations) {
+  ge::SetupRuntimeStub();
+  af::AscGraph graph("sibling_vf_loops");
+  const auto size = graph.CreateSizeVar("size");
+  const auto axis = graph.CreateAxis("axis", size);
+
+  Tiler tiler;
+  tiler.AddAxis(axis);
+  TPipe tpipe("tpipe", tiler);
+  TensorManager tensor_manager;
+
+  VFLoop root(af::kIdNone);
+  root.SetMaxDtypeSize("float");
+  root.AddLoop(new VFLoop(axis.id));
+  root.AddLoop(new VFLoop(axis.id));
+
+  std::string result;
+  std::string loop_size;
+  int32_t max_depth = -1;
+  std::vector<std::string> loop_sizes;
+  ASSERT_EQ(root.Generate(tpipe, tensor_manager, 0, result, loop_size, max_depth, loop_sizes), af::SUCCESS);
+  EXPECT_EQ(CountOccurrences(loop_size, "uint16_t axis_loop_size = loop_times;"), 1U) << loop_size;
+  EXPECT_EQ(CountOccurrences(result, "uint32_t sreg_0 = element_count;"), 1U) << result;
+  EXPECT_EQ(CountOccurrences(result, "AscendC::MicroAPI::MaskReg preg_0;"), 1U) << result;
+  root.Destruct();
 }
 
 TEST(VFLoopTest, GeneratesInt64ArangeAcrossVectorBlocks) {
@@ -1123,6 +1160,43 @@ TEST(CodegenKernel, CvUbFuseVfLayoutHelperUsesPhysicalRowStride) {
   EXPECT_EQ(codegen::GenCvUbFuseAddrOffset(tpipe, bool_output),
             "0 + cv_m * KernelUtils::BlkAlign<uint8_t>(curAivN) + cv_n * ELEMENT_PER_VECTOR_LENGTH");
   EXPECT_EQ(codegen::GenCvUbFuseAddrOffset(tpipe, broadcast_input), "0");
+}
+
+TEST(CodegenKernel, CvUbFuseFlatLoopRequiresDenseSameShapeTensors) {
+  codegen::Tiler tiler;
+  codegen::TPipe tpipe("tpipe", tiler);
+  tpipe.cv_fusion_type = ::ascir::CubeTemplateType::kUBFuse;
+  tpipe.cube_output_tensor_id = 0;
+  af::AscGraph graph("test_graph");
+  af::ascir_op::Data x("x", graph);
+  const auto m = af::Symbol("m");
+  const auto n = af::Symbol("n");
+  auto cube = MakeCvUbFuseTensor(graph, af::DT_FLOAT, 0, {n, One}, "local_0");
+  auto output = MakeCvUbFuseTensor(graph, af::DT_FLOAT, 1, {n, One}, "local_1");
+  cube.axis_size = {m, n};
+  output.axis_size = cube.axis_size;
+  const auto generate = [&]() { return codegen::GenCvUbFuseFlatLoopParams(tpipe, {cube}, {output}, "float"); };
+  const auto dense = generate();
+  EXPECT_NE(dense.find("curAlignN == curAivN"), std::string::npos);
+  EXPECT_NE(dense.find("KernelUtils::BlkAlign<float>(curAivN) == curAivN"), std::string::npos);
+  EXPECT_NE(dense.find("curAivN *= curAivM;"), std::string::npos);
+
+  output.vectorized_strides = {Zero, One};
+  EXPECT_TRUE(generate().empty());
+  output.vectorized_strides = {One, m};
+  EXPECT_TRUE(generate().empty());
+  output.vectorized_strides = {n, One};
+  output.axis_size = {n};
+  EXPECT_TRUE(generate().empty());
+  output.axis_size = cube.axis_size;
+  output.dtype = af::DT_FLOAT16;
+  EXPECT_TRUE(generate().empty());
+  output.dtype = af::DT_FLOAT;
+  tpipe.is_conv2d = true;
+  EXPECT_TRUE(generate().empty());
+  tpipe.is_conv2d = false;
+  tpipe.cv_fusion_type = ::ascir::CubeTemplateType::kDefault;
+  EXPECT_TRUE(generate().empty());
 }
 
 TEST(CodegenKernel, CvUbFuseTensorSizeAssignUsesTensorDtype) {

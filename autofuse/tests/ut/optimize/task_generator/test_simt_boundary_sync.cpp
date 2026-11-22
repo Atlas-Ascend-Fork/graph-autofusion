@@ -10,13 +10,16 @@
 
 #include "gtest/gtest.h"
 
+#include <algorithm>
 #include <string>
 #include <vector>
 
 #include "ascir_ops.h"
 #include "graph/utils/graph_utils.h"
 #include "indirect_load_utils.h"
+#include "schedule_result.h"
 #include "task_generator/simt_boundary_sync.h"
+#include "symbolizer/symbolic_utils.h"
 
 namespace {
 struct SyncViewGraphHandle {

@@ -9,6 +9,8 @@
  */
 
 #include "share_graph.h"
+#include <functional>
+#include <type_traits>
 #include "graph/utils/graph_utils.h"
 #include "graph/debug/ge_op_types.h"
 #include "ascendc_ir.h"
@@ -65,10 +67,12 @@ class GraphBuilder {
   std::string node_type_;
 };
 
-static void ConstructVVAscGraphAxisInfo(af::AscGraph &graph, size_t dims_size) {
-  std::vector<int64_t> axis;
-  std::vector<af::Expression> repeats;
-  std::vector<af::Expression> strides;
+static void ConstructVVAscGraphAxisInfo(af::AscGraph &graph, size_t dims_size, std::vector<int64_t> &axis_ids,
+                                        std::vector<af::Expression> &axis_strides,
+                                        std::vector<af::Expression> &repeats) {
+  axis_ids.clear();
+  axis_strides.clear();
+  repeats.clear();
   auto ONE = Symbol(1);
 
   // 构造符号、轴信息
@@ -77,26 +81,45 @@ static void ConstructVVAscGraphAxisInfo(af::AscGraph &graph, size_t dims_size) {
     std::string axis_str = "z" + std::to_string(i);
     const auto sym_s = Symbol(sym_str.c_str());
     auto axis_z = graph.CreateAxis(axis_str.c_str(), sym_s);
-    axis.push_back(axis_z.id);
+    axis_ids.push_back(axis_z.id);
     repeats.push_back(sym_s);
-    strides.push_back(ONE);
+    axis_strides.push_back(ONE);
   }
   // 计算每个轴的stride
   for (int i = dims_size - 2; i >= 0; i--) {
-    strides[i] = af::sym::Mul(repeats[i + 1], strides[i + 1]);
+    axis_strides[i] = af::sym::Mul(repeats[i + 1], axis_strides[i + 1]);
   }
   // 将原始轴信息设置到图中所有节点上
   for (auto node : graph.GetAllNodes()) {
     if (af::ops::IsOps<af::ascir_op::Scalar>(node)) {
       continue;
     }
-    node->attr.sched.axis = axis;
+    node->attr.sched.axis = axis_ids;
     for (auto output_attr : node->outputs()) {
-      output_attr->attr.axis = axis;
+      output_attr->attr.axis = axis_ids;
       output_attr->attr.repeats = repeats;
-      output_attr->attr.strides = strides;
+      output_attr->attr.strides = axis_strides;
     }
   }
+}
+
+static void ConstructVVAscGraphAxisInfo(af::AscGraph &graph, size_t dims_size) {
+  std::vector<int64_t> axis_ids;
+  std::vector<af::Expression> axis_strides;
+  std::vector<af::Expression> repeats;
+  ConstructVVAscGraphAxisInfo(graph, dims_size, axis_ids, axis_strides, repeats);
+}
+
+static void SetArangeVectorizedLayout(af::ascir_op::Arange &arange, const std::vector<int64_t> &axis_ids,
+                                      const std::vector<af::Expression> &axis_strides) {
+  std::vector<af::AxisId> vectorized_axes;
+  std::vector<af::Expression> vectorized_strides;
+  for (size_t i = 0UL; i < axis_ids.size(); ++i) {
+    vectorized_axes.push_back(axis_ids[i]);
+    vectorized_strides.push_back(axis_strides[i]);
+  }
+  *arange.y.vectorized_axis = vectorized_axes;
+  *arange.y.vectorized_strides = vectorized_strides;
 }
 
 static void ConstructVVConstAscGraphAxisInfo(af::AscGraph &graph, size_t dims_size, vector<int> dims) {
@@ -417,6 +440,56 @@ af::ComputeGraphPtr ShareGraph::TransposeBoolFusedGraph() {
   af::AttrUtils::SetStr(ascbc_node->GetOpDescBarePtr(), "ascgraph", sub_graph_str);
   return compute_graph;
 }
+
+static void CreateTransposeInt8AscGraph(af::AscGraph &graph) {
+  af::ascir_op::Data x("data0", graph);
+  x.ir_attr.SetIndex(0);
+  x.y.dtype = af::DT_INT8;
+
+  af::ascir_op::Load load("load0");
+  load.x = x.y;
+  load.y.dtype = af::DT_INT8;
+
+  af::ascir_op::Transpose transpose("transpose");
+  transpose.x = load.y;
+  transpose.y.dtype = af::DT_INT8;
+  transpose.attr.tmp_buffers = {{{af::Symbol(8192), -1}, af::MemAttr(), 0}};
+
+  af::ascir_op::Store store("store");
+  store.x = transpose.y;
+  store.y.dtype = af::DT_INT8;
+
+  af::ascir_op::Output output("output");
+  output.x = store.y;
+  output.y.dtype = af::DT_INT8;
+  output.ir_attr.SetIndex(0);
+
+  ConstructVVAscGraphAxisInfo(graph, 3, {1, 0, 2});
+}
+
+af::ComputeGraphPtr ShareGraph::TransposeInt8FusedGraph() {
+  auto builder = GraphBuilder("transpose_int8_test");
+  auto data0 = builder.AddNode("data0", "Data", 0, 1);
+  af::AttrUtils::SetInt(data0->GetOpDescBarePtr(), "_parent_node_index", 0);
+
+  auto ascbc = builder.AddNode("ascbc", "AscGraph", 1, 1);
+  auto netoutput = builder.AddNode("netoutput1", af::NETOUTPUT, 1, 0);
+
+  builder.AddDataEdge(data0, 0, ascbc, 0);
+  builder.AddDataEdge(ascbc, 0, netoutput, 0);
+  ComputeGraphPtr compute_graph = builder.GetGraph();
+  if (compute_graph == nullptr) {
+    return nullptr;
+  }
+  auto ascbc_node = compute_graph->FindNode("ascbc");
+  af::AscGraph sub_graph("transpose_int8");
+  CreateTransposeInt8AscGraph(sub_graph);
+
+  std::string sub_graph_str;
+  af::AscGraphUtils::SerializeToReadable(sub_graph, sub_graph_str);
+  af::AttrUtils::SetStr(ascbc_node->GetOpDescBarePtr(), "ascgraph", sub_graph_str);
+  return compute_graph;
+}
 static void CreateBF16AddAscGraph(af::AscGraph &graph, size_t dims_size) {
   af::ascir_op::Data x1("data0", graph);
   x1.ir_attr.SetIndex(0);
@@ -445,6 +518,7 @@ static void CreateBF16AddAscGraph(af::AscGraph &graph, size_t dims_size) {
   af::ascir_op::Output y("output");
   y.x = x_out.y;
   y.ir_attr.SetIndex(0);
+  y.y.dtype = af::DT_BF16;
 
   ConstructVVAscGraphAxisInfo(graph, dims_size);
 }
@@ -488,6 +562,7 @@ static void CreateBF16NddmaAddAscGraph(af::AscGraph &graph, size_t dims_size) {
   af::ascir_op::Output y("output");
   y.x = x_out.y;
   y.ir_attr.SetIndex(0);
+  y.y.dtype = af::DT_BF16;
 
   ConstructVVAscGraphAxisInfo(graph, dims_size);
 }
@@ -560,6 +635,7 @@ static void CreateLoadLogicalOrStoreAscGraph(af::AscGraph &graph, size_t dims_si
   af::ascir_op::Output y("output");
   y.x = x_out.y;
   y.ir_attr.SetIndex(0);
+  y.y.dtype = af::DT_UINT8;
 
   ConstructVVAscGraphAxisInfo(graph, dims_size);
 }
@@ -603,6 +679,7 @@ static void CreateLoadLogicalAndStoreAscGraph(af::AscGraph &graph, size_t dims_s
   af::ascir_op::Output y("output");
   y.x = x_out.y;
   y.ir_attr.SetIndex(0);
+  y.y.dtype = af::DT_UINT8;
 
   ConstructVVAscGraphAxisInfo(graph, dims_size);
 }
@@ -785,6 +862,7 @@ static void CreateAddFloorBf16AscGraph(af::AscGraph &graph, size_t dims_size) {
   af::ascir_op::Output y("output");
   y.x = x_out.y;
   y.ir_attr.SetIndex(0);
+  y.y.dtype = af::DT_BF16;
 
   ConstructVVAscGraphAxisInfo(graph, dims_size);
 }
@@ -833,6 +911,7 @@ static void CreateAddExpBf16AscGraph(af::AscGraph &graph, size_t dims_size) {
 
   af::ascir_op::Output y("output");
   y.x = x_out.y;
+  y.y.dtype = af::DT_BF16;
   y.ir_attr.SetIndex(0);
 
   ConstructVVAscGraphAxisInfo(graph, dims_size);
@@ -1557,6 +1636,220 @@ af::ComputeGraphPtr ShareGraph::BF16NddmaAddFusedGraph(size_t dims_size) {
   return compute_graph;
 }
 
+/**
+ *      output
+ *         |
+ *       store
+ *         |
+ *        brc(fp32, 尾轴广播 1->s1)
+ *         |
+ *       cast(fp16->fp32)
+ *         |
+ *       load(fp16)
+ *         |
+ *       data(fp16)
+ * 常量shape、稀疏store(GM stride 16)场景: 预处理SwapCastBroadcastPass将链交换为
+ * load(fp16)->brc(fp16)->cast, 调度期对齐按brc实际输出dtype(fp16)原生生成向量化stride。
+ */
+static void CreateLoadCastBrcRealignConstAscGraph(af::AscGraph &graph) {
+  const auto s0 = Symbol(50);
+  const auto s1 = Symbol(4096);
+  const auto One = Symbol(1);
+  const auto Zero = Symbol(0);
+  const auto Sparse = Symbol(16);
+  auto z0 = graph.CreateAxis("z0", s0);
+  auto z1 = graph.CreateAxis("z1", s1);
+
+  af::ascir_op::Data x("data", graph);
+  x.attr.api.compute_type = ComputeType::kComputeInvalid;
+  x.attr.api.type = af::ApiType::kAPITypeBuffer;
+  x.ir_attr.SetIndex(0);
+  x.y.dtype = af::DT_FLOAT16;
+
+  af::ascir_op::Load xLocal("load");
+  xLocal.x = x.y;
+  xLocal.attr.api.compute_type = ComputeType::kComputeLoad;
+  xLocal.attr.api.type = af::ApiType::kAPITypeCompute;
+  xLocal.attr.sched.axis = {z0.id, z1.id};
+  *xLocal.y.axis = {z0.id, z1.id};
+  *xLocal.y.repeats = {s0, One};
+  *xLocal.y.strides = {s1 * Sparse, Zero};
+  xLocal.y.dtype = af::DT_FLOAT16;
+  xLocal.attr.api.unit = ComputeUnit::kUnitMTE2;
+
+  af::ascir_op::Cast cast0("cast");
+  cast0.x = xLocal.y;
+  cast0.attr.api.compute_type = ComputeType::kComputeElewise;
+  cast0.attr.api.type = af::ApiType::kAPITypeCompute;
+  cast0.attr.sched.axis = {z0.id, z1.id};
+  *cast0.y.axis = {z0.id, z1.id};
+  *cast0.y.repeats = {s0, One};
+  *cast0.y.strides = {s1 * Sparse, Zero};
+  cast0.y.dtype = af::DT_FLOAT;
+  cast0.attr.api.unit = ComputeUnit::kUnitVector;
+
+  af::ascir_op::Broadcast brc0("brc");
+  brc0.x = cast0.y;
+  brc0.attr.api.compute_type = ComputeType::kComputeBroadcast;
+  brc0.attr.api.type = af::ApiType::kAPITypeCompute;
+  brc0.attr.sched.axis = {z0.id, z1.id};
+  *brc0.y.axis = {z0.id, z1.id};
+  *brc0.y.repeats = {s0, s1};
+  *brc0.y.strides = {s1 * Sparse, Sparse};
+  brc0.y.dtype = af::DT_FLOAT;
+  brc0.attr.api.unit = ComputeUnit::kUnitVector;
+  brc0.attr.tmp_buffers = {{{af::Symbol(8192), -1}, af::MemAttr(), 0}};
+
+  af::ascir_op::Store x_out("store");
+  x_out.x = brc0.y;
+  x_out.attr.api.compute_type = ComputeType::kComputeStore;
+  x_out.attr.api.type = af::ApiType::kAPITypeCompute;
+  x_out.attr.sched.axis = {z0.id, z1.id};
+  *x_out.y.axis = {z0.id, z1.id};
+  *x_out.y.repeats = {s0, s1};
+  *x_out.y.strides = {s1 * Sparse, Sparse};
+  x_out.y.dtype = af::DT_FLOAT;
+  x_out.attr.api.unit = ComputeUnit::kUnitMTE3;
+
+  af::ascir_op::Output y("output");
+  y.x = x_out.y;
+  y.attr.api.compute_type = ComputeType::kComputeInvalid;
+  y.attr.api.type = af::ApiType::kAPITypeBuffer;
+  y.y.dtype = af::DT_FLOAT;
+  y.ir_attr.SetIndex(0);
+}
+
+/**
+ *      output
+ *         |
+ *       store
+ *         |
+ *        brc(fp32, 次尾轴广播 1->s1)
+ *         |
+ *       cast(fp16->fp32)
+ *         |
+ *       load(fp16, 尾轴s2为动态size var)
+ *         |
+ *       data(fp16)
+ * 动态shape场景: brc次尾轴向量化stride为非常量表达式, 交换后由调度期按实际dtype对齐。
+ */
+static void CreateLoadCastBrcRealignDynamicAscGraph(af::AscGraph &graph) {
+  const auto s0 = graph.CreateSizeVar("s0");
+  const auto s1 = graph.CreateSizeVar("s1");
+  const auto s2 = graph.CreateSizeVar("s2");
+  const auto One = Symbol(1);
+  const auto Zero = Symbol(0);
+  auto z0 = graph.CreateAxis("z0", s0);
+  auto z1 = graph.CreateAxis("z1", s1);
+  auto z2 = graph.CreateAxis("z2", s2);
+
+  af::ascir_op::Data x("data", graph);
+  x.attr.api.compute_type = ComputeType::kComputeInvalid;
+  x.attr.api.type = af::ApiType::kAPITypeBuffer;
+  x.ir_attr.SetIndex(0);
+  x.y.dtype = af::DT_FLOAT16;
+
+  af::ascir_op::Load xLocal("load");
+  xLocal.x = x.y;
+  xLocal.attr.api.compute_type = ComputeType::kComputeLoad;
+  xLocal.attr.api.type = af::ApiType::kAPITypeCompute;
+  xLocal.attr.sched.axis = {z0.id, z1.id, z2.id};
+  *xLocal.y.axis = {z0.id, z1.id, z2.id};
+  *xLocal.y.repeats = {s0, One, s2};
+  *xLocal.y.strides = {s2, Zero, One};
+  xLocal.y.dtype = af::DT_FLOAT16;
+  xLocal.attr.api.unit = ComputeUnit::kUnitMTE2;
+
+  af::ascir_op::Cast cast0("cast");
+  cast0.x = xLocal.y;
+  cast0.attr.api.compute_type = ComputeType::kComputeElewise;
+  cast0.attr.api.type = af::ApiType::kAPITypeCompute;
+  cast0.attr.sched.axis = {z0.id, z1.id, z2.id};
+  *cast0.y.axis = {z0.id, z1.id, z2.id};
+  *cast0.y.repeats = {s0, One, s2};
+  *cast0.y.strides = {s2, Zero, One};
+  cast0.y.dtype = af::DT_FLOAT;
+  cast0.attr.api.unit = ComputeUnit::kUnitVector;
+
+  af::ascir_op::Broadcast brc0("brc");
+  brc0.x = cast0.y;
+  brc0.attr.api.compute_type = ComputeType::kComputeBroadcast;
+  brc0.attr.api.type = af::ApiType::kAPITypeCompute;
+  brc0.attr.sched.axis = {z0.id, z1.id, z2.id};
+  *brc0.y.axis = {z0.id, z1.id, z2.id};
+  *brc0.y.repeats = {s0, s1, s2};
+  *brc0.y.strides = {s1 * s2, s2, One};
+  brc0.y.dtype = af::DT_FLOAT;
+  brc0.attr.api.unit = ComputeUnit::kUnitVector;
+  brc0.attr.tmp_buffers = {{{af::Symbol(8192), -1}, af::MemAttr(), 0}};
+
+  af::ascir_op::Store x_out("store");
+  x_out.x = brc0.y;
+  x_out.attr.api.compute_type = ComputeType::kComputeStore;
+  x_out.attr.api.type = af::ApiType::kAPITypeCompute;
+  x_out.attr.sched.axis = {z0.id, z1.id, z2.id};
+  *x_out.y.axis = {z0.id, z1.id, z2.id};
+  *x_out.y.repeats = {s0, s1, s2};
+  *x_out.y.strides = {s1 * s2, s2, One};
+  x_out.y.dtype = af::DT_FLOAT;
+  x_out.attr.api.unit = ComputeUnit::kUnitMTE3;
+
+  af::ascir_op::Output y("output");
+  y.x = x_out.y;
+  y.attr.api.compute_type = ComputeType::kComputeInvalid;
+  y.attr.api.type = af::ApiType::kAPITypeBuffer;
+  y.y.dtype = af::DT_FLOAT;
+  y.ir_attr.SetIndex(0);
+}
+
+af::ComputeGraphPtr ShareGraph::LoadCastBrcRealignConstFusedGraph() {
+  auto builder = GraphBuilder("load_cast_brc_realign_const_test");
+  auto data = builder.AddNode("data", "Data", 0, 1);
+  af::AttrUtils::SetInt(data->GetOpDescBarePtr(), "_parent_node_index", 0);
+
+  auto ascbc = builder.AddNode("ascbc", "AscGraph", 1, 1);
+  auto netoutput = builder.AddNode("netoutput1", af::NETOUTPUT, 1, 0);
+
+  builder.AddDataEdge(data, 0, ascbc, 0);
+  builder.AddDataEdge(ascbc, 0, netoutput, 0);
+  ComputeGraphPtr compute_graph = builder.GetGraph();
+  if (compute_graph == nullptr) {
+    return nullptr;
+  }
+  auto ascbc_node = compute_graph->FindNode("ascbc");
+  af::AscGraph sub_graph("load_cast_brc_realign_const");
+  CreateLoadCastBrcRealignConstAscGraph(sub_graph);
+
+  std::string sub_graph_str;
+  af::AscGraphUtils::SerializeToReadable(sub_graph, sub_graph_str);
+  af::AttrUtils::SetStr(ascbc_node->GetOpDescBarePtr(), "ascgraph", sub_graph_str);
+  return compute_graph;
+}
+
+af::ComputeGraphPtr ShareGraph::LoadCastBrcRealignDynamicFusedGraph() {
+  auto builder = GraphBuilder("load_cast_brc_realign_dynamic_test");
+  auto data = builder.AddNode("data", "Data", 0, 1);
+  af::AttrUtils::SetInt(data->GetOpDescBarePtr(), "_parent_node_index", 0);
+
+  auto ascbc = builder.AddNode("ascbc", "AscGraph", 1, 1);
+  auto netoutput = builder.AddNode("netoutput1", af::NETOUTPUT, 1, 0);
+
+  builder.AddDataEdge(data, 0, ascbc, 0);
+  builder.AddDataEdge(ascbc, 0, netoutput, 0);
+  ComputeGraphPtr compute_graph = builder.GetGraph();
+  if (compute_graph == nullptr) {
+    return nullptr;
+  }
+  auto ascbc_node = compute_graph->FindNode("ascbc");
+  af::AscGraph sub_graph("load_cast_brc_realign_dynamic");
+  CreateLoadCastBrcRealignDynamicAscGraph(sub_graph);
+
+  std::string sub_graph_str;
+  af::AscGraphUtils::SerializeToReadable(sub_graph, sub_graph_str);
+  af::AttrUtils::SetStr(ascbc_node->GetOpDescBarePtr(), "ascgraph", sub_graph_str);
+  return compute_graph;
+}
+
 static void CreateAbsUint8AscGraph(af::AscGraph &graph, size_t dims_size) {
   af::ascir_op::Data x("data", graph);
   x.y.dtype = af::DataType::DT_UINT8;
@@ -1576,6 +1869,7 @@ static void CreateAbsUint8AscGraph(af::AscGraph &graph, size_t dims_size) {
 
   af::ascir_op::Output y("output");
   y.x = x_out.y;
+  y.y.dtype = af::DataType::DT_UINT8;
   y.ir_attr.SetIndex(0);
 
   ConstructVVAscGraphAxisInfo(graph, dims_size);
@@ -1631,6 +1925,7 @@ static void CreateAbsBf16AscGraph(af::AscGraph &graph, size_t dims_size) {
 
   af::ascir_op::Output y("output");
   y.x = x_out.y;
+  y.y.dtype = af::DataType::DT_BF16;
   y.ir_attr.SetIndex(0);
 
   ConstructVVAscGraphAxisInfo(graph, dims_size);
@@ -1687,6 +1982,7 @@ static void CreateCeilBf16AscGraph(af::AscGraph &graph, size_t dims_size) {
   af::ascir_op::Output y("output");
   y.x = x_out.y;
   y.ir_attr.SetIndex(0);
+  y.y.dtype = af::DataType::DT_BF16;
 
   ConstructVVAscGraphAxisInfo(graph, dims_size);
 }
@@ -1790,6 +2086,7 @@ static void CreateCosBf16AscGraph(af::AscGraph &graph, size_t dims_size) {
   af::ascir_op::Output y("output");
   y.x = x_out.y;
   y.ir_attr.SetIndex(0);
+  y.y.dtype = af::DataType::DT_BF16;
 
   ConstructVVAscGraphAxisInfo(graph, dims_size);
 }
@@ -1845,6 +2142,7 @@ static void CreateErfBf16AscGraph(af::AscGraph &graph, size_t dims_size) {
   af::ascir_op::Output y("output");
   y.x = x_out.y;
   y.ir_attr.SetIndex(0);
+  y.y.dtype = af::DataType::DT_BF16;
 
   ConstructVVAscGraphAxisInfo(graph, dims_size);
 }
@@ -1901,6 +2199,7 @@ static void CreateLog1pBfloat16AscGraph(af::AscGraph &graph, size_t dims_size) {
   y.x = log1p_store.y;
 
   y.ir_attr.SetIndex(0);
+  y.y.dtype = af::DataType::DT_BF16;
 
   ConstructVVAscGraphAxisInfo(graph, dims_size);
 }
@@ -2348,6 +2647,7 @@ static void CreateAbsFmaBf16AscGraph(af::AscGraph &graph, size_t dims_size) {
   af::ascir_op::Output y("output");
   y.x = x_out.y;
   y.ir_attr.SetIndex(0);
+  y.y.dtype = af::DT_BF16;
 
   ConstructVVAscGraphAxisInfo(graph, dims_size);
 }
@@ -2735,6 +3035,67 @@ static void CreateCastAbsAscGraph(af::AscGraph &graph, size_t dims_size, af::Dat
  *         |
  *       store
  *         |
+ *       cast
+ *         |
+ *       load
+ *         |
+ *       data0
+ */
+static void CreateCastOnlyAscGraph(af::AscGraph &graph, size_t dims_size, af::DataType in_dtype,
+                                   af::DataType out_dtype) {
+  af::ascir_op::Data data0("data0", graph);
+  data0.ir_attr.SetIndex(0);
+  data0.y.dtype = in_dtype;
+
+  af::ascir_op::Load load("load");
+  load.x = data0.y;
+  load.y.dtype = in_dtype;
+
+  af::ascir_op::Cast cast("cast");
+  cast.x = load.y;
+  cast.y.dtype = out_dtype;
+
+  af::ascir_op::Store store("store");
+  store.x = cast.y;
+  store.y.dtype = out_dtype;
+
+  af::ascir_op::Output output("output");
+  output.x = store.y;
+  output.ir_attr.SetIndex(0);
+  output.y.dtype = out_dtype;
+
+  ConstructVVAscGraphAxisInfo(graph, dims_size);
+}
+
+af::ComputeGraphPtr ShareGraph::CastOnlyFusedGraph(size_t dims_size, af::DataType in_dtype, af::DataType out_dtype) {
+  auto builder = GraphBuilder("cast_only_test");
+  auto data0 = builder.AddNode("data0", "Data", 0, 1);
+  af::AttrUtils::SetInt(data0->GetOpDescBarePtr(), "_parent_node_index", 0);
+
+  auto ascbc = builder.AddNode("ascbc", "AscGraph", 1, 1);
+  auto netoutput = builder.AddNode("netoutput1", af::NETOUTPUT, 1, 0);
+
+  builder.AddDataEdge(data0, 0, ascbc, 0);
+  builder.AddDataEdge(ascbc, 0, netoutput, 0);
+  ComputeGraphPtr compute_graph = builder.GetGraph();
+  if (compute_graph == nullptr) {
+    return nullptr;
+  }
+  auto ascbc_node = compute_graph->FindNode("ascbc");
+  af::AscGraph sub_graph("cast_only");
+  CreateCastOnlyAscGraph(sub_graph, dims_size, in_dtype, out_dtype);
+
+  std::string sub_graph_str;
+  af::AscGraphUtils::SerializeToReadable(sub_graph, sub_graph_str);
+  af::AttrUtils::SetStr(ascbc_node->GetOpDescBarePtr(), "ascgraph", sub_graph_str);
+  return compute_graph;
+}
+
+/**
+ *      output
+ *         |
+ *       store
+ *         |
  *        add
  *       /   \
  *   load0    cast
@@ -2800,6 +3161,73 @@ af::ComputeGraphPtr ShareGraph::CastCastFusedGraph(size_t dims_size, af::DataTyp
   auto ascbc_node = compute_graph->FindNode("ascbc");
   af::AscGraph sub_graph("cast_abs");
   CreateCastAbsAscGraph(sub_graph, dims_size, in_dtype, out_dtype);
+
+  std::string sub_graph_str;
+  af::AscGraphUtils::SerializeToReadable(sub_graph, sub_graph_str);
+  af::AttrUtils::SetStr(ascbc_node->GetOpDescBarePtr(), "ascgraph", sub_graph_str);
+  return compute_graph;
+}
+
+/**
+ *      output
+ *         |
+ *       store
+ *         |
+ *        cast(uint8 -> int64)
+ *         |
+ *        load
+ *         |
+ *       data0(uint8)
+ */
+static void CreateCastUint8ToInt64AscGraph(af::AscGraph &graph, size_t dims_size) {
+  af::ascir_op::Data data0("data0", graph);
+  data0.ir_attr.SetIndex(0);
+  data0.y.dtype = af::DT_UINT8;
+
+  af::ascir_op::Load load("load");
+  load.x = data0.y;
+  load.y.dtype = af::DT_UINT8;
+
+  af::ascir_op::Cast cast("cast");
+  cast.x = load.y;
+  cast.y.dtype = af::DT_INT64;
+
+  af::ascir_op::Store store("store");
+  store.x = cast.y;
+  store.y.dtype = af::DT_INT64;
+
+  af::ascir_op::Output output("output");
+  output.x = store.y;
+  output.ir_attr.SetIndex(0);
+  output.y.dtype = af::DT_INT64;
+
+  ConstructVVAscGraphAxisInfo(graph, dims_size);
+}
+
+/**
+ *       data0
+ *         |
+ *       AscBc
+ *        |
+ *     NetOutput
+ */
+af::ComputeGraphPtr ShareGraph::CastUint8ToInt64FusedGraph(size_t dims_size) {
+  auto builder = GraphBuilder("cast_uint8_to_int64_test");
+  auto data0 = builder.AddNode("data0", "Data", 0, 1);
+  af::AttrUtils::SetInt(data0->GetOpDescBarePtr(), "_parent_node_index", 0);
+
+  auto ascbc = builder.AddNode("ascbc", "AscGraph", 1, 1);
+  auto netoutput = builder.AddNode("netoutput1", af::NETOUTPUT, 1, 0);
+
+  builder.AddDataEdge(data0, 0, ascbc, 0);
+  builder.AddDataEdge(ascbc, 0, netoutput, 0);
+  ComputeGraphPtr compute_graph = builder.GetGraph();
+  if (compute_graph == nullptr) {
+    return nullptr;
+  }
+  auto ascbc_node = compute_graph->FindNode("ascbc");
+  af::AscGraph sub_graph("cast_uint8_to_int64");
+  CreateCastUint8ToInt64AscGraph(sub_graph, dims_size);
 
   std::string sub_graph_str;
   af::AscGraphUtils::SerializeToReadable(sub_graph, sub_graph_str);
@@ -4294,6 +4722,175 @@ static void CreateBrcInlineAscGraph(af::AscGraph &graph, size_t dims_size) {
  *      /     \
  *   data0  data1
  */
+/**
+ *     output
+ *        |
+ *      store
+ *        |
+ *       mul0
+ *      /    \
+ * load2    add0
+ *          /    \
+ * broadcast0  broadcast1
+ *      |          |
+ *    load0      load1
+ *      |          |
+ *   data0(x)   data1(x1)
+ *
+ * load1为大数据行（z0不变，被外提）；load0为小数据列（z0依赖，循环内）。
+ * 输出字节数load1 > load0，使RDFS拓扑排序中load0先于load1遍历。
+ */
+static void CreateBrcInlineLoadOrderAscGraph(af::AscGraph &graph, size_t dims_size) {
+  const Expression s0 = graph.CreateSizeVar(8);
+  const Expression s1 = graph.CreateSizeVar(1024);
+  auto One = Symbol(1);
+  auto Zero = Symbol(0);
+  auto z0 = graph.CreateAxis("z0", s0);
+  auto z1 = graph.CreateAxis("z1", s1);
+
+  af::ascir_op::Data x0("x", graph);
+  x0.attr.api.compute_type = ComputeType::kComputeInvalid;
+  x0.attr.api.type = af::ApiType::kAPITypeBuffer;
+  x0.ir_attr.SetIndex(0);
+  x0.y.dtype = af::DataType::DT_FLOAT;
+
+  af::ascir_op::Load load0("load0");
+  load0.x = x0.y;
+  load0.attr.api.compute_type = ComputeType::kComputeLoad;
+  load0.attr.api.type = af::ApiType::kAPITypeCompute;
+  load0.attr.sched.axis = {z0.id, z1.id};
+  *load0.y.axis = {z0.id, z1.id};
+  *load0.y.repeats = {s0, One};
+  *load0.y.strides = {One, Zero};
+  load0.y.dtype = af::DataType::DT_FLOAT;
+  load0.attr.api.unit = ComputeUnit::kUnitMTE2;
+
+  af::ascir_op::Data x1("x1", graph);
+  x1.attr.api.compute_type = ComputeType::kComputeInvalid;
+  x1.attr.api.type = af::ApiType::kAPITypeBuffer;
+  x1.y.dtype = af::DataType::DT_FLOAT;
+  x1.ir_attr.SetIndex(1);
+
+  af::ascir_op::Load load1("load1");
+  load1.x = x1.y;
+  load1.attr.api.compute_type = ComputeType::kComputeLoad;
+  load1.attr.api.type = af::ApiType::kAPITypeCompute;
+  load1.attr.sched.axis = {z0.id, z1.id};
+  *load1.y.axis = {z0.id, z1.id};
+  *load1.y.repeats = {One, s1};
+  *load1.y.strides = {Zero, One};
+  load1.y.dtype = af::DataType::DT_FLOAT;
+  load1.attr.api.unit = ComputeUnit::kUnitMTE2;
+
+  af::ascir_op::Broadcast broadcast0("broadcast0");
+  broadcast0.x = load0.y;
+  broadcast0.attr.api.compute_type = ComputeType::kComputeBroadcast;
+  broadcast0.attr.api.type = af::ApiType::kAPITypeCompute;
+  broadcast0.attr.sched.axis = {z0.id, z1.id};
+  *broadcast0.y.axis = {z0.id, z1.id};
+  *broadcast0.y.repeats = {s0, s1};
+  *broadcast0.y.strides = {s1, One};
+  broadcast0.y.dtype = af::DataType::DT_FLOAT;
+  broadcast0.attr.api.unit = ComputeUnit::kUnitVector;
+
+  af::ascir_op::Broadcast broadcast1("broadcast1");
+  broadcast1.x = load1.y;
+  broadcast1.attr.api.compute_type = ComputeType::kComputeBroadcast;
+  broadcast1.attr.api.type = af::ApiType::kAPITypeCompute;
+  broadcast1.attr.sched.axis = {z0.id, z1.id};
+  *broadcast1.y.axis = {z0.id, z1.id};
+  *broadcast1.y.repeats = {s0, s1};
+  *broadcast1.y.strides = {s1, One};
+  broadcast1.y.dtype = af::DataType::DT_FLOAT;
+  broadcast1.attr.api.unit = ComputeUnit::kUnitVector;
+
+  af::ascir_op::Add add0("add0");
+  add0.x1 = broadcast0.y;
+  add0.x2 = broadcast1.y;
+  add0.attr.api.compute_type = ComputeType::kComputeElewise;
+  add0.attr.api.type = af::ApiType::kAPITypeCompute;
+  add0.attr.sched.axis = {z0.id, z1.id};
+  *add0.y.axis = {z0.id, z1.id};
+  *add0.y.repeats = {s0, s1};
+  *add0.y.strides = {s1, One};
+  add0.y.dtype = af::DataType::DT_FLOAT;
+  add0.attr.api.unit = ComputeUnit::kUnitVector;
+
+  af::ascir_op::Data x2("x2", graph);
+  x2.attr.api.compute_type = ComputeType::kComputeInvalid;
+  x2.attr.api.type = af::ApiType::kAPITypeBuffer;
+  x2.y.dtype = af::DataType::DT_FLOAT;
+  x2.ir_attr.SetIndex(2);
+
+  af::ascir_op::Load load2("load2");
+  load2.x = x2.y;
+  load2.attr.api.compute_type = ComputeType::kComputeLoad;
+  load2.attr.api.type = af::ApiType::kAPITypeCompute;
+  load2.attr.sched.axis = {z0.id, z1.id};
+  *load2.y.axis = {z0.id, z1.id};
+  *load2.y.repeats = {s0, s1};
+  *load2.y.strides = {s1, One};
+  load2.y.dtype = af::DataType::DT_FLOAT;
+  load2.attr.api.unit = ComputeUnit::kUnitMTE2;
+
+  af::ascir_op::Mul mul0("mul0");
+  mul0.x1 = load2.y;
+  mul0.x2 = add0.y;
+  mul0.attr.api.compute_type = ComputeType::kComputeElewise;
+  mul0.attr.api.type = af::ApiType::kAPITypeCompute;
+  mul0.attr.sched.axis = {z0.id, z1.id};
+  *mul0.y.axis = {z0.id, z1.id};
+  *mul0.y.repeats = {s0, s1};
+  *mul0.y.strides = {s1, One};
+  mul0.y.dtype = af::DataType::DT_FLOAT;
+  mul0.attr.api.unit = ComputeUnit::kUnitVector;
+
+  af::ascir_op::Store store("store");
+  store.x = mul0.y;
+  store.attr.api.compute_type = ComputeType::kComputeStore;
+  store.attr.api.type = af::ApiType::kAPITypeCompute;
+  store.attr.sched.axis = {z0.id, z1.id};
+  *store.y.axis = {z0.id, z1.id};
+  *store.y.repeats = {s0, s1};
+  *store.y.strides = {s1, One};
+  store.y.dtype = af::DataType::DT_FLOAT;
+  store.attr.api.unit = ComputeUnit::kUnitMTE3;
+
+  af::ascir_op::Output y("y");
+  y.x = store.y;
+  y.attr.api.compute_type = ComputeType::kComputeInvalid;
+  y.attr.api.type = af::ApiType::kAPITypeBuffer;
+  y.y.dtype = af::DataType::DT_FLOAT;
+  y.ir_attr.SetIndex(0);
+}
+
+af::ComputeGraphPtr ShareGraph::BrcInlineLoadOrderFusedGraph(size_t dims_size) {
+  auto builder = GraphBuilder("brc_inline_load_order_test");
+  auto data0 = builder.AddNode("data0", "Data", 0, 1);
+  af::AttrUtils::SetInt(data0->GetOpDescBarePtr(), "_parent_node_index", 0);
+  auto data1 = builder.AddNode("data1", "Data", 0, 1);
+  af::AttrUtils::SetInt(data1->GetOpDescBarePtr(), "_parent_node_index", 1);
+
+  auto ascbc = builder.AddNode("ascbc", "AscGraph", 2, 1);
+  auto netoutput = builder.AddNode("netoutput1", af::NETOUTPUT, 1, 0);
+
+  builder.AddDataEdge(data0, 0, ascbc, 0);
+  builder.AddDataEdge(data1, 0, ascbc, 1);
+  builder.AddDataEdge(ascbc, 0, netoutput, 0);
+  ComputeGraphPtr compute_graph = builder.GetGraph();
+  if (compute_graph == nullptr) {
+    return nullptr;
+  }
+  auto ascbc_node = compute_graph->FindNode("ascbc");
+  af::AscGraph sub_graph("brc_inline_load_order");
+  CreateBrcInlineLoadOrderAscGraph(sub_graph, dims_size);
+
+  std::string sub_graph_str;
+  af::AscGraphUtils::SerializeToReadable(sub_graph, sub_graph_str);
+  af::AttrUtils::SetStr(ascbc_node->GetOpDescBarePtr(), "ascgraph", sub_graph_str);
+  return compute_graph;
+}
+
 af::ComputeGraphPtr ShareGraph::BrcInlineFusedGraph(size_t dims_size) {
   auto builder = GraphBuilder("brc_inline_test");
   auto data0 = builder.AddNode("data0", "Data", 0, 1);
@@ -4442,6 +5039,224 @@ static void CreateLoadWhereReduceStoreAscGraph(af::AscGraph &graph, size_t dims_
 
   af::ascir_op::Output y("output");
   y.x = x_out.y;
+  y.ir_attr.SetIndex(0);
+}
+
+static void CreateLoadAnyReduceStoreAscGraph(af::AscGraph &graph, af::DataType dtype) {
+  auto s0 = graph.CreateSizeVar("s0");
+  auto s1 = graph.CreateSizeVar("s1");
+  auto One = Symbol(1);
+  auto Zero = Symbol(0);
+  auto z0 = graph.CreateAxis("z0", s0);
+  auto z1 = graph.CreateAxis("z1", s1);
+
+  af::ascir_op::Data x("data0", graph);
+  x.ir_attr.SetIndex(0);
+  x.y.dtype = dtype;
+  x.attr.sched.axis = {z0.id, z1.id};
+  *x.y.axis = {z0.id, z1.id};
+  *x.y.repeats = {s0, s1};
+  *x.y.strides = {s1, One};
+
+  af::ascir_op::Load load("load0");
+  load.x = x.y;
+  load.attr.api.compute_type = ComputeType::kComputeLoad;
+  load.attr.api.type = af::ApiType::kAPITypeCompute;
+  load.attr.sched.axis = {z0.id, z1.id};
+  *load.y.axis = {z0.id, z1.id};
+  *load.y.repeats = {s0, s1};
+  *load.y.strides = {s1, One};
+  load.attr.api.unit = ComputeUnit::kUnitMTE2;
+  load.y.dtype = dtype;
+
+  af::ascir_op::Any any("any0");
+  any.x = load.y;
+  any.attr.sched.axis = {z0.id, z1.id};
+  *any.y.axis = {z0.id, z1.id};
+  *any.y.repeats = {s0, One};
+  *any.y.strides = {One, Zero};
+  any.y.dtype = dtype;
+
+  af::ascir_op::Store store("store0");
+  store.x = any.y;
+  store.attr.api.compute_type = ComputeType::kComputeStore;
+  store.attr.api.type = af::ApiType::kAPITypeCompute;
+  store.attr.sched.axis = {z0.id, z1.id};
+  *store.y.axis = {z0.id, z1.id};
+  *store.y.repeats = {s0, One};
+  *store.y.strides = {One, Zero};
+  store.attr.api.unit = ComputeUnit::kUnitMTE3;
+  store.y.dtype = dtype;
+
+  af::ascir_op::Output y("output0");
+  y.x = store.y;
+  y.attr.api.compute_type = ComputeType::kComputeInvalid;
+  y.attr.api.type = af::ApiType::kAPITypeBuffer;
+  y.y.dtype = dtype;
+  y.ir_attr.SetIndex(0);
+}
+
+static void CreateLoadAllReduceStoreAscGraph(af::AscGraph &graph, af::DataType dtype) {
+  auto s0 = graph.CreateSizeVar("s0");
+  auto s1 = graph.CreateSizeVar("s1");
+  auto One = Symbol(1);
+  auto Zero = Symbol(0);
+  auto z0 = graph.CreateAxis("z0", s0);
+  auto z1 = graph.CreateAxis("z1", s1);
+
+  af::ascir_op::Data x("data0", graph);
+  x.ir_attr.SetIndex(0);
+  x.y.dtype = dtype;
+  x.attr.sched.axis = {z0.id, z1.id};
+  *x.y.axis = {z0.id, z1.id};
+  *x.y.repeats = {s0, s1};
+  *x.y.strides = {s1, One};
+
+  af::ascir_op::Load load("load0");
+  load.x = x.y;
+  load.attr.api.compute_type = ComputeType::kComputeLoad;
+  load.attr.api.type = af::ApiType::kAPITypeCompute;
+  load.attr.sched.axis = {z0.id, z1.id};
+  *load.y.axis = {z0.id, z1.id};
+  *load.y.repeats = {s0, s1};
+  *load.y.strides = {s1, One};
+  load.attr.api.unit = ComputeUnit::kUnitMTE2;
+  load.y.dtype = dtype;
+
+  af::ascir_op::All all("all0");
+  all.x = load.y;
+  all.attr.sched.axis = {z0.id, z1.id};
+  *all.y.axis = {z0.id, z1.id};
+  *all.y.repeats = {s0, One};
+  *all.y.strides = {One, Zero};
+  all.y.dtype = dtype;
+
+  af::ascir_op::Store store("store0");
+  store.x = all.y;
+  store.attr.api.compute_type = ComputeType::kComputeStore;
+  store.attr.api.type = af::ApiType::kAPITypeCompute;
+  store.attr.sched.axis = {z0.id, z1.id};
+  *store.y.axis = {z0.id, z1.id};
+  *store.y.repeats = {s0, One};
+  *store.y.strides = {One, Zero};
+  store.attr.api.unit = ComputeUnit::kUnitMTE3;
+  store.y.dtype = dtype;
+
+  af::ascir_op::Output y("output0");
+  y.x = store.y;
+  y.attr.api.compute_type = ComputeType::kComputeInvalid;
+  y.attr.api.type = af::ApiType::kAPITypeBuffer;
+  y.y.dtype = dtype;
+  y.ir_attr.SetIndex(0);
+}
+
+static void CreateLoadProdReduceStoreAscGraph(af::AscGraph &graph, af::DataType dtype) {
+  auto s0 = graph.CreateSizeVar("s0");
+  auto s1 = graph.CreateSizeVar("s1");
+  auto One = Symbol(1);
+  auto Zero = Symbol(0);
+  auto z0 = graph.CreateAxis("z0", s0);
+  auto z1 = graph.CreateAxis("z1", s1);
+
+  af::ascir_op::Data x("data0", graph);
+  x.ir_attr.SetIndex(0);
+  x.y.dtype = dtype;
+  x.attr.sched.axis = {z0.id, z1.id};
+  *x.y.axis = {z0.id, z1.id};
+  *x.y.repeats = {s0, s1};
+  *x.y.strides = {s1, One};
+
+  af::ascir_op::Load load("load0");
+  load.x = x.y;
+  load.attr.api.compute_type = ComputeType::kComputeLoad;
+  load.attr.api.type = af::ApiType::kAPITypeCompute;
+  load.attr.sched.axis = {z0.id, z1.id};
+  *load.y.axis = {z0.id, z1.id};
+  *load.y.repeats = {s0, s1};
+  *load.y.strides = {s1, One};
+  load.attr.api.unit = ComputeUnit::kUnitMTE2;
+  load.y.dtype = dtype;
+
+  af::ascir_op::Prod prod("prod0");
+  prod.x = load.y;
+  prod.attr.sched.axis = {z0.id, z1.id};
+  *prod.y.axis = {z0.id, z1.id};
+  *prod.y.repeats = {s0, One};
+  *prod.y.strides = {One, Zero};
+  prod.y.dtype = dtype;
+
+  af::ascir_op::Store store("store0");
+  store.x = prod.y;
+  store.attr.api.compute_type = ComputeType::kComputeStore;
+  store.attr.api.type = af::ApiType::kAPITypeCompute;
+  store.attr.sched.axis = {z0.id, z1.id};
+  *store.y.axis = {z0.id, z1.id};
+  *store.y.repeats = {s0, One};
+  *store.y.strides = {One, Zero};
+  store.attr.api.unit = ComputeUnit::kUnitMTE3;
+  store.y.dtype = dtype;
+
+  af::ascir_op::Output y("output0");
+  y.x = store.y;
+  y.attr.api.compute_type = ComputeType::kComputeInvalid;
+  y.attr.api.type = af::ApiType::kAPITypeBuffer;
+  y.y.dtype = dtype;
+  y.ir_attr.SetIndex(0);
+}
+
+static void CreateLoadProdReduceStoreRaAscGraph(af::AscGraph &graph, af::DataType dtype) {
+  auto s0 = graph.CreateSizeVar("s0");
+  auto s1 = graph.CreateSizeVar("s1");
+  auto s2 = graph.CreateSizeVar("s2");
+  auto One = Symbol(1);
+  auto Zero = Symbol(0);
+  auto z0 = graph.CreateAxis("z0", s0);
+  auto z1 = graph.CreateAxis("z1", s1);
+  auto z2 = graph.CreateAxis("z2", s2);
+
+  af::ascir_op::Data x("data0", graph);
+  x.ir_attr.SetIndex(0);
+  x.y.dtype = dtype;
+  x.attr.sched.axis = {z0.id, z1.id, z2.id};
+  *x.y.axis = {z0.id, z1.id, z2.id};
+  *x.y.repeats = {s0, s1, s2};
+  *x.y.strides = {s1 * s2, s2, One};
+
+  af::ascir_op::Load load("load0");
+  load.x = x.y;
+  load.attr.api.compute_type = ComputeType::kComputeLoad;
+  load.attr.api.type = af::ApiType::kAPITypeCompute;
+  load.attr.sched.axis = {z0.id, z1.id, z2.id};
+  *load.y.axis = {z0.id, z1.id, z2.id};
+  *load.y.repeats = {s0, s1, s2};
+  *load.y.strides = {s1 * s2, s2, One};
+  load.attr.api.unit = ComputeUnit::kUnitMTE2;
+  load.y.dtype = dtype;
+
+  af::ascir_op::Prod prod("prod0");
+  prod.x = load.y;
+  prod.attr.sched.axis = {z0.id, z1.id, z2.id};
+  *prod.y.axis = {z0.id, z1.id, z2.id};
+  *prod.y.repeats = {s0, One, s2};
+  *prod.y.strides = {s2, Zero, One};
+  prod.y.dtype = dtype;
+
+  af::ascir_op::Store store("store0");
+  store.x = prod.y;
+  store.attr.api.compute_type = ComputeType::kComputeStore;
+  store.attr.api.type = af::ApiType::kAPITypeCompute;
+  store.attr.sched.axis = {z0.id, z1.id, z2.id};
+  *store.y.axis = {z0.id, z1.id, z2.id};
+  *store.y.repeats = {s0, One, s2};
+  *store.y.strides = {s2, Zero, One};
+  store.attr.api.unit = ComputeUnit::kUnitMTE3;
+  store.y.dtype = dtype;
+
+  af::ascir_op::Output y("output0");
+  y.x = store.y;
+  y.attr.api.compute_type = ComputeType::kComputeInvalid;
+  y.attr.api.type = af::ApiType::kAPITypeBuffer;
+  y.y.dtype = dtype;
   y.ir_attr.SetIndex(0);
 }
 
@@ -4978,6 +5793,7 @@ static void CreateLoadLogicalNotStoreAscGraph(af::AscGraph &graph, size_t dims_s
   af::ascir_op::Output y("output");
   y.x = logical_not_store.y;
   y.ir_attr.SetIndex(0);
+  y.y.dtype = dt_out;
 
   ConstructVVAscGraphAxisInfo(graph, dims_size);
 }
@@ -5077,6 +5893,7 @@ static void CreateLoadBitwiseAndStoreAscGraph(af::AscGraph &graph, size_t dims_s
   af::ascir_op::Output y("output");
   y.x = x_out.y;
   y.ir_attr.SetIndex(0);
+  y.y.dtype = out_dtype;
 
   ConstructVVAscGraphAxisInfo(graph, dims_size);
 }
@@ -5148,6 +5965,7 @@ static void CreateLoadBitwiseOrStoreAscGraph(af::AscGraph &graph, size_t dims_si
   af::ascir_op::Output y("output");
   y.x = x_out.y;
   y.ir_attr.SetIndex(0);
+  y.y.dtype = out_dtype;
 
   ConstructVVAscGraphAxisInfo(graph, dims_size);
 }
@@ -5219,6 +6037,7 @@ static void CreateLoadBitwiseXorStoreAscGraph(af::AscGraph &graph, size_t dims_s
   af::ascir_op::Output y("output");
   y.x = x_out.y;
   y.ir_attr.SetIndex(0);
+  y.y.dtype = out_dtype;
 
   ConstructVVAscGraphAxisInfo(graph, dims_size);
 }
@@ -5282,6 +6101,7 @@ static void CreateLoadBitwiseNotStoreAscGraph(af::AscGraph &graph, size_t dims_s
   af::ascir_op::Output y("output");
   y.x = x_out.y;
   y.ir_attr.SetIndex(0);
+  y.y.dtype = out_dtype;
 
   ConstructVVAscGraphAxisInfo(graph, dims_size);
 }
@@ -6604,18 +7424,20 @@ af::ComputeGraphPtr ShareGraph::LoadTanhStoreFusedGraph(size_t dims_size) {
   return compute_graph;
 }
 
-static af::ComputeGraphPtr CreateOneInputAscGraphComputeGraph(const std::string &graph_name,
-                                                              const std::string &sub_graph_name, size_t dims_size,
-                                                              void (*create_sub_graph)(af::AscGraph &, size_t)) {
+static af::ComputeGraphPtr CreateOneInputAscGraphComputeGraph(
+    const std::string &graph_name, const std::string &sub_graph_name, size_t dims_size,
+    const std::function<void(af::AscGraph &, size_t)> &create_sub_graph, int output_count = 1) {
   auto builder = GraphBuilder(graph_name);
   auto data0 = builder.AddNode("data0", "Data", 0, 1);
   af::AttrUtils::SetInt(data0->GetOpDescBarePtr(), "_parent_node_index", 0);
 
-  auto ascbc = builder.AddNode("ascbc", "AscGraph", 1, 1);
-  auto netoutput = builder.AddNode("netoutput1", af::NETOUTPUT, 1, 0);
+  auto ascbc = builder.AddNode("ascbc", "AscGraph", 1, output_count);
+  auto netoutput = builder.AddNode("netoutput1", af::NETOUTPUT, output_count, 0);
 
   builder.AddDataEdge(data0, 0, ascbc, 0);
-  builder.AddDataEdge(ascbc, 0, netoutput, 0);
+  for (int i = 0; i < output_count; ++i) {
+    builder.AddDataEdge(ascbc, i, netoutput, i);
+  }
   auto one_input_compute_graph = builder.GetGraph();
   if (one_input_compute_graph == nullptr) {
     return nullptr;
@@ -7009,6 +7831,153 @@ static void CreateBesselJ0StoreAscGraph(af::AscGraph &graph, size_t dims_size) {
 af::ComputeGraphPtr ShareGraph::BesselJ0StoreFusedGraph(size_t dims_size) {
   return CreateOneInputAscGraphComputeGraph("bessel_j0_store_test", "bessel_j0_store", dims_size,
                                             CreateBesselJ0StoreAscGraph);
+}
+
+/**
+ * Argmax 单算子图（v2 Reg 指令路径）：
+ *         data0
+ *           |
+ *         load0
+ *           |
+ *        Argmax
+ *           |
+ *         store
+ *           |
+ *        output0
+ * 输入 x{s0, s1}（FLOAT），归约沿 s1，输出 y{s0}（INT64 索引）。
+ */
+template <typename Op>
+static void CreateArgmaxStoreAscGraph(af::AscGraph &graph, size_t dims_size, af::DataType dtype = af::DT_FLOAT,
+                                      bool ra = false) {
+  const Expression s0 = graph.CreateSizeVar("s0");
+  const Expression s1 = graph.CreateSizeVar("s1");
+  auto One = Symbol(1);
+  auto Zero = Symbol(0);
+  auto z0 = graph.CreateAxis("z0", s0);
+  auto z1 = graph.CreateAxis("z1", s1);
+  const std::vector<Expression> out_repeats = ra ? std::vector<Expression>{One, s1} : std::vector<Expression>{s0, One};
+  const std::vector<Expression> out_strides =
+      ra ? std::vector<Expression>{Zero, One} : std::vector<Expression>{One, Zero};
+
+  af::ascir_op::Data x("data0", graph);
+  x.ir_attr.SetIndex(0);
+  x.y.dtype = dtype;
+
+  af::ascir_op::Load load1("load1");
+  load1.x = x.y;
+  load1.attr.api.compute_type = ComputeType::kComputeLoad;
+  load1.attr.api.type = af::ApiType::kAPITypeCompute;
+  load1.attr.sched.axis = {z0.id, z1.id};
+  *load1.y.axis = {z0.id, z1.id};
+  *load1.y.repeats = {s0, s1};
+  *load1.y.strides = {s1, One};
+  load1.y.dtype = dtype;
+  load1.attr.api.unit = ComputeUnit::kUnitMTE2;
+
+  Op argmax(std::is_same_v<Op, af::ascir_op::Argmin> ? "argmin" : "argmax");
+  argmax.x = load1.y;
+  argmax.attr.api.compute_type = ComputeType::kComputeReduce;
+  argmax.attr.api.type = af::ApiType::kAPITypeCompute;
+  argmax.attr.sched.axis = {z0.id, z1.id};
+  *argmax.y.axis = {z0.id, z1.id};
+  *argmax.y.repeats = out_repeats;
+  *argmax.y.strides = out_strides;
+  argmax.y.dtype = af::DataType::DT_INT64;
+  argmax.attr.api.unit = ComputeUnit::kUnitVector;
+
+  af::ascir_op::Store store1("store1");
+  store1.x = argmax.y;
+  store1.attr.api.compute_type = ComputeType::kComputeStore;
+  store1.attr.api.type = af::ApiType::kAPITypeCompute;
+  store1.attr.sched.axis = {z0.id, z1.id};
+  *store1.y.axis = {z0.id, z1.id};
+  *store1.y.repeats = out_repeats;
+  *store1.y.strides = out_strides;
+  store1.y.dtype = af::DataType::DT_INT64;
+  store1.attr.api.unit = ComputeUnit::kUnitMTE2;
+
+  af::ascir_op::Output output1("output1");
+  output1.x = store1.y;
+  output1.ir_attr.SetIndex(0);
+}
+
+af::ComputeGraphPtr ShareGraph::ArgmaxStoreFusedGraph(size_t dims_size) {
+  return CreateOneInputAscGraphComputeGraph(
+      "argmax_store_test", "argmax_store", dims_size,
+      [](af::AscGraph &graph, size_t dims) { CreateArgmaxStoreAscGraph<af::ascir_op::Argmax>(graph, dims); });
+}
+
+static void SetArgminParentDtypes(const af::ComputeGraphPtr &graph, af::DataType dtype, bool with_value) {
+  const auto data = graph->FindNode("data0")->GetOpDesc();
+  const auto asc = graph->FindNode("ascbc")->GetOpDesc();
+  const auto output = graph->FindNode("netoutput1")->GetOpDesc();
+  data->MutableOutputDesc(0)->SetDataType(dtype);
+  asc->MutableInputDesc(0)->SetDataType(dtype);
+  asc->MutableOutputDesc(0)->SetDataType(with_value ? dtype : af::DT_INT64);
+  output->MutableInputDesc(0)->SetDataType(with_value ? dtype : af::DT_INT64);
+  if (with_value) {
+    asc->MutableOutputDesc(1)->SetDataType(af::DT_INT64);
+    output->MutableInputDesc(1)->SetDataType(af::DT_INT64);
+  }
+}
+
+af::ComputeGraphPtr ShareGraph::ArgminStoreFusedGraph(size_t dims_size, af::DataType dtype, bool ra) {
+  auto graph = CreateOneInputAscGraphComputeGraph(
+      "argmin_store_test", "argmin_store", dims_size, [dtype, ra](af::AscGraph &subgraph, size_t dims) {
+        CreateArgmaxStoreAscGraph<af::ascir_op::Argmin>(subgraph, dims, dtype, ra);
+      });
+  if (graph != nullptr) {
+    SetArgminParentDtypes(graph, dtype, false);
+  }
+  return graph;
+}
+
+static void CreateArgminWithValueStoreAscGraph(af::AscGraph &graph, size_t dims_size, af::DataType dtype, bool ra) {
+  af::ascir_op::Data data("data0", graph);
+  data.ir_attr.SetIndex(0);
+  data.y.dtype = dtype;
+  af::ascir_op::Load load("load0");
+  load.x = data.y;
+  load.y.dtype = dtype;
+  af::ascir_op::ArgminWithValue reduce("argmin_value");
+  reduce.x = load.y;
+  reduce.value.dtype = dtype;
+  reduce.index.dtype = af::DT_INT64;
+  af::ascir_op::Store value_store("store_value"), index_store("store_index");
+  value_store.x = reduce.value;
+  value_store.y.dtype = dtype;
+  index_store.x = reduce.index;
+  index_store.y.dtype = af::DT_INT64;
+  af::ascir_op::Output value_out("output0"), index_out("output1");
+  value_out.x = value_store.y;
+  value_out.y.dtype = dtype;
+  value_out.ir_attr.SetIndex(0);
+  index_out.x = index_store.y;
+  index_out.y.dtype = af::DT_INT64;
+  index_out.ir_attr.SetIndex(1);
+  ConstructVVAscGraphAxisInfo(graph, dims_size);
+  const auto input = graph.FindNode("load0")->outputs[0].attr;
+  for (const char *name : {"argmin_value", "store_value", "store_index", "output0", "output1"}) {
+    for (auto output : graph.FindNode(name)->outputs()) {
+      output->attr.repeats = ra ? std::vector<Expression>{af::Symbol(1), input.repeats[1]}
+                                : std::vector<Expression>{input.repeats[0], af::Symbol(1)};
+      output->attr.strides = ra ? std::vector<Expression>{af::Symbol(0), af::Symbol(1)}
+                                : std::vector<Expression>{af::Symbol(1), af::Symbol(0)};
+    }
+  }
+}
+
+af::ComputeGraphPtr ShareGraph::ArgminWithValueStoreFusedGraph(size_t dims_size, af::DataType dtype, bool ra) {
+  auto graph = CreateOneInputAscGraphComputeGraph(
+      "argmin_value_store_test", "argmin_value_store", dims_size,
+      [dtype, ra](af::AscGraph &subgraph, size_t dims) {
+        CreateArgminWithValueStoreAscGraph(subgraph, dims, dtype, ra);
+      },
+      2);
+  if (graph != nullptr) {
+    SetArgminParentDtypes(graph, dtype, true);
+  }
+  return graph;
 }
 
 template <typename Op>
@@ -7667,35 +8636,35 @@ af::ComputeGraphPtr ShareGraph::RemainderInt32StoreFusedGraph(size_t dims_size) 
  *      |
  *   output0
  */
-static void CreateFloorDivInt32StoreAscGraph(af::AscGraph &graph, size_t dims_size) {
+static void CreateFloorDivStoreAscGraph(af::AscGraph &graph, size_t dims_size, af::DataType dtype) {
   af::ascir_op::Data floor_div_x1("data0", graph);
   floor_div_x1.ir_attr.SetIndex(0);
-  floor_div_x1.y.dtype = af::DT_INT32;
+  floor_div_x1.y.dtype = dtype;
 
   af::ascir_op::Data floor_div_x2("data1", graph);
   floor_div_x2.ir_attr.SetIndex(1);
-  floor_div_x2.y.dtype = af::DT_INT32;
+  floor_div_x2.y.dtype = dtype;
 
   af::ascir_op::Load floor_div_load_x1("load0");
   floor_div_load_x1.x = floor_div_x1.y;
-  floor_div_load_x1.y.dtype = af::DT_INT32;
+  floor_div_load_x1.y.dtype = dtype;
 
   af::ascir_op::Load floor_div_load_x2("load1");
   floor_div_load_x2.x = floor_div_x2.y;
-  floor_div_load_x2.y.dtype = af::DT_INT32;
+  floor_div_load_x2.y.dtype = dtype;
 
   af::ascir_op::FloorDiv floor_div_op("floor_div");
   floor_div_op.x1 = floor_div_load_x1.y;
   floor_div_op.x2 = floor_div_load_x2.y;
-  floor_div_op.y.dtype = af::DT_INT32;
+  floor_div_op.y.dtype = dtype;
 
   af::ascir_op::Store floor_div_store("store");
   floor_div_store.x = floor_div_op.y;
-  floor_div_store.y.dtype = af::DT_INT32;
+  floor_div_store.y.dtype = dtype;
 
   af::ascir_op::Output floor_div_output("output");
   floor_div_output.x = floor_div_store.y;
-  floor_div_output.y.dtype = af::DT_INT32;
+  floor_div_output.y.dtype = dtype;
 
   floor_div_output.ir_attr.SetIndex(0);
 
@@ -7703,8 +8672,15 @@ static void CreateFloorDivInt32StoreAscGraph(af::AscGraph &graph, size_t dims_si
 }
 
 af::ComputeGraphPtr ShareGraph::FloorDivInt32StoreFusedGraph(size_t dims_size) {
-  return CreateTwoInputAscGraphComputeGraph("floor_div_int32_store_test", "floor_div_int32_store", dims_size,
-                                            CreateFloorDivInt32StoreAscGraph);
+  return CreateTwoInputAscGraphComputeGraph(
+      "floor_div_int32_store_test", "floor_div_int32_store", dims_size,
+      [](af::AscGraph &graph, size_t dims) { CreateFloorDivStoreAscGraph(graph, dims, af::DT_INT32); });
+}
+
+af::ComputeGraphPtr ShareGraph::FloorDivInt64StoreFusedGraph(size_t dims_size) {
+  return CreateTwoInputAscGraphComputeGraph(
+      "floor_div_int64_store_test", "floor_div_int64_store", dims_size,
+      [](af::AscGraph &graph, size_t dims) { CreateFloorDivStoreAscGraph(graph, dims, af::DT_INT64); });
 }
 
 static void CreateSinBf16AscGraph(af::AscGraph &graph, size_t dims_size) {
@@ -10135,6 +11111,102 @@ af::ComputeGraphPtr ShareGraph::GatherReduceStore(int64_t gather_axis, af::DataT
   return compute_graph;
 }
 
+af::ComputeGraphPtr ShareGraph::LoadAnyReduceStoreFusedGraph(af::DataType dtype) {
+  auto builder = GraphBuilder("load_logical_reduce_store_test");
+  auto data0 = builder.AddNode("data0", "Data", 0, 1);
+  af::AttrUtils::SetInt(data0->GetOpDescBarePtr(), "_parent_node_index", 0);
+
+  auto ascbc = builder.AddNode("ascbc", "AscGraph", 1, 1);
+  auto netoutput = builder.AddNode("netoutput1", af::NETOUTPUT, 1, 0);
+
+  builder.AddDataEdge(data0, 0, ascbc, 0);
+  builder.AddDataEdge(ascbc, 0, netoutput, 0);
+  ComputeGraphPtr compute_graph = builder.GetGraph();
+  if (compute_graph == nullptr) {
+    return nullptr;
+  }
+  auto ascbc_node = compute_graph->FindNode("ascbc");
+  af::AscGraph sub_graph("load_logical_reduce_store");
+  CreateLoadAnyReduceStoreAscGraph(sub_graph, dtype);
+
+  std::string sub_graph_str;
+  af::AscGraphUtils::SerializeToReadable(sub_graph, sub_graph_str);
+  af::AttrUtils::SetStr(ascbc_node->GetOpDescBarePtr(), "ascgraph", sub_graph_str);
+  return compute_graph;
+}
+
+af::ComputeGraphPtr ShareGraph::LoadAllReduceStoreFusedGraph(af::DataType dtype) {
+  auto builder = GraphBuilder("load_logical_reduce_store_test");
+  auto data0 = builder.AddNode("data0", "Data", 0, 1);
+  af::AttrUtils::SetInt(data0->GetOpDescBarePtr(), "_parent_node_index", 0);
+
+  auto ascbc = builder.AddNode("ascbc", "AscGraph", 1, 1);
+  auto netoutput = builder.AddNode("netoutput1", af::NETOUTPUT, 1, 0);
+
+  builder.AddDataEdge(data0, 0, ascbc, 0);
+  builder.AddDataEdge(ascbc, 0, netoutput, 0);
+  ComputeGraphPtr compute_graph = builder.GetGraph();
+  if (compute_graph == nullptr) {
+    return nullptr;
+  }
+  auto ascbc_node = compute_graph->FindNode("ascbc");
+  af::AscGraph sub_graph("load_logical_reduce_store");
+  CreateLoadAllReduceStoreAscGraph(sub_graph, dtype);
+
+  std::string sub_graph_str;
+  af::AscGraphUtils::SerializeToReadable(sub_graph, sub_graph_str);
+  af::AttrUtils::SetStr(ascbc_node->GetOpDescBarePtr(), "ascgraph", sub_graph_str);
+  return compute_graph;
+}
+
+af::ComputeGraphPtr ShareGraph::LoadProdReduceStoreFusedGraph(af::DataType dtype) {
+  auto builder = GraphBuilder("load_prod_reduce_store_test");
+  auto data0 = builder.AddNode("data0", "Data", 0, 1);
+  af::AttrUtils::SetInt(data0->GetOpDescBarePtr(), "_parent_node_index", 0);
+
+  auto ascbc = builder.AddNode("ascbc", "AscGraph", 1, 1);
+  auto netoutput = builder.AddNode("netoutput1", af::NETOUTPUT, 1, 0);
+
+  builder.AddDataEdge(data0, 0, ascbc, 0);
+  builder.AddDataEdge(ascbc, 0, netoutput, 0);
+  ComputeGraphPtr compute_graph = builder.GetGraph();
+  if (compute_graph == nullptr) {
+    return nullptr;
+  }
+  auto ascbc_node = compute_graph->FindNode("ascbc");
+  af::AscGraph sub_graph("load_prod_reduce_store");
+  CreateLoadProdReduceStoreAscGraph(sub_graph, dtype);
+
+  std::string sub_graph_str;
+  af::AscGraphUtils::SerializeToReadable(sub_graph, sub_graph_str);
+  af::AttrUtils::SetStr(ascbc_node->GetOpDescBarePtr(), "ascgraph", sub_graph_str);
+  return compute_graph;
+}
+
+af::ComputeGraphPtr ShareGraph::LoadProdReduceStoreRaFusedGraph(af::DataType dtype) {
+  auto builder = GraphBuilder("load_prod_reduce_store_ra_test");
+  auto data0 = builder.AddNode("data0", "Data", 0, 1);
+  af::AttrUtils::SetInt(data0->GetOpDescBarePtr(), "_parent_node_index", 0);
+
+  auto ascbc = builder.AddNode("ascbc", "AscGraph", 1, 1);
+  auto netoutput = builder.AddNode("netoutput1", af::NETOUTPUT, 1, 0);
+
+  builder.AddDataEdge(data0, 0, ascbc, 0);
+  builder.AddDataEdge(ascbc, 0, netoutput, 0);
+  ComputeGraphPtr compute_graph = builder.GetGraph();
+  if (compute_graph == nullptr) {
+    return nullptr;
+  }
+  auto ascbc_node = compute_graph->FindNode("ascbc");
+  af::AscGraph sub_graph("load_prod_reduce_store_ra");
+  CreateLoadProdReduceStoreRaAscGraph(sub_graph, dtype);
+
+  std::string sub_graph_str;
+  af::AscGraphUtils::SerializeToReadable(sub_graph, sub_graph_str);
+  af::AttrUtils::SetStr(ascbc_node->GetOpDescBarePtr(), "ascgraph", sub_graph_str);
+  return compute_graph;
+}
+
 /**
  *         data0  data1
  *           |      |
@@ -10678,6 +11750,82 @@ static void CreateMatmulElewiseBrcGraph(af::AscGraph &graph, bool is_dynamic) {
   CreateMatmulGraphOutput(context, sub.y);
 }
 
+// M and N are the output axes. K belongs only to the two MatMul inputs.
+void ShareGraph::CreateMatmulOutputBroadcastGraph(af::AscGraph &graph, CvBroadcastShapeMode mode, bool broadcast_m,
+                                                  bool broadcast_n, bool broadcast_chain) {
+  const auto m = mode == CvBroadcastShapeMode::kDynamic ? graph.CreateSizeVar("m") : af::Symbol(128);
+  const auto n = mode == CvBroadcastShapeMode::kStatic ? af::Symbol(256) : graph.CreateSizeVar("n");
+  const auto k = mode == CvBroadcastShapeMode::kDynamic ? graph.CreateSizeVar("k") : af::Symbol(128);
+  const auto am = graph.CreateAxis("a0", m);
+  const auto an = graph.CreateAxis("a1", n);
+  const auto ak = graph.CreateAxis("k", k);
+  af::AscGraphUtils::GetComputeGraph(graph)->GetOrCreateAttrsGroup<af::AscGraphAttr>()->sched.axis = {am.id, an.id};
+  af::ascir_op::Data a("data", graph), b("data1", graph), c("data2", graph);
+  a.ir_attr.SetIndex(0);
+  b.ir_attr.SetIndex(1);
+  c.ir_attr.SetIndex(2);
+  af::ascir_op::Load load_a("load"), load_b("load1"), load_c("load2");
+  load_a.x = a.y;
+  load_b.x = b.y;
+  load_c.x = c.y;
+  af::ascir_op::MatMul mm("matmul");
+  mm.x1 = load_a.y;
+  mm.x2 = load_b.y;
+  mm.ir_attr.SetTranspose_x1(false);
+  mm.ir_attr.SetTranspose_x2(false);
+  mm.ir_attr.SetHas_relu(false);
+  mm.ir_attr.SetEnable_hf32(0);
+  mm.ir_attr.SetOffset_x(0);
+  af::ascir_op::Cast cast("cast"), cast1("cast1"), cast2("cast2"), cast3("cast3");
+  cast.x = mm.y;
+  af::ascir_op::Broadcast brc("broadcast");
+  if (broadcast_chain) {
+    af::ascir_op::Broadcast first("broadcast_m");
+    first.x = cast.y;
+    brc.x = first.y;
+  } else {
+    brc.x = cast.y;
+  }
+  cast1.x = load_c.y;
+  af::ascir_op::Mul mul("mul");
+  mul.x1 = brc.y;
+  mul.x2 = cast1.y;
+  cast2.x = mul.y;
+  cast3.x = cast2.y;
+  af::ascir_op::Store store("store");
+  store.x = cast3.y;
+  af::ascir_op::Output output("output");
+  output.ir_attr.SetIndex(0);
+  output.x = store.y;
+  for (const auto &node : graph.GetAllNodes()) {
+    node->attr.sched.axis = {am.id, an.id};
+    auto &attr = node->outputs[0].attr;
+    const auto &name = node->GetName();
+    const bool lhs = name == "data" || name == "load";
+    const bool rhs = name == "data1" || name == "load1";
+    const bool narrow = name == "matmul" || name == "cast";
+    const auto source_m = broadcast_m ? af::ops::One : m;
+    const auto source_n = broadcast_n ? af::ops::One : n;
+    attr.axis = lhs ? std::vector<int64_t>{am.id, ak.id}
+                    : (rhs ? std::vector<int64_t>{ak.id, an.id} : std::vector<int64_t>{am.id, an.id});
+    attr.repeats = lhs ? std::vector<af::Expression>{source_m, k}
+                       : (rhs ? std::vector<af::Expression>{k, source_n}
+                              : std::vector<af::Expression>{narrow ? source_m : m, narrow ? source_n : n});
+    attr.strides = lhs ? std::vector<af::Expression>{broadcast_m ? af::ops::Zero : k, af::ops::One}
+                       : (rhs ? std::vector<af::Expression>{source_n, broadcast_n ? af::ops::Zero : af::ops::One}
+                              : (narrow ? std::vector<af::Expression>{broadcast_m ? af::ops::Zero : source_n,
+                                                                      broadcast_n ? af::ops::Zero : af::ops::One}
+                                        : std::vector<af::Expression>{n, af::ops::One}));
+    if (name == "broadcast_m") {
+      attr.repeats = {m, af::ops::One};
+      attr.strides = {af::ops::One, af::ops::Zero};
+    }
+    const bool half = lhs || rhs || name == "matmul" || name == "data2" || name == "load2" || name == "cast3" ||
+                      name == "store" || name == "output";
+    attr.dtype = half ? af::DT_FLOAT16 : af::DT_FLOAT;
+  }
+}
+
 af::ComputeGraphPtr ShareGraph::LoadMatmulElewiseBrcFusedGraph(bool is_dynamic) {
   auto builder = GraphBuilder("load_matmul_elewise_brc_store_test");
   auto data0 = builder.AddNode("data0", "Data", 0, 1);
@@ -11012,6 +12160,7 @@ static void CreateTrueDivBf16AscGraph(af::AscGraph &graph, size_t dims_size) {
 
   af::ascir_op::Output y("output");
   y.x = x_out.y;
+  y.y.dtype = af::DataType::DT_BF16;
 
   y.ir_attr.SetIndex(0);
 
@@ -12038,6 +13187,7 @@ static void CreateAcoshBf16AscGraph(af::AscGraph &graph, size_t dims_size) {
   y.x = acosh_store.y;
 
   y.ir_attr.SetIndex(0);
+  y.y.dtype = af::DataType::DT_BF16;
 
   ConstructVVAscGraphAxisInfo(graph, dims_size);
 }
@@ -12549,6 +13699,7 @@ static void CreatePowBf16AscGraph(af::AscGraph &graph, size_t dims_size) {
   af::ascir_op::Output y("output");
   y.x = x_out.y;
   y.ir_attr.SetIndex(0);
+  y.y.dtype = af::DT_BF16;
 
   ConstructVVAscGraphAxisInfo(graph, dims_size);
 }
@@ -12851,6 +14002,7 @@ static void CreateReciprocalBf16AscGraph(af::AscGraph &graph, size_t dims_size) 
   af::ascir_op::Output y("output");
   y.x = x_out.y;
   y.ir_attr.SetIndex(0);
+  y.y.dtype = af::DataType::DT_BF16;
 
   ConstructVVAscGraphAxisInfo(graph, dims_size);
 }
@@ -12886,6 +14038,7 @@ static void CreateRoundBf16AscGraph(af::AscGraph &graph, size_t dims_size) {
   af::ascir_op::Output y("output");
   y.x = x_out.y;
   y.ir_attr.SetIndex(0);
+  y.y.dtype = af::DataType::DT_BF16;
 
   ConstructVVAscGraphAxisInfo(graph, dims_size);
 }
@@ -12922,6 +14075,47 @@ af::ComputeGraphPtr ShareGraph::ReciprocalBf16FusedGraph(size_t dims_size) {
 }
 
 /**
+ *         data0
+ *           |
+ *         load0
+ *         |    \
+ *       store2  round
+ *         |     |
+ *        ouput0 output1
+ */
+static void CreateLoadToStoreAndRoundAscGraph(af::AscGraph &graph, size_t dims_size) {
+  af::ascir_op::Data x("data", graph);
+  x.y.dtype = af::DataType::DT_BF16;
+  x.ir_attr.SetIndex(0);
+
+  af::ascir_op::Load xLocal("load");
+  xLocal.x = x.y;
+  xLocal.y.dtype = af::DataType::DT_BF16;
+
+  af::ascir_op::Store load_2_store("store2");
+  load_2_store.x = xLocal.y;
+  load_2_store.y.dtype = af::DataType::DT_BF16;
+
+  af::ascir_op::Round round("round");
+  round.x = xLocal.y;
+  round.y.dtype = af::DataType::DT_BF16;
+
+  af::ascir_op::Store round_store("store");
+  round_store.x = round.y;
+  round_store.y.dtype = af::DataType::DT_BF16;
+
+  af::ascir_op::Output y1("output");
+  y1.x = load_2_store.y;
+  y1.ir_attr.SetIndex(0);
+
+  af::ascir_op::Output y2("output2");
+  y2.x = round_store.y;
+  y2.ir_attr.SetIndex(1);
+
+  ConstructVVAscGraphAxisInfo(graph, dims_size);
+}
+
+/**
  *      NetOutput
  *         |
  *       AscBc
@@ -12945,6 +14139,44 @@ af::ComputeGraphPtr ShareGraph::RoundBf16FusedGraph(size_t dims_size) {
   auto ascbc_node = compute_graph->FindNode("ascbc");
   af::AscGraph sub_graph("round_bf16_test");
   CreateRoundBf16AscGraph(sub_graph, dims_size);
+
+  std::string sub_graph_str;
+  af::AscGraphUtils::SerializeToReadable(sub_graph, sub_graph_str);
+  af::AttrUtils::SetStr(ascbc_node->GetOpDescBarePtr(), "ascgraph", sub_graph_str);
+  return compute_graph;
+}
+
+/**
+ *      NetOutput
+ *      /      \
+ *   output0  output1
+ *     |         |
+ *  store2     store
+ *     |         |
+ *     |       round
+ *      \       /
+ *        load0
+ *          |
+ *        data0
+ */
+af::ComputeGraphPtr ShareGraph::LoadToStoreAndRoundFusedGraph(size_t dims_size) {
+  auto builder = GraphBuilder("load_to_store_and_round_test");
+  auto data = builder.AddNode("data", "Data", 0, 1);
+  af::AttrUtils::SetInt(data->GetOpDescBarePtr(), "_parent_node_index", 0);
+
+  auto ascbc = builder.AddNode("ascbc", "AscGraph", 1, 2);
+  auto netoutput = builder.AddNode("netoutput1", af::NETOUTPUT, 2, 0);
+
+  builder.AddDataEdge(data, 0, ascbc, 0);
+  builder.AddDataEdge(ascbc, 0, netoutput, 0);
+  builder.AddDataEdge(ascbc, 1, netoutput, 1);
+  ComputeGraphPtr compute_graph = builder.GetGraph();
+  if (compute_graph == nullptr) {
+    return nullptr;
+  }
+  auto ascbc_node = compute_graph->FindNode("ascbc");
+  af::AscGraph sub_graph("load_to_store_and_round_test");
+  CreateLoadToStoreAndRoundAscGraph(sub_graph, dims_size);
 
   std::string sub_graph_str;
   af::AscGraphUtils::SerializeToReadable(sub_graph, sub_graph_str);
@@ -12982,6 +14214,7 @@ static void CreateReluUint8AscGraph(af::AscGraph &graph, size_t dims_size) {
 
   af::ascir_op::Output y("output");
   y.x = x_out.y;
+  y.y.dtype = af::DataType::DT_UINT8;
   y.ir_attr.SetIndex(0);
 
   ConstructVVAscGraphAxisInfo(graph, dims_size);
@@ -13097,6 +14330,7 @@ static void CreateSignUint8AscGraph(af::AscGraph &graph, size_t dims_size) {
   af::ascir_op::Output y("output");
   y.x = x_out.y;
   y.ir_attr.SetIndex(0);
+  y.y.dtype = af::DataType::DT_UINT8;
 
   ConstructVVAscGraphAxisInfo(graph, dims_size);
 }
@@ -13145,6 +14379,7 @@ static void CreateSignBf16AscGraph(af::AscGraph &graph, size_t dims_size) {
   af::ascir_op::Output y("output");
   y.x = x_out.y;
   y.ir_attr.SetIndex(0);
+  y.y.dtype = af::DataType::DT_BF16;
 
   ConstructVVAscGraphAxisInfo(graph, dims_size);
 }
@@ -13539,6 +14774,7 @@ static void CreateRoundToIntFloatToInt32AscGraph(af::AscGraph &graph, size_t dim
   af::ascir_op::Output y("output");
   y.x = x_out.y;
   y.ir_attr.SetIndex(0);
+  y.y.dtype = af::DataType::DT_INT32;
 
   ConstructVVAscGraphAxisInfo(graph, dims_size);
 }
@@ -13735,6 +14971,7 @@ static void CreateTruncToIntBf16ToInt32AscGraph(af::AscGraph &graph, size_t dims
   af::ascir_op::Output y("output");
   y.x = x_out.y;
   y.ir_attr.SetIndex(0);
+  y.y.dtype = af::DataType::DT_INT32;
 
   ConstructVVAscGraphAxisInfo(graph, dims_size);
 }
@@ -13896,7 +15133,7 @@ af::ComputeGraphPtr ShareGraph::VfScalarFusionComprehensiveFusedGraph() {
   return compute_graph;
 }
 
-static void CreateRemainderBf16AscGraph(af::AscGraph &graph, size_t dims_size, ge::DataType dtype) {
+static void CreateRemainderAscGraph(af::AscGraph &graph, size_t dims_size, ge::DataType dtype) {
   // Data 节点
   af::ascir_op::Data x1("data0", graph);
   x1.ir_attr.SetIndex(0);
@@ -13936,8 +15173,10 @@ static void CreateRemainderBf16AscGraph(af::AscGraph &graph, size_t dims_size, g
   ConstructVVAscGraphAxisInfo(graph, dims_size);
 }
 
-af::ComputeGraphPtr ShareGraph::RemainderBf16FusedGraph(size_t dims_size) {
-  auto builder = GraphBuilder("remainder_bf16_test");
+// dtype 参数化的 Remainder E2E 图：Data->Load->Remainder->Store->Output
+static af::ComputeGraphPtr RemainderFusedGraphByDtype(size_t dims_size, ge::DataType dtype,
+                                                      const std::string &test_name) {
+  auto builder = GraphBuilder(test_name);
 
   // 创建 data 节点
   auto data0 = builder.AddNode("data0", "Data", 0, 1);
@@ -13962,8 +15201,8 @@ af::ComputeGraphPtr ShareGraph::RemainderBf16FusedGraph(size_t dims_size) {
 
   // 创建并序列化子图
   auto ascbc_node = compute_graph->FindNode("ascbc");
-  af::AscGraph sub_graph("remainder_bf16");
-  CreateRemainderBf16AscGraph(sub_graph, dims_size, af::DataType::DT_BF16);
+  af::AscGraph sub_graph(test_name.c_str());
+  CreateRemainderAscGraph(sub_graph, dims_size, dtype);
 
   std::string sub_graph_str;
   af::AscGraphUtils::SerializeToReadable(sub_graph, sub_graph_str);
@@ -13972,7 +15211,23 @@ af::ComputeGraphPtr ShareGraph::RemainderBf16FusedGraph(size_t dims_size) {
   return compute_graph;
 }
 
-static void CreateArgMaxAscGraph(af::AscGraph &graph, size_t dims_size) {
+af::ComputeGraphPtr ShareGraph::RemainderBf16FusedGraph(size_t dims_size) {
+  return RemainderFusedGraphByDtype(dims_size, af::DataType::DT_BF16, "remainder_bf16_test");
+}
+
+af::ComputeGraphPtr ShareGraph::RemainderFp16FusedGraph(size_t dims_size) {
+  return RemainderFusedGraphByDtype(dims_size, af::DataType::DT_FLOAT16, "remainder_fp16_test");
+}
+
+af::ComputeGraphPtr ShareGraph::RemainderF32FusedGraph(size_t dims_size) {
+  return RemainderFusedGraphByDtype(dims_size, af::DataType::DT_FLOAT, "remainder_f32_test");
+}
+
+af::ComputeGraphPtr ShareGraph::RemainderInt32FusedGraph(size_t dims_size) {
+  return RemainderFusedGraphByDtype(dims_size, af::DataType::DT_INT32, "remainder_int32_test");
+}
+
+static void CreateArgmaxAscGraph(af::AscGraph &graph, size_t dims_size) {
   const Expression s0 = graph.CreateSizeVar(32);
   const Expression s1 = graph.CreateSizeVar(16);
   const Expression s2 = graph.CreateSizeVar(16);
@@ -13997,7 +15252,7 @@ static void CreateArgMaxAscGraph(af::AscGraph &graph, size_t dims_size) {
   load1.y.dtype = af::DataType::DT_FLOAT;
   load1.attr.api.unit = ComputeUnit::kUnitMTE2;
 
-  af::ascir_op::ArgMax argmax("argmax");
+  af::ascir_op::Argmax argmax("argmax");
   argmax.x = load1.y;
   argmax.attr.sched.axis = {z0.id, z1.id, z2.id};
   *argmax.y.axis = {z0.id, z1.id, z2.id};
@@ -14025,7 +15280,7 @@ static void CreateArgMaxAscGraph(af::AscGraph &graph, size_t dims_size) {
   y1.ir_attr.SetIndex(0);
 }
 
-af::ComputeGraphPtr ShareGraph::ArgMaxFusedGraph(size_t dims_size) {
+af::ComputeGraphPtr ShareGraph::ArgmaxFusedGraph(size_t dims_size) {
   auto builder = GraphBuilder("argmax_test");
   auto data0 = builder.AddNode("data0", "Data", 0, 1);
   af::AttrUtils::SetInt(data0->GetOpDescBarePtr(), "_parent_node_index", 0);
@@ -14041,7 +15296,7 @@ af::ComputeGraphPtr ShareGraph::ArgMaxFusedGraph(size_t dims_size) {
   }
   auto ascbc_node = compute_graph->FindNode("ascbc");
   af::AscGraph sub_graph("argmax");
-  CreateArgMaxAscGraph(sub_graph, dims_size);
+  CreateArgmaxAscGraph(sub_graph, dims_size);
 
   std::string sub_graph_str;
   af::AscGraphUtils::SerializeToReadable(sub_graph, sub_graph_str);
@@ -14161,6 +15416,221 @@ af::ComputeGraphPtr ShareGraph::RandnStoreFusedGraph(size_t dims_size) {
   af::AscGraphUtils::SerializeToReadable(sub_graph, sub_graph_str);
   af::AttrUtils::SetStr(ascbc_node->GetOpDescBarePtr(), "ascgraph", sub_graph_str);
   return compute_graph;
+}
+
+/**
+ *   data0  data1  data2  data3
+ *     |      |      |      |
+ *   load0  load1  load2  load3
+ *       \    |      |    /
+ *            RandInt
+ *               |
+ *             store
+ *               |
+ *           output0
+ */
+static void CreateRandIntStoreAscGraph(af::AscGraph &graph, size_t dims_size) {
+  af::ascir_op::Data seed_x1("data0", graph);
+  seed_x1.ir_attr.SetIndex(0);
+  seed_x1.y.dtype = af::DT_INT64;
+
+  af::ascir_op::Data counter_x2("data1", graph);
+  counter_x2.ir_attr.SetIndex(1);
+  counter_x2.y.dtype = af::DT_INT32;
+
+  af::ascir_op::Data low_x3("data2", graph);
+  low_x3.ir_attr.SetIndex(2);
+  low_x3.y.dtype = af::DT_INT64;
+
+  af::ascir_op::Data high_x4("data3", graph);
+  high_x4.ir_attr.SetIndex(3);
+  high_x4.y.dtype = af::DT_INT64;
+
+  af::ascir_op::Load load_x1("load0");
+  load_x1.x = seed_x1.y;
+  load_x1.y.dtype = af::DT_INT64;
+
+  af::ascir_op::Load load_x2("load1");
+  load_x2.x = counter_x2.y;
+  load_x2.y.dtype = af::DT_INT32;
+
+  af::ascir_op::Load load_x3("load2");
+  load_x3.x = low_x3.y;
+  load_x3.y.dtype = af::DT_INT64;
+
+  af::ascir_op::Load load_x4("load3");
+  load_x4.x = high_x4.y;
+  load_x4.y.dtype = af::DT_INT64;
+
+  af::ascir_op::RandInt rand_int_op("rand_int");
+  rand_int_op.x1 = load_x1.y;
+  rand_int_op.x2 = load_x2.y;
+  rand_int_op.x3 = load_x3.y;
+  rand_int_op.x4 = load_x4.y;
+  rand_int_op.y.dtype = af::DT_INT64;
+
+  af::ascir_op::Store store("store");
+  store.x = rand_int_op.y;
+  store.y.dtype = af::DT_INT64;
+
+  af::ascir_op::Output y("output");
+  y.x = store.y;
+  y.y.dtype = af::DT_INT64;
+
+  y.ir_attr.SetIndex(0);
+
+  ConstructVVAscGraphAxisInfo(graph, dims_size);
+
+  // seed 为广播标量输入（对齐前端 load_seed 标量形态）：全 1 repeat + 全 0 stride，
+  // 走 ub_scalar 标量取值路径（GetValue(0) → kSeedIsScalar=true 设备重载）。
+  // 必须在 ConstructVVAscGraphAxisInfo 之后设置，否则统一轴信息会将其覆盖为 {s0, s1}
+  std::vector<af::Expression> seed_repeats(dims_size, af::sym::kSymbolOne);
+  std::vector<af::Expression> seed_strides(dims_size, af::sym::kSymbolZero);
+  *load_x1.y.repeats = seed_repeats;
+  *load_x1.y.strides = seed_strides;
+}
+
+af::ComputeGraphPtr ShareGraph::RandIntStoreFusedGraph(size_t dims_size) {
+  auto builder = GraphBuilder("randint_store_test");
+  auto data0 = builder.AddNode("data0", "Data", 0, 1);
+  af::AttrUtils::SetInt(data0->GetOpDescBarePtr(), "_parent_node_index", 0);
+  auto data1 = builder.AddNode("data1", "Data", 0, 1);
+  af::AttrUtils::SetInt(data1->GetOpDescBarePtr(), "_parent_node_index", 1);
+  auto data2 = builder.AddNode("data2", "Data", 0, 1);
+  af::AttrUtils::SetInt(data2->GetOpDescBarePtr(), "_parent_node_index", 2);
+  auto data3 = builder.AddNode("data3", "Data", 0, 1);
+  af::AttrUtils::SetInt(data3->GetOpDescBarePtr(), "_parent_node_index", 3);
+
+  auto ascbc = builder.AddNode("ascbc", "AscGraph", 4, 1);
+  auto netoutput = builder.AddNode("netoutput1", af::NETOUTPUT, 1, 0);
+
+  builder.AddDataEdge(data0, 0, ascbc, 0);
+  builder.AddDataEdge(data1, 0, ascbc, 1);
+  builder.AddDataEdge(data2, 0, ascbc, 2);
+  builder.AddDataEdge(data3, 0, ascbc, 3);
+  builder.AddDataEdge(ascbc, 0, netoutput, 0);
+  ComputeGraphPtr compute_graph = builder.GetGraph();
+  if (compute_graph == nullptr) {
+    return nullptr;
+  }
+  auto ascbc_node = compute_graph->FindNode("ascbc");
+  af::AscGraph sub_graph("randint_store");
+  CreateRandIntStoreAscGraph(sub_graph, dims_size);
+
+  std::string sub_graph_str;
+  af::AscGraphUtils::SerializeToReadable(sub_graph, sub_graph_str);
+  af::AttrUtils::SetStr(ascbc_node->GetOpDescBarePtr(), "ascgraph", sub_graph_str);
+  return compute_graph;
+}
+
+static void CreateRandSeedStoreAscGraph(af::AscGraph &graph, size_t dims_size, ge::DataType dtype) {
+  af::ascir_op::Data seed("data0", graph);
+  seed.ir_attr.SetIndex(0);
+  seed.y.dtype = af::DT_INT64;
+
+  af::ascir_op::Load load_seed("load0");
+  load_seed.x = seed.y;
+  load_seed.y.dtype = af::DT_INT64;
+
+  af::ascir_op::Arange arange("arange", graph);
+  arange.ir_attr.SetBase(af::sym::kSymbolZero);
+  arange.ir_attr.SetStep(af::sym::kSymbolOne);
+  arange.attr.api.compute_type = af::ComputeType::kComputeElewise;
+  arange.attr.api.type = af::ApiType::kAPITypeCompute;
+  arange.attr.api.unit = af::ComputeUnit::kUnitVector;
+
+  af::ascir_op::Rand rand_op("rand");
+  rand_op.seed = load_seed.y;
+  rand_op.offset = arange.y;
+  rand_op.y.dtype = dtype;
+
+  af::ascir_op::Store store("store");
+  store.x = rand_op.y;
+  store.y.dtype = dtype;
+
+  af::ascir_op::Output y("output");
+  y.x = store.y;
+  y.ir_attr.SetIndex(0);
+
+  std::vector<int64_t> axis_ids;
+  std::vector<af::Expression> axis_strides;
+  std::vector<af::Expression> repeats;
+  ConstructVVAscGraphAxisInfo(graph, dims_size, axis_ids, axis_strides, repeats);
+  SetArangeVectorizedLayout(arange, axis_ids, axis_strides);
+  arange.y.dtype = af::DT_INT32;
+}
+
+static void CreateRandnSeedStoreAscGraph(af::AscGraph &graph, size_t dims_size, ge::DataType dtype) {
+  af::ascir_op::Data seed("data0", graph);
+  seed.ir_attr.SetIndex(0);
+  seed.y.dtype = af::DT_INT64;
+
+  af::ascir_op::Load load_seed("load0");
+  load_seed.x = seed.y;
+  load_seed.y.dtype = af::DT_INT64;
+
+  af::ascir_op::Arange arange("arange", graph);
+  arange.ir_attr.SetBase(af::sym::kSymbolZero);
+  arange.ir_attr.SetStep(af::sym::kSymbolOne);
+  arange.attr.api.compute_type = af::ComputeType::kComputeElewise;
+  arange.attr.api.type = af::ApiType::kAPITypeCompute;
+  arange.attr.api.unit = af::ComputeUnit::kUnitVector;
+
+  af::ascir_op::Randn randn_op("randn");
+  randn_op.seed = load_seed.y;
+  randn_op.offset = arange.y;
+  randn_op.y.dtype = dtype;
+
+  af::ascir_op::Store store("store");
+  store.x = randn_op.y;
+  store.y.dtype = dtype;
+
+  af::ascir_op::Output y("output");
+  y.x = store.y;
+  y.ir_attr.SetIndex(0);
+
+  std::vector<int64_t> axis_ids;
+  std::vector<af::Expression> axis_strides;
+  std::vector<af::Expression> repeats;
+  ConstructVVAscGraphAxisInfo(graph, dims_size, axis_ids, axis_strides, repeats);
+  SetArangeVectorizedLayout(arange, axis_ids, axis_strides);
+  arange.y.dtype = af::DT_INT32;
+}
+
+static af::ComputeGraphPtr CreateSeedStoreFusedGraph(size_t dims_size, const std::string &name, ge::DataType dtype,
+                                                     bool is_rand) {
+  auto builder = GraphBuilder(name);
+  auto data0 = builder.AddNode("data0", "Data", 0, 1);
+  af::AttrUtils::SetInt(data0->GetOpDescBarePtr(), "_parent_node_index", 0);
+  auto ascbc = builder.AddNode("ascbc", "AscGraph", 1, 1);
+  auto netoutput = builder.AddNode("netoutput", af::NETOUTPUT, 1, 0);
+
+  builder.AddDataEdge(data0, 0, ascbc, 0);
+  builder.AddDataEdge(ascbc, 0, netoutput, 0);
+  ComputeGraphPtr compute_graph = builder.GetGraph();
+  if (compute_graph == nullptr) {
+    return nullptr;
+  }
+  auto ascbc_node = compute_graph->FindNode("ascbc");
+  af::AscGraph sub_graph(name.c_str());
+  if (is_rand) {
+    CreateRandSeedStoreAscGraph(sub_graph, dims_size, dtype);
+  } else {
+    CreateRandnSeedStoreAscGraph(sub_graph, dims_size, dtype);
+  }
+
+  std::string sub_graph_str;
+  af::AscGraphUtils::SerializeToReadable(sub_graph, sub_graph_str);
+  af::AttrUtils::SetStr(ascbc_node->GetOpDescBarePtr(), "ascgraph", sub_graph_str);
+  return compute_graph;
+}
+
+af::ComputeGraphPtr ShareGraph::RandSeedStoreFusedGraph(size_t dims_size, af::DataType dtype) {
+  return CreateSeedStoreFusedGraph(dims_size, "rand_seed_store_test", dtype, true);
+}
+
+af::ComputeGraphPtr ShareGraph::RandnSeedStoreFusedGraph(size_t dims_size, af::DataType dtype) {
+  return CreateSeedStoreFusedGraph(dims_size, "randn_seed_store_test", dtype, false);
 }
 
 static void CreateAscBackendGraphTwoInTwoOut(std::shared_ptr<af::AscGraph> &graph, const std::string &prefix,

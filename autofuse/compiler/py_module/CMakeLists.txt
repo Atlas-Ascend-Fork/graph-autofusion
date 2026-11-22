@@ -1,7 +1,13 @@
-Python3_add_library(pyautofuse MODULE
+set(PYAUTOFUSE_SOURCES
         pyascir.cpp pyascir_types.cpp pyascir_common_utils.cpp
         pyautofuse.cpp
 )
+
+Python3_add_library(pyautofuse MODULE ${PYAUTOFUSE_SOURCES})
+
+if(ENABLE_AUTOFUSE_MLIR)
+        target_compile_definitions(pyautofuse PRIVATE ENABLE_AUTOFUSE_MLIR=1)
+endif()
 
 target_compile_options(pyautofuse PRIVATE
         -Wno-error=variadic-macros -Wall

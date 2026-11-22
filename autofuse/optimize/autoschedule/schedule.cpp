@@ -18,6 +18,7 @@
 #include "schedule_utils.h"
 #include "node_cache_marker.h"
 #include "task_generator/simt_boundary_sync.h"
+#include "att/base/arch_param.h"
 
 namespace {
 bool CompareByOrderInTensorAxis(const int64_t &lhs, const int64_t &rhs, const std::vector<int64_t> &tensor_axes) {
@@ -360,7 +361,16 @@ Status Scheduler::ModifyStoreAfterReduce(ascir::NodeView &node, ascir::AxisId re
     GE_ASSERT_TRUE(index < output_attr.strides.size(), "Strides of [%s]'s output tensor not greater than [%lu].",
                    node->GetNamePtr(), index);
     output_attr.repeats[index] = reduce_block_axis->size;
-    output_attr.strides[index] = size_product;
+    if (!enable_workspace_alignment_) {
+      output_attr.strides[index] = size_product;
+      continue;
+    }
+    const auto dtype_size = ge::GetSizeByDataType(output_attr.dtype);
+    GE_ASSERT_TRUE(dtype_size > 0, "Invalid dtype size for [%s]'s output tensor.", node->GetNamePtr());
+    const auto cacheline_bytes = att::arch_param::kV2ArchHardwareConfig.cache_line_size;
+    GE_ASSERT_TRUE(cacheline_bytes % dtype_size == 0, "Unsupported dtype size[%ld] for RCore workspace alignment.",
+                   dtype_size);
+    output_attr.strides[index] = af::sym::Align(size_product, cacheline_bytes / static_cast<uint32_t>(dtype_size));
   }
   return af::SUCCESS;
 }
@@ -504,6 +514,99 @@ Status Scheduler::RemoveRedundantBroadcastNode(const ascir::ImplGraph &impl_grap
 }
 
 namespace {
+// 数据搬运类算子、图边界/辅助节点（Output/Data/Scalar/IndexExpr/Workspace/Nop 等
+// ComputeType 未声明节点）与 IndirectLoad 的 IsNodeValid 不做输入输出轴一致性校验
+// （V1/V2 实现未 override、基类默认恒通过）；SIMT 标量路径节点跳过主 tiling、
+// vectorized 视图为空，codegen 对其同样跳过轴校验；其余计算节点走向量化路径，会校验
+// 输入轴属于输出轴。生产者跳过模板 tensor merge 时，前几类消费者仍与旧轴空间的输入
+// 自洽，后者的输出会被模板 merge 改写到新轴空间而与输入脱节。
+bool HasShapeValidatingConsumer(const af::AscNodePtr &node) {
+  for (const auto &out_node : node->GetOutDataNodes()) {
+    const auto asc_out_node = std::dynamic_pointer_cast<af::AscNode>(out_node);
+    if (asc_out_node == nullptr) {
+      continue;
+    }
+    const auto compute_type = asc_out_node->attr.api.compute_type;
+    if (compute_type == af::ComputeType::kComputeLoad || compute_type == af::ComputeType::kComputeStore ||
+        compute_type == af::ComputeType::kComputeGather || compute_type == af::ComputeType::kComputeInvalid) {
+      continue;
+    }
+    if (ascgen_utils::indirect_load::GetTemplateBehavior(asc_out_node).skips_main_schedule_tiling) {
+      continue;
+    }
+    return true;
+  }
+  return false;
+}
+
+// 判断节点全部输出视图按 original 轴组是否物理连续（与 graph 层 DoApplyTensorAxisMerge
+// 跳过不连续输出所用的判定同源：original 相邻轴满足 stride_i == repeat_{i+1} * stride_{i+1}）。
+// 只读查询，不修改任何视图；用公开的视图属性实现，避免在 AscGraph 接口上新增查询方法。
+bool IsOutputViewContinuousForMerge(const af::AscNodePtr &node, const std::vector<int64_t> &original) {
+  const std::set<int64_t> original_set(original.begin(), original.end());
+  for (const auto &output : node->outputs()) {
+    if (output == nullptr) {
+      continue;
+    }
+    std::vector<af::Expression> repeats;
+    std::vector<af::Expression> strides;
+    std::set<int64_t> merge_axis_set;
+    const auto &axis = output->attr.axis;
+    for (uint32_t axis_index = 0U; axis_index < axis.size(); axis_index++) {
+      if (original_set.find(axis[axis_index]) != original_set.end()) {
+        repeats.emplace_back(output->attr.repeats[axis_index]);
+        strides.emplace_back(output->attr.strides[axis_index]);
+        merge_axis_set.emplace(axis[axis_index]);
+      }
+    }
+    if (repeats.size() <= 1U) {
+      continue;
+    }
+    for (uint32_t i = 0U; i < repeats.size() - 1U; i++) {
+      if (af::SymbolicUtils::StaticCheckEq(strides[i], repeats[i + 1] * strides[i + 1]) != af::TriBool::kTrue) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+// 判断 SIMT 域内节点的输出消费链是否到达 normal schedule（主 tiling/VF 分区）：
+// 到达则该节点视图必须折叠到模板轴空间对齐消费者；消费链终结于 IndirectLoad 本体
+// （x1/x2 均按视图标量/strided 读，视图感知）或全部留在 SIMT 标量域时，视图保留
+// 原轴空间即可，非连续视图（如索引张量跨维切片）无需折叠也不会与消费者脱节。
+// BFS 不穿过 IndirectLoad 本体传播：其输入消费即本条视图链的终点。
+bool SimtOutputReachesNormalSchedule(const af::AscNodePtr &node) {
+  std::queue<af::AscNodePtr> work;
+  std::set<const void *> visited;
+  const auto push_consumers = [&work](const af::AscNodePtr &n) {
+    for (const auto &out_node : n->GetOutDataNodes()) {
+      const auto asc = std::dynamic_pointer_cast<af::AscNode>(out_node);
+      if (asc != nullptr) {
+        work.push(asc);
+      }
+    }
+  };
+  push_consumers(node);
+  while (!work.empty()) {
+    const auto cur = work.front();
+    work.pop();
+    if (cur == nullptr || !visited.insert(cur.get()).second) {
+      continue;
+    }
+    // IndirectLoad 本体按视图标量/strided 读输入，消费链在此终结
+    if (cur->attr.api.compute_type == af::ComputeType::kComputeGather) {
+      continue;
+    }
+    // 参与主 tiling（normal schedule/VF 分区）的消费者要求生产者视图与之同轴空间
+    if (!ascgen_utils::indirect_load::GetTemplateBehavior(cur).skips_main_schedule_tiling) {
+      return true;
+    }
+    push_consumers(cur);
+  }
+  return false;
+}
+
 Status AddIndirectLoadSyntheticOuterAxis(const af::AscNodePtr &node, ascir::AxisId outer_axis_id,
                                          bool has_synthetic_outer_axis) {
   if (!has_synthetic_outer_axis) {
@@ -522,6 +625,9 @@ Status AddIndirectLoadSyntheticOuterAxis(const af::AscNodePtr &node, ascir::Axis
   return af::SUCCESS;
 }
 
+// 对 IndirectLoad 模板覆盖的节点应用轴合并：sched 轴按模板轴组统一合并，tensor 视图按
+// merge_tensor_axis 决定是否合并。tensor 视图非连续且存在校验输入输出轴一致性的消费者时，
+// 该模板形态不可行，返回 UNSUPPORTED 供调用方跳过当前候选。
 Status ApplyIndirectLoadTemplateMerge(ascir::ImplGraph &graph, const af::AscNodePtr &node, ascir::AxisId axis_id,
                                       bool merge_tensor_axis = true) {
   if (axis_id == af::kIdNone) {
@@ -536,6 +642,17 @@ Status ApplyIndirectLoadTemplateMerge(ascir::ImplGraph &graph, const af::AscNode
     GE_ASSERT_TRUE(graph.ApplySchedAxisMerge(node, axis_id), "Failed to merge schedule axis[%ld] for node[%s].",
                    axis_id, node->GetNamePtr());
     if (merge_tensor_axis) {
+      // 非连续视图（如索引张量跨维切片）无法执行 tensor merge。此时若存在会校验输入输出轴
+      // 一致性的消费者，其输出被模板 merge 改写后将与本输入脱节，codegen 校验必然失败，
+      // 返回 UNSUPPORTED 让调用方跳过该候选；消费者全部为豁免校验的节点时保持既有跳过
+      // 行为（双方停留在旧轴空间仍自洽）。
+      if (!IsOutputViewContinuousForMerge(node, merged_from) && HasShapeValidatingConsumer(node)) {
+        GELOGW(
+            "[IndirectLoad] Graph[%s] node[%s] output view is not continuous for merge axis[%ld], and it has "
+            "shape validating consumer, the schedule is unsupported.",
+            graph.GetName().c_str(), node->GetNamePtr(), axis_id);
+        return af::UNSUPPORTED;
+      }
       GE_ASSERT_TRUE(graph.ApplyTensorAxisMerge(node, axis_id), "Failed to merge tensor axis[%ld] for node[%s].",
                      axis_id, node->GetNamePtr());
     }
@@ -583,19 +700,6 @@ Status ApplyIndirectLoadTemplateMerge(ascir::ImplGraph &graph, const af::AscNode
       }
       output->attr.vectorized_axis = std::move(remapped_vec);
     }
-  }
-  return af::SUCCESS;
-}
-
-Status SetOuterRepeatsToOne(const af::AscNodePtr &node, const std::vector<ascir::AxisId> &vectorized_axes) {
-  if (node->attr.api.compute_type != af::ComputeType::kComputeReduce) {
-    return af::SUCCESS;
-  }
-  GE_ASSERT_TRUE(!vectorized_axes.empty(), "Node[%s] has no IndirectLoad vector axes.", node->GetNamePtr());
-  for (const auto &output : node->outputs()) {
-    GE_ASSERT_TRUE(output->attr.axis.size() == output->attr.repeats.size());
-    GE_ASSERT_TRUE(output->attr.axis.size() >= vectorized_axes.size());
-    std::fill_n(output->attr.repeats.begin(), output->attr.axis.size() - vectorized_axes.size(), af::sym::kSymbolOne);
   }
   return af::SUCCESS;
 }
@@ -659,6 +763,68 @@ Status ApplyInputInnerVectorizedAxis(ascir::ImplGraph &graph, const af::AscNodeP
 
 }  // namespace
 
+ascir::AxisId Scheduler::GetSolvedTileInnerAxis() const {
+  // 固定 tile（预建 pair）保持既有单行窗口语义；可求解 tile 返回通用 TileSplit 产物
+  // TileInner 轴 id（与 TileSplit 中向量化视图前插的判定条件一致）。
+  if (indirect_load_info_.axes.tile_inner_axis != af::kIdNone) {
+    return af::kIdNone;
+  }
+  return tiling_case_.ub_tiling_y.second == nullptr ? af::kIdNone : tiling_case_.ub_tiling_y.second->id;
+}
+
+Status Scheduler::FoldSolvedTileInnerIntoPreWindow(const af::AscNodePtr &node) const {
+  // 可求解多行 tile：TileInner（tile 内行数）并入输入侧 pre 节点的向量化窗口，使输入
+  // staging 覆盖 tile 内多行（R×inner 批量搬运）而非按行循环。须在 ApplyTiling 之后
+  // 调用（节点视图完成 a0 -> a0T/a0t 分裂后才能看到 TileInner 轴）。
+  const ascir::AxisId tile_inner_axis_id = GetSolvedTileInnerAxis();
+  if (tile_inner_axis_id == af::kIdNone) {
+    return af::SUCCESS;
+  }
+  const auto role = ascgen_utils::indirect_load::GetTemplateRole(node);
+  // StridedUbPath（带行间 padding 的对齐路径）保持既有单行窗口语义：其紧凑写回与
+  // 视图标注机制假定逐行 staging 结构，多行窗口不在本变更范围内。
+  if (role == ascgen_utils::indirect_load::TemplateRole::kSimdInputPreStridedUbPath) {
+    return af::SUCCESS;
+  }
+  const bool is_pre_node = ascgen_utils::indirect_load::ShouldApplyInputInnerVectorization(node) ||
+                           role == ascgen_utils::indirect_load::TemplateRole::kSimdIndexPre;
+  if (!is_pre_node) {
+    return af::SUCCESS;
+  }
+  for (const auto &output : node->outputs()) {
+    auto &attr = output->attr;
+    const auto tile_iter = std::find(attr.axis.begin(), attr.axis.end(), tile_inner_axis_id);
+    if (tile_iter == attr.axis.end() || std::find(attr.vectorized_axis.begin(), attr.vectorized_axis.end(),
+                                                  tile_inner_axis_id) != attr.vectorized_axis.end()) {
+      continue;
+    }
+    const auto tile_index = static_cast<size_t>(std::distance(attr.axis.begin(), tile_iter));
+    const bool zero_stride =
+        af::SymbolicUtils::StaticCheckEq(attr.strides[tile_index], af::sym::kSymbolZero) == af::TriBool::kTrue;
+    const bool multi_repeat =
+        af::SymbolicUtils::StaticCheckEq(attr.repeats[tile_index], af::sym::kSymbolOne) != af::TriBool::kTrue;
+    // 零步长且窗口展开（广播流）不并入：并入会使 staging 重复搬运 R 份相同数据；
+    // 其余情形并入——多行窗口批量化，或退化轴（repeat==1）仅上移循环层级。
+    if (zero_stride && multi_repeat) {
+      continue;
+    }
+    // 插入位置须保持 vectorized_axis 为 attr.axis 的子序列：转置视图下行维度不一定
+    // 位于内层轴之前（如 origin [1,5,9,13] 中内层轴 1 先于行轴 9），盲目前插会破坏
+    // 视图轴序一致性（CheckContinuous）。按 tile 轴在 attr.axis 中的位置确定插入点。
+    size_t insert_pos = 0UL;
+    for (size_t axis_pos = 0UL; axis_pos < tile_index; ++axis_pos) {
+      if (std::find(attr.vectorized_axis.begin(), attr.vectorized_axis.end(), attr.axis[axis_pos]) !=
+          attr.vectorized_axis.end()) {
+        ++insert_pos;
+      }
+    }
+    attr.vectorized_axis.insert(attr.vectorized_axis.begin() + static_cast<int64_t>(insert_pos), tile_inner_axis_id);
+    attr.vectorized_strides.insert(attr.vectorized_strides.begin() + static_cast<int64_t>(insert_pos),
+                                   attr.strides[tile_index]);
+  }
+  return af::SUCCESS;
+}
+
 Status Scheduler::InitIndirectLoadScheduleCase() {
   indirect_load_info_ = {};
   const af::AscNodePtr indirect_load = ascgen_utils::indirect_load::FindIndirectLoadNode(graph_);
@@ -682,27 +848,38 @@ Status Scheduler::ApplyIndirectLoadNodeAxes(const af::AscNodePtr &node, bool &sk
   }
   const bool is_input_pre = ascgen_utils::indirect_load::ShouldApplyInputInnerVectorization(node);
   if (is_input_pre) {
-    GE_ASSERT_SUCCESS(ApplyInputInnerVectorizedAxis(graph_, node, indirect_load_info_.axes.input_inner_axis));
+    // 双 gather 水平融合：优先使用节点上的 per-IL 输入内轴提示（两路 input 的 dim 轴
+    // 尺寸可不同）；单 gather 场景无提示，回退全局模板轴，行为与原实现一致。
+    const auto hint_axis = ascgen_utils::indirect_load::GetSimdInputInnerAxis(node);
+    GE_ASSERT_SUCCESS(ApplyInputInnerVectorizedAxis(
+        graph_, node, hint_axis != af::kIdNone ? hint_axis : indirect_load_info_.axes.input_inner_axis));
   }
   const bool is_index_pre =
       ascgen_utils::indirect_load::GetTemplateRole(node) == ascgen_utils::indirect_load::TemplateRole::kSimdIndexPre;
   if (is_index_pre) {
-    GE_ASSERT_SUCCESS(ApplyInputInnerVectorizedAxis(graph_, node, indirect_load_info_.axes.index_inner_axis));
+    // 双 gather 水平融合：优先使用节点上的 per-IL index 内轴提示（各成员的 index 链形态
+    // 可不同——primary 的 None 不再套到有 Broadcast 的非 primary 成员）；单 gather 场景
+    // 无提示，回退全局模板轴，行为与原实现一致。
+    const auto index_hint_axis = ascgen_utils::indirect_load::GetSimdIndexInnerAxis(node);
+    GE_ASSERT_SUCCESS(ApplyInputInnerVectorizedAxis(
+        graph_, node, index_hint_axis != af::kIdNone ? index_hint_axis : indirect_load_info_.axes.index_inner_axis));
   }
   skip_main_tiling = ascgen_utils::indirect_load::GetTemplateBehavior(node).skips_main_schedule_tiling;
   if (skip_main_tiling) {
     const auto role = ascgen_utils::indirect_load::GetTemplateRole(node);
     const bool is_simt_role = role == ascgen_utils::indirect_load::TemplateRole::kSimtInlineTransform ||
                               role == ascgen_utils::indirect_load::TemplateRole::kSimtFanoutBranch;
-    // SIMT 角色节点虽由 scalar evaluator 发射、跳过主 tiling 切分，但其输出可能同时
-    // 被 normal schedule 的 VF 子图消费（如 IndirectLoad 输出直连链汇入 post Reduce）。
-    // VF 分区的边界 Load 会拷贝此处 view，必须与消费者经模板 merge 改写后的 view 一致，
-    // 否则 ValidateInputTensorLoopAxis 报 input axis not in output axis。
-    // 因此 SIMT 角色节点仍需执行 tensor 轴 merge（merge_tensor_axis=true），仅跳过 tiling。
-    // 同理，kSimtInputBoundary/kSimtDirectGmBoundary/kSkInputBoundary 等边界节点也跳过主
-    // tiling，若不补 tensor 轴 merge，其 view 停留在旧轴空间（如 [0,1]），而模板 merge 已
-    // 将调度轴合并改写（[0,1] -> [2] -> [5,6,4]），BufQueAllocator::InitTensorMemInfo 遍历
-    // vectorized_axis 时会因 axis 已不存在而失败（Cannot find vectorized axis）。
+    // SIMT 角色节点由 scalar evaluator 发射、跳过主 tiling 切分。其输出可能同时被
+    // normal schedule 的 VF 子图消费（如 IndirectLoad 输出直连链汇入 post Reduce），
+    // VF 分区的边界 Load 拷贝此处 view，必须与消费者经模板 merge 改写后的 view 一致，
+    // 因此跨域节点的 tensor 视图仍需折叠（merge_tensor_axis=true）；输出消费链终结于
+    // IndirectLoad 标量读、全部留在 SIMT 域内的节点则保留原视图，非连续视图（如索引
+    // 张量跨维切片）不再因无法折叠而与消费者轴空间脱节。
+    // 边界节点（kSimtInputBoundary/kSimtDirectGmBoundary/kSkInputBoundary）自身即跨域
+    // 桥，视图若不折叠会停留旧轴空间（如 [0,1]），而模板 merge 已将调度轴合并改写
+    // （[0,1] -> [2] -> [5,6,4]），BufQueAllocator::InitTensorMemInfo 遍历
+    // vectorized_axis 时会因 axis 已不存在而失败（Cannot find vectorized axis），故
+    // 边界节点保持强制折叠。
     const bool is_simt_boundary_role = role == ascgen_utils::indirect_load::TemplateRole::kSimtInputBoundary ||
                                        role == ascgen_utils::indirect_load::TemplateRole::kSimtDirectGmBoundary ||
                                        role == ascgen_utils::indirect_load::TemplateRole::kSkInputBoundary;
@@ -713,26 +890,19 @@ Status Scheduler::ApplyIndirectLoadNodeAxes(const af::AscNodePtr &node, bool &sk
       // 等节点可能持有独立副本轴（如 z*_index，仅与输出轴同形不同 id），部分匹配时
       // ApplySchedAxisMerge 的连续性断言会失败。此时保持节点原视图（与主线路径行为
       // 一致：这些节点不参与模板轴折叠，由消费者侧 BroadcastBackward 等统一处理）。
-      const auto sched_has_all_members = [&graph = this->graph_](const af::AscNodePtr &n,
-                                                                 const ascir::AxisId merged_axis_id) {
-        if (merged_axis_id == af::kIdNone) {
-          return true;
+      if (ascgen_utils::indirect_load::GroupAxesCoverable(graph_, node, indirect_load_info_.axes.outer_axis)) {
+        // tensor 视图折叠按需执行：输出消费链到达 normal schedule 时必须折叠对齐
+        // （既有行为）；纯 SIMT 标量域内消费则保留原视图，非连续视图（跨维切片）
+        // 不再因折叠失败而与消费者轴空间脱节。
+        const bool needs_tensor_merge = is_simt_boundary_role || SimtOutputReachesNormalSchedule(node);
+        const auto simt_merge_status =
+            ApplyIndirectLoadTemplateMerge(graph_, node, indirect_load_info_.axes.outer_axis, needs_tensor_merge);
+        if (simt_merge_status == af::UNSUPPORTED) {
+          return af::UNSUPPORTED;
         }
-        const auto merged_axis = graph.FindAxis(merged_axis_id);
-        if (merged_axis == nullptr || merged_axis->from.empty()) {
-          return true;
-        }
-        for (const auto member : merged_axis->from) {
-          if (std::find(n->attr.sched.axis.begin(), n->attr.sched.axis.end(), member) == n->attr.sched.axis.end()) {
-            return false;
-          }
-        }
-        return true;
-      };
-      if (sched_has_all_members(node, indirect_load_info_.axes.outer_axis)) {
-        GE_ASSERT_SUCCESS(ApplyIndirectLoadTemplateMerge(graph_, node, indirect_load_info_.axes.outer_axis, true));
+        GE_ASSERT_SUCCESS(simt_merge_status);
       }
-      if (sched_has_all_members(node, indirect_load_info_.axes.inner_axis)) {
+      if (ascgen_utils::indirect_load::GroupAxesCoverable(graph_, node, indirect_load_info_.axes.inner_axis)) {
         GE_ASSERT_SUCCESS(ApplyIndirectLoadTemplateMerge(graph_, node, indirect_load_info_.axes.inner_axis, false));
       }
       // SIMT 节点跳过主 tiling，其 tensor view 的 split 同步与 vectorized_axis 重映射
@@ -743,15 +913,85 @@ Status Scheduler::ApplyIndirectLoadNodeAxes(const af::AscNodePtr &node, bool &sk
   }
   GE_ASSERT_SUCCESS(AddIndirectLoadSyntheticOuterAxis(node, indirect_load_info_.axes.outer_axis,
                                                       indirect_load_info_.axes.synthetic_outer));
-  GE_ASSERT_SUCCESS(ApplyIndirectLoadTemplateMerge(graph_, node, indirect_load_info_.axes.outer_axis,
-                                                   !is_input_pre && !is_index_pre));
+  const auto merge_status =
+      ApplyIndirectLoadTemplateMerge(graph_, node, indirect_load_info_.axes.outer_axis, !is_input_pre && !is_index_pre);
+  if (merge_status == af::UNSUPPORTED) {
+    return af::UNSUPPORTED;
+  }
+  GE_ASSERT_SUCCESS(merge_status);
   if (is_input_pre) {
     return af::SUCCESS;
   }
   GE_ASSERT_SUCCESS(ApplyIndirectLoadTemplateMerge(graph_, node, indirect_load_info_.axes.inner_axis, false));
-  GE_ASSERT_SUCCESS(SetOuterRepeatsToOne(node, indirect_load_info_.axes.vectorized_axes));
+  // 保留 Reduce 的逻辑外轴尺寸，局部 UB 窗口由 vectorized_axis 定义。
+  // 将保留的 batch 轴强制置 1 会使输入/输出视图不一致，Mean 据此误把 batch 计入归约除数。
   return af::SUCCESS;
 }
+
+// [节点级向量化视图推导] candidate = node_vectorized_axes 与本节点输出 attr.axis
+// 的交集（保持 node_vectorized_axes 相对序）；结果为空且视图非空时按视图重播种（单位
+// stride 轴优先，否则最后的非零 stride 轴）；仍为空（全零 stride 的全广播视图）时取
+// 尾轴兜底——保持"非空视图 ⇒ 非空 vectorized"不变量（下游 ReduceAlignmentInferFunc
+// 首句断言非空），尾轴 stride=0 会被其判为 kNotAligned，语义明确。空视图（输出本身
+// 标量/无轴）仍返回空。不过滤归约轴（stride=0/repeat=1）——reduce 输出上的归约轴是
+// 合法视图（ReduceAlignmentInferFunc 用 .back() 的 stride 判定对齐类型），过滤会改变
+// 下游对齐语义。组员 value tensor 的补写同用此推导。
+namespace {
+std::vector<ascir::AxisId> DeriveNodeVectorizedAxes(const af::AscTensorAttr &attr,
+                                                    const std::vector<ascir::AxisId> &node_vectorized_axes) {
+  std::vector<ascir::AxisId> derived;
+  derived.reserve(node_vectorized_axes.size());
+  for (const auto axis_id : node_vectorized_axes) {
+    if (std::find(attr.axis.begin(), attr.axis.end(), axis_id) == attr.axis.end()) {
+      continue;  // 陈旧轴（已被 merge/reduce 收缩）——求交过滤
+    }
+    derived.emplace_back(axis_id);
+  }
+  if (derived.empty() && !attr.axis.empty()) {
+    for (size_t pos = 0UL; pos < attr.axis.size(); ++pos) {
+      if (pos < attr.strides.size() &&
+          af::SymbolicUtils::StaticCheckEq(attr.strides[pos], af::sym::kSymbolOne) == af::TriBool::kTrue) {
+        derived.emplace_back(attr.axis[pos]);
+      }
+    }
+    if (derived.empty()) {
+      for (size_t pos = attr.axis.size(); pos > 0UL; --pos) {
+        const size_t dim = pos - 1UL;
+        if (dim >= attr.strides.size() ||
+            af::SymbolicUtils::StaticCheckEq(attr.strides[dim], af::sym::kSymbolZero) != af::TriBool::kTrue) {
+          derived.emplace_back(attr.axis[dim]);
+          break;
+        }
+      }
+    }
+    if (derived.empty()) {
+      // 全零 stride（全广播视图）兜底取尾轴：非空视图 ⇒ 非空 vectorized，尾轴 stride=0
+      // 由 ReduceAlignmentInferFunc 判为 kNotAligned（保守标量路径），语义明确不崩溃。
+      derived.emplace_back(attr.axis.back());
+      GELOGW("[TileSplit] Node output view has no vectorizable axis (all zero strides), fallback to tail axis[%ld].",
+             attr.axis.back());
+    }
+  }
+  return derived;
+}
+
+std::vector<af::Expression> CollectVectorizedStrides(const af::AscTensorAttr &attr) {
+  std::vector<af::Expression> strides;
+  if (attr.axis.size() != attr.strides.size()) {
+    return strides;
+  }
+  strides.reserve(attr.vectorized_axis.size());
+  for (const auto axis_id : attr.vectorized_axis) {
+    const auto iter = std::find(attr.axis.begin(), attr.axis.end(), axis_id);
+    if (iter == attr.axis.end()) {
+      continue;
+    }
+    strides.emplace_back(attr.strides[static_cast<size_t>(std::distance(attr.axis.begin(), iter))]);
+  }
+  return strides;
+}
+
+}  // namespace
 
 std::vector<ascir::AxisId> Scheduler::GetSortedNodeVectorizedAxes(Scheduler &scheduler) {
   std::vector<ascir::AxisId> vectorized_axes;
@@ -800,13 +1040,21 @@ Status Scheduler::TileSplit() {
       continue;
     }
     bool skip_main_tiling = false;
-    GE_CHK_STATUS_RET(ApplyIndirectLoadNodeAxes(node, skip_main_tiling));
+    const auto axes_status = ApplyIndirectLoadNodeAxes(node, skip_main_tiling);
+    if (axes_status == af::UNSUPPORTED) {
+      return af::UNSUPPORTED;
+    }
+    GE_CHK_STATUS_RET(axes_status, "Failed to apply IndirectLoad node axes for node[%s].", node->GetNamePtr());
     if (skip_main_tiling) {
       continue;
     }
     ApplyTiling(node, tiling_case_.ub_tiling_id_x, tiling_case_.ub_tiling_x);
     ApplyTiling(node, tiling_case_.ub_tiling_id_y, tiling_case_.ub_tiling_y);
     ApplyTiling(node, tiling_case_.ub_tiling_id_r, tiling_case_.ub_tiling_r);
+    if (indirect_load_info_.active) {
+      GE_CHK_STATUS_RET(FoldSolvedTileInnerIntoPreWindow(node), "Failed to fold solved tile inner window for node[%s].",
+                        node->GetNamePtr());
+    }
 
     auto axes = node->attr.sched.axis;
     const auto &n_group = this->axes_group_.n_group;
@@ -820,14 +1068,38 @@ Status Scheduler::TileSplit() {
       }
     }
 
-    // 非reduce场景应该将向量化轴调整为tensor中的相对顺序, 带reduce场景由于tiling策略已经做了特别的reorder,需要跳过
-    // tiling策略暂时无法支持具有reduce和transpose融合的场景
+    // [节点级向量化视图推导] 任何节点输出的 vectorized_axis 必须是该节点自身 attr.axis 的
+    // 子集、由该节点自己的视图语义决定——全图级列表（含模板轴/求解 TileInner）直接整块回
+    // 写会把已被 merge/reduce 收缩掉的陈旧轴 id 写进输出视图（ReduceAlignmentInferFunc 取
+    // .back() 后 find 不到即硬断言），同时冲掉 MergeContinuousAxis 已完成的节点级重映射。
+    // 推导规则：求交保序（仅去陈旧轴，不过滤归约轴——reduce 输出的归约轴 stride=0 是合法
+    // 视图，ReduceAlignmentInferFunc 用 .back() 的 stride 判定对齐类型，过滤会改变下游语义）；
+    // 空则按视图重播种（单位 stride 轴优先，否则最后的非零 stride 轴）。排序条件保持图级
+    // has_reduce（既有行为不变）。
     for (auto &output : node->outputs()) {
       if (indirect_load_info_.active &&
           ascgen_utils::indirect_load::GetTemplateBehavior(node).preserves_vectorized_axis) {
+        // [组成员 value tensor 的 k×R 窗口] 单 gather 的 IL 输出经输出重定向绑定为普通节点
+        // 的输出 tensor（redirected id），全局写入把 [k, R]（含求解 TileInner）写进该 tensor
+        // 视图、actual_size = k × R；多 gather 组员无此绑定（自身输出即 value tensor，被
+        // preserves 跳过）——有共享 Reduce 终端的组员在此显式补写（镜像重定向效果）。无
+        // Reduce 的组员保持空视图（codegen 整核调用形态不依赖向量化视图）。
+        // 无条件覆盖（不做 already_written 判定）：任务生成期的 SeedGroupMemberValue
+        // VectorizedViews 已写入 R 轴，这些轴在全局列表中会导致守卫恒 true，但调度期
+        // 求解出的 TileInner（k）尚未在视图内——必须覆盖写入才能使 actual_size = k×R。
+        // 覆盖值与 value 视图 attr.axis 求交（DeriveNodeVectorizedAxes）：过滤已被
+        // merge/reduce 收缩的陈旧轴、保持全局相对序，保证 vectorized ⊆ axis 且
+        // strides 与 vectorized_axis 一一对应；ApplyTiling 已先于本分支对该节点执行过
+        // ApplySplit，TileInner 必在 value 视图内，求交不会丢 k。
+        if (ascgen_utils::indirect_load::IsSimtGroupMember(node) &&
+            ascgen_utils::indirect_load::GetPostReduceConsumer(node) != nullptr && !node_vectorized_axes.empty()) {
+          auto &value = output->attr;
+          value.vectorized_axis = DeriveNodeVectorizedAxes(value, node_vectorized_axes);
+          value.vectorized_strides = CollectVectorizedStrides(value);
+        }
         continue;
       }
-      output->attr.vectorized_axis = node_vectorized_axes;
+      output->attr.vectorized_axis = DeriveNodeVectorizedAxes(output->attr, node_vectorized_axes);
       if (!has_reduce) {
         auto tensor_axis = output->attr.axis;
         std::sort(output->attr.vectorized_axis.begin(), output->attr.vectorized_axis.end(),
@@ -849,7 +1121,11 @@ Status Scheduler::DoScheduler() {
                     graph_.GetName().c_str());
   RemoveDuplicatedAxisFromGroup();
   // Tile Split
-  TileSplit();
+  const auto tile_split_status = TileSplit();
+  if (tile_split_status == af::UNSUPPORTED) {
+    return af::UNSUPPORTED;
+  }
+  GE_CHK_STATUS_RET(tile_split_status, "Tile split failed for graph[%s].", graph_.GetName().c_str());
   // Block Split
   if (cube_template_ != ascir::CubeTemplateType::kUBFuse) {
     std::vector<ascir::AxisId> new_sched_axes;

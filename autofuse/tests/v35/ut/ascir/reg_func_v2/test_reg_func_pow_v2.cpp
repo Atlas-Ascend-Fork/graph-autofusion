@@ -271,7 +271,8 @@ TEST_F(CalcPowTmpSizeV2Test, CalcPowTmpSize_WhenInputsAreAllScalarOrUbScalar) {
   node->inputs[0].attr.vectorized_strides = {s1, Symbol(1)};
   std::vector<std::unique_ptr<af::TmpBufDesc>> result = CalcPowTmpSizeV2(*node);
   ASSERT_EQ(result.size(), 1);
-  ASSERT_EQ(result[0]->size, sym::Min(af::Symbol(4) * s1 + af::Symbol(32 * 2), MAX_TMP_BUFFER_SIZE));
+  // 全标量分支为f32/bf16额外扩容Power DOUBLE_FLOAT_TECH scratch（3段*4B*alignCount=384B，pow.h left_tmp_buf）
+  ASSERT_EQ(result[0]->size, sym::Min(af::Symbol(4) * s1 + af::Symbol(32 * 2) + af::Symbol(384), MAX_TMP_BUFFER_SIZE));
   ASSERT_EQ(result[0]->life_time_axis_id, -1);
 }
 }  // namespace ascir

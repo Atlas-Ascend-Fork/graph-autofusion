@@ -188,6 +188,16 @@ class AscIrCodegen {
     (void)node;
     return true;
   }
+
+  // SIMT 实现需预留的 d-cache 字节数，参与动态 UB 预算与 tiling 预留；非 SIMT 实现返回 0
+  virtual int64_t GetSimtDcacheSize(const AscNode &node) const {
+    (void)node;
+    return 0;
+  }
+
+  virtual std::vector<std::string> LoadApiHeaderFiles(bool is_dynamic, [[maybe_unused]] bool is_cv_fusion) const {
+    return LoadApiHeaderFiles(is_dynamic);
+  }
 };
 
 class AscIrAtt {
@@ -238,6 +248,7 @@ class AscIrDef {
   void Init(const char *type, const char *def_file_path, int64_t line) const;
 
   const std::vector<std::pair<std::string, IrInputType>> &GetInputDefs() const;
+  const std::string &GetInputIrSymName(const std::string &ir_name) const;
   const std::vector<std::pair<std::string, IrOutputType>> &GetOutputDefs() const;
   bool HasDynamicOutput() const;
   void AppendInput(const string &name, IrInputType type) const;

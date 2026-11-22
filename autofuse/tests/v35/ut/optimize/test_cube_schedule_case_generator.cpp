@@ -13,9 +13,13 @@
 #include "ascir_ops_utils.h"
 #include "ascir_utils.h"
 #include "asc_graph_utils.h"
+#include "graph_utils.h"
 #include "ascir_ops.h"
+#include "ascgraph_info_complete.h"
 #include "task_generator/schedule_case_generator.h"
 #include "task_generator/cube_schedule_case_generator.h"
+#include "autoschedule/tiling_group.h"
+#include "common_utils.h"
 
 namespace schedule {
 using namespace optimize;
@@ -374,6 +378,93 @@ TEST_F(CubeScheduleCaseGeneratorTest, Test_Just_Matmul_Store) {
   ASSERT_EQ(tasks[0].grouped_graphs.size(), 1UL);
 }
 
+static void AddSecondCubeOutput(af::AscGraph &graph, bool shared_store) {
+  const auto cube = graph.FindNode("matmul");
+  const auto original_store = graph.FindNode("store");
+  ASSERT_NE(cube, nullptr);
+  ASSERT_NE(original_store, nullptr);
+  auto writeback = original_store;
+  if (!shared_store) {
+    Store store2("store2");
+    graph.AddNode(store2);
+    ASSERT_EQ(af::GraphUtils::AddEdge(cube->GetOutDataAnchor(0), graph.FindNode("store2")->GetInDataAnchor(0)),
+              af::GRAPH_SUCCESS);
+    store2.attr.sched = original_store->attr.sched;
+    store2.attr.api = original_store->attr.api;
+    store2.y.dtype = original_store->outputs[0].attr.dtype;
+    *store2.y.axis = original_store->outputs[0].attr.axis;
+    *store2.y.repeats = original_store->outputs[0].attr.repeats;
+    *store2.y.strides = original_store->outputs[0].attr.strides;
+    store2.ir_attr.SetOffset(af::ops::Zero);
+    writeback = graph.FindNode("store2");
+  }
+  Output output2("output2");
+  graph.AddNode(output2);
+  ASSERT_EQ(af::GraphUtils::AddEdge(writeback->GetOutDataAnchor(0), graph.FindNode("output2")->GetInDataAnchor(0)),
+            af::GRAPH_SUCCESS);
+  output2.y.dtype = original_store->outputs[0].attr.dtype;
+  output2.ir_attr.SetIndex(1);
+}
+
+TEST_F(CubeScheduleCaseGeneratorTest, MultipleCubeOutputsRequireVectorWriteback) {
+  for (const bool shared_store : {false, true}) {
+    SCOPED_TRACE(shared_store);
+    af::AscGraph graph("matmul_two_outputs");
+    ConstructJustMatMul(graph);
+    ASSERT_NO_FATAL_FAILURE(AddSecondCubeOutput(graph, shared_store));
+    const auto original_store = graph.FindNode("store");
+    std::vector<ScheduleTask> tasks;
+    optimize::CubeFusionCaseGenerator generator;
+    ASSERT_EQ(generator.GeneratorTask(graph, tasks, OptimizerOptions{}), af::SUCCESS);
+    bool has_common = false;
+    for (const auto &task : tasks) {
+      if (shared_store) {
+        ASSERT_NE(task.optimize_graph.FindNode("store_for_output2"), nullptr);
+      }
+      EXPECT_NE(task.cube_type, ascir::CubeTemplateType::kFixpip);
+      if (task.cube_type == ascir::CubeTemplateType::kCommon) {
+        has_common = true;
+        EXPECT_GT(task.grouped_graphs.size(), 1U);
+        const auto first = *task.optimize_graph.FindNode("output")->GetInDataNodes().begin();
+        const auto second = *task.optimize_graph.FindNode("output2")->GetInDataNodes().begin();
+        EXPECT_NE(first, second);
+        EXPECT_EQ(*first->GetInDataNodes().begin(), *second->GetInDataNodes().begin());
+      }
+    }
+    EXPECT_TRUE(has_common);
+    // Candidate normalization must not modify the caller's graph.
+    EXPECT_EQ(original_store->GetOutDataNodes().size(), shared_store ? 2U : 1U);
+  }
+}
+
+TEST_F(CubeScheduleCaseGeneratorTest, SharedCubeStorePreservesControlEdges) {
+  af::AscGraph graph("matmul_shared_store_control");
+  ConstructJustMatMul(graph);
+  ASSERT_NO_FATAL_FAILURE(AddSecondCubeOutput(graph, true));
+  const auto original_store = graph.FindNode("store");
+  ASSERT_EQ(
+      af::GraphUtils::AddEdge(graph.FindNode("data0")->GetOutControlAnchor(), original_store->GetInControlAnchor()),
+      af::GRAPH_SUCCESS);
+  ASSERT_EQ(
+      af::GraphUtils::AddEdge(original_store->GetOutControlAnchor(), graph.FindNode("output2")->GetInControlAnchor()),
+      af::GRAPH_SUCCESS);
+  // Check control preservation independently of connectivity-based candidate grouping.
+  std::vector<ScheduleTask> controlled_tasks;
+  optimize::CubeFusionCaseGenerator controlled_generator;
+  ASSERT_EQ(controlled_generator.GeneratorTask(graph, controlled_tasks, OptimizerOptions{}), af::SUCCESS);
+  ASSERT_FALSE(controlled_tasks.empty());
+  for (const auto &candidate : controlled_tasks) {
+    const auto copy = candidate.optimize_graph.FindNode("store_for_output2");
+    ASSERT_NE(copy, nullptr);
+    EXPECT_EQ(copy->attr.name, copy->GetName());
+    ASSERT_EQ(copy->GetInControlNodes().size(), 1U);
+    ASSERT_EQ(copy->GetOutControlNodes().size(), 1U);
+    EXPECT_EQ((*copy->GetInControlNodes().begin())->GetName(), "data0");
+    EXPECT_EQ((*copy->GetOutControlNodes().begin())->GetName(), "output2");
+  }
+  EXPECT_EQ(original_store->GetOutDataNodes().size(), 2U);
+}
+
 TEST_F(CubeScheduleCaseGeneratorTest, Test_MatMul_Add_Store) {
   af::AscGraph graph("matmul_add_store");
   ConstructMatMulAndAdd(graph);
@@ -384,6 +475,152 @@ TEST_F(CubeScheduleCaseGeneratorTest, Test_MatMul_Add_Store) {
   ASSERT_EQ(tasks.size(), 2UL);
   ASSERT_EQ(tasks[0].grouped_graphs.size(), 2UL);
   ASSERT_EQ(tasks[1].grouped_graphs.size(), 2UL);
+}
+
+TEST_F(CubeScheduleCaseGeneratorTest, PartitionCreatedNodesHaveCompleteApiInfo) {
+  af::AscGraph graph("matmul_partition_api_info");
+  ConstructMatMulAndAdd(graph);
+  ASSERT_EQ(optimize::AscGraphInfoComplete::CompleteApiInfo(graph), af::SUCCESS);
+  std::vector<ScheduleTask> tasks;
+  optimize::CubeFusionCaseGenerator generator;
+  ASSERT_EQ(generator.GeneratorTask(graph, tasks, OptimizerOptions{}), af::SUCCESS);
+
+  size_t workspace_count = 0UL;
+  size_t cube_load_count = 0UL;
+  for (const auto &task : tasks) {
+    for (const auto &subgraph : task.grouped_graphs) {
+      for (const auto &node : subgraph.GetAllNodes()) {
+        if (af::ops::IsOps<af::ascir_op::Workspace>(node)) {
+          ++workspace_count;
+          EXPECT_EQ(node->attr.api.type, af::ApiType::kAPITypeBuffer);
+          EXPECT_EQ(node->attr.api.compute_type, af::ComputeType::kComputeInvalid);
+        } else if (node->GetName().find("Cube_Load_") == 0UL) {
+          ++cube_load_count;
+          EXPECT_EQ(node->attr.api.type, af::ApiType::kAPITypeCompute);
+          EXPECT_EQ(node->attr.api.compute_type, af::ComputeType::kComputeLoad);
+        }
+      }
+    }
+  }
+  EXPECT_GT(workspace_count, 0UL);
+  EXPECT_GT(cube_load_count, 0UL);
+}
+
+void AddMBroadcastNode(af::AscGraph &graph, const af::AscNodePtr &mm, const af::AscNodePtr &broadcast,
+                       const std::vector<af::Expression> &full_shape) {
+  af::ascir_op::Broadcast first_op("cube_m_broadcast");
+  graph.AddNode(first_op);
+  auto first = graph.FindNode("cube_m_broadcast");
+  first->outputs[0].attr = broadcast->outputs[0].attr;
+  first->outputs[0].attr.repeats = {full_shape[0], af::ops::One};
+  first->outputs[0].attr.strides = {af::ops::One, af::ops::Zero};
+  first->attr.sched = broadcast->attr.sched;
+  first->attr.api.compute_type = af::ComputeType::kComputeBroadcast;
+  ASSERT_EQ(af::GraphUtils::RemoveEdge(mm->GetOutDataAnchor(0), broadcast->GetInDataAnchor(0)), af::GRAPH_SUCCESS);
+  ASSERT_EQ(af::GraphUtils::AddEdge(mm->GetOutDataAnchor(0), first->GetInDataAnchor(0)), af::GRAPH_SUCCESS);
+  ASSERT_EQ(af::GraphUtils::AddEdge(first->GetOutDataAnchor(0), broadcast->GetInDataAnchor(0)), af::GRAPH_SUCCESS);
+}
+
+void CheckCommonTradeoffScope(const std::vector<ScheduleTask> &tasks, bool broadcast_m) {
+  for (const auto &task : tasks) {
+    const bool expect_tradeoff = task.cube_type == ascir::CubeTemplateType::kCommon && broadcast_m;
+    if (expect_tradeoff) {
+      // The Common task contains the broadcast vector group and its paired cube group.
+      EXPECT_EQ(task.matmul_m_common_group_ids.size(), 2UL);
+    } else {
+      EXPECT_TRUE(task.matmul_m_common_group_ids.empty());
+    }
+  }
+}
+
+void BuildOutputBroadcastGraph(af::AscGraph &graph, int mask) {
+  const bool broadcast_m = (mask & 2) != 0;
+  const bool broadcast_n = (mask & 1) != 0;
+  ConstructMatMulAndAdd(graph);
+  auto mm = graph.FindNode("matmul");
+  auto add = graph.FindNode("add");
+  ASSERT_NE(mm, nullptr);
+  ASSERT_NE(add, nullptr);
+  const auto full_shape = add->outputs[0].attr.repeats;
+  mm->outputs[0].attr.repeats = {broadcast_m ? af::ops::One : full_shape[0],
+                                 broadcast_n ? af::ops::One : full_shape[1]};
+  mm->outputs[0].attr.strides = {broadcast_m ? af::ops::Zero : mm->outputs[0].attr.repeats[1],
+                                 broadcast_n ? af::ops::Zero : af::ops::One};
+  af::ascir_op::Broadcast broadcast_op("cube_n_broadcast");
+  graph.AddNode(broadcast_op);
+  auto broadcast = graph.FindNode("cube_n_broadcast");
+  broadcast->outputs[0].attr = add->outputs[0].attr;
+  broadcast->attr.sched = add->attr.sched;
+  broadcast->attr.api.compute_type = af::ComputeType::kComputeBroadcast;
+  ASSERT_EQ(af::GraphUtils::RemoveEdge(mm->GetOutDataAnchor(0), add->GetInDataAnchor(0)), af::GRAPH_SUCCESS);
+  ASSERT_EQ(af::GraphUtils::AddEdge(mm->GetOutDataAnchor(0), broadcast->GetInDataAnchor(0)), af::GRAPH_SUCCESS);
+  ASSERT_EQ(af::GraphUtils::AddEdge(broadcast->GetOutDataAnchor(0), add->GetInDataAnchor(0)), af::GRAPH_SUCCESS);
+  if (mask == 3) {
+    AddMBroadcastNode(graph, mm, broadcast, full_shape);
+  }
+  ASSERT_EQ(optimize::AscGraphInfoComplete::CompleteApiInfo(graph), af::SUCCESS);
+}
+
+void CheckOutputBroadcastTasks(const std::vector<ScheduleTask> &tasks, af::AscGraph &graph, int mask) {
+  const bool broadcast_m = (mask & 2) != 0;
+  auto mm = graph.FindNode("matmul");
+  auto broadcast = graph.FindNode("cube_n_broadcast");
+  ASSERT_NE(mm, nullptr);
+  ASSERT_NE(broadcast, nullptr);
+  const auto full_shape = broadcast->outputs[0].attr.repeats;
+  bool found_ub_broadcast = false;
+  bool found_common_broadcast = false;
+  CheckCommonTradeoffScope(tasks, broadcast_m);
+  for (const auto &task : tasks) {
+    if (task.cube_type != ascir::CubeTemplateType::kUBFuse && task.cube_type != ascir::CubeTemplateType::kCommon) {
+      continue;
+    }
+    for (const auto &subgraph : task.grouped_graphs) {
+      const auto brc = subgraph.FindNode("cube_n_broadcast");
+      if (brc == nullptr) {
+        continue;
+      }
+      // The real Broadcast stays visible to allocation and resource solving.
+      EXPECT_EQ(brc->outputs[0].attr.repeats, full_shape);
+      if (task.cube_type == ascir::CubeTemplateType::kUBFuse) {
+        found_ub_broadcast = true;
+        EXPECT_EQ(ascir::GetCvBroadcastShape(*brc), full_shape);
+        EXPECT_EQ(ascir::IsCvMBroadcast(*brc), broadcast_m);
+        if (mask == 3) {
+          EXPECT_EQ(subgraph.FindNode("cube_m_broadcast"), nullptr);
+          EXPECT_EQ(ascgen_utils::GetTemplateSemanticTransform(*brc), ascgen_utils::template_semantic::kBroadcastFold);
+        }
+        if (broadcast_m) {
+          optimize::autoschedule::AxisGroup group;
+          ASSERT_EQ(optimize::autoschedule::TilingGroup::GenTilingGroup(subgraph, group, false), af::SUCCESS);
+          const auto m_axis = ascir::GetCvBroadcastMAxis(*brc);
+          EXPECT_NE(std::find(group.n_group.begin(), group.n_group.end(), m_axis), group.n_group.end());
+          EXPECT_EQ(std::find(group.y_group.begin(), group.y_group.end(), m_axis), group.y_group.end());
+        }
+      } else {
+        found_common_broadcast = true;
+        EXPECT_TRUE(ascir::GetCvBroadcastShape(*brc).empty());
+        if (mask == 3) {
+          EXPECT_NE(subgraph.FindNode("cube_m_broadcast"), nullptr);
+        }
+      }
+    }
+  }
+  EXPECT_TRUE(found_ub_broadcast);
+  EXPECT_TRUE(found_common_broadcast);
+  EXPECT_TRUE(ascir::GetCvBroadcastShape(*broadcast).empty());
+  EXPECT_EQ(mm->outputs[0].attr.repeats[broadcast_m ? 0 : 1], af::ops::One);
+}
+
+TEST_F(CubeScheduleCaseGeneratorTest, OutputBroadcastKeepsExplicitBufferAndCommonCandidate) {
+  for (const int mask : {1, 2, 3}) {
+    af::AscGraph graph("matmul_n_broadcast");
+    BuildOutputBroadcastGraph(graph, mask);
+    std::vector<ScheduleTask> tasks;
+    optimize::CubeFusionCaseGenerator generator;
+    ASSERT_EQ(generator.GeneratorTask(graph, tasks, OptimizerOptions{}), af::SUCCESS);
+    CheckOutputBroadcastTasks(tasks, graph, mask);
+  }
 }
 
 TEST_F(CubeScheduleCaseGeneratorTest, Test_MatMul_Add_Shared_Data_Split) {

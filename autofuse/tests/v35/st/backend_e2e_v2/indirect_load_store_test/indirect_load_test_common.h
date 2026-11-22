@@ -65,6 +65,9 @@ extern "C" __global__ __aicore__ void user_add_gather(GM_ADDR input0, GM_ADDR in
 #elif defined(IL_USER_GATHER_SUM_TRANSPOSE)
 extern "C" __global__ __aicore__ void autofused_gather_sum_transpose_9d393a67d2eb1a45f6dd4ea95c860eac(
     GM_ADDR input0, GM_ADDR input1, GM_ADDR output, GM_ADDR workspace, GM_ADDR gm_tiling_data);
+#elif defined(IL_USER_EMBEDDING_MUL)
+extern "C" __global__ __aicore__ void autofused_embedding_mul_d7faa8b114b9ec412ddcfe3bad00fefa(
+    GM_ADDR index, GM_ADDR table, GM_ADDR other, GM_ADDR output, GM_ADDR workspace, GM_ADDR gm_tiling_data);
 #elif defined(IL_USER_ABS_EMBEDDING_SUM)
 extern "C" __global__ __aicore__ void autofused_abs_embedding_sum_1ee65c13970c2252fddcc2b670e5212d(
     GM_ADDR input0, GM_ADDR input1, GM_ADDR output, GM_ADDR workspace, GM_ADDR gm_tiling_data);

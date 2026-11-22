@@ -81,8 +81,8 @@ __simd_vf__ inline void FrexpImplVF(__ubuf__ uint32_t *mantissaUb, __ubuf__ int3
     Reg::Or(mantFieldSave, mantFieldSave, frexpMantBiasReg, fullMask);
     Reg::Select(mantReg, mantFieldSave, mantReg, subnormOnlyMask);
 
-    // Handle zero: mantissa = 0, exponent = 0
-    Reg::Select(mantReg, zeroReg, mantReg, zeroMask);
+    // Handle zero: mantissa preserves the input sign, exponent = 0
+    Reg::Select(mantReg, signField, mantReg, zeroMask);
     Reg::Select((Reg::RegTensor<int32_t> &)(expField), (Reg::RegTensor<int32_t> &)(zeroReg),
                 (Reg::RegTensor<int32_t> &)(expField), zeroMask);
 

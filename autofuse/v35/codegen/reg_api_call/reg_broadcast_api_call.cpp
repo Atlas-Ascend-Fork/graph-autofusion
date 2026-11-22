@@ -8,9 +8,11 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 #include "reg_broadcast_api_call.h"
+#include "common_utils.h"
 #include <limits>
 #include <sstream>
 #include "ascir_ops.h"
+#include "ascir_ops_utils.h"
 #include "common/ge_common/debug/log.h"
 #include "api_call/utils/api_call_utils.h"
 #include "api_call/utils/api_call_factory.h"
@@ -20,12 +22,50 @@
 #include "reg_api_call_utils.h"
 
 namespace codegen {
+namespace semantic = ascgen_utils::template_semantic;
 using namespace std;
 using namespace ascgen_utils;
 
 namespace {
 constexpr const char *kAscirNodeParams = "AscirNodeParams";
 constexpr const char *kCompactPddingMode = "AscendC::PaddingMode::Compact";
+
+bool IsCubeScalarToFloatCast(const af::AscNodePtr &broadcast, const TPipe &tpipe, const Tensor &input) {
+  if (input.dtype != af::DT_FLOAT || input.position != af::Position::kPositionVecCalc ||
+      ascir::GetCvBroadcastShape(*broadcast).empty() || broadcast->GetInDataNodesSize() != 1U) {
+    return false;
+  }
+  const auto cast = std::dynamic_pointer_cast<af::AscNode>(*broadcast->GetInDataNodes().begin());
+  return cast != nullptr && af::ops::IsOps<af::ascir_op::Cast>(cast) && cast->inputs.Size() == 1U &&
+         cast->inputs[0].attr.mem.tensor_id == tpipe.cube_output_tensor_id &&
+         (cast->inputs[0].attr.dtype == af::DT_FLOAT16 ||
+          (tpipe.cv_split_nm_columns && cast->inputs[0].attr.dtype == af::DT_BF16));
+}
+
+std::string GetBroadcastSemanticFeature(const Tensor &input, const Tensor &output) {
+  if (IsBroadcastConstantTensor(input)) {
+    return semantic::kBroadcastScalar;
+  }
+  const size_t axis_count = std::min(input.vectorized_axis.size(), output.vectorized_axis.size());
+  bool has_non_tail_broadcast = false;
+  bool has_tail_broadcast = false;
+  for (size_t pos = 0UL; pos < axis_count; ++pos) {
+    const auto input_size = input.axis_size[input.vectorized_axis_pos[pos]];
+    const auto output_size = output.axis_size[output.vectorized_axis_pos[pos]];
+    if (af::SymbolicUtils::StaticCheckEq(input_size, output_size) == af::TriBool::kTrue) {
+      continue;
+    }
+    if (pos + 1UL == axis_count) {
+      has_tail_broadcast = true;
+    } else {
+      has_non_tail_broadcast = true;
+    }
+  }
+  if (has_non_tail_broadcast) {
+    return semantic::kBroadcastNonTail;
+  }
+  return has_tail_broadcast ? semantic::kBroadcastTail : semantic::kBroadcast;
+}
 
 af::Status ResetBroadcastNodeParams(const af::AscNodePtr &node, ascir_param::BroadcastNodeParams *&broadcast_params) {
   GE_ASSERT_NOTNULL(node);
@@ -185,14 +225,102 @@ Status BroadcastRegApiCall::Generate(const TPipe &tpipe, const std::vector<ascir
   const auto &x = inputs[0].get();
   const auto &y = outputs[0].get();
   (void)RegisterBasicDumpParam(this->api_name_, inputs, outputs);
+  GE_ASSERT_SUCCESS(SetSemanticFeature(GetBroadcastSemanticFeature(x, y)));
+  const bool batch_n = tpipe.cv_n_batch && !ascir::GetCvBroadcastShape(*this->node).empty();
+  if (tpipe.cv_output_broadcast && (batch_n || !IsBroadcastConstantTensor(x)) &&
+      (tpipe.CvRows(x) != tpipe.CvRows(y) || tpipe.CvColumns(x) != tpipe.CvColumns(y))) {
+    // Use the normal UB-to-UB broadcast API and its synchronization, retaining
+    // the graph's allocated output. The callback owns the row/N-tile loops.
+    if (!tpipe.cv_m_broadcast && tpipe.CvColumns(x) != tpipe.CvColumns(y)) {
+      GE_ASSERT_SUCCESS(SetSemanticFeature(semantic::kBroadcastTail));
+    }
+    std::string dtype;
+    GE_ASSERT_SUCCESS(Tensor::DtypeName(y.dtype, dtype));
+    std::stringstream ss;
+    const auto src_rows = tpipe.cv_m_broadcast ? tpipe.CvRows(x) : "1";
+    const auto dst_rows = tpipe.cv_m_broadcast ? tpipe.CvRows(y) : "1";
+    const auto src_columns =
+        tpipe.IsCvNarrowTensor(x) ? "1U" : "static_cast<uint32_t>(KernelUtils::BlkAlign<" + dtype + ">(curAivN))";
+    const auto dst_columns = "static_cast<uint32_t>(KernelUtils::BlkAlign<" + dtype + ">(" + tpipe.CvColumns(y) + "))";
+    ss << "const uint32_t cv_src_shape[2] = {" << (src_rows == "1" ? "1U" : "static_cast<uint32_t>(curAivM)") << ", "
+       << src_columns << "};\n";
+    ss << "const uint32_t cv_dst_shape[2] = {" << (dst_rows == "1" ? "1U" : "static_cast<uint32_t>(curAivM)") << ", "
+       << dst_columns << "};\n";
+    if (batch_n) {
+      // BroadcastExtend reads a packed source. The Cube fragment and narrow
+      // Cast tensors instead have a padded stride between row scalars.
+      const auto src_stride =
+          x.id == tpipe.cube_output_tensor_id ? "curAlignN" : "KernelUtils::BlkAlign<" + dtype + ">(1)";
+      ss << "for (int64_t cv_row = 0; cv_row < curAivM; ++cv_row) {\n";
+      ss << this->api_name_ << "<" << dtype << ",2>(" << y << "[cv_row * cv_dst_shape[1]], " << x << "[cv_row * "
+         << src_stride << "], cv_dst_shape, cv_src_shape);\n}\n";
+    } else {
+      ss << this->api_name_ << "<" << dtype << ",2>(" << y << ", " << x << ", cv_dst_shape, cv_src_shape);\n";
+    }
+    ss << y.actual_size << " = " << (batch_n ? "curAivM" : dst_rows) << " * KernelUtils::BlkAlign<" << dtype << ">("
+       << tpipe.CvColumns(y) << ");\n";
+    result = ss.str();
+    ascir_param::BroadcastNodeParams *params = nullptr;
+    GE_ASSERT_SUCCESS(ResetBroadcastNodeParams(this->node, params));
+    params->valid = true;
+    constexpr int32_t kCvBroadcastRank = 2;
+    params->const_rank = kCvBroadcastRank;
+    const auto output_shape = GetBroadcastShape(tpipe, y, y, false, false);
+    GE_ASSERT_TRUE(!output_shape.empty());
+    const ascir_param::ParamExprLeaf one{af::Symbol(1U), ascir_param::ParamExprRole::kSemantic};
+    if (batch_n) {
+      // ATT binds shape expressions to the scheduled vector axes. The device
+      // API still takes rank two even when M is an outer loop axis.
+      GE_ASSERT_EQ(x.vectorized_axis.size(), output_shape.size());
+      params->src_shape.assign(output_shape.size(), one);
+      params->dst_shape = params->src_shape;
+      params->dst_shape.back() = output_shape.back();
+      return af::SUCCESS;
+    }
+    const auto input_shape = GetBroadcastShape(tpipe, x, y, true, false);
+    GE_ASSERT_EQ(input_shape.size(), static_cast<size_t>(kCvBroadcastRank));
+    params->src_shape = input_shape;
+    params->dst_shape = output_shape;
+    if (!tpipe.cv_m_broadcast) {
+      params->src_shape.front() = one;
+      params->dst_shape.front() = one;
+    }
+    return af::SUCCESS;
+  }
   if (IsBroadcastConstantTensor(x)) {
     int64_t id = -1;
-    BroadcastScalar(tpipe, current_axis, x, y, id, result, false);
+    const bool vector_scalar_type =
+        x.dtype == af::DT_FLOAT || (tpipe.cv_split_nm_columns && (x.dtype == af::DT_FLOAT16 || x.dtype == af::DT_BF16));
+    const bool vector_cube_scalar =
+        tpipe.cv_output_broadcast && tpipe.cv_m_broadcast && tpipe.cv_broadcast_n &&
+        ((!tpipe.is_inductor && !tpipe.is_dynamic) || tpipe.cv_split_nm_columns) && vector_scalar_type &&
+        (x.id == tpipe.cube_output_tensor_id || IsCubeScalarToFloatCast(this->node, tpipe, x));
+    if (tpipe.cv_output_broadcast) {
+      // The callback already selects the UB tile. Fill its padded footprint
+      // once; graph-loop offsets can contain tiling fields unavailable here.
+      std::string dtype;
+      GE_ASSERT_SUCCESS(Tensor::DtypeName(y.dtype, dtype));
+      std::stringstream ss;
+      ss << y.actual_size << " = " << tpipe.CvRows(y) << " * KernelUtils::BlkAlign<" << dtype << ">("
+         << tpipe.CvColumns(y) << ");\n";
+      if (vector_cube_scalar) {
+        // Read on PIPE_V, where the Cube wait and the Cast input barrier are ordered.
+        ss << "const uint32_t cv_src_shape[1] = {1U};\n"
+           << "const uint32_t cv_dst_shape[1] = {static_cast<uint32_t>(" << y.actual_size << ")};\n"
+           << this->api_name_ << "<" << dtype << ",1>(" << y << ", " << x << ", cv_dst_shape, cv_src_shape);\n";
+      } else {
+        BroadcastScalar(tpipe, {}, x, y, id, result, false);
+        ss << result;
+      }
+      result = ss.str();
+    } else {
+      BroadcastScalar(tpipe, current_axis, x, y, id, result, false);
+    }
     ascir_param::BroadcastNodeParams *broadcast_params = nullptr;
     if (ResetBroadcastNodeParams(this->node, broadcast_params) == af::SUCCESS && broadcast_params != nullptr) {
       broadcast_params->valid = true;
       broadcast_params->is_scalar = true;
-      broadcast_params->const_rank = -1;
+      broadcast_params->const_rank = vector_cube_scalar ? 1 : -1;
       GE_ASSERT_SUCCESS(GetBroadcastScalarDuplicateCount(tpipe, y, broadcast_params->duplicate_count));
       broadcast_params->duplicate_count_role = ascir_param::ParamExprRole::kActualSize;
     }
@@ -218,23 +346,29 @@ Status BroadcastRegApiCall::Generate(const TPipe &tpipe, const std::vector<ascir
     return af::FAILED;
   }
   std::stringstream ss;
-  // 生成参数 const uint32_t *dst_shape;
-  std::stringstream params_name;
   DataCopyParams data_copy_param;
   (void)CalculateDmaParams(tpipe, y, y, data_copy_param);
   const auto has_transpose = IsGraphHasTransposeNode(this->node);
   const bool is_compact_padding = GetPaddingMode(y, data_copy_param, has_transpose) == kCompactPddingMode;
+  const auto &row = tpipe.common_m_row_broadcast;
+  if (row.AppliesTo(y.id)) {
+    // Keep the scheduled lifetime and synchronization. The aligned VF
+    // reads the source buffer directly through the broadcast output handle.
+    ss << "if constexpr (" << row.VectorAlignmentCondition() << ") {\n" << y << " = " << x << ";\n} else {\n";
+  }
+
   GenParams(tpipe, x, y, ss, false, is_compact_padding);
-  // 生成参数 const uint32_t *src_shape;
   GenParams(tpipe, x, y, ss, true, is_compact_padding);
   std::string dtype_name;
   Tensor::DtypeName(x.dtype, dtype_name);
   ss << this->api_name_ << "<" << dtype_name << "," << x.vectorized_axis.size() << ">(";
-  // 传入参数  const LocalTensor<T> &dst;
   ss << y << "[" << tpipe.tiler.TensorVectorizedOffset(current_axis, y) << "], ";
-  // 传入参数  const LocalTensor<T> &src;
   ss << x << "[" << tpipe.tiler.TensorVectorizedOffset(current_axis, x) << "], ";
   ss << "dst_shape_" << x.id << "_brc_to_" << y.id << ", src_shape_" << x.id << "_brc_to_" << y.id << ");\n";
+  if (row.AppliesTo(y.id)) {
+    ss << "}\n";
+    GE_ASSERT_SUCCESS(SetSemanticFeature(semantic::kCommonBroadcastRowAdaptive));
+  }
 
   result = ss.str();
   ascir_param::BroadcastNodeParams *broadcast_params = nullptr;

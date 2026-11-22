@@ -15,6 +15,7 @@
 #include <set>
 #include "ascendc_ir.h"
 #include "indirect_load_utils.h"
+#include "arg_reduce_utils.h"
 #include "reg_func/default_reg_func.h"
 #include "reg_func/default_reg_func_v2.h"
 #include "symbolizer/symbolic_utils.h"
@@ -56,6 +57,9 @@ bool HasSameSimtBinaryDtype(const AscNode &node) {
 bool IsSimtFloatDtype(ge::DataType dtype) {
   return dtype == DT_FLOAT || dtype == DT_FLOAT16 || dtype == DT_BF16;
 }
+
+// v2 SIMT 实现运行时按 1024 线程并发读写，需从动态 UB 中预留的 d-cache 大小
+constexpr int64_t kSimtDcacheSize = 40 * 1024;
 
 const char *GetSimtDtypeName(ge::DataType dtype) {
   static constexpr std::pair<ge::DataType, const char *> kDtypeNames[] = {
@@ -406,6 +410,9 @@ class BroadcastAscIrCodegenImplV2 : public AscIrCodegenV2 {
   }
 
   [[nodiscard]] bool IsVectorFunctionSupported(const AscNode &node) const override {
+    if (!::ascir::GetCvBroadcastShape(node).empty()) {
+      return false;  // Keep the budgeted materialization at the CV boundary.
+    }
     AscNodeInputs node_inputs = node.inputs;
     auto vectorized_strides = node_inputs[0].attr.vectorized_strides;
     return std::all_of(vectorized_strides.begin(), vectorized_strides.end(), [](const Expression &i) {
@@ -520,7 +527,11 @@ class CastAscIrCodegenImplV2 : public AscIrCodegenV2 {
         {DT_INT32, DT_INT64},   {DT_INT32, DT_INT16},   {DT_INT32, DT_FLOAT16}, {DT_INT32, DT_UINT32},
         {DT_INT64, DT_INT32},   {DT_INT64, DT_FLOAT},   {DT_INT64, DT_UINT8},   {DT_INT64, DT_UINT64},
         {DT_INT64, DT_FLOAT16}, {DT_INT64, DT_BF16},    {DT_BF16, DT_FLOAT},    {DT_BF16, DT_INT32},
-        {DT_FLOAT, DT_BOOL},
+        {DT_FLOAT, DT_BOOL},    {DT_INT8, DT_INT32},    {DT_INT16, DT_INT32},   {DT_INT8, DT_INT64},
+        {DT_INT16, DT_INT64},   {DT_UINT8, DT_BOOL},    {DT_UINT16, DT_BOOL},   {DT_UINT32, DT_BOOL},
+        {DT_UINT64, DT_BOOL},   {DT_INT32, DT_UINT8},   {DT_INT32, DT_INT8},    {DT_INT64, DT_INT16},
+        {DT_INT64, DT_INT8},    {DT_UINT16, DT_FLOAT},  {DT_UINT32, DT_FLOAT},  {DT_UINT64, DT_FLOAT},
+        {DT_FLOAT, DT_UINT8},   {DT_FLOAT, DT_UINT16},
     };
     const std::pair<ge::DataType, ge::DataType> pair{GetSimtInputDtype(node), GetSimtOutputDtype(node)};
     return std::find(std::begin(kSupportedPairs), std::end(kSupportedPairs), pair) != std::end(kSupportedPairs);
@@ -618,7 +629,7 @@ class AbsAscIrCodegenImplV2 : public AscIrCodegenV2 {
   }
   // 如果需要插入cast节点，返回cast的目的类型
   [[nodiscard]] std::pair<std::vector<ge::DataType>, std::vector<ge::DataType>> GetConversionDtype(
-      const AscNode &node) {
+      const AscNode &node) override {
     std::map<ge::DataType, ge::DataType> dtype_conversion_map = {{DT_BF16, DT_FLOAT}, {DT_UINT8, DT_INT16}};
     return GetConversionFromDtypeMap(node, dtype_conversion_map);
   }
@@ -919,6 +930,37 @@ class I0eAscIrCodegenImplV2 : public SimtFloatUnaryAscIrCodegenImplV2 {
   }
   [[nodiscard]] std::vector<std::string> LoadApiHeaderFiles([[maybe_unused]] bool is_dynamic) const override {
     return {"modified_bessel_utils_reg_base.h", "modified_bessel_i0_reg_base.h", "i0e_reg_base.h"};
+  }
+  [[nodiscard]] std::vector<std::string> IncludeApiHeaderFiles() const override {
+    return {
+        "basic_api/reg_compute/kernel_reg_compute_intf.h",
+    };
+  }
+  [[nodiscard]] bool IsNodeValid(const AscNode &node) const override {
+    GE_ASSERT_TRUE(!IsNodeHasScalarInput(node), "Node %s[%s] does not support scalar input", node.GetTypePtr(),
+                   node.GetNamePtr());
+    GE_ASSERT_SUCCESS(ValidateShapeConsistencyWithSingleOutput(node), "Node %s[%s] check shape consistency failed",
+                      node.GetTypePtr(), node.GetNamePtr());
+    return true;
+  }
+};
+
+class I1AscIrCodegenImplV2 : public SimtFloatUnaryAscIrCodegenImplV2 {
+ public:
+  [[nodiscard]] std::vector<std::unique_ptr<TmpBufDesc>> CalcTmpBufSize(const AscNode &node) override {
+    return CalcVoidTmpSizeV2(node);
+  }
+  [[nodiscard]] std::string GetApiCallName() const override {
+    return "UnaryApiTmpCall";
+  }
+  [[nodiscard]] std::string GetApiName() const override {
+    return "I1Extend";
+  }
+  [[nodiscard]] std::string GetSimtScalarApiName() const override {
+    return "j1";
+  }
+  [[nodiscard]] std::vector<std::string> LoadApiHeaderFiles([[maybe_unused]] bool is_dynamic) const override {
+    return {"i1_reg_base.h"};
   }
   [[nodiscard]] std::vector<std::string> IncludeApiHeaderFiles() const override {
     return {
@@ -1745,17 +1787,26 @@ class AiryAiAscIrCodegenImplV2 : public AscIrCodegenV2 {
 
 class ErfinvAscIrCodegenImplV2 : public SimtFloatUnaryAscIrCodegenImplV2 {
  public:
+  [[nodiscard]] int64_t GetSimtDcacheSize([[maybe_unused]] const AscNode &node) const override {
+    return kSimtDcacheSize;
+  }
   [[nodiscard]] std::string GetApiCallName() const override {
     return "UnaryApiCall";
   }
   [[nodiscard]] std::string GetApiName() const override {
-    return "Erfinv";
+    return "ErfinvExtend";
   }
   [[nodiscard]] std::string GetSimtScalarApiName() const override {
     return "Erfinv";
   }
   [[nodiscard]] std::vector<std::string> LoadApiHeaderFiles([[maybe_unused]] bool is_dynamic) const override {
     return {"erfinv_reg_base.h"};
+  }
+  [[nodiscard]] std::vector<std::string> IncludeApiHeaderFiles() const override {
+    return {
+        "simt_api/cpp/kernel_simt_utils.h",
+        "simt_api/math_functions.h",
+    };
   }
   [[nodiscard]] bool IsNodeValid(const AscNode &node) const override {
     GE_ASSERT_TRUE(!IsNodeHasScalarInput(node), "Node %s[%s] does not support scalar input", node.GetTypePtr(),
@@ -1957,6 +2008,9 @@ class Expm1AscIrCodegenImplV2 : public SimtFloatUnaryAscIrCodegenImplV2 {
   [[nodiscard]] std::string GetSimtScalarApiName() const override {
     return "Expm1";
   }
+  [[nodiscard]] int64_t GetSimtDcacheSize([[maybe_unused]] const AscNode &node) const override {
+    return kSimtDcacheSize;
+  }
   [[nodiscard]] std::vector<std::string> LoadApiHeaderFiles([[maybe_unused]] bool is_dynamic) const override {
     return {"expm1_reg_base.h"};
   }
@@ -2022,7 +2076,10 @@ class LShiftAscIrCodegenImplV2 : public AscIrCodegenV2 {
     return "BinaryApiCallV2";
   }
   [[nodiscard]] std::string GetApiName() const override {
-    return "ShiftLeft";
+    return "ShiftLeftExtend";
+  }
+  [[nodiscard]] std::vector<std::string> LoadApiHeaderFiles([[maybe_unused]] bool is_dynamic) const override {
+    return {"shift_reg_base.h"};
   }
   [[nodiscard]] std::vector<std::string> IncludeApiHeaderFiles() const override {
     return {
@@ -2040,6 +2097,9 @@ class LShiftAscIrCodegenImplV2 : public AscIrCodegenV2 {
 
 class ModAscIrCodegenImplV2 : public AscIrCodegenV2 {
  public:
+  [[nodiscard]] int64_t GetSimtDcacheSize([[maybe_unused]] const AscNode &node) const override {
+    return kSimtDcacheSize;
+  }
   [[nodiscard]] std::vector<std::unique_ptr<TmpBufDesc>> CalcTmpBufSize(const AscNode &node) override {
     return CalcVoidTmpSizeV2(node);
   }
@@ -2766,6 +2826,18 @@ class ProdAscIrCodegenImplV2 : public AscIrCodegenV2 {
   [[nodiscard]] std::vector<std::string> LoadApiHeaderFiles([[maybe_unused]] bool is_dynamic) const override {
     return {"reduce_init_reg_base.h", "reduce_extend_reg_base.h"};
   }
+  [[nodiscard]] std::pair<std::vector<ge::DataType>, std::vector<ge::DataType>> GetConversionDtype(
+      const AscNode &node) {
+    const std::map<ge::DataType, ge::DataType> prod_dtype_map = {{ge::DataType::DT_INT8, ge::DataType::DT_INT16}};
+    return GetConversionFromDtypeMap(node, prod_dtype_map);
+  }
+  [[nodiscard]] std::vector<std::vector<ge::DataType>> GetOutputConversionPath(const AscNode &node) override {
+    AscNodeOutputs node_outputs = node.outputs;
+    if (node_outputs().empty() || node_outputs[0].attr.dtype != ge::DataType::DT_INT8) {
+      return {};
+    }
+    return {{ge::DataType::DT_UINT8, ge::DataType::DT_INT8}};
+  }
   [[nodiscard]] std::vector<std::string> IncludeApiHeaderFiles() const override {
     return {
         "adv_api/reduce/reduce.h",
@@ -3318,6 +3390,20 @@ class MulAscIrCodegenImplV2 : public AscIrCodegenV2 {
                                                                 {ge::DataType::DT_UINT8, ge::DataType::DT_INT16}};
     return GetConversionFromDtypeMap(node, mul_dtype_map);
   }
+  [[nodiscard]] std::vector<std::vector<ge::DataType>> GetOutputConversionPath(const AscNode &node) override {
+    AscNodeOutputs node_outputs = node.outputs;
+    if (node_outputs().empty() || node_outputs[0].attr.dtype != ge::DataType::DT_INT8) {
+      return {};
+    }
+    const auto input_nodes = node.GetInDataNodes();
+    const auto producer = std::find_if(input_nodes.begin(), input_nodes.end(), [](const NodePtr &input_node) {
+      return input_node != nullptr && input_node->GetType() == "Prod";
+    });
+    if (producer == input_nodes.end()) {
+      return {};
+    }
+    return {{ge::DataType::DT_UINT8, ge::DataType::DT_INT8}};
+  }
   [[nodiscard]] std::vector<std::string> IncludeApiHeaderFiles() const override {
     return {
         "basic_api/kernel_operator_vec_binary_intf.h",
@@ -3555,7 +3641,9 @@ class WhereAscIrCodegenImplV2 : public AscIrCodegenV2 {
     bool value_dtype_supported = output_dtype != DT_BOOL && GetSimtDtypeName(output_dtype) != nullptr;
     if (node.GetType() == "Select") {
       value_dtype_supported = output_dtype == DT_FLOAT16 || output_dtype == DT_FLOAT || output_dtype == DT_BF16 ||
-                              output_dtype == DT_INT16 || output_dtype == DT_INT32 || output_dtype == DT_INT64;
+                              output_dtype == DT_INT16 || output_dtype == DT_INT32 || output_dtype == DT_INT64 ||
+                              output_dtype == DT_INT8 || output_dtype == DT_UINT8 || output_dtype == DT_UINT16 ||
+                              output_dtype == DT_UINT32 || output_dtype == DT_UINT64;
     }
     return (mask_dtype == DT_BOOL || mask_dtype == DT_UINT8) && mutable_node.inputs[1].attr.dtype == output_dtype &&
            mutable_node.inputs[2].attr.dtype == output_dtype && value_dtype_supported;
@@ -3767,6 +3855,9 @@ class SplitAscIrCodegenImplV2 : public AscIrCodegenV2 {
 /*********************************************************************************/
 class GatherAscIrCodegenImplV2 : public AscIrCodegenV2 {
  public:
+  [[nodiscard]] int64_t GetSimtDcacheSize([[maybe_unused]] const AscNode &node) const override {
+    return kSimtDcacheSize;
+  }
   [[nodiscard]] std::vector<std::unique_ptr<TmpBufDesc>> CalcTmpBufSize(const AscNode &node) override {
     return CalcGatherTmpSizeV2(node);
   }
@@ -3796,6 +3887,75 @@ class GatherAscIrCodegenImplV2 : public AscIrCodegenV2 {
 };
 /*********************************************************************************/
 namespace {
+const af::Axis *FindNodeOwnerAxis(const AscNode &node, af::AxisId axis_id) {
+  const auto compute_graph = node.GetOwnerComputeGraph();
+  if (compute_graph == nullptr) {
+    return nullptr;
+  }
+  const auto *graph_attr = compute_graph->GetAttrsGroup<af::AscGraphAttr>();
+  if (graph_attr == nullptr || axis_id < 0L || static_cast<size_t>(axis_id) >= graph_attr->axis.size()) {
+    return nullptr;
+  }
+  const auto &axis = graph_attr->axis[static_cast<size_t>(axis_id)];
+  return axis == nullptr ? nullptr : axis.get();
+}
+
+// 判断输出视图 dim 对应的轴是否为窗口迭代轴：窗口迭代轴（tile_outer）及其派生的 block 切分轴
+// （block_outer/block_inner）仅承载串行窗口循环计数，不增加单次调用的 tmp 驻留量，静态估算应
+// 跳过；原始 tile_inner 不派生自 tile_outer（from 链不触及窗口轴），承载单次调用驻留量，必须
+// 保留。轴信息不可解析时不跳过，保持安全上界。
+bool IsWindowIterAxis(const AscNode &node, af::AxisId axis_id, const std::vector<af::AxisId> &window_iter_axes) {
+  const auto is_window_axis = [&window_iter_axes](af::AxisId candidate) {
+    return std::find(window_iter_axes.begin(), window_iter_axes.end(), candidate) != window_iter_axes.end();
+  };
+  if (is_window_axis(axis_id)) {
+    return true;
+  }
+  const auto *axis = FindNodeOwnerAxis(node, axis_id);
+  if (axis == nullptr ||
+      (axis->type != af::Axis::Type::kAxisTypeBlockOuter && axis->type != af::Axis::Type::kAxisTypeBlockInner &&
+       axis->type != af::Axis::Type::kAxisTypeTileOuter)) {
+    return false;
+  }
+  std::vector<af::AxisId> pending = axis->from;
+  std::set<af::AxisId> visited{axis_id};
+  while (!pending.empty()) {
+    const af::AxisId current = pending.back();
+    pending.pop_back();
+    if (is_window_axis(current)) {
+      return true;
+    }
+    if (visited.insert(current).second) {
+      const auto *from_axis = FindNodeOwnerAxis(node, current);
+      if (from_axis != nullptr) {
+        pending.insert(pending.end(), from_axis->from.begin(), from_axis->from.end());
+      }
+    }
+  }
+  return false;
+}
+
+// [SIMD offsets 单次调用驻留] offsets 在 API 内按批次复用，驻留为排除串行循环轴
+// （block 切分/每核 tile 轮次）后的元素积。逻辑 repeats 按全输出元素计会把大输出
+// 的 SIMD 候选误杀（实际驻留远小于该上界）。轴不可解析时回退逻辑 repeats。
+bool TryCalcIndirectLoadSimdOffsetsSize(const AscNode &node, const std::vector<af::AxisId> &axis_ids,
+                                        Expression &offset_size) {
+  Expression size = Symbol(sizeof(uint32_t));
+  for (const af::AxisId axis_id : axis_ids) {
+    const auto *axis = FindNodeOwnerAxis(node, axis_id);
+    if (axis == nullptr) {
+      return false;
+    }
+    if (axis->type == af::Axis::Type::kAxisTypeBlockOuter || axis->type == af::Axis::Type::kAxisTypeBlockInner ||
+        axis->type == af::Axis::Type::kAxisTypeTileOuter) {
+      continue;  // 串行循环计数轴（多核分块/每核 tile 轮次），不进入单次调用驻留
+    }
+    size = size * axis->size;
+  }
+  offset_size = size;
+  return true;
+}
+
 bool CalcIndirectLoadSkTmpSize(const AscNode &node, const Expression &offset_size, Expression &tmp_size) {
   constexpr uint32_t kUbBlockAlignBytes = 32U;
   auto inputs = node.inputs;
@@ -3827,9 +3987,17 @@ bool CalcIndirectLoadSkTmpSize(const AscNode &node, const Expression &offset_siz
     return false;
   }
   const size_t axis_index = static_cast<size_t>(axis < 0L ? axis + rank : axis);
+  // SK tmp 由窗口循环串行复用：outer_count 取单次 API 调用驻留的 outer 行数（window_outer_count，
+  // 即固定 tile_inner 尺寸，不含每核串行循环次数）。
+  // window_iter_axes 为空（非 SK 填充路径/退化 outer/老节点）时回退全量 outer 积，与历史行为一致。
+  // 注意 Expression 默认构造为合法的空名符号，IsValid 恒真，不能作为"未设置"哨兵。
   Expression outer_count = Symbol(1);
-  for (size_t dim = 0UL; dim < axis_index; ++dim) {
-    outer_count = outer_count * index_repeats[dim];
+  if (!logical_view.window_iter_axes.empty()) {
+    outer_count = logical_view.window_outer_count;
+  } else {
+    for (size_t dim = 0UL; dim < axis_index; ++dim) {
+      outer_count = outer_count * index_repeats[dim];
+    }
   }
   Expression input_slice_count = Symbol(1);
   for (size_t dim = axis_index; dim < index_repeats.size(); ++dim) {
@@ -3865,11 +4033,38 @@ class IndirectLoadAscIrCodegenImplV2 : public AscIrCodegenV2 {
       // SIMD uses an offsets buffer, SK uses an input cache and offsets buffer, while SIMT accesses GM directly.
       return {};
     }
+    // dense/register-gather/gather-api 的 offsets 走寄存器寻址，不消费 API 级 tmp；
+    // 最终形态可证明非 strided 时不分配（判定见 SimdOffsetsTmpRequired，保守保留）。
+    // SK 的 tmp 含输入缓存，不受影响。
+    if (template_id == ::ascir::TemplateId::kIndirectLoadSimd &&
+        !::ascgen_utils::indirect_load::SimdOffsetsTmpRequired(node)) {
+      return {};
+    }
     auto node_outputs = node.outputs;
     const auto &y = node_outputs[0].attr;
+    ascgen_utils::indirect_load::TemplateLogicalView logical_view;
+    const auto op_desc = node.GetOpDesc();
+    if (op_desc != nullptr) {
+      logical_view = op_desc->TryGetExtAttr(ascgen_utils::indirect_load::kTemplateLogicalViewAttr,
+                                            ascgen_utils::indirect_load::TemplateLogicalView{});
+    }
+    // offsets 与 input staging 同块布局，同样按单次调用驻留：跳过窗口迭代轴及其派生的 block 切分轴
+    // （串行循环计数），保留原始 tile_inner 与窗口内输出维度。窗口语义仅由 SK 填充，按模板防御性
+    // 门控；无窗口语义时表达式与历史行为逐字节一致。
+    const bool has_window_iter_axes = template_id == ::ascir::TemplateId::kIndirectLoadSK &&
+                                      !logical_view.window_iter_axes.empty() && y.axis.size() == y.repeats.size();
     Expression offset_size = Symbol(sizeof(uint32_t));
-    for (const auto &repeat : y.repeats) {
-      offset_size = offset_size * repeat;
+    if (template_id == ::ascir::TemplateId::kIndirectLoadSimd && y.axis.size() == y.repeats.size() &&
+        TryCalcIndirectLoadSimdOffsetsSize(node, y.axis, offset_size)) {
+      // SIMD offsets 按单次调用驻留计算（见 TryCalcIndirectLoadSimdOffsetsSize 注释）；
+      // dense 与降级 strided 的单次调用元素集相同，公式对两形态一致成立。
+    } else {
+      for (size_t dim = 0UL; dim < y.repeats.size(); ++dim) {
+        if (has_window_iter_axes && IsWindowIterAxis(node, y.axis[dim], logical_view.window_iter_axes)) {
+          continue;
+        }
+        offset_size = offset_size * y.repeats[dim];
+      }
     }
     Expression tmp_size = offset_size;
     if (template_id == ::ascir::TemplateId::kIndirectLoadSK &&
@@ -3897,8 +4092,9 @@ class IndirectLoadAscIrCodegenImplV2 : public AscIrCodegenV2 {
             "indirect_load_sk_reg_base.h", "indirect_load_simt_reg_base.h",        "transpose_reg_base.h"};
   }
   [[nodiscard]] std::vector<std::string> IncludeApiHeaderFiles() const override {
-    return {"basic_api/kernel_operator_vec_gather_intf.h", "basic_api/reg_compute/kernel_reg_compute_intf.h",
-            "simt_api/cpp/kernel_simt_intf.h"};
+    // SIMD offsets fast path uses vector Cast, provided only by vconv.
+    return {"basic_api/kernel_operator_vec_gather_intf.h", "basic_api/kernel_operator_vec_vconv_intf.h",
+            "basic_api/reg_compute/kernel_reg_compute_intf.h", "simt_api/cpp/kernel_simt_intf.h"};
   }
   [[nodiscard]] bool IsNodeValid(const AscNode &node) const override {
     GE_ASSERT_TRUE(!IsNodeHasScalarInput(node), "Node %s[%s] does not support scalar input", node.GetTypePtr(),
@@ -4014,6 +4210,9 @@ class CeilAscIrCodegenImplV2 : public SimtFloatUnaryAscIrCodegenImplV2 {
 
 class CosAscIrCodegenImplV2 : public SimtFloatUnaryAscIrCodegenImplV2 {
  public:
+  [[nodiscard]] int64_t GetSimtDcacheSize([[maybe_unused]] const AscNode &node) const override {
+    return kSimtDcacheSize;
+  }
   [[nodiscard]] std::vector<std::unique_ptr<TmpBufDesc>> CalcTmpBufSize(const AscNode &node) override {
     return CalcCosTmpSizeV2(node);
   }
@@ -4056,6 +4255,9 @@ class CosAscIrCodegenImplV2 : public SimtFloatUnaryAscIrCodegenImplV2 {
 
 class AcosAscIrCodegenImplV2 : public SimtFloatUnaryAscIrCodegenImplV2 {
  public:
+  [[nodiscard]] int64_t GetSimtDcacheSize([[maybe_unused]] const AscNode &node) const override {
+    return kSimtDcacheSize;
+  }
   [[nodiscard]] std::vector<std::unique_ptr<TmpBufDesc>> CalcTmpBufSize(const AscNode &node) override {
     return CalcAcosTmpSizeV2(node);
   }
@@ -4177,6 +4379,9 @@ class CoshAscIrCodegenImplV2 : public SimtFloatUnaryAscIrCodegenImplV2 {
 
 class AsinAscIrCodegenImplV2 : public SimtFloatUnaryAscIrCodegenImplV2 {
  public:
+  [[nodiscard]] int64_t GetSimtDcacheSize([[maybe_unused]] const AscNode &node) const override {
+    return kSimtDcacheSize;
+  }
   [[nodiscard]] std::vector<std::unique_ptr<TmpBufDesc>> CalcTmpBufSize(const AscNode &node) override {
     return CalcAsinTmpSizeV2(node);
   }
@@ -4292,6 +4497,9 @@ class AtanAscIrCodegenImplV2 : public SimtFloatUnaryAscIrCodegenImplV2 {
 
 class AtanhAscIrCodegenImplV2 : public SimtFloatUnaryAscIrCodegenImplV2 {
  public:
+  [[nodiscard]] int64_t GetSimtDcacheSize([[maybe_unused]] const AscNode &node) const override {
+    return kSimtDcacheSize;
+  }
   [[nodiscard]] std::vector<std::unique_ptr<TmpBufDesc>> CalcTmpBufSize(const AscNode &node) override {
     return CalcAtanhTmpSizeV2(node);
   }
@@ -4820,6 +5028,10 @@ class BitwiseXorAscIrCodegenImplV2 : public AscIrCodegenV2 {
 
 class FloorDivAscIrCodegenImplV2 : public AscIrCodegenV2 {
  public:
+  // FloorDiv 仅 int64 走 SIMT 实现，只为该 dtype 预留 dcache
+  [[nodiscard]] int64_t GetSimtDcacheSize(const AscNode &node) const override {
+    return GetSimtInputDtype(node) == DT_INT64 ? kSimtDcacheSize : 0;
+  }
   [[nodiscard]] std::string GetApiCallName() const override {
     return "BinaryApiCallV2";
   }
@@ -4838,6 +5050,7 @@ class FloorDivAscIrCodegenImplV2 : public AscIrCodegenV2 {
   [[nodiscard]] std::vector<std::string> IncludeApiHeaderFiles() const override {
     return {
         "basic_api/reg_compute/kernel_reg_compute_intf.h",
+        "simt_api/cpp/kernel_simt_intf.h",
     };
   }
   [[nodiscard]] bool IsNodeValid(const AscNode &node) const override {
@@ -4879,6 +5092,9 @@ class FloorToIntAscIrCodegenImplV2 : public AscIrCodegenV2 {
 
 class FmodAscIrCodegenImplV2 : public AscIrCodegenV2 {
  public:
+  [[nodiscard]] int64_t GetSimtDcacheSize([[maybe_unused]] const AscNode &node) const override {
+    return kSimtDcacheSize;
+  }
   [[nodiscard]] std::vector<std::unique_ptr<TmpBufDesc>> CalcTmpBufSize(const AscNode &node) override {
     return CalcVoidTmpSizeV2(node);
   }
@@ -5071,7 +5287,7 @@ class PowAscIrCodegenImplV2 : public AscIrCodegenV2 {
     return "PowApiCall";
   }
   [[nodiscard]] std::string GetApiName() const override {
-    return "Pow";
+    return IsPowInBlacklist() ? "PowFast" : "Pow";
   }
   [[nodiscard]] std::vector<std::string> LoadApiHeaderFiles([[maybe_unused]] bool is_dynamic) const override {
     return {"pow_reg_base.h"};
@@ -5092,6 +5308,13 @@ class PowAscIrCodegenImplV2 : public AscIrCodegenV2 {
     GE_ASSERT_SUCCESS(ValidateShapeConsistencyWithSingleOutput(node, {false, {0, 1}}),
                       "Node %s[%s] check shape consistency failed", node.GetTypePtr(), node.GetNamePtr());
     return true;
+  }
+
+ private:
+  // Pow 命中精度提升黑名单（配置 Pow 或 all）时，codegen 调用 PowFast 快速幂高性能路径（整数指数
+  // 连乘可能引入额外舍入误差）；默认调用 Power 高精度实现；类型字符串与 REG_ASC_IR(Pow) 注册名一致
+  static bool IsPowInBlacklist() {
+    return af::pre_process::PreProcessConfig::Instance().IsInImprovePrecisionBlacklist("Pow");
   }
 };
 
@@ -5139,11 +5362,40 @@ class MatMulAscIrCodegenImplV2 : public AscIrCodegenV2 {
   }
   std::vector<std::string> LoadApiHeaderFiles(bool is_dynamic) const override {
     if (is_dynamic) {
-      return {"mat_mul_tiling_key_dynamic.h", "matmul_include_headers.h", "mat_mul_pingpong_basic_cmct_dynamic.h",
+      return {"mat_mul_tiling_key_dynamic.h",
+              "matmul_include_headers.h",
+              "mat_mul_tensor_include_headers.h",
+              "mat_mul_basic_cv_pipeline.h",
+              "mat_mul_pingpong_basic_cmct_dynamic.h",
+              "mat_mul_tensor_cv_block.h",
+              "mat_mul_pingpong_tensor_cv.h",
+              "mat_mul_tensor_common_scheduler.h",
+              "mat_mul_tensor_common.h",
               "matmul_dynamic.h"};
     } else {
-      return {"mat_mul_tiling_key.h", "matmul_include_headers.h", "mat_mul_pingpong_basic_cmct.h", "matmul.h"};
+      return {"mat_mul_tiling_key.h",
+              "matmul_include_headers.h",
+              "mat_mul_tensor_include_headers.h",
+              "mat_mul_basic_cv_pipeline.h",
+              "mat_mul_pingpong_basic_cmct.h",
+              "mat_mul_tensor_cv_block.h",
+              "mat_mul_pingpong_tensor_cv.h",
+              "mat_mul_tensor_common_scheduler.h",
+              "mat_mul_tensor_common.h",
+              "matmul.h"};
     }
+  }
+  std::vector<std::string> LoadApiHeaderFiles(bool is_dynamic, bool is_cv_fusion) const override {
+    if (is_cv_fusion) {
+      return LoadApiHeaderFiles(is_dynamic);
+    }
+    return {"mat_mul_tiling_key.h",
+            "matmul_include_headers.h",
+            "mat_mul_tensor_include_headers.h",
+            "mat_mul_pingpong_basic_cmct.h",
+            "mat_mul_tensor_common_scheduler.h",
+            "mat_mul_tensor_common.h",
+            "matmul.h"};
   }
   std::vector<std::string> IncludeApiHeaderFiles() const override {
     return {
@@ -5170,12 +5422,35 @@ class BatchMatMulAscIrCodegenImplV2 : public AscIrCodegenV2 {
   }
   std::vector<std::string> LoadApiHeaderFiles(bool is_dynamic) const override {
     if (is_dynamic) {
-      return {"batch_mat_mul_v3_tiling_key_dynamic.h", "batch_matmul_include_headers.h",
-              "mat_mul_pingpong_basic_cmct_dynamic.h", "batch_matmul_dynamic.h"};
+      return {"batch_mat_mul_v3_tiling_key_dynamic.h",
+              "batch_matmul_include_headers.h",
+              "mat_mul_tensor_include_headers.h",
+              "mat_mul_basic_cv_pipeline.h",
+              "mat_mul_pingpong_basic_cmct_dynamic.h",
+              "mat_mul_tensor_cv_block.h",
+              "mat_mul_pingpong_tensor_cv.h",
+              "mat_mul_tensor_common_scheduler.h",
+              "mat_mul_tensor_common.h",
+              "batch_matmul_dynamic.h"};
     } else {
-      return {"batch_mat_mul_v3_tiling_key.h", "batch_matmul_include_headers.h", "mat_mul_pingpong_basic_cmct.h",
-              "batch_matmul.h"};
+      return {"batch_mat_mul_v3_tiling_key.h",    "batch_matmul_include_headers.h",
+              "mat_mul_tensor_include_headers.h", "mat_mul_basic_cv_pipeline.h",
+              "mat_mul_pingpong_basic_cmct.h",    "mat_mul_tensor_cv_block.h",
+              "mat_mul_pingpong_tensor_cv.h",     "mat_mul_tensor_common_scheduler.h",
+              "mat_mul_tensor_common.h",          "batch_matmul.h"};
     }
+  }
+  std::vector<std::string> LoadApiHeaderFiles(bool is_dynamic, bool is_cv_fusion) const override {
+    if (is_cv_fusion) {
+      return LoadApiHeaderFiles(is_dynamic);
+    }
+    return {"batch_mat_mul_v3_tiling_key.h",
+            "batch_matmul_include_headers.h",
+            "mat_mul_tensor_include_headers.h",
+            "mat_mul_pingpong_basic_cmct.h",
+            "mat_mul_tensor_common_scheduler.h",
+            "mat_mul_tensor_common.h",
+            "batch_matmul.h"};
   }
   std::vector<std::string> IncludeApiHeaderFiles() const override {
     return {
@@ -5219,6 +5494,9 @@ class Conv2DAscIrCodegenImplV2 : public AscIrCodegenV2 {
 
 class SinAscIrCodegenImplV2 : public SimtFloatUnaryAscIrCodegenImplV2 {
  public:
+  [[nodiscard]] int64_t GetSimtDcacheSize([[maybe_unused]] const AscNode &node) const override {
+    return kSimtDcacheSize;
+  }
   [[nodiscard]] std::string GetApiCallName() const override {
     return "UnaryApiTmpCall";
   }
@@ -5264,7 +5542,10 @@ class RShiftAscIrCodegenImplV2 : public AscIrCodegenV2 {
     return "BinaryApiCallV2";
   }
   [[nodiscard]] std::string GetApiName() const override {
-    return "ShiftRight";
+    return "ShiftRightExtend";
+  }
+  [[nodiscard]] std::vector<std::string> LoadApiHeaderFiles([[maybe_unused]] bool is_dynamic) const override {
+    return {"shift_reg_base.h"};
   }
   std::vector<std::string> IncludeApiHeaderFiles() const override {
     return {
@@ -5408,6 +5689,9 @@ class SinhAscIrCodegenImplV2 : public SimtFloatUnaryAscIrCodegenImplV2 {
 
 class TanAscIrCodegenImplV2 : public SimtFloatUnaryAscIrCodegenImplV2 {
  public:
+  [[nodiscard]] int64_t GetSimtDcacheSize([[maybe_unused]] const AscNode &node) const override {
+    return kSimtDcacheSize;
+  }
   [[nodiscard]] std::vector<std::unique_ptr<TmpBufDesc>> CalcTmpBufSize(const AscNode &node) override {
     return CalcTanTmpSizeV2(node);
   }
@@ -5557,6 +5841,9 @@ class SquareAscIrCodegenImplV2 : public AscIrCodegenV2 {
 
 class RemainderAscIrCodegenImplV2 : public AscIrCodegenV2 {
  public:
+  [[nodiscard]] int64_t GetSimtDcacheSize([[maybe_unused]] const AscNode &node) const override {
+    return kSimtDcacheSize;
+  }
   [[nodiscard]] std::vector<std::unique_ptr<TmpBufDesc>> CalcTmpBufSize(const AscNode &node) override {
     return CalcVoidTmpSizeV2(node);
   }
@@ -5617,6 +5904,64 @@ class SoftmaxAscIrCodegenImplV2 : public AscIrCodegenV2 {
 };
 
 /*********************************************************************************/
+class RandSeedOffsetAscIrCodegenImplV2 : public AscIrCodegenV2 {
+ public:
+  [[nodiscard]] int64_t GetSimtDcacheSize(const AscNode &node) const override {
+    return node.GetInDataNodes().empty() ? 0 : kSimtDcacheSize;
+  }
+
+  [[nodiscard]] std::vector<std::unique_ptr<TmpBufDesc>> CalcTmpBufSize(const AscNode &node) override {
+    if (node.GetInDataNodes().empty()) {
+      return {};
+    }
+    return CalcVoidTmpSizeV2(node);
+  }
+
+  [[nodiscard]] std::string GetApiCallName() const override {
+    return "RandSeedOffsetApiCall";
+  }
+
+  [[nodiscard]] std::string GetApiName() const override {
+    return "RandSeedOffset";
+  }
+
+  [[nodiscard]] std::vector<std::string> LoadApiHeaderFiles([[maybe_unused]] bool is_dynamic) const override {
+    return {"random_reg_base.h"};
+  }
+
+  [[nodiscard]] std::vector<std::string> IncludeApiHeaderFiles() const override {
+    return {"simt_api/cpp/kernel_simt_intf.h", "adv_api/math/philox.h"};
+  }
+
+  [[nodiscard]] bool IsNodeValid(const AscNode &node) const override {
+    AscNodeInputs inputs = node.inputs;
+    const auto input_num = inputs.Size();
+    GE_ASSERT_TRUE(input_num == 0U || input_num == 2U, "Node %s[%s] seed/offset must be both connected or both absent",
+                   node.GetTypePtr(), node.GetNamePtr());
+    const auto output_dtype = GetSimtOutputDtype(node);
+    if (input_num == 2U) {
+      const std::set<ge::DataType> supported_dtypes = {DT_UINT32, DT_INT32, DT_FLOAT16, DT_FLOAT, DT_BF16};
+      GE_ASSERT_TRUE(supported_dtypes.find(output_dtype) != supported_dtypes.end(),
+                     "Node %s[%s] unsupported dtype %d in seeded signature, fp64 is not supported yet, see "
+                     "docs/zh/autofuse/design/features/rand.md",
+                     node.GetTypePtr(), node.GetNamePtr(), static_cast<int32_t>(output_dtype));
+      GE_ASSERT_TRUE(inputs[0].attr.dtype == DT_INT64, "Node %s[%s] seed dtype must be int64", node.GetTypePtr(),
+                     node.GetNamePtr());
+      GE_ASSERT_TRUE(inputs[1].attr.dtype == DT_INT32, "Node %s[%s] offset dtype must be int32", node.GetTypePtr(),
+                     node.GetNamePtr());
+      GE_ASSERT_SUCCESS(ValidateShapeConsistencyWithSingleOutput(node, {true, {0}}),
+                        "Node %s[%s] check shape consistency failed", node.GetTypePtr(), node.GetNamePtr());
+    } else {
+      const std::set<ge::DataType> supported_dtypes = {DT_UINT32, DT_INT32, DT_FLOAT16, DT_FLOAT, DT_BF16};
+      GE_ASSERT_TRUE(supported_dtypes.find(output_dtype) != supported_dtypes.end(),
+                     "Node %s[%s] unsupported dtype %d in legacy signature, fp64 is not supported yet, see "
+                     "docs/zh/autofuse/design/features/rand.md",
+                     node.GetTypePtr(), node.GetNamePtr(), static_cast<int32_t>(output_dtype));
+    }
+    return true;
+  }
+};
+
 class RandAscIrCodegenImplV2 : public AscIrCodegenV2 {
  public:
   [[nodiscard]] std::string GetApiCallName() const override {
@@ -5651,6 +5996,185 @@ class RandnAscIrCodegenImplV2 : public AscIrCodegenV2 {
 };
 
 /*********************************************************************************/
+class RandIntAscIrCodegenImplV2 : public AscIrCodegenV2 {
+ public:
+  [[nodiscard]] int64_t GetSimtDcacheSize([[maybe_unused]] const AscNode &node) const override {
+    return kSimtDcacheSize;
+  }
+  [[nodiscard]] std::vector<std::unique_ptr<TmpBufDesc>> CalcTmpBufSize(const AscNode &node) override {
+    return CalcVoidTmpSizeV2(node);
+  }
+  [[nodiscard]] std::string GetApiCallName() const override {
+    return "RandIntApiCall";
+  }
+  [[nodiscard]] std::string GetApiName() const override {
+    return "RandInt";
+  }
+  [[nodiscard]] std::vector<std::string> LoadApiHeaderFiles([[maybe_unused]] bool is_dynamic) const override {
+    return {"randint_reg_base.h"};
+  }
+  // 设备实现为 SIMT 逐元素 Philox + 64 位取模，按 Remainder 同款引入 SIMT 头
+  [[nodiscard]] std::vector<std::string> IncludeApiHeaderFiles() const override {
+    return {
+        "simt_api/cpp/kernel_simt_intf.h",
+    };
+  }
+  [[nodiscard]] bool IsNodeValid(const AscNode &node) const override {
+    // x1/x3/x4 为广播标量输入，x2 为 Arange 产出的逐元素位置流，仅支持张量
+    GE_ASSERT_SUCCESS(ValidateShapeConsistencyWithSingleOutput(node, {true, {0, 2, 3}}),
+                      "Node %s[%s] check shape consistency failed", node.GetTypePtr(), node.GetNamePtr());
+    return true;
+  }
+};
+
+/*********************************************************************************/
+class BucketizeAscIrCodegenImplV2 : public AscIrCodegenV2 {
+ public:
+  [[nodiscard]] std::vector<std::unique_ptr<TmpBufDesc>> CalcTmpBufSize(const AscNode &node) override {
+    return CalcBucketizeTmpSizeV2(node);
+  }
+  [[nodiscard]] std::string GetApiCallName() const override {
+    return "BucketizeApiCall";
+  }
+  [[nodiscard]] std::string GetApiName() const override {
+    return "BucketizeExtend";
+  }
+  [[nodiscard]] std::vector<std::string> LoadApiHeaderFiles([[maybe_unused]] bool is_dynamic) const override {
+    return {"bucketize_reg_base.h"};
+  }
+  [[nodiscard]] std::vector<std::string> IncludeApiHeaderFiles() const override {
+    return {
+        "basic_api/reg_compute/kernel_reg_compute_intf.h",
+    };
+  }
+  [[nodiscard]] bool IsNodeValid(const AscNode &node) const override {
+    constexpr size_t kValueIndex = 0U;
+    constexpr size_t kBoundaryIndex = 1U;
+    auto inputs = node.inputs;
+    GE_ASSERT_TRUE(inputs.Size() >= 2U, "Node %s[%s] needs values and boundaries", node.GetTypePtr(),
+                   node.GetNamePtr());
+    GE_ASSERT_TRUE(!IsNodeHasScalarInput(node), "Node %s[%s] does not support scalar input", node.GetTypePtr(),
+                   node.GetNamePtr());
+    const auto value_dtype = inputs[kValueIndex].attr.dtype;
+    GE_ASSERT_TRUE(inputs[kBoundaryIndex].attr.dtype == value_dtype, "Node %s[%s] boundaries dtype must match values",
+                   node.GetTypePtr(), node.GetNamePtr());
+    const bool src_supported = value_dtype == DT_INT8 || value_dtype == DT_UINT8 || value_dtype == DT_INT16 ||
+                               value_dtype == DT_UINT16 || value_dtype == DT_INT32 || value_dtype == DT_UINT32 ||
+                               value_dtype == DT_INT64 || value_dtype == DT_UINT64 || value_dtype == DT_FLOAT16 ||
+                               value_dtype == DT_BF16 || value_dtype == DT_FLOAT;
+    GE_ASSERT_TRUE(src_supported, "Node %s[%s] does not support dtype %d", node.GetTypePtr(), node.GetNamePtr(),
+                   static_cast<int32_t>(value_dtype));
+    AscNodeOutputs outputs = node.outputs;
+    GE_ASSERT_TRUE(outputs().size() == 1U && outputs[0].attr.dtype == DT_INT32,
+                   "Node %s[%s] output dtype must be int32", node.GetTypePtr(), node.GetNamePtr());
+    return true;
+  }
+};
+
+/*********************************************************************************/
+class IdentityAscIrCodegenImplV2 : public Ub2ubAscIrCodegenImplV2 {};
+
+class DeviceAssertAsyncAscIrCodegenImplV2 : public Ub2ubAscIrCodegenImplV2 {};
+
+class InlineAsmElementwiseAscIrCodegenImplV2 : public AscIrCodegenV2 {
+ public:
+  [[nodiscard]] std::string GetApiCallName() const override {
+    return "ApiCall";
+  }
+  [[nodiscard]] std::string GetApiName() const override {
+    return "InlineAsmElementwise";
+  }
+  [[nodiscard]] bool IsNodeValid(const AscNode &node) const override {
+    GE_ASSERT_TRUE(false, "Node %s[%s] cannot emit raw inline asm on the V2 device path", node.GetTypePtr(),
+                   node.GetNamePtr());
+    return false;
+  }
+};
+
+class MaskedAscIrCodegenImplV2 : public WhereAscIrCodegenImplV2 {};
+
+class Randint64AscIrCodegenImplV2 : public AscIrCodegenV2 {
+ public:
+  [[nodiscard]] std::string GetApiCallName() const override {
+    return "ApiCall";
+  }
+  [[nodiscard]] std::string GetApiName() const override {
+    return "Randint64";
+  }
+  [[nodiscard]] bool IsNodeValid(const AscNode &node) const override {
+    GE_ASSERT_TRUE(false, "Node %s[%s] has no V2 device kernel", node.GetTypePtr(), node.GetNamePtr());
+    return false;
+  }
+};
+
+class XorSumAscIrCodegenImplV2 : public AscIrCodegenV2 {
+ public:
+  [[nodiscard]] std::string GetApiCallName() const override {
+    return "BinaryApiCallV2";
+  }
+  [[nodiscard]] std::string GetApiName() const override {
+    return "ReduceXorSumExtend";
+  }
+  [[nodiscard]] std::vector<std::string> LoadApiHeaderFiles([[maybe_unused]] bool is_dynamic) const override {
+    return {"reduce_init_reg_base.h", "reduce_extend_reg_base.h"};
+  }
+  [[nodiscard]] std::vector<std::string> IncludeApiHeaderFiles() const override {
+    return {
+        "adv_api/reduce/reduce.h",
+        "basic_api/kernel_operator_vec_binary_intf.h",
+        "basic_api/reg_compute/kernel_reg_compute_intf.h",
+    };
+  }
+  [[nodiscard]] bool IsNodeValid(const AscNode &node) const override {
+    constexpr size_t kInputCount = 2U;
+    auto inputs = node.inputs;
+    GE_ASSERT_TRUE(inputs.Size() == kInputCount, "Node %s[%s] needs two int16 inputs", node.GetTypePtr(),
+                   node.GetNamePtr());
+    GE_ASSERT_TRUE(!IsNodeHasScalarInput(node), "Node %s[%s] does not support scalar input", node.GetTypePtr(),
+                   node.GetNamePtr());
+    GE_ASSERT_TRUE(inputs[0].attr.dtype == DT_INT16 && inputs[1].attr.dtype == DT_INT16,
+                   "Node %s[%s] only supports int16", node.GetTypePtr(), node.GetNamePtr());
+    AscNodeOutputs outputs = node.outputs;
+    GE_ASSERT_TRUE(outputs().size() == 1U && outputs[0].attr.dtype == DT_INT16,
+                   "Node %s[%s] output dtype must be int16", node.GetTypePtr(), node.GetNamePtr());
+    return true;
+  }
+};
+
+class WelfordAscIrCodegenImplV2 : public AscIrCodegenV2 {
+ public:
+  [[nodiscard]] std::vector<std::unique_ptr<TmpBufDesc>> CalcTmpBufSize(const AscNode &node) override {
+    return CalcWelfordUpdateTmpSize(node);
+  }
+  [[nodiscard]] std::string GetApiCallName() const override {
+    return "ApiCall";
+  }
+  [[nodiscard]] std::string GetApiName() const override {
+    return "WelfordUpdate";
+  }
+  [[nodiscard]] bool IsNodeValid(const AscNode &node) const override {
+    GE_ASSERT_TRUE(false, "Node %s[%s] has no V2 device kernel", node.GetTypePtr(), node.GetNamePtr());
+    return false;
+  }
+};
+
+class ScanAscIrCodegenImplV2 : public AscIrCodegenV2 {
+ public:
+  [[nodiscard]] std::string GetApiCallName() const override {
+    return "ApiCall";
+  }
+  [[nodiscard]] std::string GetApiName() const override {
+    return "Scan";
+  }
+  [[nodiscard]] bool IsNodeValid(const AscNode &node) const override {
+    GE_ASSERT_TRUE(false, "Node %s[%s] combine_fn must be lowered before V2 codegen", node.GetTypePtr(),
+                   node.GetNamePtr());
+    return false;
+  }
+};
+
+class StoreReductionAscIrCodegenImplV2 : public StoreAscIrCodegenImplV2 {};
+
 class UnsupportedAscIrCodegenImplV2 : public AscIrCodegenV2 {
  public:
   [[nodiscard]] std::string GetApiCallName() const override {
@@ -5659,6 +6183,96 @@ class UnsupportedAscIrCodegenImplV2 : public AscIrCodegenV2 {
   [[nodiscard]] std::string GetApiName() const override {
     return "Unsupported";
   }
+};
+
+class ArgReduceAscIrCodegenImplV2 : public AscIrCodegenV2 {
+ public:
+  [[nodiscard]] std::vector<std::unique_ptr<TmpBufDesc>> CalcTmpBufSize(const AscNode &node) override {
+    return CalcReduceTmpSizeV2(node);
+  }
+  [[nodiscard]] std::string GetApiCallName() const override {
+    return call_name_;
+  }
+  [[nodiscard]] std::string GetApiName() const override {
+    return api_name_;
+  }
+  [[nodiscard]] std::vector<std::string> LoadApiHeaderFiles([[maybe_unused]] bool is_dynamic) const override {
+    return {"arg_reduce_common_reg_base.h",
+            "arg_reduce_core_reg_base.h",
+            "arg_reduce_merge_reg_base.h",
+            "arg_reduce_reg_base.h",
+            ascgen_utils::IsArgMinType(api_name_) ? "argmin_reg_base.h" : "argmax_reg_base.h",
+            "cast_reg_base.h"};
+  }
+  [[nodiscard]] std::vector<std::string> IncludeApiHeaderFiles() const override {
+    return {
+        "adv_api/reduce/reduce.h",
+        "basic_api/kernel_operator_vec_binary_intf.h",
+        "basic_api/reg_compute/kernel_reg_compute_intf.h",
+    };
+  }
+  [[nodiscard]] bool IsNodeValid(const AscNode &node) const override {
+    GE_ASSERT_TRUE(!IsNodeHasScalarInput(node), "Node %s[%s] does not support scalar input", node.GetTypePtr(),
+                   node.GetNamePtr());
+    return true;
+  }
+
+ protected:
+  ArgReduceAscIrCodegenImplV2(const char *api_name, const char *call_name)
+      : api_name_(api_name), call_name_(call_name) {}
+
+ private:
+  // Registry constructors below supply string literals with static lifetime.
+  const char *api_name_;
+  const char *call_name_;
+};
+
+class ArgmaxAscIrCodegenImplV2 : public ArgReduceAscIrCodegenImplV2 {
+ public:
+  ArgmaxAscIrCodegenImplV2() : ArgReduceAscIrCodegenImplV2("Argmax", "RegArgmaxApiCall") {}
+};
+class ArgMaxMultiRPhase1AscIrCodegenImplV2 : public ArgReduceAscIrCodegenImplV2 {
+ public:
+  ArgMaxMultiRPhase1AscIrCodegenImplV2()
+      : ArgReduceAscIrCodegenImplV2("ArgMaxMultiRPhase1", "RegArgMaxPhase1ApiCall") {}
+};
+class ArgMaxMultiRPhase2AscIrCodegenImplV2 : public ArgReduceAscIrCodegenImplV2 {
+ public:
+  ArgMaxMultiRPhase2AscIrCodegenImplV2()
+      : ArgReduceAscIrCodegenImplV2("ArgMaxMultiRPhase2", "RegArgMaxPhase2ApiCall") {}
+};
+class ArgmaxWithValueAscIrCodegenImplV2 : public ArgReduceAscIrCodegenImplV2 {
+ public:
+  ArgmaxWithValueAscIrCodegenImplV2() : ArgReduceAscIrCodegenImplV2("ArgmaxWithValue", "RegArgmaxWithValueApiCall") {}
+};
+class ArgMaxMultiRPhase2WithValueAscIrCodegenImplV2 : public ArgReduceAscIrCodegenImplV2 {
+ public:
+  ArgMaxMultiRPhase2WithValueAscIrCodegenImplV2()
+      : ArgReduceAscIrCodegenImplV2("ArgMaxMultiRPhase2WithValue", "RegArgMaxPhase2WithValueApiCall") {}
+};
+
+class ArgminAscIrCodegenImplV2 : public ArgReduceAscIrCodegenImplV2 {
+ public:
+  ArgminAscIrCodegenImplV2() : ArgReduceAscIrCodegenImplV2("Argmin", "RegArgminApiCall") {}
+};
+class ArgMinMultiRPhase1AscIrCodegenImplV2 : public ArgReduceAscIrCodegenImplV2 {
+ public:
+  ArgMinMultiRPhase1AscIrCodegenImplV2()
+      : ArgReduceAscIrCodegenImplV2("ArgMinMultiRPhase1", "RegArgMinPhase1ApiCall") {}
+};
+class ArgMinMultiRPhase2AscIrCodegenImplV2 : public ArgReduceAscIrCodegenImplV2 {
+ public:
+  ArgMinMultiRPhase2AscIrCodegenImplV2()
+      : ArgReduceAscIrCodegenImplV2("ArgMinMultiRPhase2", "RegArgMinPhase2ApiCall") {}
+};
+class ArgminWithValueAscIrCodegenImplV2 : public ArgReduceAscIrCodegenImplV2 {
+ public:
+  ArgminWithValueAscIrCodegenImplV2() : ArgReduceAscIrCodegenImplV2("ArgminWithValue", "RegArgminWithValueApiCall") {}
+};
+class ArgMinMultiRPhase2WithValueAscIrCodegenImplV2 : public ArgReduceAscIrCodegenImplV2 {
+ public:
+  ArgMinMultiRPhase2WithValueAscIrCodegenImplV2()
+      : ArgReduceAscIrCodegenImplV2("ArgMinMultiRPhase2WithValue", "RegArgMinPhase2WithValueApiCall") {}
 };
 }  // namespace ascir
 }  // namespace af

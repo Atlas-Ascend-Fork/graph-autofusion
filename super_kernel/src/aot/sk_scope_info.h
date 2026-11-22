@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <unordered_set>
 #include <vector>
 #include "sk_types.h"
 #include "sk_node.h"
@@ -467,5 +468,9 @@ class SuperKernelScopeInfo {
   ScopeCoreInfo scopeCoreInfo_;                    ///< Final SK type and numBlocks
   ScopeExtInfo extInfo_;                           ///< Extended info for scope processing and scheduling
 };
+
+inline bool IsWaitNotifyInScope(const SuperKernelBaseNode &wait, const std::unordered_set<uint64_t> &memberIds) {
+  return memberIds.count(wait.GetCorrespondingNotifyNodeId()) != 0;
+}
 
 #endif  // __SK_SCOPE_INFO_H__

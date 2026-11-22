@@ -24,6 +24,7 @@ PyObject *UtilsDeserialize(PyObject *self_pyobject, PyObject *args, PyObject *kw
 PyObject *UtilsDurationRecord(PyObject *self_pyobject, PyObject *args, PyObject *kwds);
 PyObject *UtilsReportDurations(PyObject *self_pyobject, PyObject *args, PyObject *kwds);
 PyObject *UtilsSetPlatform(const PyObject *self_pyobject, PyObject *args, const PyObject *kwds);
+PyObject *UtilsRequiresFullSocVersion(const PyObject *self_pyobject, PyObject *args, const PyObject *kwds);
 }  // namespace pyascir
 
 #endif

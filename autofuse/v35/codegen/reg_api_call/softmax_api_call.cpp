@@ -20,6 +20,7 @@
 #include "codegen/expression_convert_struct.h"
 
 namespace codegen {
+namespace semantic = ascgen_utils::template_semantic;
 using namespace af::ops;
 using namespace af::ascir_op;
 using namespace ascgen_utils;
@@ -31,6 +32,7 @@ Status SoftmaxApiCall::Generate(const TPipe &tpipe, const std::vector<ascir::Axi
   auto x = inputs[0].get();
   auto y = outputs[0].get();
   (void)RegisterBasicDumpParam(this->api_name_, inputs, outputs, CombinedExprFactory::SymbolVar(x.actual_size.Str()));
+  GE_ASSERT_SUCCESS(SetSemanticFeature(semantic::kSoftmaxAr));
   std::string dtype_name;
   GE_CHK_STATUS_RET(Tensor::DtypeName(x.dtype, dtype_name), "Codegen(softmax) get data type:%d failed",
                     static_cast<int32_t>(x.dtype));

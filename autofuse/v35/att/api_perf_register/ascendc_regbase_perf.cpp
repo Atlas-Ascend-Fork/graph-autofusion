@@ -9,6 +9,7 @@
  */
 
 #include "ascendc_regbase_perf.h"
+#include "common_utils.h"
 namespace att {
 namespace ascendcperf_v2 {
 RepeatParams CalculateRepeatParams(const std::string &input_dtype, const Expr &cal_count) {
@@ -57,6 +58,10 @@ Expr ProductExprs(const std::vector<ge::Expression> &exprs, size_t end) {
 Expr GetCastOneRepeatSize(const NodeDetail &node_info) {
   if (node_info.input_dtype[0] == kUInt8 && node_info.output_dtype[0] == kInt4) {
     return kRptEleMap.at(kFloat16);
+  }
+  if ((node_info.input_dtype[0] == kUInt32 && node_info.output_dtype[0] == kFloat32) ||
+      (node_info.input_dtype[0] == kFloat32 && node_info.output_dtype[0] == kUInt32)) {
+    return kRptEleMap.at(kInt64);
   }
   Expr one_rep_size = kRptSizeFloat;
   auto it = kRptEleMap.find(node_info.input_dtype[0]);
@@ -509,6 +514,139 @@ af::Status AddTransposeDim4Inner3Perf(const NodeDetail &node_info, const std::st
   return af::SUCCESS;
 }
 
+// TransposeExtend<3, 3> with a unit outer dimension: calibrate index generation and
+// gather separately. Index repeats use RangeType<T>, not the data element width.
+// The table retains a head + repeat cost; b64 Gather lowers to two b32 gathers.
+constexpr uint64_t kTransposeRegisterBytes = 256U;
+constexpr uint64_t kTransposeBankSpanBytes = 128U;
+constexpr uint64_t kTransposeB16MinBankCost = 2U;
+
+struct TransposeUnitOuterParams {
+  double index_head;
+  double index_repeat;
+  double gather_head;
+  double gather_repeat;
+};
+
+const TransposeUnitOuterParams *GetTransposeUnitOuterParams(uint64_t data_size) {
+  static constexpr TransposeUnitOuterParams kB16 = {195.7, 19.51, 50.4, 0.1798};
+  static constexpr TransposeUnitOuterParams kB32 = {227.7, 19.9, 47.42, 0.5771};
+  static constexpr TransposeUnitOuterParams kB64 = {228.0, 19.87, 67.74, 4.243};
+  switch (data_size) {
+    case 2U:
+      return &kB16;
+    case 4U:
+      return &kB32;
+    case 8U:
+      return &kB64;
+    default:
+      return nullptr;
+  }
+}
+
+Expr GetTransposeGatherStrideGcd(const Expr &stride, uint64_t alignment, PerfOutputInfo &perf) {
+  uint64_t stride_value = 0U;
+  if (stride.IsConstExpr() && stride.GetConstValue(stride_value)) {
+    return CreateExpr(ascgen_utils::Gcd(stride_value, alignment));
+  }
+  // alignment is a power of two. Reuse ATT's conditional expression tree so
+  // symbolic tilings compute the same gcd as constant descriptors.
+  auto choice = std::make_shared<IfCase>(CreateExpr(1));
+  for (uint64_t divisor = 2U; divisor <= alignment; divisor *= 2U) {
+    choice = std::make_shared<IfCase>(CondType::K_EQ, af::sym::Mod(stride, CreateExpr(divisor)), CreateExpr(0),
+                                      std::make_shared<IfCase>(CreateExpr(divisor)), std::move(choice));
+  }
+  Expr gcd;
+  GetPerfVar("transpose_gather_stride_gcd", gcd, perf.ternary_ops);
+  std::vector<Expr> related;
+  choice->GetUsedArgs(related);
+  perf.ternary_ops[gcd] = TernaryOp(gcd, std::move(choice), related);
+  return gcd;
+}
+
+Expr ApplyTransposeUnitOuterModel(const NodeDetail &node_info, const Expr &legacy, PerfOutputInfo &perf) {
+  const auto &params = node_info.transpose_node_params;
+  if (params.total_dim != 3U || params.inner_dim != 3U) {
+    return legacy;
+  }
+  uint64_t data_size = 0U;
+  if (!kDataTypeSizeMap.at(node_info.input_dtype[0]).GetConstValue(data_size)) {
+    return legacy;
+  }
+  const auto *model = GetTransposeUnitOuterParams(data_size);
+  if (model == nullptr) {
+    return legacy;
+  }
+  // Preserve other permutations and padded input layouts. Unknown tiling
+  // dimensions are checked at evaluation time rather than assumed to be one.
+  const std::vector<std::pair<Expr, Expr>> checks = {{params.output_dims[0], CreateExpr(1)},
+                                                     {params.input_strides[1], CreateExpr(1)},
+                                                     {params.input_strides[2], params.output_dims[1]}};
+  std::vector<std::pair<Expr, Expr>> symbolic_checks;
+  for (const auto &check : checks) {
+    const auto equal = af::SymbolicUtils::StaticCheckEq(check.first, check.second);
+    if (equal == af::TriBool::kFalse) {
+      return legacy;
+    }
+    if (equal == af::TriBool::kUnknown) {
+      symbolic_checks.emplace_back(check);
+    }
+  }
+  const Expr count = GetTransposeInnerCount(params);
+  const uint64_t index_size = data_size <= 2U ? 2U : 4U;
+  const Expr index_repeats = af::sym::Ceiling(count / CreateExpr(kTransposeRegisterBytes / index_size));
+  const Expr data_repeats = af::sym::Ceiling(count / CreateExpr(kTransposeRegisterBytes / data_size));
+  Expr bank_cost = GetTransposeGatherStrideGcd(params.input_strides.back(), kTransposeBankSpanBytes / data_size, perf) *
+                   CreateExpr(data_size == 8U ? 4U : 2U);
+  if (data_size == 2U) {
+    const Expr row_group = CreateExpr(kTransposeBankSpanBytes / data_size);
+    bank_cost = af::sym::Max(CreateExpr(kTransposeB16MinBankCost),
+                             bank_cost * af::sym::Min(params.output_dims.back(), row_group) / row_group);
+  }
+  if (data_size == 4U || data_size == 8U) {
+    // A 128B bank group consumes 32 b32 lanes. Short b32 rows and masked
+    // b64 gathers can cross source rows, distributing requests across banks.
+    // Preserve the calibrated b32 cost once a row spans a whole bank group.
+    const Expr row = params.output_dims.back();
+    const Expr lanes = CreateExpr(kTransposeBankSpanBytes / sizeof(uint32_t));
+    const Expr fraction =
+        af::sym::Max(af::sym::Min(row, lanes / CreateExpr(2)) / lanes, CreateExpr(1) - lanes / (CreateExpr(4) * row));
+    const Expr partial = af::sym::Max(CreateExpr(data_size == 8U ? 4U : 2U), bank_cost * fraction);
+    const Expr selector = data_size == 8U ? af::sym::Mod(row, lanes) : row;
+    const Expr boundary = data_size == 8U ? CreateExpr(0) : lanes;
+    const auto aligned = data_size == 8U ? af::SymbolicUtils::StaticCheckEq(selector, boundary)
+                                         : af::SymbolicUtils::StaticCheckLe(boundary, selector);
+    if (aligned == af::TriBool::kFalse) {
+      bank_cost = partial;
+    } else if (aligned == af::TriBool::kUnknown) {
+      Expr selected;
+      GetPerfVar("transpose_gather_row", selected, perf.ternary_ops);
+      TernaryOp ternary(data_size == 8U ? CondType::K_EQ : CondType::K_GE, selector, boundary, bank_cost, partial);
+      ternary.SetVariable(selected);
+      perf.ternary_ops[selected] = std::move(ternary);
+      bank_cost = selected;
+    }
+  }
+  Expr calibrated = (CreateExpr(model->index_head) +
+                     CreateExpr(model->index_repeat) * af::sym::Max(index_repeats - CreateExpr(1), CreateExpr(0)) +
+                     CreateExpr(model->gather_head) + data_repeats * (bank_cost + CreateExpr(model->gather_repeat))) *
+                    GetTransposeOuterCount(params);
+  if (symbolic_checks.empty()) {
+    return calibrated;
+  }
+  auto choice = std::make_shared<IfCase>(calibrated);
+  for (const auto &check : symbolic_checks) {
+    choice = std::make_shared<IfCase>(CondType::K_EQ, check.first, check.second, std::move(choice),
+                                      std::make_shared<IfCase>(legacy));
+  }
+  Expr selected;
+  GetPerfVar("transpose_unit_outer", selected, perf.ternary_ops);
+  std::vector<Expr> related;
+  choice->GetUsedArgs(related);
+  perf.ternary_ops[selected] = TernaryOp(selected, std::move(choice), related);
+  return selected;
+}
+
 }  // namespace
 
 Expr GetTransposeGatherCount(const NodeDetail &node_info, const std::string &data_dtype, PerfOutputInfo &perf) {
@@ -586,6 +724,7 @@ af::Status TransposePerf(const NodeDetail &node_info, PerfOutputInfo &perf) {
   }
 
   Expr res = (VfPerfUtils::GetVFHeadCost() + CreateExpr(latency) + all_vf_instruct_cost) * outer_count;
+  res = ApplyTransposeUnitOuterModel(node_info, res, perf);
   res.Simplify();
   perf.pipe_res[PipeType::AIV_VEC] = res;
 
@@ -1264,6 +1403,70 @@ af::Status AddFloat32BoolCastPerf(const Expr &repeat_time, Expr &max_latency, Ex
   return af::SUCCESS;
 }
 
+/*
+===========================================================================
+【功能描述】Int64/Uint64 转 Bool Regbase 版本伪代码 (Reg 与 UB 间的搬运由公共流程计入)
+  按 dav_3510/dav_m510 的 RegTraitNumOne 实现展开 b64 操作
+  创建全有效 b64 mask，初始化 b64 常量 0 和 1
+  循环（共 repeat_time 次）：
+    更新 b64 比较 mask 和 b32 写回 mask
+    Compares：生成 b64 零值，拆分两个比较源，分别比较高低 32 位
+    Select：拆分两个候选源，分别选择高低 32 位，再交错合并结果
+    Pack：拆分选择结果，提取低 32 位用于压缩写回
+  展开规则：
+    b64 Duplicate = MaskPack + 两次 b32 Duplicate + Interleave
+    每次源拆分 = 创建全有效 b32 mask + Duplicate(0) + DeInterleave
+    每轮源拆分共五次：Compare 两次、Select 两次、Pack 一次
+    b64 CreateMask/UpdateMask 和 Compare 还需 MaskUnPack，Compare/Select 还需 MaskPack
+    b32 全有效 mask 创建无精确性能表项，使用 kPlaceholder
+===========================================================================
+*/
+af::Status AddInt64BoolCastPerf(const NodeDetail &node_info, const Expr &repeat_time, Expr &max_latency,
+                                Expr &all_vf_instruct_cost) {
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kPlaceholder, kUInt32, max_latency, all_vf_instruct_cost,
+                                                   kSymOne + repeat_time * kSymFive));
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kDuplicate, kUInt32, max_latency, all_vf_instruct_cost,
+                                                   kSymFour + repeat_time * (kSymTwo + kSymFive)));
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kInterleave, kUInt32, max_latency, all_vf_instruct_cost,
+                                                   kSymTwo + repeat_time * kSymTwo));
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kDeInterleave, kUInt32, max_latency, all_vf_instruct_cost,
+                                                   repeat_time * kSymFive));
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kMaskPack, kUInt8, max_latency, all_vf_instruct_cost,
+                                                   kSymTwo + repeat_time * kSymThree));
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kMaskUnPack, kUInt8, max_latency, all_vf_instruct_cost,
+                                                   kSymOne + repeat_time * kSymTwo));
+  GE_ASSERT_SUCCESS(
+      VfPerfUtils::AddVfInstructPerf(kUpdateMask, kInt32, max_latency, all_vf_instruct_cost, repeat_time * kSymTwo));
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kEq, kUInt32, max_latency, all_vf_instruct_cost, repeat_time));
+  const std::string high_dtype = node_info.input_dtype[0] == kInt64 ? kInt32 : kUInt32;
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kEq, high_dtype, max_latency, all_vf_instruct_cost, repeat_time));
+  GE_ASSERT_SUCCESS(
+      VfPerfUtils::AddVfInstructPerf(kSelect, kUInt32, max_latency, all_vf_instruct_cost, repeat_time * kSymTwo));
+  return af::SUCCESS;
+}
+
+af::Status AddIntegerBoolCastPerf(const NodeDetail &node_info, const Expr &repeat_time, Expr &max_latency,
+                                  Expr &all_vf_instruct_cost) {
+  const std::string &input_dtype = node_info.input_dtype[0];
+  if (input_dtype == kInt64 || input_dtype == kUInt64) {
+    return AddInt64BoolCastPerf(node_info, repeat_time, max_latency, all_vf_instruct_cost);
+  }
+  const std::string mask_dtype = (input_dtype == kInt32 || input_dtype == kUInt32) ? kInt32 : input_dtype;
+  // Reg::CreateMask<InT> (int32_t for the b32 path); no exact performance-table entry exists.
+  GE_ASSERT_SUCCESS(
+      VfPerfUtils::AddVfInstructPerf(kPlaceholder, mask_dtype, max_latency, all_vf_instruct_cost, kSymOne));
+  // Constants zero and one are duplicated once per VF invocation, outside the repeat loop.
+  GE_ASSERT_SUCCESS(
+      VfPerfUtils::AddVfInstructPerf(kDuplicate, input_dtype, max_latency, all_vf_instruct_cost, kSymTwo));
+  GE_ASSERT_SUCCESS(
+      VfPerfUtils::AddVfInstructPerf(kUpdateMask, mask_dtype, max_latency, all_vf_instruct_cost, repeat_time));
+  GE_ASSERT_SUCCESS(
+      VfPerfUtils::AddVfInstructPerf(kCompareScalarEQ, input_dtype, max_latency, all_vf_instruct_cost, repeat_time));
+  GE_ASSERT_SUCCESS(
+      VfPerfUtils::AddVfInstructPerf(kSelect, input_dtype, max_latency, all_vf_instruct_cost, repeat_time));
+  return af::SUCCESS;
+}
+
 af::Status AddB4CastPerf(const NodeDetail &node_info, const Expr &repeat_time, Expr &max_latency,
                          Expr &all_vf_instruct_cost) {
   const Expr input_size = kDataTypeSizeMap.at(node_info.input_dtype[0]);
@@ -1375,10 +1578,177 @@ af::Status AddUInt8ToInt64CastPerf(const Expr &repeat_time, Expr &max_latency, E
   return af::SUCCESS;
 }
 
+/*
+===========================================================================
+【功能描述】整数窄化 Regbase 版本伪代码 (搬运成本由公共 Cast 模型统计)
+  每轮处理元素数：int32 输入为 64，int64 输入为 32
+  循环（共 repeat_time 次）：
+    按输出类型更新本轮有效元素的写回 mask
+    若输入为 int64：
+      Pack<uint32_t, int64_t> 展开为创建 b32 mask、Duplicate(0) 和 DeInterleave
+      Pack<uint16_t, uint32_t> 保留每个元素的低 16 位
+    否则：
+      Pack<uint16_t, int32_t> 保留每个元素的低 16 位
+    若输出为 int8：再 Pack<uint8_t, uint16_t> 保留低 8 位
+  b32 mask 创建无精确性能表项，使用 kPlaceholder；不额外计入 kCast
+===========================================================================
+*/
+af::Status AddIntegerNarrowCastPerf(const NodeDetail &node_info, const Expr &repeat_time, Expr &max_latency,
+                                    Expr &all_vf_instruct_cost) {
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kUpdateMask, node_info.output_dtype[0], max_latency,
+                                                   all_vf_instruct_cost, repeat_time));
+  if (node_info.input_dtype[0] == kInt64) {
+    GE_ASSERT_SUCCESS(
+        VfPerfUtils::AddVfInstructPerf(kPlaceholder, kUInt32, max_latency, all_vf_instruct_cost, repeat_time));
+    GE_ASSERT_SUCCESS(
+        VfPerfUtils::AddVfInstructPerf(kDuplicate, kUInt32, max_latency, all_vf_instruct_cost, repeat_time));
+    GE_ASSERT_SUCCESS(
+        VfPerfUtils::AddVfInstructPerf(kDeInterleave, kUInt32, max_latency, all_vf_instruct_cost, repeat_time));
+    GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kPack, kUInt32, max_latency, all_vf_instruct_cost, repeat_time));
+  } else {
+    GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kPack, kInt32, max_latency, all_vf_instruct_cost, repeat_time));
+  }
+  if (node_info.output_dtype[0] == kInt8) {
+    GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kPack, kUInt16, max_latency, all_vf_instruct_cost, repeat_time));
+  }
+  return af::SUCCESS;
+}
+
+af::Status AddSmallIntToInt64CastPerf(const NodeDetail &node_info, const Expr &repeat_time, Expr &max_latency,
+                                      Expr &all_vf_instruct_cost) {
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructDtypeMappingPerf(kCast, node_info.input_dtype[0], kInt32, max_latency,
+                                                               all_vf_instruct_cost, repeat_time));
+  // Reg::UnPack<int64_t, int32_t> expands to ShiftRights + Interleave.
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kVshrs, kInt32, max_latency, all_vf_instruct_cost, repeat_time));
+  GE_ASSERT_SUCCESS(
+      VfPerfUtils::AddVfInstructPerf(kInterleave, kUInt32, max_latency, all_vf_instruct_cost, repeat_time));
+  return af::SUCCESS;
+}
+
+/*
+===========================================================================
+【功能描述】无符号整数转 float32 Regbase 版本伪代码 (搬运成本由公共 Cast 模型统计)
+  uint16：每轮零扩展装载 64 个元素，按 int32 转 float32
+  uint32：每轮零扩展装载 32 个元素，按 int64 转 float32 后 Pack 紧凑化
+  uint64：每轮装载 32 个元素，按 int64 转 float32 后 Pack 紧凑化
+    循环外初始化 float 常量 0 和 2^64
+    循环内在紧凑 float 布局判负，Select 补偿值后 Add
+  每轮更新 float 写回 mask；b64 CreateMask 还需一次 MaskUnPack
+  b64 Pack 展开为创建 b32 mask、Duplicate(0)、DeInterleave
+  CreateMask 使用 kPlaceholder；源码展开未替代汇编和设备实测校准
+===========================================================================
+*/
+af::Status AddUintToFloatCastPerf(const NodeDetail &node_info, const Expr &repeat_time, Expr &max_latency,
+                                  Expr &all_vf_instruct_cost) {
+  GE_ASSERT_SUCCESS(
+      VfPerfUtils::AddVfInstructPerf(kUpdateMask, kFloat32, max_latency, all_vf_instruct_cost, repeat_time));
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kPlaceholder, kUInt32, max_latency, all_vf_instruct_cost, kSymOne));
+  if (node_info.input_dtype[0] == kUInt16) {
+    GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructDtypeMappingPerf(kCast, kInt32, kFloat32, max_latency,
+                                                                 all_vf_instruct_cost, repeat_time));
+    return af::SUCCESS;
+  }
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kMaskUnPack, kUInt8, max_latency, all_vf_instruct_cost, kSymOne));
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructDtypeMappingPerf(kCast, kInt64, kFloat32, max_latency,
+                                                               all_vf_instruct_cost, repeat_time));
+  GE_ASSERT_SUCCESS(
+      VfPerfUtils::AddVfInstructPerf(kPlaceholder, kUInt32, max_latency, all_vf_instruct_cost, repeat_time));
+  GE_ASSERT_SUCCESS(
+      VfPerfUtils::AddVfInstructPerf(kDuplicate, kUInt32, max_latency, all_vf_instruct_cost, repeat_time));
+  GE_ASSERT_SUCCESS(
+      VfPerfUtils::AddVfInstructPerf(kDeInterleave, kUInt32, max_latency, all_vf_instruct_cost, repeat_time));
+  if (node_info.input_dtype[0] == kUInt64) {
+    GE_ASSERT_SUCCESS(
+        VfPerfUtils::AddVfInstructPerf(kPlaceholder, kFloat32, max_latency, all_vf_instruct_cost, kSymOne));
+    GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kDuplicate, kFloat32, max_latency, all_vf_instruct_cost, kSymTwo));
+    GE_ASSERT_SUCCESS(
+        VfPerfUtils::AddVfInstructPerf(kCompareScalarLT, kFloat32, max_latency, all_vf_instruct_cost, repeat_time));
+    GE_ASSERT_SUCCESS(
+        VfPerfUtils::AddVfInstructPerf(kSelect, kFloat32, max_latency, all_vf_instruct_cost, repeat_time));
+    GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kAdd, kFloat32, max_latency, all_vf_instruct_cost, repeat_time));
+  }
+  return af::SUCCESS;
+}
+
+/*
+===========================================================================
+【功能描述】Float32 转 int32 饱和修正伪代码（与设备端公共 helper 对应）
+  循环（共 repeat_time 次）：
+    比较输入是否 >= 2^31、< -2^31，以及是否为 NaN，共三次比较
+    调用 Cast(float32 → int32)
+    Duplicate(INT32_MAX)、Duplicate(INT32_MIN)、Duplicate(0)
+    依次 Select 修正上溢、下溢和 NaN 的结果
+===========================================================================
+*/
+af::Status AddFloatToInt32CastPerf(const Expr &repeat_time, Expr &max_latency, Expr &all_vf_instruct_cost) {
+  GE_ASSERT_SUCCESS(
+      VfPerfUtils::AddVfInstructPerf(kCompareScalarGE, kFloat32, max_latency, all_vf_instruct_cost, repeat_time));
+  GE_ASSERT_SUCCESS(
+      VfPerfUtils::AddVfInstructPerf(kCompareScalarLT, kFloat32, max_latency, all_vf_instruct_cost, repeat_time));
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kNe, kFloat32, max_latency, all_vf_instruct_cost, repeat_time));
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructDtypeMappingPerf(kCast, kFloat32, kInt32, max_latency,
+                                                               all_vf_instruct_cost, repeat_time));
+  GE_ASSERT_SUCCESS(
+      VfPerfUtils::AddVfInstructPerf(kDuplicate, kInt32, max_latency, all_vf_instruct_cost, repeat_time * kSymThree));
+  GE_ASSERT_SUCCESS(
+      VfPerfUtils::AddVfInstructPerf(kSelect, kInt32, max_latency, all_vf_instruct_cost, repeat_time * kSymThree));
+  return af::SUCCESS;
+}
+
+/*
+===========================================================================
+【功能描述】Float32 转 unsigned Regbase 版本伪代码（搬运由公共路径计费）
+  循环外创建 float 计算 mask：b32 使用 pset 占位
+  uint8/uint16 每轮 64 元素：调用 float → int32 的公共饱和修正，再 Cast 到 unsigned
+  uint32 每轮 32 元素：float → int64，一次 Cast，再 Pack 取低 32 位紧凑化
+    b64 Pack 展开为创建 b32 mask、Duplicate(0)、DeInterleave
+  uint64 每轮 32 元素：float → int64，一次 Cast，按 uint64 位模式写回
+  每轮更新写回 mask：uint8/uint16/uint32 使用 b32，uint64 使用 b64
+    b64 UpdateMask 展开为 b32 UpdateMask 和一次 MaskUnPack
+  同宽整数类型重解释不产生 Cast；CreateMask 的 pset 暂用零成本占位
+===========================================================================
+*/
+af::Status AddFloatToUintCastPerf(const NodeDetail &node_info, const Expr &repeat_time, Expr &max_latency,
+                                  Expr &all_vf_instruct_cost) {
+  const auto &output_dtype = node_info.output_dtype[0];
+  GE_ASSERT_SUCCESS(
+      VfPerfUtils::AddVfInstructPerf(kUpdateMask, kUInt32, max_latency, all_vf_instruct_cost, repeat_time));
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructPerf(kPlaceholder, kUInt32, max_latency, all_vf_instruct_cost, kSymOne));
+  if (output_dtype == kUInt8 || output_dtype == kUInt16) {
+    GE_ASSERT_SUCCESS(AddFloatToInt32CastPerf(repeat_time, max_latency, all_vf_instruct_cost));
+    GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructDtypeMappingPerf(kCast, kInt32, output_dtype, max_latency,
+                                                                 all_vf_instruct_cost, repeat_time));
+    return af::SUCCESS;
+  }
+  // UpdateMask<uint64_t> expands into a b32 update plus a MaskUnPack per round.
+  if (output_dtype == kUInt64) {
+    GE_ASSERT_SUCCESS(
+        VfPerfUtils::AddVfInstructPerf(kMaskUnPack, kUInt8, max_latency, all_vf_instruct_cost, repeat_time));
+  }
+  GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructDtypeMappingPerf(kCast, kFloat32, kInt64, max_latency,
+                                                               all_vf_instruct_cost, repeat_time));
+  if (output_dtype == kUInt32) {
+    GE_ASSERT_SUCCESS(
+        VfPerfUtils::AddVfInstructPerf(kPlaceholder, kUInt32, max_latency, all_vf_instruct_cost, repeat_time));
+    GE_ASSERT_SUCCESS(
+        VfPerfUtils::AddVfInstructPerf(kDuplicate, kUInt32, max_latency, all_vf_instruct_cost, repeat_time));
+    GE_ASSERT_SUCCESS(
+        VfPerfUtils::AddVfInstructPerf(kDeInterleave, kUInt32, max_latency, all_vf_instruct_cost, repeat_time));
+  }
+  return af::SUCCESS;
+}
+
 af::Status AddSpecificCastComputePerf(const NodeDetail &node_info, const Expr &repeat_time, Expr &max_latency,
                                       Expr &all_vf_instruct_cost) {
   if (IsCastPair(node_info, kFloat32, kBool)) {
     GE_ASSERT_SUCCESS(AddFloat32BoolCastPerf(repeat_time, max_latency, all_vf_instruct_cost));
+  } else if (IsCastPair(node_info, kFloat32, kInt32)) {
+    GE_ASSERT_SUCCESS(AddFloatToInt32CastPerf(repeat_time, max_latency, all_vf_instruct_cost));
+  } else if (IsCastPair(node_info, kInt8, kBool) || IsCastPair(node_info, kUInt8, kBool) ||
+             IsCastPair(node_info, kInt16, kBool) || IsCastPair(node_info, kUInt16, kBool) ||
+             IsCastPair(node_info, kInt32, kBool) || IsCastPair(node_info, kUInt32, kBool) ||
+             IsCastPair(node_info, kInt64, kBool) || IsCastPair(node_info, kUInt64, kBool)) {
+    GE_ASSERT_SUCCESS(AddIntegerBoolCastPerf(node_info, repeat_time, max_latency, all_vf_instruct_cost));
   } else if (IsB4Cast(node_info)) {
     GE_ASSERT_SUCCESS(AddB4CastPerf(node_info, repeat_time, max_latency, all_vf_instruct_cost));
   } else if (IsB64TransferCast(node_info)) {
@@ -1387,10 +1757,21 @@ af::Status AddSpecificCastComputePerf(const NodeDetail &node_info, const Expr &r
     GE_ASSERT_SUCCESS(AddB8SpecificCastPerf(node_info, repeat_time, max_latency, all_vf_instruct_cost));
   } else if (IsB64Cast(node_info)) {
     GE_ASSERT_SUCCESS(AddB64CastPerf(node_info, repeat_time, max_latency, all_vf_instruct_cost));
+  } else if (IsCastPair(node_info, kInt32, kInt8) || IsCastPair(node_info, kInt64, kInt16) ||
+             IsCastPair(node_info, kInt64, kInt8)) {
+    GE_ASSERT_SUCCESS(AddIntegerNarrowCastPerf(node_info, repeat_time, max_latency, all_vf_instruct_cost));
   } else if (IsCastPair(node_info, kInt64, kUInt8)) {
     GE_ASSERT_SUCCESS(AddInt64ToUInt8CastPerf(repeat_time, max_latency, all_vf_instruct_cost));
   } else if (IsCastPair(node_info, kUInt8, kInt64)) {
     GE_ASSERT_SUCCESS(AddUInt8ToInt64CastPerf(repeat_time, max_latency, all_vf_instruct_cost));
+  } else if (IsCastPair(node_info, kInt8, kInt64) || IsCastPair(node_info, kInt16, kInt64)) {
+    GE_ASSERT_SUCCESS(AddSmallIntToInt64CastPerf(node_info, repeat_time, max_latency, all_vf_instruct_cost));
+  } else if (IsCastPair(node_info, kUInt16, kFloat32) || IsCastPair(node_info, kUInt32, kFloat32) ||
+             IsCastPair(node_info, kUInt64, kFloat32)) {
+    GE_ASSERT_SUCCESS(AddUintToFloatCastPerf(node_info, repeat_time, max_latency, all_vf_instruct_cost));
+  } else if (IsCastPair(node_info, kFloat32, kUInt8) || IsCastPair(node_info, kFloat32, kUInt16) ||
+             IsCastPair(node_info, kFloat32, kUInt32) || IsCastPair(node_info, kFloat32, kUInt64)) {
+    GE_ASSERT_SUCCESS(AddFloatToUintCastPerf(node_info, repeat_time, max_latency, all_vf_instruct_cost));
   } else if (node_info.input_dtype[0] == kInt32 && node_info.output_dtype[0] == kFloat16) {
     GE_ASSERT_SUCCESS(VfPerfUtils::AddVfInstructDtypeMappingPerf(kCast, node_info.input_dtype[0], kFloat32, max_latency,
                                                                  all_vf_instruct_cost, repeat_time));

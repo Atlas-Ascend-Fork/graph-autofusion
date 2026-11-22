@@ -130,3 +130,29 @@ TEST(BroadcastBackwardPassSt, DtypeAwareBackwardEnablesCommonAxis) {
   EXPECT_EQ(GetInputNodeName(FindNode(graph, "broadcast1_residual_1")), "relu");
   EXPECT_EQ(GetInputNodeName(FindNode(graph, "store")), "merge_broadcast_backward_common");
 }
+
+TEST(BroadcastBackwardPassSt, RollsBackMultiLevelChainSplitWithoutBackwardGain) {
+  auto graph = BuildMultiLevelChainFanOutGraph("broadcast_backward_chain_split_fanout_st");
+  CompleteApiInfo(graph);
+  optimize::BroadcastBackwardPass pass;
+  ASSERT_EQ(pass.RunPass(graph), af::SUCCESS);
+  // 两分支与 bx/by 无公共轴、无后移收益：拆分由反向合并回滚，恢复共享形态
+  EXPECT_FALSE(HasNode(graph, "b1_consumer_split_1"));
+  EXPECT_FALSE(HasNode(graph, "b2_consumer_split_1"));
+  EXPECT_TRUE(IsConnected(graph, "load0", "b1"));
+  EXPECT_TRUE(IsConnected(graph, "b1", "b2"));
+  EXPECT_EQ(FindNode(graph, "b2")->GetOutDataNodesSize(), 2U);
+  EXPECT_EQ(FindNode(graph, "load0")->GetOutDataAnchor(0)->GetPeerInDataAnchors().size(), 1U);
+}
+
+TEST(BroadcastBackwardPassSt, MovesSplitMultiLevelChainWithSiblingBroadcasts) {
+  auto graph = BuildMultiLevelChainSiblingGraph("broadcast_backward_chain_split_sibling_st");
+  CompleteApiInfo(graph);
+  optimize::BroadcastBackwardPass pass;
+  ASSERT_EQ(pass.RunPass(graph), af::SUCCESS);
+  EXPECT_TRUE(IsConnected(graph, "load0", "add"));
+  EXPECT_TRUE(IsConnected(graph, "add", "b1"));
+  EXPECT_TRUE(IsConnected(graph, "mul", "b1_consumer_split_1"));
+  EXPECT_FALSE(HasNode(graph, "y1"));
+  EXPECT_FALSE(HasNode(graph, "y2"));
+}

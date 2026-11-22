@@ -148,7 +148,7 @@ ReduceTailSubAxes MakeReduceTailSubAxes(const Expr &reduce_size, const Expr &tai
   sub_axes.origin_reduce->data_type_size = kAxisDataTypeSize;
   sub_axes.reduce->data_type_size = kAxisDataTypeSize;
   sub_axes.tail->data_type_size = kAxisDataTypeSize;
-  sub_axes.reduce->is_bind_multi_core = bind_multicore;
+  sub_axes.origin_reduce->is_bind_multi_core = bind_multicore;
   sub_axes.reduce->orig_axis_name = {sub_axes.origin_reduce->name};
   sub_axes.reduce->orig_axis.emplace_back(sub_axes.origin_reduce.get());
   sub_axes.tail->is_node_innerest_dim = true;
@@ -189,7 +189,7 @@ ReduceTailSortCase BuildReduceTailSortCase(const Expr &reduce_size, const Expr &
   test_case.tuning_space->sub_axes.emplace_back(std::move(sub_axes.tail));
   auto reduce_axis = MakeAttAxis("reduce");
   auto tail_axis = MakeAttAxis("tail");
-  InitAttAxis(reduce_axis, "reduce", reduce_size, bind_multicore);
+  InitAttAxis(reduce_axis, "reduce", reduce_size);
   InitAttAxis(tail_axis, "tail", tail_size);
   test_case.model_info.arg_list = {reduce_axis, tail_axis};
   return test_case;
@@ -208,6 +208,13 @@ ReduceTailSortCase BuildReduceTailSortCaseWithOriginalAxes(const Expr &reduce_si
   tail->orig_axis_name = {origin_tail->name};
   tail->orig_axis.emplace_back(origin_tail.get());
   test_case.tuning_space->sub_axes.emplace_back(std::move(origin_tail));
+  return test_case;
+}
+
+ReduceTailSortCase BuildReduceInnermostSortCase() {
+  auto test_case = BuildReduceTailSortCase(af::Symbol(129800), af::Symbol(84));
+  test_case.tuning_space->sub_axes[1]->is_node_innerest_dim = true;
+  test_case.tuning_space->sub_axes[2]->is_node_innerest_dim = false;
   return test_case;
 }
 }  // namespace
@@ -503,6 +510,71 @@ TEST_F(TestArgListReorder, case2) {
   EXPECT_EQ(arg_id_map["z0z1t"] < arg_id_map["z2t"], true);
 }
 
+TEST_F(TestArgListReorder, reorder_duplicate_tiling_r_with_non_reduce_first) {
+  auto test_case = BuildReduceInnermostSortCase();
+  ArgListReorder arg_list_reorder(test_case.tuning_space);
+  std::vector<AttAxisPtr> tiling_R_arg_list;
+  ASSERT_EQ(arg_list_reorder.SortArgList(test_case.model_info.arg_list, tiling_R_arg_list), af::SUCCESS);
+  ASSERT_EQ(tiling_R_arg_list.size(), test_case.model_info.arg_list.size());
+  EXPECT_LT(GetArgIndex(test_case.model_info.arg_list, "reduce"), GetArgIndex(test_case.model_info.arg_list, "tail"));
+  EXPECT_LT(GetArgIndex(tiling_R_arg_list, "tail"), GetArgIndex(tiling_R_arg_list, "reduce"));
+}
+
+TEST_F(TestArgListReorder, skip_duplicate_tiling_r_when_dependencies_prevent_reorder) {
+  auto test_case = BuildReduceInnermostSortCase();
+  test_case.model_info.arg_list[1]->from_axis.emplace_back(test_case.model_info.arg_list[0].get());
+  ArgListReorder arg_list_reorder(test_case.tuning_space);
+  std::vector<AttAxisPtr> tiling_R_arg_list;
+  ASSERT_EQ(arg_list_reorder.SortArgList(test_case.model_info.arg_list, tiling_R_arg_list), af::SUCCESS);
+  EXPECT_TRUE(tiling_R_arg_list.empty());
+  EXPECT_LT(GetArgIndex(test_case.model_info.arg_list, "reduce"), GetArgIndex(test_case.model_info.arg_list, "tail"));
+}
+
+TEST_F(TestArgListReorder, reorder_duplicate_tiling_r_when_only_origin_order_differs) {
+  auto test_case = BuildReduceInnermostSortCase();
+  test_case.tuning_space->sub_axes[1]->is_node_innerest_dim = false;
+  auto origin_axis = MakeAttAxis("origin");
+  InitAttAxis(origin_axis, "origin", CreateExpr("origin_size"));
+  origin_axis->axis_pos = AxisPosition::ORIGIN;
+  test_case.model_info.arg_list.insert(test_case.model_info.arg_list.begin(), origin_axis);
+  ArgListReorder arg_list_reorder(test_case.tuning_space);
+  arg_list_reorder.innermost_dim_map_["origin"] = true;
+  std::vector<AttAxisPtr> tiling_R_arg_list;
+  ASSERT_EQ(arg_list_reorder.SortArgList(test_case.model_info.arg_list, tiling_R_arg_list), af::SUCCESS);
+  ASSERT_EQ(tiling_R_arg_list.size(), test_case.model_info.arg_list.size());
+  EXPECT_LT(GetArgIndex(tiling_R_arg_list, "tail"), GetArgIndex(tiling_R_arg_list, "reduce"));
+}
+
+TEST_F(TestArgListReorder, duplicate_tiling_r_preserves_parent_order) {
+  auto test_case = BuildReduceInnermostSortCase();
+  test_case.model_info.arg_list[1]->from_axis.emplace_back(test_case.model_info.arg_list[0].get());
+  auto outer_axis = MakeAttAxis("outer");
+  InitAttAxis(outer_axis, "outer", CreateExpr("outer_size"));
+  test_case.model_info.arg_list.emplace_back(outer_axis);
+  ArgListReorder arg_list_reorder(test_case.tuning_space);
+  std::vector<AttAxisPtr> tiling_R_arg_list;
+  ASSERT_EQ(arg_list_reorder.SortArgList(test_case.model_info.arg_list, tiling_R_arg_list), af::SUCCESS);
+  ASSERT_EQ(tiling_R_arg_list.size(), 3U);
+  EXPECT_LT(GetArgIndex(tiling_R_arg_list, "outer"), GetArgIndex(tiling_R_arg_list, "reduce"));
+  EXPECT_LT(GetArgIndex(tiling_R_arg_list, "reduce"), GetArgIndex(tiling_R_arg_list, "tail"));
+}
+
+TEST_F(TestArgListReorder, duplicate_tiling_r_reorders_multiple_non_reduce_axes) {
+  auto test_case = BuildReduceInnermostSortCase();
+  constexpr size_t kAxisCount = 32U;
+  for (size_t i = 0U; i < kAxisCount; ++i) {
+    const auto name = "outer" + std::to_string(i);
+    auto axis = MakeAttAxis(name);
+    InitAttAxis(axis, name, CreateExpr((name + "_size").c_str()));
+    test_case.model_info.arg_list.emplace_back(axis);
+  }
+  ArgListReorder arg_list_reorder(test_case.tuning_space);
+  std::vector<AttAxisPtr> tiling_R_arg_list;
+  ASSERT_EQ(arg_list_reorder.SortArgList(test_case.model_info.arg_list, tiling_R_arg_list), af::SUCCESS);
+  ASSERT_EQ(tiling_R_arg_list.size(), kAxisCount + 2U);
+  EXPECT_EQ(GetArgIndex(tiling_R_arg_list, "reduce"), tiling_R_arg_list.size() - 1U);
+}
+
 TEST_F(TestArgListReorder, keep_tiling_r_arg_list_when_reduce_block_split) {
   auto test_case = BuildReduceTailSortCase(af::Symbol(256), af::Symbol(32));
   ArgListReorder arg_list_reorder(test_case.tuning_space);
@@ -723,5 +795,78 @@ TEST_F(TestArgListReorder, v1_micro_api_len_equals_schedule_vector_len) {
   EXPECT_EQ(perf_param_table.GetMicroApiLen(), tiling_schedule_config_table.GetVectorLenSize());
   EXPECT_EQ(tiling_schedule_config_table.GetModelTilingScheduleConfig().vector_len_size,
             tiling_schedule_config_table.GetVectorLenSize());
+}
+
+// 动态shape分段缓存：SortArgList全链路将reduce切分轴回溯到原始轴并打标
+TEST_F(TestArgListReorder, segment_cache_marks_reduce_related_origin_after_sort) {
+  auto origin = std::make_unique<SubAxis>();
+  origin->name = "origin_r";
+  origin->repeat = af::Symbol("Z");
+  origin->data_type_size = kAxisDataTypeSize;
+  auto reduce = std::make_unique<SubAxis>();
+  reduce->name = "reduce";
+  reduce->repeat = af::Symbol("R");
+  reduce->data_type_size = kAxisDataTypeSize;
+  reduce->axis_type = AxisPosition::INNER;
+  reduce->orig_axis_name = {origin->name};
+  reduce->orig_axis.emplace_back(origin.get());
+
+  auto input = std::make_shared<Tensor>();
+  auto output = std::make_shared<Tensor>();
+  input->name = "segment_reduce_input";
+  input->data_type_size = kTensorDataTypeSize;
+  input->dim_info = {reduce.get()};
+  input->repeat = {af::Symbol("R")};
+  input->stride = {af::Symbol(1, "ONE")};
+  output->name = "segment_reduce_output";
+  output->data_type_size = kTensorDataTypeSize;
+  output->dim_info = {reduce.get()};
+  output->repeat = {af::Symbol(1, "ONE")};
+  output->stride = {af::Symbol(0, "ZERO")};
+  NodeInfo node;
+  node.name = "SegmentReduce";
+  node.node_type = "SegmentReduce";
+  node.inputs = {input};
+  node.outputs = {output};
+
+  auto tuning_space = std::make_shared<TuningSpace>();
+  auto tiling_schedule_config_table = std::make_shared<TestTilingScheduleConfigTable>(128U, 256U);
+  tuning_space->tiling_schedule_config_table = tiling_schedule_config_table.get();
+  tuning_space->node_infos = {node};
+  tuning_space->sub_axes.emplace_back(std::move(origin));
+  tuning_space->sub_axes.emplace_back(std::move(reduce));
+
+  auto origin_att = MakeAttAxis("origin_r");
+  origin_att->axis_pos = AxisPosition::ORIGIN;
+  auto reduce_att = MakeAttAxis("reduce");
+  InitAttAxis(reduce_att, "reduce", af::Symbol("R"));
+  reduce_att->orig_axis.push_back(origin_att.get());
+  std::vector<AttAxisPtr> arg_list = {origin_att, reduce_att};
+
+  ArgListReorder arg_list_reorder(tuning_space);
+  std::vector<AttAxisPtr> tiling_r_arg_list;
+  ASSERT_EQ(arg_list_reorder.SortArgList(arg_list, tiling_r_arg_list), af::SUCCESS);
+  EXPECT_TRUE(origin_att->is_reduce_related);
+  EXPECT_FALSE(origin_att->is_load_store_innermost);
+  EXPECT_FALSE(reduce_att->is_reduce_related);
+}
+
+// 动态shape分段缓存：load/store最内轴名与reduce原始轴名直接命中arg_list时分别打标
+TEST_F(TestArgListReorder, segment_cache_marks_load_store_innermost_and_direct_origin) {
+  auto tuning_space = std::make_shared<TuningSpace>();
+  auto origin_att = MakeAttAxis("origin_t");
+  origin_att->axis_pos = AxisPosition::ORIGIN;
+  auto tail_att = MakeAttAxis("t");
+  InitAttAxis(tail_att, "t", af::Symbol("T"));
+  tail_att->orig_axis.push_back(origin_att.get());
+  std::vector<AttAxisPtr> arg_list = {origin_att, tail_att};
+
+  ArgListReorder arg_list_reorder(tuning_space);
+  arg_list_reorder.load_store_inner_most_dims_.insert("t");
+  arg_list_reorder.reduce_map_.insert({"origin_t", true});
+  arg_list_reorder.MarkSegmentCacheAxes(arg_list);
+  EXPECT_TRUE(origin_att->is_load_store_innermost);
+  EXPECT_TRUE(origin_att->is_reduce_related);
+  EXPECT_FALSE(tail_att->is_load_store_innermost);
 }
 }  // namespace att

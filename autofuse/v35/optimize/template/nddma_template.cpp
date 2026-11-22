@@ -9,7 +9,9 @@
  */
 
 #include "nddma_template.h"
+#include <algorithm>
 #include <optional>
+#include <limits>
 #include <stack>
 #include "ascir_utils.h"
 #include "graph_utils.h"
@@ -17,11 +19,14 @@
 #include "tensor_layout_utils.h"
 #include "autoschedule/alignment_handler.h"
 #include "indirect_load_utils.h"
+#include "common_utils.h"
 #include "platform/common/base_alignment_strategy.h"
 
 namespace optimize {
+namespace semantic = ascgen_utils::template_semantic;
 namespace {
 constexpr uint32_t kAlignBytes = 32U;
+constexpr int64_t kMinContinuousLoadBytes = 128;
 constexpr int32_t kTwoBytes = 2;
 constexpr int32_t kFourBytes = 4;
 constexpr char kTransposePrefix[] = "transpose_";
@@ -68,6 +73,48 @@ size_t GetContinuousTailAxisCount(const std::vector<af::Expression> &vector_repe
   return tail_len;
 }
 
+bool CanFoldTransposeIntoLoad(const af::AscTensorAttr &attr) {
+  const auto count = attr.vectorized_axis.size();
+  const auto dtype_size = af::GetSizeByDataType(attr.dtype);
+  if (count < 2UL || count > 4UL || attr.vectorized_strides.size() != count || dtype_size <= 0) {
+    return false;
+  }
+  std::vector<af::Expression> repeats;
+  std::vector<af::Expression> gm_strides;
+  if (ScheduleUtils::GetVectorRepeats(attr.repeats, attr.axis, attr.vectorized_axis, repeats) != af::SUCCESS ||
+      ScheduleUtils::GetVectorAxisStrides(attr, gm_strides) != af::SUCCESS || repeats.size() != count ||
+      gm_strides.size() != count) {
+    return false;
+  }
+  int64_t tail = 0;
+  if (!repeats.back().GetConstValue(tail) || tail <= 0 ||
+      tail > static_cast<int64_t>(std::numeric_limits<uint32_t>::max()) / dtype_size ||
+      tail * dtype_size < kMinContinuousLoadBytes || tail * dtype_size % kAlignBytes != 0) {
+    return false;
+  }
+  if (gm_strides.back() != af::sym::kSymbolOne || attr.vectorized_strides.back() != af::sym::kSymbolOne ||
+      af::SymbolicUtils::StaticCheckEq(attr.vectorized_strides[count - 2UL], repeats.back()) != af::TriBool::kTrue) {
+    return false;
+  }
+  // Four axes fit an aligned block length, blockCount and two hardware loop dimensions.
+  // Unknown source pitches and padded rows retain the existing NDDMA path.
+  for (size_t i = 0UL; i + 1UL < count; ++i) {
+    int64_t stride = 0;
+    if (!gm_strides[i].GetConstValue(stride) || stride <= 0 ||
+        stride > std::numeric_limits<int64_t>::max() / dtype_size ||
+        (i + 2UL == count &&
+         (stride < tail || stride - tail > static_cast<int64_t>(std::numeric_limits<uint32_t>::max()) / dtype_size))) {
+      return false;
+    }
+    if (af::SymbolicUtils::StaticCheckEq(
+            af::sym::Mod(attr.vectorized_strides[i] * af::Symbol(dtype_size), af::Symbol(kAlignBytes)),
+            af::sym::kSymbolZero) != af::TriBool::kTrue) {
+      return false;
+    }
+  }
+  return true;
+}
+
 bool IsNddma(const af::AscNodePtr &node) {
   return ScheduleUtils::IsLoad(node) && node->attr.type == "Nddma";
 }
@@ -94,7 +141,6 @@ Status UpdateSimdIndirectLoadDenseInputLayouts(const af::OutDataAnchorPtr &produ
 af::Status JudgeByTailBlockSize(const af::AscNodePtr &node_load, const std::vector<af::Expression> &vector_repeats,
                                 const size_t tail_len, af::AscGraph &graph, std::optional<bool> &need_nddma) {
   // 尾轴连续且尾组字节数达到该值时, 保持Load走连续搬运, 不转Nddma
-  constexpr int64_t kMaxContinuousTailBlockBytes = 128;
   const auto &output_attr = node_load->outputs[0].attr;
   int64_t tail_bytes = GetSizeByDataType(output_attr.dtype);
   int64_t original_axis_numel = 1;
@@ -127,7 +173,7 @@ af::Status JudgeByTailBlockSize(const af::AscNodePtr &node_load, const std::vect
     }
   }
   // 尾块的静态shape部分已经足够大, 不需要使用Nddma
-  if (tail_bytes >= kMaxContinuousTailBlockBytes) {
+  if (tail_bytes >= kMinContinuousLoadBytes) {
     GELOGD("keeps Load: tail block const size = %ld bytes", tail_bytes);
     need_nddma = false;
     return af::SUCCESS;
@@ -139,7 +185,7 @@ af::Status JudgeByTailBlockSize(const af::AscNodePtr &node_load, const std::vect
     return af::SUCCESS;
   }
   // 将尾块的TileIn轴按Original轴大小计算，仍不够大时, 使用Nddma
-  if ((tail_bytes * original_axis_numel) < kMaxContinuousTailBlockBytes) {
+  if ((tail_bytes * original_axis_numel) < kMinContinuousLoadBytes) {
     GELOGD("Node [%s] converts to Nddma: full tail block size = %ld bytes", node_load->GetNamePtr(),
            (tail_bytes * original_axis_numel));
     need_nddma = true;
@@ -310,6 +356,7 @@ Status NddmaTemplate::GenNddmaNode(const af::AscNodePtr &node_pre, const af::Asc
   // 继承自Load/Nddma节点，把Load/Nddma节点的offset信息和是否brc缓存信息同步继承过来
   node_pre->GetOpDesc()->SetType("Nddma");
   node_pre->attr.type = "Nddma";
+  GE_ASSERT_SUCCESS(ascgen_utils::SetTemplateSemanticTransform(node_pre, semantic::kBroadcast));
   const auto brc_output_attr = node_brc->outputs[0].attr;
   GE_ASSERT_SUCCESS(ScheduleUtils::RemoveNode(new_case, std::dynamic_pointer_cast<af::AscNode>(node_brc),
                                               node_pre->GetOutDataAnchor(0)));
@@ -365,8 +412,12 @@ Status NddmaTemplate::MergeLoadAndTranspose(const af::AscNodePtr &load_node, af:
   load_node->attr.sched.axis = out_node->attr.sched.axis;
   load_node->outputs[0].attr.vectorized_strides = out_node->outputs[0].attr.vectorized_strides;
   load_node->outputs[0].attr.vectorized_axis = out_node->outputs[0].attr.vectorized_axis;
-  load_node->GetOpDesc()->SetType("Nddma");
-  load_node->attr.type = "Nddma";
+  const bool use_load = CanFoldTransposeIntoLoad(load_node->outputs[0].attr) &&
+                        ascgen_utils::indirect_load::FindIndirectLoadNode(new_case) == nullptr;
+  const char *const type = use_load ? "Load" : "Nddma";
+  load_node->GetOpDesc()->SetType(type);
+  load_node->attr.type = type;
+  GE_ASSERT_SUCCESS(ascgen_utils::SetTemplateSemanticTransform(load_node, semantic::kTranspose));
   // 删除transpose节点
   GE_ASSERT_SUCCESS(ScheduleUtils::RemoveNode(new_case, out_node, load_node->GetOutDataAnchor(0)));
   GE_ASSERT_SUCCESS(UpdateSimdIndirectLoadDenseInputLayouts(load_out_anchor));
@@ -444,6 +495,7 @@ af::Status NddmaTemplate::ProcessSliceToNddma(const af::AscNodePtr &node_load, b
     if (need_nddma) {
       node_load->GetOpDesc()->SetType("Nddma");
       node_load->attr.type = "Nddma";
+      GE_ASSERT_SUCCESS(ascgen_utils::SetTemplateSemanticTransform(node_load, semantic::kSlice));
       is_nddma_generated_cur = true;
       GELOGD("Node [%s] is a slice load, converted to Nddma.", node_load->GetNamePtr());
     }
@@ -470,6 +522,26 @@ af::Status NddmaTemplate::ProcessTransposeNodes(af::AscGraph &new_case, bool &is
   return af::SUCCESS;
 }
 
+af::Status NddmaTemplate::ProcessSliceNodes(af::AscGraph &new_case, bool &is_nddma_generated) {
+  bool any_generated = false;
+  for (const auto &node : new_case.GetAllNodes()) {
+    GE_CHECK_NOTNULL(node);
+    if ((!af::ops::IsOps<af::ascir_op::Load>(node)) ||
+        ascgen_utils::indirect_load::GetTemplateBehavior(node).uses_direct_gm_pipeline) {
+      continue;
+    }
+    bool generated = false;
+    GE_ASSERT_SUCCESS(ProcessSliceToNddma(node, generated, new_case));
+    any_generated = (any_generated || generated);
+  }
+  if (any_generated) {
+    GELOGI("Nddma generated from Slice, realign vectorized strides");
+    GE_ASSERT_SUCCESS(autoschedule::AlignmentHandler::AlignVectorizedStrides(new_case));
+  }
+  is_nddma_generated = (is_nddma_generated || any_generated);
+  return af::SUCCESS;
+}
+
 af::Status NddmaTemplate::Generate([[maybe_unused]] const af::AscGraph &origin_graph,
                                    [[maybe_unused]] const af::AscGraph &based_case, af::AscGraph &new_case) {
   const auto indirect_load = ascgen_utils::indirect_load::FindIndirectLoadNode(new_case);
@@ -481,8 +553,14 @@ af::Status NddmaTemplate::Generate([[maybe_unused]] const af::AscGraph &origin_g
     return af::FAILED;
   }
   bool is_nddma_generated = false;
+  for (const auto &node : new_case.GetAllNodes()) {
+    if (!ascir::GetCvBroadcastShape(*node).empty()) {
+      return af::FAILED;  // The Cube result is supplied by UB, never by a GM NDDMA load.
+    }
+  }
   GE_ASSERT_SUCCESS(ProcessTransposeNodes(new_case, is_nddma_generated));
   bool is_transpose_nddma_generated = is_nddma_generated;
+  GE_ASSERT_SUCCESS(ProcessSliceNodes(new_case, is_nddma_generated));
   for (const auto &node : new_case.GetAllNodes()) {
     GE_CHECK_NOTNULL(node);
     if ((!af::ops::IsOps<af::ascir_op::Load>(node) && !af::ops::IsOps<af::ascir_op::Nddma>(node)) ||
@@ -511,15 +589,15 @@ af::Status NddmaTemplate::Generate([[maybe_unused]] const af::AscGraph &origin_g
         SwapCastBrcAndGenNddma(std::dynamic_pointer_cast<af::AscNode>(out_node), node, new_case) == af::SUCCESS) {
       is_nddma_generated_cur = true;
     }
-    GE_ASSERT_SUCCESS(ProcessSliceToNddma(node, is_nddma_generated_cur, new_case));
-    is_nddma_generated = is_nddma_generated || is_nddma_generated_cur;
     ascgen_utils::DiscontinuityInfo info;
     GE_ASSERT_SUCCESS(ascgen_utils::TensorLayoutUtils::AnalyzeLoadDiscontinuity(node->outputs[0].attr, info),
                       "Failed to analyze discontinuity info for node:[%s].", node->GetNamePtr());
     bool need_align_at_repeat1 = info.has_multiple_discontinuities && info.is_tail_axis_discontinuous;
     if (!is_nddma_generated_cur && (IsLoadNeedAlign(node) || need_align_at_repeat1)) {
       GE_ASSERT_SUCCESS(GenLoadToGenNddmaNode(node));
+      is_nddma_generated_cur = true;
     }
+    is_nddma_generated = is_nddma_generated || is_nddma_generated_cur;
   }
   if (!is_nddma_generated) {
     GELOGD("No nddma template generated.");
@@ -528,6 +606,20 @@ af::Status NddmaTemplate::Generate([[maybe_unused]] const af::AscGraph &origin_g
   if (is_transpose_nddma_generated && indirect_load == nullptr) {
     GE_ASSERT_SUCCESS(
         UnAlignmentStrategy::ModifyTransposeFusionVectorizedStrides(new_case, BaseAlignmentStrategy::GetAlignWidth()));
+  }
+  if (is_transpose_nddma_generated && indirect_load == nullptr) {
+    bool has_nddma = false;
+    for (const auto &node : new_case.GetAllNodes()) {
+      has_nddma = has_nddma || IsNddma(node);
+    }
+    if (!has_nddma) {
+      GE_ASSERT_SUCCESS(ascgen_utils::SetTemplateSemanticNameForGraph(new_case, semantic::kTransposeFold));
+    }
+  }
+  // SIMD indirect load 的 UB 布局契约由 RecalculateStridesFromRepeats 推导为紧致布局，
+  // 图级垫整改写 vectorized_strides 会造成生产/消费布局失配，与其余改写调用一致整体绕开。
+  if (indirect_load == nullptr) {
+    GE_ASSERT_SUCCESS(PadNddmaOutputVectorizedStrides(new_case));
   }
   GE_ASSERT_SUCCESS(ScheduleUtils::TopologicalSorting(new_case));
   return af::SUCCESS;
@@ -652,6 +744,7 @@ af::Status NddmaTemplate::SwapCastBrcAndGenNddma(const af::AscNodePtr &node_cast
   node_cast->outputs[0].attr.vectorized_strides = next_node->outputs[0].attr.vectorized_strides;
   GE_ASSERT_SUCCESS(
       GenNddmaNode(node_load, std::dynamic_pointer_cast<af::AscNode>(next_node), new_case, is_need_realignment));
+  GE_ASSERT_SUCCESS(ascgen_utils::SetTemplateSemanticTransform(node_load, semantic::kCast));
   return af::SUCCESS;
 }
 
@@ -668,7 +761,7 @@ af::Status NddmaTemplate::BroadcastInputNodeIsScalar(const af::AscNodePtr &node,
     GE_CHECK_NOTNULL(in_node);
     output_idx = peer_out_anchor->GetIdx();
   }
-  if (af::ops::IsOps<af::ascir_op::Scalar>(in_node) || af::ops::IsOps<af::ascir_op::ScalarData>(in_node)) {
+  if (ScheduleUtils::IsScalarLikeNode(in_node)) {
     is_scalar = true;
     GELOGD("Node [%s] is scalar.", in_node->GetNamePtr());
     return af::SUCCESS;
@@ -679,6 +772,55 @@ af::Status NddmaTemplate::BroadcastInputNodeIsScalar(const af::AscNodePtr &node,
   is_scalar = std::all_of(output_vec_strides.begin(), output_vec_strides.end(), [](const auto &stride) {
     return af::SymbolicUtils::StaticCheckEq(stride, af::sym::kSymbolZero) == af::TriBool::kTrue;
   });
+  return af::SUCCESS;
+}
+
+// 判定broadcast-api的src（其直接输入节点在向量化窗口内的数据块）是否连续：
+// 判定对象是广播节点直接输入（node的第output_idx个输出）的输出缓冲——链式广播下直接
+// 输入可能仍是Broadcast节点，其输出缓冲的窗口属性与更上游节点无关，因此不向上穿行：
+// ① 非尾轴全为广播（vectorized_strides全0）且尾轴stride为1：窗口内输入仅剩尾轴一行真实数据，src必然连续；
+// ② 恰有一根非尾轴有真实数据（记为pre）且尾轴stride为1且pre的stride等于尾轴逻辑大小：
+//    多行紧凑排布（行间无32B对齐padding跳写），src同样连续；
+// 其余形态（多根非尾轴真实数据，或行间存在对齐跳写）src不连续，仍需drop。
+af::Status NddmaTemplate::BroadcastInputWindowBlockIsContiguous(const af::AscNodePtr &node, const int32_t output_idx,
+                                                                bool &is_contiguous) {
+  is_contiguous = false;
+  auto &output_attr = node->outputs[static_cast<size_t>(output_idx)].attr;
+  const auto &vec_strides = output_attr.vectorized_strides;
+  GE_ASSERT_TRUE(!vec_strides.empty());
+  const size_t axis_count = vec_strides.size();
+  size_t real_non_tail_pos = axis_count;
+  for (size_t pos = 0UL; pos + 1UL < axis_count; ++pos) {
+    if (af::SymbolicUtils::StaticCheckEq(vec_strides[pos], af::sym::kSymbolZero) == af::TriBool::kTrue) {
+      continue;
+    }
+    if (real_non_tail_pos != axis_count) {
+      return af::SUCCESS;
+    }
+    real_non_tail_pos = pos;
+  }
+  if (af::SymbolicUtils::StaticCheckEq(vec_strides[axis_count - 1UL], af::sym::kSymbolOne) != af::TriBool::kTrue) {
+    return af::SUCCESS;
+  }
+  if (real_non_tail_pos == axis_count) {
+    is_contiguous = true;
+    return af::SUCCESS;
+  }
+  if (output_attr.vectorized_axis.size() != axis_count) {
+    return af::SUCCESS;
+  }
+  const auto tail_axis_id = output_attr.vectorized_axis[axis_count - 1UL];
+  const auto &axis_ids = output_attr.axis;
+  const auto tail_axis_it = std::find(axis_ids.begin(), axis_ids.end(), tail_axis_id);
+  GE_ASSERT_TRUE(tail_axis_it != axis_ids.end());
+  const auto tail_index = static_cast<size_t>(tail_axis_it - axis_ids.begin());
+  // axis与repeats不保证等长（ReorderRepeats重排后repeats长度可能与axis不一致）：
+  // 尾轴下标越出repeats范围时按不连续处理（保守drop），避免下标越界读
+  if (tail_index >= output_attr.repeats.size()) {
+    return af::SUCCESS;
+  }
+  const auto &tail_size = output_attr.repeats[tail_index];
+  is_contiguous = af::SymbolicUtils::StaticCheckEq(vec_strides[real_non_tail_pos], tail_size) == af::TriBool::kTrue;
   return af::SUCCESS;
 }
 
@@ -700,7 +842,9 @@ af::Status NddmaTemplate::IsVectorizedAxisDoubleCut(af::AscGraph &graph, const a
 }
 
 af::Status NddmaTemplate::IsNeedDropTransposeBrcFuse(af::AscGraph &graph, bool &is_need_drop) {
-  // broadcast-api要求输入内存连续，因此如果是双切分且输入节点不是scalar(或者vectorized_strides全为0)，则需要drop该模板。
+  // broadcast-api要求输入内存连续。双切分视图下，若输入在向量化窗口内的数据块不连续
+  // （非尾轴存在多根真实数据轴，或行间存在32B对齐padding跳写），则drop该模板；
+  // 若输入仅剩尾轴一行真实数据（非尾轴全广播），或行间无padding（多行紧凑排布），src连续，可保留模板。
   is_need_drop = false;
   for (const auto &node : graph.GetAllNodes()) {
     if (af::ops::IsOps<af::ascir_op::Broadcast>(node)) {
@@ -718,8 +862,14 @@ af::Status NddmaTemplate::IsNeedDropTransposeBrcFuse(af::AscGraph &graph, bool &
       GE_ASSERT_SUCCESS(IsVectorizedAxisDoubleCut(graph, node, is_vectorized_axis_double_cut));
       GELOGD("Node [%s] is vectorized axis double cut: %d.", node->GetNamePtr(), is_vectorized_axis_double_cut);
       if (!is_scalar && is_vectorized_axis_double_cut) {
-        is_need_drop = true;
-        break;
+        bool is_src_contiguous = false;
+        GE_ASSERT_SUCCESS(BroadcastInputWindowBlockIsContiguous(in_node, peer_out_anchor->GetIdx(), is_src_contiguous));
+        GELOGI("Transpose brc fuse: broadcast[%s] input window block contiguous[%d].", node->GetNamePtr(),
+               is_src_contiguous);
+        if (!is_src_contiguous) {
+          is_need_drop = true;
+          break;
+        }
       }
     }
   }

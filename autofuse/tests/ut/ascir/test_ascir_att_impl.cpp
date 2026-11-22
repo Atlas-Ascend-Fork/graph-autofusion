@@ -51,7 +51,7 @@ TEST_F(AscIrAttImplTest, GetApiPerfReturnsIrName_AllClasses) {
   EXPECT_ATT_IMPL_NAMED(ReduceAll);
   EXPECT_ATT_IMPL_NAMED(ReduceAny);
   EXPECT_ATT_IMPL_NAMED(ReduceMax);
-  EXPECT_ATT_IMPL_NAMED(ReduceArgMax);
+  EXPECT_ATT_IMPL_NAMED(ReduceArgmax);
   EXPECT_ATT_IMPL_NAMED(ReduceArgMaxMultiRPhase1);
   EXPECT_ATT_IMPL_NAMED(ReduceArgMaxMultiRPhase2);
   EXPECT_ATT_IMPL_NAMED(ReduceMean);

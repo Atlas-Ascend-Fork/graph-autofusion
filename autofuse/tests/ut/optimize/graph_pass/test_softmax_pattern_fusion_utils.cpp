@@ -62,7 +62,9 @@ void SetElewiseApi(Op &op) {
 }
 
 // 在 graph 上构建 IndirectLoad -> (来源链) -> 稳定 softmax pattern -> Store -> Output。
-void BuildIndirectLoadSoftmaxGraph(af::AscGraph &graph, SoftmaxSourceKind kind, SoftmaxGraphHandle &handle) {
+// use_div_node 控制除法尾节点形态：false 为 TrueDiv，true 为 Div（同 dtype 浮点除法）。
+void BuildIndirectLoadSoftmaxGraph(af::AscGraph &graph, SoftmaxSourceKind kind, SoftmaxGraphHandle &handle,
+                                   bool use_div_node = false) {
   const af::Expression s0 = graph.CreateSizeVar(2);
   const af::Expression s1 = graph.CreateSizeVar(3);
   const af::Expression s2 = graph.CreateSizeVar(5);
@@ -195,13 +197,24 @@ void BuildIndirectLoadSoftmaxGraph(af::AscGraph &graph, SoftmaxSourceKind kind, 
   af::ascir_op::Broadcast sum_broadcast("sum_broadcast");
   sum_broadcast.x = sum_op.y;
   SetSoftmaxNodeView(sum_broadcast, af::DT_FLOAT16, handle.output_axes, handle.output_repeats, handle.output_strides);
-  af::ascir_op::TrueDiv true_div("true_div");
-  true_div.x1 = exp_op.y;
-  true_div.x2 = sum_broadcast.y;
-  SetElewiseApi(true_div);
-  SetSoftmaxNodeView(true_div, af::DT_FLOAT16, handle.output_axes, handle.output_repeats, handle.output_strides);
+  af::AscOpOutput *div_result = nullptr;
+  if (use_div_node) {
+    af::ascir_op::Div div_op("true_div");
+    div_op.x1 = exp_op.y;
+    div_op.x2 = sum_broadcast.y;
+    SetElewiseApi(div_op);
+    SetSoftmaxNodeView(div_op, af::DT_FLOAT16, handle.output_axes, handle.output_repeats, handle.output_strides);
+    div_result = &div_op.y;
+  } else {
+    af::ascir_op::TrueDiv true_div("true_div");
+    true_div.x1 = exp_op.y;
+    true_div.x2 = sum_broadcast.y;
+    SetElewiseApi(true_div);
+    SetSoftmaxNodeView(true_div, af::DT_FLOAT16, handle.output_axes, handle.output_repeats, handle.output_strides);
+    div_result = &true_div.y;
+  }
   af::ascir_op::Store store("store");
-  store.x = true_div.y;
+  store.x = *div_result;
   SetSoftmaxNodeView(store, af::DT_FLOAT16, handle.output_axes, handle.output_repeats, handle.output_strides);
   af::ascir_op::Output output("output");
   output.x = store.y;
@@ -235,6 +248,21 @@ TEST(SoftmaxPatternFusionUtilsTest, MatchStableStructureHitsCompletePattern) {
   SoftmaxGraphHandle handle;
   BuildIndirectLoadSoftmaxGraph(graph, SoftmaxSourceKind::kDirect, handle);
   ASSERT_NE(handle.true_div, nullptr);
+  optimize::softmax_pattern::MatchResult pattern;
+  EXPECT_TRUE(optimize::softmax_pattern::MatchStable(handle.true_div, pattern));
+  EXPECT_EQ(pattern.max_node->GetName(), "max");
+  EXPECT_EQ(pattern.sub_node->GetName(), "sub");
+  EXPECT_EQ(pattern.exp_node->GetName(), "exp");
+  EXPECT_EQ(pattern.sum_node->GetName(), "sum");
+  EXPECT_EQ(pattern.true_div_node->GetName(), "true_div");
+}
+
+TEST(SoftmaxPatternFusionUtilsTest, MatchStableStructureHitsCompletePatternWithDiv) {
+  af::AscGraph graph("softmax_pattern_utils_ut_graph_div");
+  SoftmaxGraphHandle handle;
+  BuildIndirectLoadSoftmaxGraph(graph, SoftmaxSourceKind::kDirect, handle, true);
+  ASSERT_NE(handle.true_div, nullptr);
+  ASSERT_STREQ(handle.true_div->GetTypePtr(), "Div");
   optimize::softmax_pattern::MatchResult pattern;
   EXPECT_TRUE(optimize::softmax_pattern::MatchStable(handle.true_div, pattern));
   EXPECT_EQ(pattern.max_node->GetName(), "max");

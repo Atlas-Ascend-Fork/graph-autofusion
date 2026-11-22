@@ -19,6 +19,8 @@
 #include "ascgen_log.h"
 #include "ascir/meta/asc_graph_dumper_context.h"
 #include "common_utils.h"
+#include "gen_model_info/api_perf_register/soc_perf_config.h"
+#include "schedule_graph_validator.h"
 
 namespace pyascir {
 namespace {
@@ -47,6 +49,16 @@ class DumpGraphGuard {
     ascir::AscGraphDumperContext::GetThreadLocalCtx().ClearAllWatchGraphs();
   }
 };
+
+/**
+ * @brief 将 Schedule 阶段保存的图校验诊断转换为 Python RuntimeError。
+ *
+ * 没有专用诊断时使用调用方提供的通用错误文本。
+ */
+PyObject *BuildScheduleError(const char *fallback) {
+  const auto &diagnostic = optimize::GetScheduleValidationError();
+  return PyErr_Format(PyExc_RuntimeError, "%s", diagnostic.empty() ? fallback : diagnostic.c_str());
+}
 }  // namespace
 class AutofuserOptions {
  public:
@@ -115,6 +127,13 @@ int AutofuserOptions::Init(PyObject *self, PyObject *args, PyObject *kwds) {
       int64_t graph_type = PyLong_AsLong(graph_kwarg);
       self_->optimizer->graph_type = static_cast<optimize::GraphType>(graph_type);
     }
+
+    PyObject *soc_version_kwarg = PyDict_GetItemString(kwds, "soc_version");
+    if (soc_version_kwarg != nullptr && PyUnicode_Check(soc_version_kwarg)) {
+      Py_ssize_t soc_version_len;
+      const char *soc_version = PyUnicode_AsUTF8AndSize(soc_version_kwarg, &soc_version_len);
+      self_->codegen->soc_version = std::string(soc_version, soc_version_len);
+    }
   }
 
   return 0;
@@ -139,6 +158,10 @@ class Autofuser {
   static PyObject *AutofuseBackend(PyObject *self, PyObject *args, PyObject *kwds);
   static PyObject *Schedule(PyObject *self, PyObject *args, PyObject *kwds);
   static PyObject *Codegen(PyObject *self, PyObject *args, PyObject *kwds);
+  // rtLaunch 变体：与 codegen 共享实现，仅 launch_decouple=true。前后端独立上库契约：
+  // 老前端只调 codegen → legacy；新前端探测 hasattr(Autofuser, "codegen_bin") 失败即回退。
+  static PyObject *CodegenBin(PyObject *self, PyObject *args, PyObject *kwds);
+  static PyObject *CodegenImpl(PyObject *self, PyObject *args, PyObject *kwds, bool launch_decouple);
 };
 
 PyMethodDef Autofuser::methods[] = {
@@ -146,6 +169,7 @@ PyMethodDef Autofuser::methods[] = {
      nullptr},
     {"schedule", reinterpret_cast<PyCFunction>(Autofuser::Schedule), METH_VARARGS | METH_KEYWORDS, nullptr},
     {"codegen", reinterpret_cast<PyCFunction>(Autofuser::Codegen), METH_VARARGS | METH_KEYWORDS, nullptr},
+    {"codegen_bin", reinterpret_cast<PyCFunction>(Autofuser::CodegenBin), METH_VARARGS | METH_KEYWORDS, nullptr},
     {nullptr, nullptr, 0, nullptr}};
 
 PyTypeObject Autofuser::type = {PyVarObject_HEAD_INIT(nullptr, 0)};
@@ -205,29 +229,42 @@ PyObject *Autofuser::Schedule(PyObject *self, PyObject *args, PyObject *kwds) {
     auto hint_graph = reinterpret_cast<pyascir::HintGraph::Object *>(graph_obj);
     PY_ASSERT_NOTNULL(hint_graph->graph);
     AssignDefaultIoIndex(*hint_graph->graph);
+    optimize::ClearScheduleValidationError();
     auto ret = self_->optimizer->Optimize(*(hint_graph->graph), fused_schedule_result->fused_schedule_result);
     if (ret != 0) {
       ERROR_PRINT("Optimize fail ret %d", ret);
       ascir::AscGraphDumperContext::GetThreadLocalCtx().DumpWatchedGraphs();
-      return PyErr_Format(PyExc_RuntimeError, "Optimize fail");
+      Py_DECREF(fused_schedule_result_obj);
+      return BuildScheduleError("Optimize fail");
     }
     return Py_BuildValue("O", fused_schedule_result_obj);
   } else if (PyObject_IsInstance(graph_obj, reinterpret_cast<PyObject *>(&pyascir::FusedGraph::type)) ==
              kPythonSuccess) {
     auto fused_graph = reinterpret_cast<pyascir::FusedGraph::Object *>(graph_obj);
+    optimize::ClearScheduleValidationError();
     auto ret = self_->optimizer->Optimize(fused_graph->graph, fused_schedule_result->fused_schedule_result);
     if (ret != 0) {
       ERROR_PRINT("Optimize fail ret %d", ret);
       ascir::AscGraphDumperContext::GetThreadLocalCtx().DumpWatchedGraphs();
-      return PyErr_Format(PyExc_RuntimeError, "Optimize fail");
+      Py_DECREF(fused_schedule_result_obj);
+      return BuildScheduleError("Optimize fail");
     }
     return Py_BuildValue("O", fused_schedule_result_obj);
   } else {
+    Py_DECREF(fused_schedule_result_obj);
     return PyErr_Format(PyExc_RuntimeError, "schedule requires hint graph or fused graph");
   }
 }
 
 PyObject *Autofuser::Codegen(PyObject *self, PyObject *args, PyObject *kwds) {
+  return CodegenImpl(self, args, kwds, false);
+}
+
+PyObject *Autofuser::CodegenBin(PyObject *self, PyObject *args, PyObject *kwds) {
+  return CodegenImpl(self, args, kwds, true);
+}
+
+PyObject *Autofuser::CodegenImpl(PyObject *self, PyObject *args, PyObject *kwds, bool launch_decouple) {
   (void)kwds;
   DumpGraphGuard guard;
   auto self_ = reinterpret_cast<Autofuser::Object *>(self);
@@ -241,7 +278,7 @@ PyObject *Autofuser::Codegen(PyObject *self, PyObject *args, PyObject *kwds) {
   codegen::CodegenResult result;
   af::Status ret = af::FAILED;
   try {
-    ret = self_->codegen->GenerateForInductor(fused_schedule_result->fused_schedule_result, result);
+    ret = self_->codegen->GenerateForInductor(fused_schedule_result->fused_schedule_result, result, launch_decouple);
   } catch (const std::runtime_error &e) {
     GELOGE(af::FAILED, "Caught a runtime_error: %s", e.what());
   }
@@ -258,6 +295,9 @@ PyObject *Autofuser::AutofuseBackend(PyObject *self, PyObject *args, PyObject *k
   if (PyArg_ParseTuple(args, "O", &graph_obj) == kPythonFail) {
     return PyErr_Format(PyExc_ValueError, "autofuse input args error");
   }
+  if (att::ValidateSocPerfEntry() != af::SUCCESS) {
+    return PyErr_Format(PyExc_RuntimeError, "Invalid SoC performance target");
+  }
 
   ascir::FusedScheduledResult fused_schedule_result;
 
@@ -265,18 +305,20 @@ PyObject *Autofuser::AutofuseBackend(PyObject *self, PyObject *args, PyObject *k
     auto hint_graph = reinterpret_cast<pyascir::HintGraph::Object *>(graph_obj);
     PY_ASSERT_NOTNULL(hint_graph->graph);
     AssignDefaultIoIndex(*hint_graph->graph);
+    optimize::ClearScheduleValidationError();
     auto ret = self_->optimizer->Optimize(*(hint_graph->graph), fused_schedule_result);
     if (ret != 0) {
       ERROR_PRINT("Optimize fail ret %d", ret);
-      return PyErr_Format(PyExc_RuntimeError, "Optimize fail");
+      return BuildScheduleError("Optimize fail");
     }
   } else if (PyObject_IsInstance(graph_obj, reinterpret_cast<PyObject *>(&pyascir::FusedGraph::type)) ==
              kPythonSuccess) {
     auto fused_graph = reinterpret_cast<pyascir::FusedGraph::Object *>(graph_obj);
+    optimize::ClearScheduleValidationError();
     auto ret = self_->optimizer->Optimize(fused_graph->graph, fused_schedule_result);
     if (ret != 0) {
       ERROR_PRINT("Optimize fail ret %d", ret);
-      return PyErr_Format(PyExc_RuntimeError, "Optimize fail");
+      return BuildScheduleError("Optimize fail");
     }
   } else {
     return PyErr_Format(PyExc_RuntimeError, "schedule requires hint graph or fused graph");
@@ -284,11 +326,13 @@ PyObject *Autofuser::AutofuseBackend(PyObject *self, PyObject *args, PyObject *k
 
   codegen::CodegenResult result;
   try {
-    if (self_->codegen->GenerateForInductor(fused_schedule_result, result) != af::SUCCESS) {
-      GELOGE(af::FAILED, "Codegen generate kernel failed");
+    const auto ret = self_->codegen->GenerateForInductor(fused_schedule_result, result);
+    if (ret != af::SUCCESS) {
+      return PyErr_Format(PyExc_RuntimeError, "Codegen generate kernel failed");
     }
   } catch (const std::runtime_error &e) {
     GELOGE(af::FAILED, "Caught a runtime_error: %s", e.what());
+    return PyErr_Format(PyExc_RuntimeError, "Codegen generate kernel failed: %s", e.what());
   }
 
   return Py_BuildValue("sss", result.tiling_data.c_str(), result.tiling.c_str(), result.kernel.c_str());
@@ -363,8 +407,11 @@ PyObject *Schedule::ScheduleV1(PyObject *self_pyobject, PyObject *args, PyObject
   auto fused_schedule_result = reinterpret_cast<pyascir::FusedScheduledResult::Object *>(fused_schedule_result_obj);
   PY_ASSERT_NOTNULL(hint_graph->graph);
   AssignDefaultIoIndex(*hint_graph->graph);
+  optimize::ClearScheduleValidationError();
   if (self->optimizer->Optimize(*hint_graph->graph, fused_schedule_result->fused_schedule_result) != af::SUCCESS) {
     ascir::AscGraphDumperContext::GetThreadLocalCtx().DumpWatchedGraphs();
+    Py_DECREF(fused_schedule_result_obj);
+    return BuildScheduleError("Optimize fail");
   }
   return Py_BuildValue("O", fused_schedule_result_obj);
 }
@@ -389,11 +436,13 @@ PyObject *Schedule::ScheduleV2(PyObject *self_pyobject, PyObject *args, PyObject
                                  "FusedScheduledResult init fail");
 
   auto fused_schedule_result = reinterpret_cast<pyascir::FusedScheduledResult::Object *>(fused_schedule_result_obj);
+  optimize::ClearScheduleValidationError();
   auto ret = self->optimizer->Optimize(hint_compute_graph->compute_graph, fused_schedule_result->fused_schedule_result);
   if (ret != 0) {
     ascir::AscGraphDumperContext::GetThreadLocalCtx().DumpWatchedGraphs();
     ERROR_PRINT("Optimize fail ret %d", ret);
-    return PyErr_Format(PyExc_RuntimeError, "Optimize fail");
+    Py_DECREF(fused_schedule_result_obj);
+    return BuildScheduleError("Optimize fail");
   }
 
   return Py_BuildValue("O", fused_schedule_result_obj);
@@ -506,7 +555,10 @@ af::Status CodeGen::HandleDeviceCodeGenForCVFusion(CodeGen::Object *self,
   ascir::FusedScheduledResult ub_schedule_result = fused_schedule_result;
   ascir::FusedScheduledResult common_schedule_result = fused_schedule_result;
 
-  GE_ASSERT_SUCCESS(ascgen_utils::FilterCVFusionUBResult(ub_schedule_result));
+  // Dynamic tiling selects UB or Common at runtime, so both branches must be generated together.
+  if (ascgen_utils::IsFrontendStaticSchedResult(fused_schedule_result)) {
+    GE_ASSERT_SUCCESS(ascgen_utils::FilterCVFusionUBResult(ub_schedule_result));
+  }
   GE_ASSERT_SUCCESS(ascgen_utils::FilterCVFusionCommonResult(common_schedule_result));
 
   // 生成UB模板的代码，存在没有UB模板的场景
@@ -572,7 +624,10 @@ af::Status CodeGen::HandleHostCodeGenForCVFusion(CodeGen::Object *self,
   ascir::FusedScheduledResult ub_schedule_result = fused_schedule_result;
   ascir::FusedScheduledResult common_schedule_result = fused_schedule_result;
 
-  GE_ASSERT_SUCCESS(ascgen_utils::FilterCVFusionUBResult(ub_schedule_result));
+  // Keep the Common cases reachable by the dynamic UB host's runtime fallback.
+  if (ascgen_utils::IsFrontendStaticSchedResult(fused_schedule_result)) {
+    GE_ASSERT_SUCCESS(ascgen_utils::FilterCVFusionUBResult(ub_schedule_result));
+  }
   GE_ASSERT_SUCCESS(ascgen_utils::FilterCVFusionCommonResult(common_schedule_result));
 
   // 生成UB模板的代码,存在没有UB模板的场景
@@ -802,12 +857,13 @@ PyObject *CodeGen::get_kernel_and_json_generator(PyObject *self_pyobject, PyObje
   std::string get_kernel;
   const char *kernel_path = nullptr;
   const char *json_path = nullptr;
-  if (PyArg_ParseTuple(args, "ss", &kernel_path, &json_path) == kPythonFail) {
+  const char *export_name = "GetKernelBin";
+  if (PyArg_ParseTuple(args, "ss|s", &kernel_path, &json_path, &export_name) == kPythonFail) {
     return PyErr_Format(PyExc_ValueError, "codegen param parse failed");
   }
 
   af::Status ret = af::SUCCESS;
-  get_kernel = self->codegen->GenGetKernelAndJson(kernel_path, json_path);
+  get_kernel = self->codegen->GenGetKernelAndJson(kernel_path, json_path, export_name);
   if (get_kernel == "") {
     ret = af::FAILED;
   }

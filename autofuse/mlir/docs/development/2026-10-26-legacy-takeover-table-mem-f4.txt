@@ -1,0 +1,84 @@
+# legacy 接管表 —— mem 侧（NpuArch 2201）38 格，F-4 落地后，2026-10-26
+#
+# 上一张 mem 表是 2026-10-17-legacy-takeover-table-mem.txt。本轮量了两遍，两遍之间只差 F-4
+# 那一个补丁，于是 F-4 的效果与本期其他改动分得开（10-17 那张早于本期七批算子与 bf16）。
+#
+#                  10-17   F-4 前   F-4 后
+#   takeover          13      13      13     （本期与 F-4 都没动它：本期接的算子全是 reg-only）
+#   fallback           0       1       4
+#   hard-failure      21      20      17
+#   no-hook-call       3       3       3
+#   out-of-scope       1       1       1
+#
+# F-4 逐格只有 3 格变，都是 hard-failure -> fallback，0 格变差：
+#   brc_inline_test_codegen                      组合拒收 elementwise-broadcast 1 + queue-resources 1
+#   inductor_topn_test_codegen                   组合拒收 elementwise-broadcast 1 + queue-resources 1
+#   workspace_uint64_multi_reduce_test_codegen    绑定判据 data-movement
+#
+# 残余 17 格硬失败 = 11 格 att-tiling-key（全部 candidate-preparation）+ 6 格 lowering。
+# att-tiling-key 不标能力不足的理由见 2026-10-26-f4-plan-selection-shortfall.txt。
+#
+# 量具: autofuse/mlir/test/probe/legacy_takeover_table.sh -j 8 -R '_test_codegen$'
+# 代码: cc7d56b2。环境: 远端 AF_MLIR_0814。量具 WARNING 0、缺二进制 0。
+# no-hook-call 那 3 行的归因沿用 10-17 那份：conv2d / matmul 走 TilingLib::Generate，
+# pgo_add_abs 直接调 GenerateKernel / GenerateTiling，都不经过挂钩点。
+#
+case                                                 state         gate                     shortfall  first diagnostic
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+add_abs_test_codegen                                 takeover      none                     no
+add_gelu_test_codegen                                takeover      none                     no
+add_neg_test_codegen                                 takeover      none                     no
+add_rsqrt_test_codegen                               takeover      none                     no
+axpy_abs_half_test_codegen                           hard-failure  lowering                 no         error: 'afir.store' op transfer source and destination must have the same element type
+axpy_abs_test_codegen                                takeover      none                     no
+brc_inline_test_codegen                              fallback      candidate-preparation    yes        error: subgraph 0 contains no plan with an MLIR-supported template (plan 0 stage 0: 2 template(s), no single predicate rejects all; counts: elementwis
+compare_test_codegen                                 hard-failure  candidate-preparation    no         error: ATT generated tiling_func references field(s) not present in TilingFieldSchema: graph0_tiling_key tiling_key
+compare_x2_tensor_int32_test_codegen                 hard-failure  candidate-preparation    no         error: ATT generated tiling_func references field(s) not present in TilingFieldSchema: graph0_tiling_key tiling_key
+compare_x2_tensor_int64_eq_test_codegen              hard-failure  candidate-preparation    no         error: ATT generated tiling_func references field(s) not present in TilingFieldSchema: graph0_tiling_key tiling_key
+compare_x2_tensor_int64_gt_test_codegen              hard-failure  candidate-preparation    no         error: ATT generated tiling_func references field(s) not present in TilingFieldSchema: graph0_tiling_key tiling_key
+compare_x2_tensor_test_codegen                       hard-failure  candidate-preparation    no         error: ATT generated tiling_func references field(s) not present in TilingFieldSchema: graph0_tiling_key tiling_key
+concat_all_aligned_test_codegen                      hard-failure  candidate-preparation    no         error: ATT generated tiling_func references field(s) not present in TilingFieldSchema: graph0_tiling_key tiling_key
+concat_to_stores_test_codegen                        hard-failure  candidate-preparation    no         error: ATT generated tiling_func references field(s) not present in TilingFieldSchema: graph0_tiling_key tiling_key
+conv2d_elemwise_test_codegen                         no-hook-call  -                        -
+inductor_matmul_elemwise_test_codegen                out-of-scope  cube-fusion              no
+inductor_tail_brc_tail_reduce_test_codegen           hard-failure  candidate-preparation    no         error: ATT generated tiling_func references field(s) not present in TilingFieldSchema: graph0_tiling_key tiling_key
+inductor_topn_concat_test_codegen                    hard-failure  candidate-preparation    no         error: ATT generated tiling_func references field(s) not present in TilingFieldSchema: graph0_tiling_key tiling_key
+inductor_topn_test_codegen                           fallback      candidate-preparation    yes        error: subgraph 0 contains no plan with an MLIR-supported template (plan 0 stage 0: 2 template(s), no single predicate rejects all; counts: elementwis
+isinf_maskedfill_test_codegen                        takeover      none                     no
+load_logical_not_store_test_codegen                  takeover      none                     no
+load_pow_all_input_is_scalar_store_test_codegen      takeover      none                     no
+load_to_store_and_abs_test_codegen                   takeover      none                     no
+load_unalign_pad_test_codegen                        fallback      lowering                 yes        error: 'afir.load' op has no supported Ascend implementation
+load_where_store_test_codegen                        takeover      none                     no
+load_where_x2_is_ubscalar_store_test_codegen         takeover      none                     no
+load_where_x2_x3_is_ubscalar_store_test_codegen      takeover      none                     no
+load_where_x3_is_ubscalar_store_test_codegen         takeover      none                     no
+matmul_elemwise_test_codegen                         no-hook-call  -                        -
+pgo_add_abs_inductor_concat_test_codegen             hard-failure  candidate-preparation    no         error: ATT generated tiling_func references field(s) not present in TilingFieldSchema: graph0_tiling_key tiling_key
+pgo_add_abs_inductor_test_codegen                    hard-failure  candidate-preparation    no         error: ATT generated tiling_func references field(s) not present in TilingFieldSchema: graph0_tiling_key tiling_key
+pgo_add_abs_test_codegen                             no-hook-call  -                        -
+scalar_cast_add_test_codegen                         hard-failure  lowering                 no         error: 'afir.cast' op operand #0 must be Tensor or MemRef of 4-bit signless integer or 8-bit signless integer or 8-bit unsigned integer or 16-bit sign
+scalar_div_inf_test_codegen                          hard-failure  lowering                 no         error: UnsupportedOperation: Scalar node 'scalar0' value 'inf' is not a numeric literal
+scalar_float_inf_test_codegen                        hard-failure  lowering                 no         error: UnsupportedOperation: Scalar node 'scalar0' value 'inf' is not a numeric literal
+sub_abs_test_codegen                                 hard-failure  lowering                 no         error: 'afir.sub' op buffer form expects at least one shaped input; all-scalar inputs have no tile to compute over
+truediv_abs_test_codegen                             hard-failure  lowering                 no         error: 'afir.truediv' op buffer form expects at least one shaped input; all-scalar inputs have no tile to compute over
+workspace_uint64_multi_reduce_test_codegen           fallback      candidate-preparation    yes        error: subgraph 0 contains no plan with an MLIR-supported template (plan 0 stage 0: 1 template(s), all rejected by: data-movement 1)
+
+state                              count
+------------------------------------------------
+fallback                           4
+hard-failure                       17
+no-hook-call                       3
+out-of-scope                       1
+takeover                           13
+
+gate                               count
+------------------------------------------------
+-                                  3
+candidate-preparation              14
+cube-fusion                        1
+lowering                           7
+none                               13
+
+二进制不存在的行: 0
+没打出标签的行: 3 —— 逐个归因：这些用例调的是哪个 API？归完才算不是「状态未知」

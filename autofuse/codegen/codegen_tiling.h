@@ -67,6 +67,7 @@ struct TensorInfo {
   std::string param_name;
   std::vector<ge::Expression> shape;
   std::vector<ge::Expression> ori_shape;
+  std::vector<ge::Expression> strides;
   std::string dtype;
   std::string format;
   std::string name;
@@ -117,8 +118,8 @@ class TilingLib {
   std::map<std::string, std::string> Generate(const ::ascir::FusedScheduledResult &fused_schedule_result,
                                               const std::map<std::string, std::string> &shape_info,
                                               const std::string &pgo_dir, const std::string &core_num) const;
-  std::map<std::string, std::string> GenerateForInductor(
-      const ::ascir::FusedScheduledResult &fused_schedule_result) const;
+  std::map<std::string, std::string> GenerateForInductor(const ::ascir::FusedScheduledResult &fused_schedule_result,
+                                                         bool launch_decouple = false) const;
 
   // codegen_tiling_pgo_runtime.cpp: TF and Inductor shared PGO runtime orchestration.
   std::string GenerateForPgo(const ::ascir::FusedScheduledResult &fused_schedule_result,
@@ -139,7 +140,8 @@ class TilingLib {
                             const std::map<std::string, std::string> &shape_info, const std::string &pgo_dir,
                             const std::string &core_num) const;
   std::string TilingFuncDefForInductor(const ::ascir::FusedScheduledResult &fused_schedule_result,
-                                       const ::ascir::FusedScheduledResult &elemwise_schedule_result) const;
+                                       const ::ascir::FusedScheduledResult &elemwise_schedule_result,
+                                       bool launch_decouple) const;
   bool IsSupportedInductorPgoScene(const ::ascir::FusedScheduledResult &fused_schedule_result) const;
   // codegen_tiling_inductor_topn.cpp: Inductor modeled/measured TopN source generation.
   void GenInductorTopnSources(const ::ascir::FusedScheduledResult &fused_schedule_result, std::stringstream &ss,
@@ -203,6 +205,8 @@ class TilingLib {
   std::string GenTilingFuncForInductor(const ::ascir::FusedScheduledResult &fused_schedule_result,
                                        const ::ascir::FusedScheduledResult &elemwise_schedule_result,
                                        const std::string func, const std::string tiling) const;
+  std::string GenInductorTilingV2(const std::vector<std::string> &dynamic_shape_vars, const std::string &func,
+                                  const std::string &tiling) const;
   void GenInductorShapeDim(const ::ascir::FusedScheduledResult &elemwise_schedule_result,
                            codegen::PgoShapeStringStream &pgo_shape_dim, std::vector<std::string> &dynamic_shape_vars,
                            const std::string &tiling_var) const;
@@ -219,20 +223,27 @@ class TilingLib {
                                                  const std::string &entry_declaration = "") const;
   std::string GenModeledFallbackTopnForInductor(const ::ascir::FusedScheduledResult &fused_schedule_result,
                                                 const std::string &tiling) const;
+  bool UseAttCodegen(const ::ascir::FusedScheduledResult &fused_schedule_result) const;
   void GenTopnInitSearchTiling(std::stringstream &ss, const ::ascir::FusedScheduledResult &fused_schedule_result,
                                const std::string &tiling, int symbol_value_count, bool use_measured_perf) const;
   void GenTopnGetTilingFunc(std::stringstream &ss, const ::ascir::FusedScheduledResult &fused_schedule_result,
                             const std::string &tiling, int symbol_value_count, bool use_measured_perf) const;
   void GenTopnSearchTilingSetup(std::stringstream &ss, const std::string &tiling,
                                 const ::ascir::FusedScheduledResult &fused_schedule_result) const;
-  void GenTopnCollectCandidates(std::stringstream &ss, const std::string &tiling) const;
+  void GenTopnCollectCandidates(std::stringstream &ss, const std::string &tiling, bool use_att_codegen) const;
+  void GenMoveTopnSelectionSnapshots(std::stringstream &ss, const std::string &indent, bool use_att_codegen,
+                                     const std::string &selection_snapshots) const;
+  std::string GenTemplateSemanticInfosForInductor(const ::ascir::FusedScheduledResult &fused_schedule_result) const;
+  void GenGroupTemplateSemanticInfo(std::stringstream &ss, const std::string &group_prefix,
+                                    const std::string &tiling_data, size_t group, size_t slot) const;
+  void GenTopnTemplateSemanticLogs(std::stringstream &ss, bool use_att_codegen, size_t observation_slot_count) const;
   void GenTopnMeasuredCoreSearch(std::stringstream &ss, const std::string &tiling) const;
-  void GenTopnMeasuredBatchProfiling(std::stringstream &ss) const;
-  void GenTopnAppendMeasuredDefault(std::stringstream &ss) const;
+  void GenTopnMeasuredBatchProfiling(std::stringstream &ss, bool use_att_codegen) const;
+  void GenTopnAppendMeasuredDefault(std::stringstream &ss, bool use_att_codegen) const;
   void GenTopnSearchTilingKeyCall(std::stringstream &ss, const ::ascir::FusedScheduledResult &fused_schedule_result,
                                   const std::string &search_cfg) const;
   void GenTopnSetFailureMessage(std::stringstream &ss, const std::string &indent, const std::string &reason) const;
-  void GenTopnDefaultTiling(std::stringstream &ss, const std::string &tiling) const;
+  void GenTopnDefaultTiling(std::stringstream &ss, const std::string &tiling, bool use_att_codegen) const;
   void GenTopnSearchAndFinalChecks(std::stringstream &ss, const std::string &tiling,
                                    const ::ascir::FusedScheduledResult &fused_schedule_result,
                                    bool use_measured_perf) const;
@@ -240,7 +251,7 @@ class TilingLib {
                                      const std::string &tiling, const codegen::PgoShapeStringStream &pgo_shape_dim,
                                      const std::string &entry_declaration) const;
   void GenInductorPgoProxyEntry(std::stringstream &ss, const std::string &tiling) const;
-  std::string GenCandidateSolutionProtocolForInductor(const std::string &tiling) const;
+  std::string GenCandidateSolutionProtocolForInductor(const std::string &tiling, bool emit_semantic_infos) const;
   void GenDeduplicateCandidateSolutionsPrefix(std::stringstream &ss) const;
   void GenDeduplicateCandidateSolutions(std::stringstream &ss) const;
   void GenDeduplicateMeasuredCandidateSolutions(std::stringstream &ss) const;
@@ -256,13 +267,14 @@ class TilingLib {
   void GenGroupPerfForScheduleResult(std::stringstream &ss, size_t asc_graph_id, size_t result_id,
                                      const ::ascir::ScheduledResult &sched_result) const;
   std::string GenUpdateCurPerfAndBlockByGroupHelper() const;
-  void GenReprScheduleGroupFields(std::stringstream &ss, const ::ascir::ScheduleGroup &sg,
-                                  const std::string &field_prefix, const std::string &emit_fn,
-                                  const std::string &indent, bool emit_first_arg) const;
-  void GenReprApiTilingFields(std::stringstream &ss, const ::ascir::ImplGraph &graph, size_t tiling_case_id,
-                              const std::string &field_prefix, bool top_level) const;
-  void GenReprSingleGroup(std::stringstream &ss, const ::ascir::FusedScheduledResult &fused_schedule_result) const;
-  void GenReprMultiGroup(std::stringstream &ss, const ::ascir::FusedScheduledResult &fused_schedule_result) const;
+  af::Status GenReprScheduleGroupFields(std::stringstream &ss, const ::ascir::ScheduleGroup &sg,
+                                        const std::string &field_prefix, const std::string &emit_fn,
+                                        const std::string &indent, bool emit_first_arg) const;
+  af::Status GenReprApiTilingFields(std::stringstream &ss, const ::ascir::ImplGraph &graph, size_t tiling_case_id,
+                                    const std::string &field_prefix, bool top_level) const;
+  af::Status GenReprSingleGroup(std::stringstream &ss,
+                                const ::ascir::FusedScheduledResult &fused_schedule_result) const;
+  af::Status GenReprMultiGroup(std::stringstream &ss, const ::ascir::FusedScheduledResult &fused_schedule_result) const;
   // codegen_tiling_pgo_search.cpp: PGO candidate traversal, tiling key and configuration persistence.
   std::string GenPgoTilingFunc(const ::ascir::FusedScheduledResult &fused_schedule_result, const std::string &tiling,
                                codegen::PgoShapeStringStream &pgo_shape_dim, bool is_inductor_scene,
@@ -370,6 +382,7 @@ class TilingLib {
   void GenInductorPgoProxySpawn(std::stringstream &ss) const;
   void GenInductorPgoProxyFunction(std::stringstream &ss, const std::string &tiling) const;
   std::string GenExternTilingFunc(const ::ascir::FusedScheduledResult &fused_schedule_result,
+                                  const ::ascir::FusedScheduledResult &elemwise_schedule_result,
                                   const std::map<std::string, std::string> &shape_info, const std::string tiling,
                                   const std::string &pgo_dir, const std::string &core_num) const;
   void TilingSetShapeDim(std::stringstream &tiling_set_shape_dim, const std::string &var_define,
@@ -393,9 +406,17 @@ class TilingLib {
   std::string GenGetTilingKeyCount(const ::ascir::FusedScheduledResult &fused_schedule_result) const;
   std::string GenGetTilingKeyForStatic() const;
   std::string GenGetTilingKeyKernelTypeForStatic(const ::ascir::FusedScheduledResult &fused_schedule_result) const;
+  std::string GenGetTilingKeyKernelTypeForStaticCompact(
+      const ::ascir::FusedScheduledResult &fused_schedule_result) const;
   // codegen_tiling_cube.cpp: Cube/CV tiling and MatMul metadata extraction.
-  std::string GenCVTilingFunc() const;
+  // Emit the shared helper before any generated CV UB selection calls it.
+  static void AppendCvUbStageSizeSelection(const ::ascir::FusedScheduledResult &fused_schedule_result,
+                                           const ::ascir::FusedScheduledResult &elemwise_schedule_result,
+                                           std::stringstream &ss);
+  static std::vector<bool> GetCvUbBufferPolicies(const ::ascir::FusedScheduledResult &fused_schedule_result);
+  std::string GenCVTilingFunc(const std::vector<bool> &broadcast_policies = {}, bool batch_n_rows = false) const;
   std::string GenTilingDataBlockDimAndWss() const;
+  std::string GenTilingDataBlockDimAndWss(bool exclude_system_workspace, bool cv_broadcast = false) const;
   std::map<std::string, std::string> GenerateCVFusionStatic(
       const ::ascir::FusedScheduledResult &fused_schedule_result,
       const ::ascir::FusedScheduledResult &elemwise_schedule_result,
@@ -410,11 +431,15 @@ class TilingLib {
   std::map<std::string, std::string> GenerateCVFusion(const ::ascir::FusedScheduledResult &fused_schedule_result,
                                                       const std::map<std::string, std::string> &shape_info,
                                                       const std::string &pgo_dir, const std::string &core_num) const;
+  void AppendCubeFusionUbModeCode(std::stringstream &ss, const ::ascir::FusedScheduledResult &elemwise_schedule_result,
+                                  const MatMulCubeInfo &cube_info, const std::vector<bool> &non_db_cases) const;
   std::string GenCubeFusionTilingBody(const ::ascir::FusedScheduledResult &fused_schedule_result,
+                                      const ::ascir::FusedScheduledResult &elemwise_schedule_result,
                                       const std::string &shape_dim_param) const;
   std::string GenNonCubeFusionTilingBody(const ::ascir::FusedScheduledResult &fused_schedule_result,
                                          const std::string &tiling, const std::string &shape_dim_param) const;
   std::string GenExternTilingFuncBody(const ::ascir::FusedScheduledResult &fused_schedule_result,
+                                      const ::ascir::FusedScheduledResult &elemwise_schedule_result,
                                       const std::map<std::string, std::string> &shape_info, const std::string &tiling,
                                       const std::string &pgo_dir) const;
   Status ExtractMatMulCubeInfoFromImplGraph(const ge::AscGraph &impl_graph, MatMulCubeInfo &cube_info) const;
@@ -432,7 +457,8 @@ class TilingLib {
   std::string GenerateMatMulTilingCode(const CompileInfo &compile_info, const std::vector<TensorInfo> &inputs,
                                        const std::vector<TensorInfo> &outputs, const std::vector<AttrInfo> &attrs,
                                        bool is_batch) const;
-  std::string ProcessCubeKernelTilingFromFusedResult(const ::ascir::FusedScheduledResult &fused_schedule_result) const;
+  std::string ProcessCubeKernelTilingFromFusedResult(const ::ascir::FusedScheduledResult &fused_schedule_result,
+                                                     bool enable_input_view = false) const;
   std::string GenCubeFusionTilingBodyInductor(const ::ascir::FusedScheduledResult &fused_schedule_result,
                                               const ::ascir::FusedScheduledResult &elemwise_schedule_result,
                                               const std::string &shape_dim_param) const;

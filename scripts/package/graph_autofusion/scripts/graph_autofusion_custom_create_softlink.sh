@@ -108,6 +108,8 @@ python_dir_chmod_reset "$WHL_SOFTLINK_INSTALL_DIR_PATH"
 
 create_softlink_if_exists "${WHL_INSTALL_DIR_PATH}" "$WHL_SOFTLINK_INSTALL_DIR_PATH" "superkernel"
 create_softlink_if_exists "${WHL_INSTALL_DIR_PATH}" "$WHL_SOFTLINK_INSTALL_DIR_PATH" "superkernel-*.dist-info"
+create_softlink_if_exists "${WHL_INSTALL_DIR_PATH}" "$WHL_SOFTLINK_INSTALL_DIR_PATH" "multistream"
+create_softlink_if_exists "${WHL_INSTALL_DIR_PATH}" "$WHL_SOFTLINK_INSTALL_DIR_PATH" "multistream-*.dist-info"
 
 python_dir_chmod_set "$WHL_SOFTLINK_INSTALL_DIR_PATH"
 python_dir_chmod_set "$(dirname $WHL_SOFTLINK_INSTALL_DIR_PATH)"

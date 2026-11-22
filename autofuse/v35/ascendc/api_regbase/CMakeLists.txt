@@ -31,6 +31,7 @@ set(ascendc_api_regbase_extend_src
         polygamma.h
         random.h
         randn.h
+        randint.h
         split.h
         where.h
         erf.h
@@ -62,6 +63,11 @@ set(ascendc_api_regbase_extend_src
         reduce/sum_3510_impl.h
         reduce/reduce_xor_sum_3510_impl.h
         argmax.h
+        argmin.h
+        arg_reduce.h
+        arg_reduce_common.h
+        arg_reduce_core.h
+        arg_reduce_merge.h
         atan2.h
         airy_ai.h
         copy_sign.h
@@ -69,6 +75,7 @@ set(ascendc_api_regbase_extend_src
         expm1.h
         fmod.h
         neg.h
+        shift.h
         square.h
         softmax_af.h
         trunc_div.h

@@ -11,12 +11,28 @@
 #include "codegen_tiling.h"
 #include "codegen_tiling_data.h"
 
+#include <map>
+
 #include "common_utils.h"
 
 namespace codegen {
 using namespace ascgen_utils;
 
 namespace {
+size_t CountObservationSlots(const ascir::FusedScheduledResult &fused_schedule_result) {
+  size_t slot_count = 0UL;
+  for (const auto &scheduled_results : fused_schedule_result.node_idx_to_scheduled_results) {
+    for (const auto &scheduled_result : scheduled_results) {
+      slot_count += scheduled_result.schedule_groups.size();
+    }
+  }
+  return slot_count;
+}
+
+bool HasFinalTilingObservation(const ascir::FusedScheduledResult &fused_schedule_result) {
+  return CountObservationSlots(fused_schedule_result) > 0UL;
+}
+
 void AppendTopnEntryInitialization(std::stringstream &ss) {
   ss << "  tiling_datas.clear();" << std::endl;
   ss << "  workspaces.clear();" << std::endl;
@@ -30,7 +46,9 @@ void AppendTopnEntryInitialization(std::stringstream &ss) {
 
 void TilingLib::GenInductorTopnSources(const ascir::FusedScheduledResult &fused_schedule_result, std::stringstream &ss,
                                        std::map<std::string, std::string> &tiling_file_name_to_content) const {
-  ss << GenCandidateSolutionProtocolForInductor("AutofuseTilingData") << std::endl;
+  const bool use_att_codegen = UseAttCodegen(fused_schedule_result) && HasFinalTilingObservation(fused_schedule_result);
+  ss << GenCandidateSolutionProtocolForInductor("AutofuseTilingData", use_att_codegen) << std::endl;
+  ss << GenTemplateSemanticInfosForInductor(fused_schedule_result) << std::endl;
   ss << (enable_autofuse_pgo_ ? GenMeasuredTopnSelectorHelpersForInductor() : GenTopnSelectorHelpersForInductor())
      << std::endl;
   if (!enable_autofuse_pgo_) {
@@ -59,7 +77,9 @@ std::string TilingLib::GenModeledFallbackTopnForInductor(const ascir::FusedSched
                                                          const std::string &tiling) const {
   std::stringstream ss;
   ss << "namespace inductor_pgo_fallback {" << std::endl;
-  ss << GenCandidateSolutionProtocolForInductor(tiling) << std::endl;
+  ss << GenCandidateSolutionProtocolForInductor(
+            tiling, UseAttCodegen(fused_schedule_result) && HasFinalTilingObservation(fused_schedule_result))
+     << std::endl;
   ss << GenTopnSelectorHelpersForInductor() << std::endl;
   ss << GenInductorConfigParserForInductor() << std::endl;
   if (!ascgen_utils::IsSingleGroup(fused_schedule_result)) {
@@ -105,9 +125,9 @@ extern "C" void ClearTopnPgoContext() {
 )";
 }
 
-void TilingLib::GenReprScheduleGroupFields(std::stringstream &ss, const ascir::ScheduleGroup &sg,
-                                           const std::string &field_prefix, const std::string &emit_fn,
-                                           const std::string &indent, bool emit_first_arg) const {
+af::Status TilingLib::GenReprScheduleGroupFields(std::stringstream &ss, const ascir::ScheduleGroup &sg,
+                                                 const std::string &field_prefix, const std::string &emit_fn,
+                                                 const std::string &indent, bool emit_first_arg) const {
   std::unordered_set<std::string> seen_vars;
   std::set<int64_t> q_ids;
   std::set<int64_t> b_ids;
@@ -126,7 +146,7 @@ void TilingLib::GenReprScheduleGroupFields(std::stringstream &ss, const ascir::S
     }
     codegen::TilingData::GetTqueAndTbufId(graph, q_ids, b_ids);
     codegen::TilingData::GetTmpBufName(graph, b_ids);
-    GenReprApiTilingFields(ss, graph, gi, field_prefix, emit_first_arg);
+    GE_ASSERT_SUCCESS(GenReprApiTilingFields(ss, graph, gi, field_prefix, emit_first_arg));
   }
   for (auto q_id : q_ids) {
     if (q_id >= 0) {
@@ -140,18 +160,35 @@ void TilingLib::GenReprScheduleGroupFields(std::stringstream &ss, const ascir::S
          << first_arg << std::endl;
     }
   }
+  return af::SUCCESS;
 }
 
-void TilingLib::GenReprApiTilingFields(std::stringstream &ss, const ascir::ImplGraph &graph, size_t tiling_case_id,
-                                       const std::string &field_prefix, bool top_level) const {
+af::Status TilingLib::GenReprApiTilingFields(std::stringstream &ss, const ascir::ImplGraph &graph,
+                                             size_t tiling_case_id, const std::string &field_prefix,
+                                             bool top_level) const {
   const std::string indent = top_level ? "  " : "    ";
   const std::string first_flag = top_level ? "first" : "sub_first";
+  // 与 AddApiTilingData 保持一致：重名字段只发一次 repr，避免生成重复的 designated initializer。
+  // 与其相同，跳过仅对"同身份"（原始节点名 + tiling 类型 + tiling 值指纹）的等价重复安全；
+  // 异源节点共享字段属运行期数据错误，显性失败而非静默跳过。
+  std::map<std::string, std::string> emitted_api_fields;  // field -> 节点身份
   for (const auto &node : graph.GetAllNodes()) {
     std::string device_type_name;
     std::string api_field_name;
     if (af::SUCCESS == GetApiTilingTypeName(node, device_type_name) &&
         af::SUCCESS == GetApiTilingFieldName(node, api_field_name)) {
       api_field_name = api_field_name + "_" + std::to_string(tiling_case_id);
+      const std::string node_identity =
+          node->GetName() + "|" + device_type_name + "|" + ascgen_utils::GenApiTilingValueFingerprint(node);
+      const auto emitted_iter = emitted_api_fields.find(api_field_name);
+      if (emitted_iter != emitted_api_fields.end()) {
+        GE_ASSERT_TRUE(emitted_iter->second == node_identity,
+                       "Duplicate repr api tiling field [%s] from node [%s] type [%s] conflicts with identity [%s].",
+                       api_field_name.c_str(), node->GetNamePtr(), device_type_name.c_str(),
+                       emitted_iter->second.c_str());
+        continue;
+      }
+      emitted_api_fields[api_field_name] = node_identity;
       ss << indent << "{" << std::endl;
       ss << indent << "  if (!" << first_flag << ") { repr << \",\"; }" << std::endl;
       ss << indent << "  repr << std::endl << \"" << indent << "." << api_field_name << " = {\";" << std::endl;
@@ -169,6 +206,7 @@ void TilingLib::GenReprApiTilingFields(std::stringstream &ss, const ascir::ImplG
       ss << indent << "}" << std::endl;
     }
   }
+  return af::SUCCESS;
 }
 
 std::string TilingLib::GenGetTilingDataReprFuncForInductor(const ascir::FusedScheduledResult &fused_schedule_result,
@@ -194,9 +232,16 @@ std::string TilingLib::GenGetTilingDataReprFuncForInductor(const ascir::FusedSch
   ss << "  };" << std::endl;
   ss << "  bool first = true;" << std::endl;
   ss << "  emit_field(\"block_dim\", tiling_data->get_block_dim(), first); first = false;" << std::endl;
-  ss << "  emit_field(\"corenum\", tiling_data->get_corenum(), first); first = false;" << std::endl;
+  // designated initializer 必须按声明顺序：block_dim 后紧跟 tiling_key / graphN_tiling_key。
+  if (ascgen_utils::IsSingleGroup(fused_schedule_result)) {
+    ss << "  emit_field(\"tiling_key\", tiling_data->get_tiling_key(), first); first = false;" << std::endl;
+  } else {
+    for (size_t i = 0; i < fused_schedule_result.node_idx_to_scheduled_results.size(); ++i) {
+      ss << "  emit_field(\"graph" << i << "_tiling_key\", tiling_data->get_graph" << i
+         << "_tiling_key(), first); first = false;" << std::endl;
+    }
+  }
   ss << "  emit_field(\"ub_size\", tiling_data->get_ub_size(), first); first = false;" << std::endl;
-  ss << "  emit_field(\"hbm_size\", tiling_data->get_hbm_size(), first); first = false;" << std::endl;
 
   std::vector<ascir::TensorId> workspace_ids =
       ascgen_utils::GetWorkspaceTensorIdListInOneScheduleResult(fused_schedule_result);
@@ -207,9 +252,9 @@ std::string TilingLib::GenGetTilingDataReprFuncForInductor(const ascir::FusedSch
   }
 
   if (ascgen_utils::IsSingleGroup(fused_schedule_result)) {
-    GenReprSingleGroup(ss, fused_schedule_result);
+    GE_ASSERT_SUCCESS(GenReprSingleGroup(ss, fused_schedule_result));
   } else {
-    GenReprMultiGroup(ss, fused_schedule_result);
+    GE_ASSERT_SUCCESS(GenReprMultiGroup(ss, fused_schedule_result));
   }
 
   ss << "  repr << std::endl << \"}\";" << std::endl;
@@ -221,19 +266,15 @@ std::string TilingLib::GenGetTilingDataReprFuncForInductor(const ascir::FusedSch
   return ss.str();
 }
 
-void TilingLib::GenReprSingleGroup(std::stringstream &ss,
-                                   const ascir::FusedScheduledResult &fused_schedule_result) const {
-  ss << "  emit_field(\"tiling_key\", tiling_data->get_tiling_key(), first); first = false;" << std::endl;
+af::Status TilingLib::GenReprSingleGroup(std::stringstream &ss,
+                                         const ascir::FusedScheduledResult &fused_schedule_result) const {
   auto &sg = fused_schedule_result.node_idx_to_scheduled_results[0][0].schedule_groups[0];
-  GenReprScheduleGroupFields(ss, sg, "tiling_data->", "emit_field", "  ", true);
+  GE_ASSERT_SUCCESS(GenReprScheduleGroupFields(ss, sg, "tiling_data->", "emit_field", "  ", true));
+  return af::SUCCESS;
 }
 
-void TilingLib::GenReprMultiGroup(std::stringstream &ss,
-                                  const ascir::FusedScheduledResult &fused_schedule_result) const {
-  for (size_t i = 0; i < fused_schedule_result.node_idx_to_scheduled_results.size(); ++i) {
-    ss << "  emit_field(\"graph" << i << "_tiling_key\", tiling_data->get_graph" << i << "_tiling_key(), first);"
-       << " first = false;" << std::endl;
-  }
+af::Status TilingLib::GenReprMultiGroup(std::stringstream &ss,
+                                        const ascir::FusedScheduledResult &fused_schedule_result) const {
   for (size_t i = 0; i < fused_schedule_result.node_idx_to_scheduled_results.size(); ++i) {
     const auto &scheduled_results = fused_schedule_result.node_idx_to_scheduled_results[i];
     for (size_t j = 0; j < scheduled_results.size(); ++j) {
@@ -251,18 +292,17 @@ void TilingLib::GenReprMultiGroup(std::stringstream &ss,
         ss << "      sub_first = false;" << std::endl;
         ss << "    };" << std::endl;
         ss << "    emit_sub(\"block_dim\", tiling_data->" << sub_name << ".get_block_dim());" << std::endl;
-        ss << "    emit_sub(\"corenum\", tiling_data->" << sub_name << ".get_corenum());" << std::endl;
-        ss << "    emit_sub(\"ub_size\", tiling_data->" << sub_name << ".get_ub_size());" << std::endl;
-        ss << "    emit_sub(\"hbm_size\", tiling_data->" << sub_name << ".get_hbm_size());" << std::endl;
         ss << "    emit_sub(\"tiling_key\", tiling_data->" << sub_name << ".get_tiling_key());" << std::endl;
+        ss << "    emit_sub(\"ub_size\", tiling_data->" << sub_name << ".get_ub_size());" << std::endl;
         std::string field_prefix = "tiling_data->" + sub_name + ".";
-        GenReprScheduleGroupFields(ss, schedule_groups[k], field_prefix, "emit_sub", "    ", false);
+        GE_ASSERT_SUCCESS(GenReprScheduleGroupFields(ss, schedule_groups[k], field_prefix, "emit_sub", "    ", false));
         ss << "    repr << std::endl << \"  }\";" << std::endl;
         ss << "    first = false;" << std::endl;
         ss << "  }" << std::endl;
       }
     }
   }
+  return af::SUCCESS;
 }
 
 std::string TilingLib::GenUpdateCurPerfAndBlockByGroupHelper() const {
@@ -409,8 +449,7 @@ void TilingLib::GenTopnInitSearchTiling(std::stringstream &ss, const ascir::Fuse
     for (auto vars : GetFrontendShapeVars(fused_schedule_result)) {
       if (!(vars.IsConstExpr())) {
         std::string var_define = std::string(vars.Str().get());
-        ss << "  const uint32_t " << var_define << " = static_cast<uint32_t>(request.symbol_values[" << idx << "]);"
-           << std::endl;
+        ss << "  const int64_t " << var_define << " = request.symbol_values[" << idx << "];" << std::endl;
         TilingSetShapeDim(ss, var_define, fused_schedule_result, "search_tiling.");
         idx++;
       }
@@ -421,6 +460,8 @@ void TilingLib::GenTopnInitSearchTiling(std::stringstream &ss, const ascir::Fuse
 
 void TilingLib::GenTopnGetTilingFunc(std::stringstream &ss, const ascir::FusedScheduledResult &fused_schedule_result,
                                      const std::string &tiling, int symbol_value_count, bool use_measured_perf) const {
+  const bool use_att_codegen = UseAttCodegen(fused_schedule_result) && HasFinalTilingObservation(fused_schedule_result);
+  const size_t observation_slot_count = CountObservationSlots(fused_schedule_result);
   ss << "static int64_t GetTopnCandidateSolutions(const GetTilingRequest &request, GetTilingResponse &response) {"
      << std::endl;
   ss << "  response.candidate_solutions.clear();" << std::endl;
@@ -432,9 +473,15 @@ void TilingLib::GenTopnGetTilingFunc(std::stringstream &ss, const ascir::FusedSc
   GenTopnSetFailureMessage(ss, "    ", "invalid topn");
   ss << "    return -1;" << std::endl;
   ss << "  }" << std::endl;
+  if (use_att_codegen) {
+    ss << "  FinalTilingObservationContext final_tiling_observation;" << std::endl;
+    ss << "  FinalTilingObservationCallGuard final_tiling_observation_guard(final_tiling_observation, "
+          "ShouldEmitFinalTiling(), "
+       << observation_slot_count << "U);" << std::endl;
+  }
 
   GenTopnInitSearchTiling(ss, fused_schedule_result, tiling, symbol_value_count, use_measured_perf);
-  GenTopnDefaultTiling(ss, tiling);
+  GenTopnDefaultTiling(ss, tiling, use_att_codegen);
 
   if (use_measured_perf) {
     ss << "  (void)request.input_configs;" << std::endl;
@@ -501,9 +548,9 @@ void TilingLib::GenTopnSearchTilingSetup(std::stringstream &ss, const std::strin
   ss << "    }" << std::endl;
 }
 
-void TilingLib::GenTopnCollectCandidates(std::stringstream &ss, const std::string &tiling) const {
+void TilingLib::GenTopnCollectCandidates(std::stringstream &ss, const std::string &tiling, bool use_att_codegen) const {
   (void)tiling;
-  ss << "    for (const auto &raw_candidate : raw_candidates) {" << std::endl;
+  ss << "    for (auto &raw_candidate : raw_candidates) {" << std::endl;
   ss << "      CandidateSolution solution;" << std::endl;
   ss << "      solution.tiling_data = raw_candidate.tiling_data;" << std::endl;
   ss << "      solution.canonical_repr = GetTilingDataRepr(&raw_candidate.tiling_data);" << std::endl;
@@ -516,6 +563,7 @@ void TilingLib::GenTopnCollectCandidates(std::stringstream &ss, const std::strin
   ss << "      OP_LOGI(OP_NAME, \"candidate: repr=%s perf=%.6f is_default=%d\", "
      << "solution.canonical_repr.c_str(), solution.modeled_perf, solution.is_default);" << std::endl;
   ss << "      response.candidate_solutions.push_back(solution);" << std::endl;
+  GenMoveTopnSelectionSnapshots(ss, "      ", use_att_codegen, "raw_candidate.final_tiling_selections");
   ss << "    }" << std::endl;
   ss << "  }" << std::endl;
   ss << "  if (!default_repr.empty() && !found_default_candidate) {" << std::endl;
@@ -526,14 +574,100 @@ void TilingLib::GenTopnCollectCandidates(std::stringstream &ss, const std::strin
   ss << "    default_solution.is_default = true;" << std::endl;
   ss << "    found_default_candidate = true;" << std::endl;
   ss << "    response.candidate_solutions.push_back(default_solution);" << std::endl;
+  GenMoveTopnSelectionSnapshots(ss, "    ", use_att_codegen, "default_selections");
   ss << "  }" << std::endl;
   ss << std::endl;
 }
 
+void TilingLib::GenMoveTopnSelectionSnapshots(std::stringstream &ss, const std::string &indent, bool use_att_codegen,
+                                              const std::string &selection_snapshots) const {
+  if (!use_att_codegen) {
+    return;
+  }
+  ss << indent << "response.candidate_solutions.back().final_tiling_selections = std::move(" << selection_snapshots
+     << ");" << std::endl;
+}
+
+void TilingLib::GenGroupTemplateSemanticInfo(std::stringstream &ss, const std::string &group_prefix,
+                                             const std::string &tiling_data, size_t group, size_t slot) const {
+  const std::string prefix = "optiling::" + (group_prefix.empty() ? "" : group_prefix + "::");
+  ss << "    {" << std::endl;
+  ss << "      if (topn_output >= 0) {" << std::endl;
+  ss << "        " << prefix << "EmitFinalTilingByCase(" << tiling_data << ", " << tiling_data
+     << ".get_block_dim(), \"topn\", \"topn\", " << group << "U, -1, topn_output);" << std::endl;
+  ss << "      }" << std::endl;
+  ss << "      const auto *snapshot = selection_snapshots.size() > " << slot << "U ? &selection_snapshots[" << slot
+     << "U] : nullptr;" << std::endl;
+  ss << "      FinalTilingGroupSelection selection;" << std::endl;
+  ss << "      if (snapshot != nullptr && " << prefix << "GetFinalTilingSelectionFromSnapshot(" << tiling_data
+     << ", *snapshot, selection)) {" << std::endl;
+  ss << "        TemplateSemanticInfo info;" << std::endl;
+  ss << "        info.graph = snapshot->graph; info.result = snapshot->result; info.group = snapshot->group;"
+     << std::endl;
+  ss << "        info.tiling_key = snapshot->tiling_key;" << std::endl;
+  ss << "        info.semantic_names = {selection.semantic_name};" << std::endl;
+  ss << "        info.semantic_name = selection.semantic_name; info.template_name = selection.template_name;"
+     << std::endl;
+  ss << "        semantic_infos.push_back(info);" << std::endl;
+  ss << "      } else {" << std::endl;
+  ss << "        const auto infos = " << prefix << "GetTemplateSemanticInfos(" << tiling_data << ");" << std::endl;
+  ss << "        semantic_infos.insert(semantic_infos.end(), infos.begin(), infos.end());" << std::endl;
+  ss << "      }" << std::endl;
+  ss << "    }" << std::endl;
+}
+
+std::string TilingLib::GenTemplateSemanticInfosForInductor(
+    const ascir::FusedScheduledResult &fused_schedule_result) const {
+  if (!UseAttCodegen(fused_schedule_result) || !HasFinalTilingObservation(fused_schedule_result)) {
+    return std::string();
+  }
+  const bool is_single_group = ascgen_utils::IsSingleGroup(fused_schedule_result);
+  std::stringstream ss;
+  ss << "namespace optiling {" << std::endl;
+  ss << "std::vector<TemplateSemanticInfo> GetTemplateSemanticInfos("
+        "AutofuseTilingData &tiling_data, const std::vector<FinalTilingSelectionSnapshot> &selection_snapshots, "
+        "int64_t topn_output = -1) {"
+     << std::endl;
+  ss << "  if (!IsFinalTilingObservationEnabled()) { return {}; }" << std::endl;
+  ss << "  try {" << std::endl;
+  ss << "  std::vector<TemplateSemanticInfo> semantic_infos;" << std::endl;
+  size_t slot = 0UL;
+  for (size_t graph = 0UL; graph < fused_schedule_result.node_idx_to_scheduled_results.size(); ++graph) {
+    const auto &results = fused_schedule_result.node_idx_to_scheduled_results[graph];
+    for (size_t result = 0UL; result < results.size(); ++result) {
+      if (!is_single_group) {
+        ss << "  if (tiling_data.get_graph" << graph << "_tiling_key() == " << result << "U) {" << std::endl;
+      }
+      for (size_t group = 0UL; group < results[result].schedule_groups.size(); ++group) {
+        const std::string prefix = "AscGraph" + std::to_string(graph) + "ScheduleResult" + std::to_string(result) +
+                                   "G" + std::to_string(group);
+        const std::string data = is_single_group
+                                     ? "tiling_data"
+                                     : "tiling_data.graph" + std::to_string(graph) + "_result" +
+                                           std::to_string(result) + "_g" + std::to_string(group) + "_tiling_data";
+        GenGroupTemplateSemanticInfo(ss, is_single_group ? "" : prefix, data, group, slot++);
+      }
+      if (!is_single_group) {
+        ss << "  }" << std::endl;
+      }
+    }
+  }
+  ss << "  return semantic_infos;" << std::endl;
+  ss << "  } catch (...) { DisableFinalTilingObservation(); return {}; }" << std::endl;
+  ss << "}" << std::endl;
+  if (!is_single_group) {
+    ss << "std::vector<TemplateSemanticInfo> GetTemplateSemanticInfos(AutofuseTilingData &tiling_data) {" << std::endl;
+    ss << "  return GetTemplateSemanticInfos(tiling_data, {});" << std::endl;
+    ss << "}" << std::endl;
+  }
+  ss << "}  // namespace optiling" << std::endl;
+  return ss.str();
+}
+
 namespace {
 void GenTopnCollectMeasuredCandidatesForList(std::stringstream &ss, const std::string &indent,
-                                             const std::string &candidate_list) {
-  ss << indent << "for (const auto &raw_candidate : " << candidate_list << ") {" << std::endl;
+                                             const std::string &candidate_list, const std::string &snapshot_move_code) {
+  ss << indent << "for (auto &raw_candidate : " << candidate_list << ") {" << std::endl;
   ss << indent
      << "  if (!std::isfinite(raw_candidate.best_perf) || raw_candidate.best_perf <= 0.0 || "
         "raw_candidate.best_perf >= DBL_MAX) { continue; }"
@@ -547,13 +681,16 @@ void GenTopnCollectMeasuredCandidatesForList(std::stringstream &ss, const std::s
      << std::endl;
   ss << indent << "  if (solution.is_default) { found_default_candidate = true; }" << std::endl;
   ss << indent << "  response.candidate_solutions.push_back(solution);" << std::endl;
+  if (!snapshot_move_code.empty()) {
+    ss << indent << "  " << snapshot_move_code << std::endl;
+  }
   ss << indent << "}" << std::endl;
 }
 }  // namespace
 
 void TilingLib::GenTopnMeasuredCoreSearch(std::stringstream &ss, const std::string &tiling) const {
   ss << "  PgoConfigRuntimeGuard pgo_config_guard;" << std::endl;
-  ss << "  std::vector<" << tiling << "> measured_tiling_datas;" << std::endl;
+  ss << "  std::vector<AutofuseTilingDataPerf> measured_tiling_datas;" << std::endl;
   ss << "  PgoConfig::Instance().need_change_solver_run = true;" << std::endl;
   ss << "  while (PgoConfig::Instance().pgo_threshold_index < PgoConfig::Instance().pgo_threshold_list_size) {"
      << std::endl;
@@ -568,24 +705,22 @@ void TilingLib::GenTopnMeasuredCoreSearch(std::stringstream &ss, const std::stri
   ss << "  }" << std::endl;
 }
 
-void TilingLib::GenTopnMeasuredBatchProfiling(std::stringstream &ss) const {
+void TilingLib::GenTopnMeasuredBatchProfiling(std::stringstream &ss, bool use_att_codegen) const {
   ss << "  constexpr int64_t kPgoProfileUnsupported = -13;" << std::endl;
-  ss << "  std::vector<AutofuseTilingDataPerf> raw_candidates;" << std::endl;
   ss << "  uint64_t workspace_size = 0U;" << std::endl;
-  ss << "  for (const auto &tiling_data : measured_tiling_datas) {" << std::endl;
+  ss << "  for (const auto &candidate : measured_tiling_datas) {" << std::endl;
   ss << "    uint64_t candidate_workspace_size = 0U;" << std::endl;
-  ss << "    if (!GetWorkspaceSize(tiling_data, candidate_workspace_size)) {" << std::endl;
+  ss << "    if (!GetWorkspaceSize(candidate.tiling_data, candidate_workspace_size)) {" << std::endl;
   ss << "      response.error_message = \"GetWorkspaceSize failed for measured topn candidate\";" << std::endl;
   ss << "      return -1;" << std::endl;
   ss << "    }" << std::endl;
   ss << "    workspace_size = std::max(workspace_size, candidate_workspace_size);" << std::endl;
-  ss << "    raw_candidates.push_back({tiling_data, DBL_MAX});" << std::endl;
   ss << "  }" << std::endl;
-  ss << "  if (raw_candidates.empty()) {" << std::endl;
+  ss << "  if (measured_tiling_datas.empty()) {" << std::endl;
   GenTopnSetFailureMessage(ss, "    ", "PGOByCoreNumSearchTilingKey returned no candidate");
   ss << "    return -1;" << std::endl;
   ss << "  }" << std::endl;
-  ss << "  auto measured_candidates = NormalizePgoMeasuredCandidates(std::move(raw_candidates));" << std::endl;
+  ss << "  auto measured_candidates = NormalizePgoMeasuredCandidates(std::move(measured_tiling_datas));" << std::endl;
   ss << "  const auto callback_ret = PgoConfig::Instance().batch_callback(PgoConfig::Instance().tensor_args, "
         "PgoConfig::Instance().stream, workspace_size, &measured_candidates);"
      << std::endl;
@@ -596,10 +731,14 @@ void TilingLib::GenTopnMeasuredBatchProfiling(std::stringstream &ss) const {
   GenTopnSetFailureMessage(ss, "    ", "batch profiling callback failed");
   ss << "    return -1;" << std::endl;
   ss << "  }" << std::endl;
-  GenTopnCollectMeasuredCandidatesForList(ss, "  ", "measured_candidates");
+  const std::string snapshot_move_code = use_att_codegen
+                                             ? "response.candidate_solutions.back().final_tiling_selections = "
+                                               "std::move(raw_candidate.final_tiling_selections);"
+                                             : "";
+  GenTopnCollectMeasuredCandidatesForList(ss, "  ", "measured_candidates", snapshot_move_code);
 }
 
-void TilingLib::GenTopnAppendMeasuredDefault(std::stringstream &ss) const {
+void TilingLib::GenTopnAppendMeasuredDefault(std::stringstream &ss, bool use_att_codegen) const {
   ss << "  if (!default_repr.empty() && !found_default_candidate) {" << std::endl;
   ss << "    if (PgoConfig::Instance().single_callback == nullptr) {" << std::endl;
   ss << "      response.error_message = \"single profiling callback is not set\";" << std::endl;
@@ -621,6 +760,7 @@ void TilingLib::GenTopnAppendMeasuredDefault(std::stringstream &ss) const {
   ss << "      return -1;" << std::endl;
   ss << "    }" << std::endl;
   ss << "    response.candidate_solutions.push_back({default_tiling, default_perf, true, default_repr});" << std::endl;
+  GenMoveTopnSelectionSnapshots(ss, "    ", use_att_codegen, "default_selections");
   ss << "    found_default_candidate = true;" << std::endl;
   ss << "  }" << std::endl;
   ss << std::endl;
@@ -646,13 +786,18 @@ void TilingLib::GenTopnSetFailureMessage(std::stringstream &ss, const std::strin
   ss << indent << "response.error_message = \"" << reason << "\";" << std::endl;
 }
 
-void TilingLib::GenTopnDefaultTiling(std::stringstream &ss, const std::string &tiling) const {
+void TilingLib::GenTopnDefaultTiling(std::stringstream &ss, const std::string &tiling, bool use_att_codegen) const {
   ss << "  std::string default_repr;" << std::endl;
+  if (use_att_codegen) {
+    ss << "  std::vector<FinalTilingSelectionSnapshot> default_selections;" << std::endl;
+  }
   ss << "  bool found_default_candidate = false;" << std::endl;
   ss << "  " << tiling << " default_tiling = search_tiling;" << std::endl;
-  ss << "  if (" << (codegen_func_ != nullptr ? "GetTilingCore" : "GetTiling") << "(default_tiling, -1)) {"
-     << std::endl;
+  ss << "  if (" << (use_att_codegen ? "GetTilingCore" : "GetTiling") << "(default_tiling, -1)) {" << std::endl;
   ss << "    default_repr = GetTilingDataRepr(&default_tiling);" << std::endl;
+  if (use_att_codegen) {
+    ss << "    default_selections = GetFinalTilingSelectionSnapshots();" << std::endl;
+  }
   ss << "  } else {" << std::endl;
   ss << "    OP_LOGW(OP_NAME, \"GetTiling failed for default topn config.\");" << std::endl;
   ss << "    response.error_message = \"GetTiling failed for default topn config\";" << std::endl;
@@ -662,6 +807,7 @@ void TilingLib::GenTopnDefaultTiling(std::stringstream &ss, const std::string &t
 void TilingLib::GenTopnSearchAndFinalChecks(std::stringstream &ss, const std::string &tiling,
                                             const ascir::FusedScheduledResult &fused_schedule_result,
                                             bool use_measured_perf) const {
+  const bool use_att_codegen = UseAttCodegen(fused_schedule_result) && HasFinalTilingObservation(fused_schedule_result);
   if (use_measured_perf) {
     ss << "  if (PgoConfig::Instance().tensor_args == nullptr || PgoConfig::Instance().stream == nullptr || "
           "PgoConfig::Instance().single_callback == nullptr || PgoConfig::Instance().batch_callback == nullptr) {"
@@ -670,13 +816,13 @@ void TilingLib::GenTopnSearchAndFinalChecks(std::stringstream &ss, const std::st
     ss << "    return -1;" << std::endl;
     ss << "  }" << std::endl;
     GenTopnMeasuredCoreSearch(ss, tiling);
-    GenTopnMeasuredBatchProfiling(ss);
-    GenTopnAppendMeasuredDefault(ss);
+    GenTopnMeasuredBatchProfiling(ss, use_att_codegen);
+    GenTopnAppendMeasuredDefault(ss, use_att_codegen);
   } else {
     ss << "  PgoConfig::Instance().ResetRuntimeOverrides();" << std::endl;
     ss << "  size_t failed_config_count = 0U;" << std::endl;
     GenTopnSearchTilingSetup(ss, tiling, fused_schedule_result);
-    GenTopnCollectCandidates(ss, tiling);
+    GenTopnCollectCandidates(ss, tiling, use_att_codegen);
   }
   ss << "  if (!found_default_candidate) {" << std::endl;
   ss << "    if (response.error_message.empty()) {" << std::endl;
@@ -700,6 +846,7 @@ void TilingLib::GenGenerateTopnSolutionsEntry(std::stringstream &ss,
                                               const std::string &tiling,
                                               const codegen::PgoShapeStringStream &pgo_shape_dim,
                                               const std::string &entry_declaration) const {
+  const bool use_att_codegen = UseAttCodegen(fused_schedule_result) && HasFinalTilingObservation(fused_schedule_result);
   ss << entry_declaration << "(";
   ss << pgo_shape_dim.shape_dim_def.str();
   ss << "const std::vector<std::map<std::string, std::string>> &input_configs, int64_t topn, ";
@@ -707,8 +854,8 @@ void TilingLib::GenGenerateTopnSolutionsEntry(std::stringstream &ss,
   ss << "std::vector<int64_t> &block_dims, ResLimit *res_limit = nullptr)" << std::endl;
   ss << "{" << std::endl;
   AppendTopnEntryInitialization(ss);
-  ss << "  OP_LOGI(OP_NAME, \"GenerateTopnSolutions enter: topn=%ld, input_configs.size=%zu\", "
-     << "static_cast<long>(topn), input_configs.size());" << std::endl;
+  ss << "  OP_LOGI(OP_NAME, \"GenerateTopnSolutions enter: topn=%ld, input_configs.size=%zu operator=%s\", "
+     << "static_cast<long>(topn), input_configs.size(), OP_NAME);" << std::endl;
   ss << "  GetTilingRequest request;" << std::endl;
   (void)fused_schedule_result;  // symbol_values already captured in pgo_shape_dim
   ss << "  request.symbol_values = {" << pgo_shape_dim.shape_dim_use.str() << "};" << std::endl;
@@ -761,11 +908,75 @@ void TilingLib::GenGenerateTopnSolutionsEntry(std::stringstream &ss,
   ss << "  tiling_datas.swap(export_tilings);" << std::endl;
   ss << "  workspaces.swap(export_workspaces);" << std::endl;
   ss << "  block_dims.swap(export_block_dims);" << std::endl;
+  GenTopnTemplateSemanticLogs(ss, use_att_codegen, CountObservationSlots(fused_schedule_result));
   ss << "  return 0;" << std::endl;
   ss << "}" << std::endl;
 }
 
-std::string TilingLib::GenCandidateSolutionProtocolForInductor(const std::string &tiling) const {
+void TilingLib::GenTopnTemplateSemanticLogs(std::stringstream &ss, bool use_att_codegen,
+                                            size_t observation_slot_count) const {
+  if (!use_att_codegen) {
+    return;
+  }
+  ss << "  if (ShouldEmitFinalTiling()) {" << std::endl;
+  ss << "  try {" << std::endl;
+  ss << "    FinalTilingObservationContext final_tiling_observation;" << std::endl;
+  ss << "    FinalTilingObservationCallGuard final_tiling_observation_guard(final_tiling_observation, true, "
+     << observation_slot_count << "U);" << std::endl;
+  ss << "    for (size_t output_index = 0U; output_index < response.candidate_solutions.size(); ++output_index) {"
+     << std::endl;
+  ss << "      auto &solution = response.candidate_solutions[output_index];" << std::endl;
+  ss << "      RestoreFinalTilingSelectionSnapshots(solution.final_tiling_selections);" << std::endl;
+  ss << "      const auto semantic_infos = optiling::GetTemplateSemanticInfos("
+        "solution.tiling_data, solution.final_tiling_selections, static_cast<int64_t>(output_index));"
+     << std::endl;
+  ss << "      if (semantic_infos.empty()) {" << std::endl;
+  ss << "        TemplateSemanticRecord unavailable_record;" << std::endl;
+  ss << "        unavailable_record.stage = \"topn_output\";" << std::endl;
+  ss << "        unavailable_record.has_output = true;" << std::endl;
+  ss << "        unavailable_record.output_index = output_index;" << std::endl;
+  ss << "        unavailable_record.semantic_name = \"Unknown\";" << std::endl;
+  ss << "        unavailable_record.name_status = \"unavailable\";" << std::endl;
+  ss << "        EmitTemplateSemanticRecord(unavailable_record);" << std::endl;
+  ss << "        continue;" << std::endl;
+  ss << "      }" << std::endl;
+  ss << "      for (const auto &info : semantic_infos) {" << std::endl;
+  ss << "        std::vector<std::string> semantic_names = info.semantic_names;" << std::endl;
+  ss << "        if (semantic_names.empty()) { semantic_names.push_back(info.semantic_name); }" << std::endl;
+  ss << "        const std::string name_status = !info.name_status.empty()" << std::endl;
+  ss << "                                       ? info.name_status" << std::endl;
+  ss << "                                       : (semantic_names.size() > 1U ? \"ambiguous\"" << std::endl;
+  ss << "                                          : (semantic_names.front().empty() ? \"unavailable\" : \"\"));"
+     << std::endl;
+  ss << "        for (size_t semantic_index = 0UL; semantic_index < semantic_names.size(); ++semantic_index) {"
+     << std::endl;
+  ss << "          TemplateSemanticRecord record;" << std::endl;
+  ss << "          record.stage = \"topn_output\";" << std::endl;
+  ss << "          record.has_output = true;" << std::endl;
+  ss << "          record.output_index = output_index;" << std::endl;
+  ss << "          record.has_group = true;" << std::endl;
+  ss << "          record.group = info.group;" << std::endl;
+  ss << "          record.semantic_index = semantic_index;" << std::endl;
+  ss << "          record.semantic_name_count = semantic_names.size();" << std::endl;
+  ss << "          record.semantic_name = semantic_names[semantic_index];" << std::endl;
+  ss << "          record.name_status = name_status;" << std::endl;
+  ss << "          record.has_identity = true;" << std::endl;
+  ss << "          record.graph = info.graph;" << std::endl;
+  ss << "          record.result = info.result;" << std::endl;
+  ss << "          record.tiling_key = info.tiling_key;" << std::endl;
+  ss << "          record.template_name = info.template_name;" << std::endl;
+  ss << "          EmitTemplateSemanticRecord(record);" << std::endl;
+  ss << "        }" << std::endl;
+  ss << "      }" << std::endl;
+  ss << "    }" << std::endl;
+  ss << "  } catch (...) {" << std::endl;
+  ss << "    OP_LOGW(OP_NAME, \"TopN tiling log failed.\");" << std::endl;
+  ss << "  }" << std::endl;
+  ss << "}" << std::endl;
+}
+
+std::string TilingLib::GenCandidateSolutionProtocolForInductor(const std::string &tiling,
+                                                               bool emit_semantic_infos) const {
   std::stringstream ss;
   ss << "// Candidate solution protocol for Inductor topn selection." << std::endl;
   ss << "struct CandidateSolution {" << std::endl;
@@ -773,6 +984,9 @@ std::string TilingLib::GenCandidateSolutionProtocolForInductor(const std::string
   ss << "  double modeled_perf = 0.0;" << std::endl;
   ss << "  bool is_default = false;" << std::endl;
   ss << "  std::string canonical_repr;" << std::endl;
+  if (emit_semantic_infos) {
+    ss << "  std::vector<FinalTilingSelectionSnapshot> final_tiling_selections{};" << std::endl;
+  }
   ss << "};" << std::endl;
   ss << std::endl;
   ss << "struct GetTilingRequest {" << std::endl;
@@ -795,12 +1009,12 @@ void TilingLib::GenDeduplicateCandidateSolutionsPrefix(std::stringstream &ss) co
   ss << "  std::unordered_map<std::string, size_t> repr_to_index;" << std::endl;
   ss << "  std::vector<CandidateSolution> deduplicated;" << std::endl;
   ss << "  deduplicated.reserve(solutions.size());" << std::endl;
-  ss << "  for (const auto &solution : solutions) {" << std::endl;
+  ss << "  for (auto &solution : solutions) {" << std::endl;
   ss << "    if (solution.canonical_repr.empty()) { continue; }" << std::endl;
   ss << "    const auto iter = repr_to_index.find(solution.canonical_repr);" << std::endl;
   ss << "    if (iter == repr_to_index.end()) {" << std::endl;
   ss << "      repr_to_index.emplace(solution.canonical_repr, deduplicated.size());" << std::endl;
-  ss << "      deduplicated.push_back(solution);" << std::endl;
+  ss << "      deduplicated.push_back(std::move(solution));" << std::endl;
   ss << "      continue;" << std::endl;
   ss << "    }" << std::endl;
   ss << "    auto &kept = deduplicated[iter->second];" << std::endl;
@@ -815,7 +1029,7 @@ void TilingLib::GenDeduplicateCandidateSolutions(std::stringstream &ss) const {
   ss << "      continue;" << std::endl;
   ss << "    }" << std::endl;
   ss << "    if (!kept.is_default && solution.is_default) {" << std::endl;
-  ss << "      kept = solution;" << std::endl;
+  ss << "      kept = std::move(solution);" << std::endl;
   ss << "    }" << std::endl;
   ss << "  }" << std::endl;
   ss << "  solutions.swap(deduplicated);" << std::endl;
@@ -825,7 +1039,7 @@ void TilingLib::GenDeduplicateCandidateSolutions(std::stringstream &ss) const {
 
 void TilingLib::GenDeduplicateMeasuredCandidateSolutions(std::stringstream &ss) const {
   GenDeduplicateCandidateSolutionsPrefix(ss);
-  ss << "    if (kept.modeled_perf > solution.modeled_perf) { kept = solution; }" << std::endl;
+  ss << "    if (kept.modeled_perf > solution.modeled_perf) { kept = std::move(solution); }" << std::endl;
   ss << "  }" << std::endl;
   ss << "  solutions.swap(deduplicated);" << std::endl;
   ss << "}" << std::endl;
@@ -910,7 +1124,7 @@ std::string TilingLib::GenMeasuredTopnSelectorHelpersForInductor() const {
   ss << "    measured_candidates->clear();" << std::endl;
   ss << "    measured_candidates->reserve(solutions.size());" << std::endl;
   ss << "    for (const auto &solution : solutions) {" << std::endl;
-  ss << "      measured_candidates->push_back({solution.tiling_data, solution.modeled_perf});" << std::endl;
+  ss << "      measured_candidates->push_back({solution.tiling_data, solution.modeled_perf, {}});" << std::endl;
   ss << "    }" << std::endl;
   ss << "  }" << std::endl;
   ss << "  if (topn > 1 && solutions.size() > 1U) {" << std::endl;

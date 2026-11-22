@@ -18,7 +18,7 @@ from typing import List, Optional, Sequence
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from core.log_parser import LogParser, OperatorSummary  # noqa: F401
-from core.evidence_schema import FinalTilingRecord
+from core.evidence_schema import FinalTilingRecord, normalize_pipe_estimates
 
 
 _FINAL_COLUMNS = [
@@ -29,23 +29,13 @@ _FINAL_COLUMNS = [
     "Tiling Repr",
     "Final Parse Status",
 ]
-_PIPE_NAMES = {"M2": "AIV_MTE2", "M3": "AIV_MTE3", "V": "AIV_VEC"}
-_PIPE_ORDER = ("AIV_MTE2", "AIV_MTE3", "AIV_VEC")
+_TOPN_COLUMNS = ["Output Index", "Source Path", "Source Line"]
 
 
 def _compact_json(value):
     if value is None:
         return ""
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=False)
-
-
-def _pipe_estimate(record: FinalTilingRecord):
-    source = record.pipe_est or {}
-    if not source:
-        return {name: None for name in _PIPE_ORDER}
-    return {
-        name: source.get(name, source.get(alias)) for alias, name in _PIPE_NAMES.items()
-    }
 
 
 def _final_row(
@@ -82,7 +72,7 @@ def _final_row(
         "Final Source": record.source or "",
         "Tiling Key": record.tiling_key if record.tiling_key is not None else "",
         "Score": record.score if record.score is not None else "",
-        "Pipe Estimate": _compact_json(_pipe_estimate(record)),
+        "Pipe Estimate": _compact_json(normalize_pipe_estimates(record.pipe_est)),
         "Tiling Repr": _compact_json(record.tiling_repr),
         "Final Parse Status": parse_status or record.parse_status or "",
     }
@@ -91,6 +81,15 @@ def _final_row(
         # columns still come from the legacy PROF observations.
         row.update(summary.tiling_values)
     return row
+
+
+def _topn_row(record: FinalTilingRecord):
+    return {
+        **_final_row(record),
+        "Output Index": record.output_index,
+        "Source Path": record.source_path,
+        "Source Line": record.source_line,
+    }
 
 
 def find_log_files(path):
@@ -192,8 +191,8 @@ def print_summary_table(summaries: List[OperatorSummary]):
         print("  ".join(row))
 
 
-def print_final_tiling_table(records: Sequence[FinalTilingRecord]):
-    """Print FINAL_TILING observations when no legacy summary is available."""
+def print_tiling_table(records: Sequence[FinalTilingRecord], *, topn: bool = False):
+    """Print structured tiling records."""
     if not records:
         return
 
@@ -210,10 +209,13 @@ def print_final_tiling_table(records: Sequence[FinalTilingRecord]):
         "Tiling Repr",
         "Final Parse Status",
     ]
+    if topn:
+        print("TopN candidates")
+        columns.extend(_TOPN_COLUMNS)
     print("  ".join(columns))
     print("-" * (len("  ".join(columns)) + 1))
     for record in records:
-        row = _final_row(record)
+        row = _topn_row(record) if topn else _final_row(record)
         print("  ".join(str(row[column]) for column in columns))
 
 
@@ -221,9 +223,11 @@ def export_to_csv(
     summaries: List[OperatorSummary],
     output_file: str,
     final_records: Optional[Sequence[FinalTilingRecord]] = None,
+    *,
+    topn_records: Sequence[FinalTilingRecord] = (),
 ):
     final_records = list(final_records or [])
-    if not summaries and not final_records:
+    if not summaries and not final_records and not topn_records:
         print("No data to export.")
         return
 
@@ -251,6 +255,8 @@ def export_to_csv(
     fieldnames.extend(dynamic_tiling_keys)
     fieldnames.extend(fixed_tiling_keys)
     fieldnames.extend(_FINAL_COLUMNS)
+    if topn_records:
+        fieldnames.extend(_TOPN_COLUMNS)
 
     summary_by_key = {
         (item.operator_name, item.graph, item.result, item.group): item
@@ -307,14 +313,16 @@ def export_to_csv(
                 }
                 export_items.append(row)
 
-        for row in export_items:
-            writer.writerow(row)
+        writer.writerows(export_items)
+        writer.writerows(_topn_row(record) for record in topn_records)
 
 
 def export_to_excel(
     summaries: List[OperatorSummary],
     output_file: str,
     final_records: Optional[Sequence[FinalTilingRecord]] = None,
+    *,
+    topn_records: Sequence[FinalTilingRecord] = (),
 ):
     final_records = list(final_records or [])
     try:
@@ -323,11 +331,13 @@ def export_to_excel(
     except ImportError:
         print("Warning: openpyxl not installed. Falling back to CSV format.")
         csv_file = output_file.replace(".xlsx", ".csv").replace(".xls", ".csv")
-        export_to_csv(summaries, csv_file, final_records=final_records)
+        export_to_csv(
+            summaries, csv_file, final_records=final_records, topn_records=topn_records
+        )
         print(f"Data exported to {csv_file}")
         return
 
-    if not summaries and not final_records:
+    if not summaries and not final_records and not topn_records:
         print("No data to export.")
         return
 
@@ -358,8 +368,10 @@ def export_to_excel(
     ]
     fieldnames.extend(dynamic_tiling_keys)
     fieldnames.extend(fixed_tiling_keys)
-    if final_records:
+    if final_records or topn_records:
         fieldnames.extend(_FINAL_COLUMNS)
+    if topn_records:
+        fieldnames.extend(_TOPN_COLUMNS)
 
     header_fill = PatternFill(
         start_color="4472C4", end_color="4472C4", fill_type="solid"
@@ -419,6 +431,7 @@ def export_to_excel(
                 }
             )
 
+    rows.extend(_topn_row(record) for record in topn_records)
     for row_num, data in enumerate(rows, 2):
         for col_num, header in enumerate(fieldnames, 1):
             cell = ws.cell(row=row_num, column=col_num, value=data.get(header, ""))
@@ -448,6 +461,9 @@ def main():
         "--all",
         action="store_true",
         help="Summarize best group/case tiling data for all results",
+    )
+    parser.add_argument(
+        "--topn", action="store_true", help="Include exported TopN candidate groups"
     )
     parser.add_argument(
         "-f",
@@ -481,6 +497,7 @@ def main():
     log_parser = LogParser()
     all_summaries = []
     all_final_records = []
+    all_topn_records = []
 
     for log_file in log_files:
         print(f"Parsing: {log_file}")
@@ -492,6 +509,10 @@ def main():
                 if "[ATT][FINAL_TILING" in content:
                     final_records = log_parser.extract_final_tiling_records(
                         content, log_file
+                    )
+                if args.topn and "[ATT][TOPN_TILING" in content:
+                    all_topn_records.extend(
+                        log_parser.extract_topn_tiling_records(content, log_file)
                     )
             if any(record.source != "legacy" for record in final_records):
                 all_final_records.extend(
@@ -507,7 +528,7 @@ def main():
 
     print(f"Total operators extracted: {len(all_summaries)}")
 
-    if not all_summaries and not all_final_records:
+    if not all_summaries and not all_final_records and not all_topn_records:
         print("No data to export.")
         return 1
 
@@ -517,19 +538,31 @@ def main():
                 original_stdout = sys.stdout
                 sys.stdout = f
                 print_summary_table(all_summaries)
-                print_final_tiling_table(all_final_records)
+                print_tiling_table(all_final_records)
+                print_tiling_table(all_topn_records, topn=True)
                 sys.stdout = original_stdout
             print(f"Summary table has been written to '{args.output}'")
         else:
             print_summary_table(all_summaries)
-            print_final_tiling_table(all_final_records)
+            print_tiling_table(all_final_records)
+            print_tiling_table(all_topn_records, topn=True)
     elif args.format == "csv":
         output_file = args.output if args.output else "output.csv"
-        export_to_csv(all_summaries, output_file, final_records=all_final_records)
+        export_to_csv(
+            all_summaries,
+            output_file,
+            final_records=all_final_records,
+            topn_records=all_topn_records,
+        )
         print(f"Data exported to {output_file}")
     elif args.format == "excel":
         output_file = args.output if args.output else "output.xlsx"
-        export_to_excel(all_summaries, output_file, final_records=all_final_records)
+        export_to_excel(
+            all_summaries,
+            output_file,
+            final_records=all_final_records,
+            topn_records=all_topn_records,
+        )
 
     return 0
 

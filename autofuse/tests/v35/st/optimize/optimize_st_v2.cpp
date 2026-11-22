@@ -60,8 +60,7 @@ class OptimizerStV2 : public ::testing::Test {
   void SetUp() override {
     dlog_setlevel(ASCGEN_MODULE_NAME, DLOG_ERROR, 0);
     ge::PlatformContext::GetInstance().Reset();
-    auto stub_v2 = std::make_shared<af::RuntimeStubV2>();
-    RuntimeStub::SetInstance(stub_v2);
+    af::InstallV35SocPerfRuntimeStub();
   }
   void TearDown() override {
     dlog_setlevel(ASCGEN_MODULE_NAME, DLOG_ERROR, 0);
@@ -197,7 +196,9 @@ TEST_F(OptimizerStV2, ReduceNeedAlignment) {
   ::ascir::FusedScheduledResult fused_scheduled_result;
   Status res = optimizer.Optimize(graph, fused_scheduled_result);
   EXPECT_EQ(res, af::SUCCESS);
-  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 9UL);
+  // Max 对 {0,2} 两根轴归约, 单 reduce 双 R 轴: phase-1 各 tiling case 切分结构不同(relation 不一致),
+  // AppendReduceFirstStageGroup 回退逐 case 展开, 10 = Common 1 + RCore 展开 8 + AllLoad 1
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 10UL);
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups.size(), 1UL);
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs.size(), 8UL);
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][1].schedule_groups.size(), 2UL);
@@ -1213,15 +1214,40 @@ TEST_F(OptimizerStV2, LoadCastBrcMulMinCase) {
   ::ascir::FusedScheduledResult fused_scheduled_result;
   EXPECT_EQ(optimizer.Optimize(graph, fused_scheduled_result), 0);
 
-  for (const auto &node :
-       fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs[2].GetAllNodes()) {
-    if (node->GetOpDesc()->GetId() == 1) {
-      EXPECT_EQ(node->GetOpDesc()->GetType(), "Nddma");
+  // 预处理SwapCastBroadcastPass已将load1->cast1->broadcast1(低转高)交换为
+  // load1->broadcast1->cast1, NddmaTemplate直连分支将load1与broadcast1合并为Nddma,
+  // cast1后移为Nddma的直接消费者。交换前后调度产物的tiling case数量/顺序与节点
+  // id/命名均可能变化, 故按图名(_nddma且非_load_to_nddma)与节点类型断言。
+  const af::AscNodePtr nddma_node = [&fused_scheduled_result]() -> af::AscNodePtr {
+    for (const auto &schedule_result : fused_scheduled_result.node_idx_to_scheduled_results[0]) {
+      for (const auto &schedule_group : schedule_result.schedule_groups) {
+        for (const auto &impl_graph : schedule_group.impl_graphs) {
+          const std::string graph_name = impl_graph.GetName();
+          const bool is_nddma_graph =
+              graph_name.find("_nddma") != std::string::npos && graph_name.find("_load_to_nddma") == std::string::npos;
+          if (!is_nddma_graph) {
+            continue;
+          }
+          for (const auto &node : impl_graph.GetAllNodes()) {
+            const auto asc_node = std::dynamic_pointer_cast<af::AscNode>(node);
+            if ((asc_node != nullptr) && asc_node->GetType() == "Nddma") {
+              return asc_node;
+            }
+          }
+        }
+      }
     }
-    if (node->GetOpDesc()->GetId() == 2) {
-      EXPECT_EQ(node->GetOpDesc()->GetType(), "Cast");
+    return nullptr;
+  }();
+  ASSERT_NE(nddma_node, nullptr);
+  bool has_cast_consumer = false;
+  for (const auto &out_node : nddma_node->GetOutDataNodes()) {
+    const auto asc_out_node = std::dynamic_pointer_cast<af::AscNode>(out_node);
+    if ((asc_out_node != nullptr) && asc_out_node->GetType() == "Cast") {
+      has_cast_consumer = true;
     }
   }
+  EXPECT_TRUE(has_cast_consumer);
 }
 
 TEST_F(OptimizerStV2, LoadOpSequenceAdjustCase) {
@@ -1390,7 +1416,16 @@ TEST_F(OptimizerStV2, TwoAxisSliceNeedAlign) {
   EXPECT_EQ(res, 0);
   EXPECT_EQ(fused_scheduled.node_idx_to_scheduled_results[0].size(), 1);
   EXPECT_EQ(fused_scheduled.node_idx_to_scheduled_results[0][0].schedule_groups.size(), 1);
-  auto impl_graph = fused_scheduled.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs[1];
+  const auto &impl_graphs = fused_scheduled.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs;
+  size_t align_graph_index = impl_graphs.size();
+  for (size_t i = 0UL; i < impl_graphs.size(); ++i) {
+    if (impl_graphs[i].GetName().find("B0Y0") != std::string::npos) {
+      align_graph_index = i;
+      break;
+    }
+  }
+  ASSERT_LT(align_graph_index, impl_graphs.size());
+  auto impl_graph = impl_graphs[align_graph_index];
   auto load_node = impl_graph.FindNode("load0");
   // Store 输出尾轴 GM stride = s2 = 3 != 1, 触发 IsNeedDiscontinuousAligned, 回传 kDiscontinuous 到 Load
   // FP32: align_factor = 32 / 4 = 8, 尾轴 stride = Align(1, 8) = 8, 次尾轴 stride = 8 * s1 = 32

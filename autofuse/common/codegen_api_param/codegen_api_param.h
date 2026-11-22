@@ -180,10 +180,12 @@ struct CodegenApiParam;
 using CodegenApiParamPtr = std::shared_ptr<CodegenApiParam>;
 struct CodegenApiParam {
   static af::Status Register(af::AscNodePtr node, CodegenApiParamPtr api_param);
+  static CodegenApiParamPtr TryGetNodeApiParam(const af::AscNodePtr &node);
   static CodegenApiParamPtr GetNodeApiParam(af::AscNodePtr node);
   static af::Status DumpGraphApiParams(const ascir::ImplGraph &graph, const Tiler &tiler, const std::string &prefix);
   std::string api_name;
   std::vector<std::string> template_params;
+  std::string semantic_feature;
 
   struct TensorParam {
     TensorParam() = default;

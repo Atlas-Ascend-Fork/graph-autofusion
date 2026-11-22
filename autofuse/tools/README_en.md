@@ -7,6 +7,22 @@ Licensed under the CANN Open Software License Agreement Version 2.0.
 
 These tools support Autofuse development, debugging, and issue analysis. They are not runtime APIs. Use each command's `--help` output as the authoritative reference for options.
 
+## NDDMA: modeling and ad-hoc prediction/collection
+
+Tool directory: [`nddma/`](nddma/README_en.md).
+
+- Purpose: Round1–5 collection, fitting and analysis, plus single-configuration prediction and measurement.
+- Inputs: shape, GM/UB strides, core count and dtype, or measurement CSVs and model JSONs.
+- Commands (from the repository root):
+
+  ```bash
+  python3 autofuse/tools/nddma/Modeling/Data_collection/common/tools/predict_nddma_ad_hoc.py --help
+  python3 autofuse/tools/nddma/Modeling/Data_collection/common/tools/run_nddma_ad_hoc.py --help
+  ```
+
+- Results: cycle predictions, formula terms, fitted parameters and measurement analysis. Historical snapshot metrics are marked invalid; collection requires CANN and an Ascend device.
+
+
 ## ATT-ANALYZE: template, tiling, and profiling analysis
 
 Tool directory: [`att_analyze/`](att_analyze/). The common entry point is:

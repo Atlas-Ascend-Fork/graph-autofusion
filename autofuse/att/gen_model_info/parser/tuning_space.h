@@ -183,6 +183,7 @@ struct NodeInfo {
   std::vector<NodeInfo> sub_nodes_infos;
   ascir_param::VectorFuncNodeParams vector_func_params;
   ascir_param::ReduceNodeParams reduce_specific_params;
+  ascir_param::ArgmaxNodeParams argmax_node_params;
   ascir_param::CastNodeParams cast_node_params;
   ascir_param::BroadcastNodeParams broadcast_node_params;
   ascir_param::CompareNodeParams compare_node_params;
@@ -192,6 +193,7 @@ struct NodeInfo {
   af::ExecuteCondition exec_condition{af::ExecuteCondition::kNoCache};
   // schedule 级 Codegen 路径门禁。kUBFuse 将 NDDMA 描述固定为 2D，因此 raw 1D 必须使用 legacy 模型。
   bool is_cv_ub_fusion{false};
+  std::vector<ascir_param::CacheExecutionParams> cache_executions;
   std::string DebugString() const {
     std::stringstream ss;
     ss << "NodeInfo {" << name << ", " << node_type << ", " << node_unit;

@@ -255,9 +255,7 @@ class RemovePadAscIrCodegenImpl : public AscIrCodegen {
     return {"removepad.h"};
   }
   std::vector<std::string> IncludeApiHeaderFiles() const override {
-    return {
-        "basic_api/kernel_operator_vec_gather_mask_intf.h",
-    };
+    return {"basic_api/kernel_operator_vec_gather_mask_intf.h", "basic_api/kernel_operator_vec_binary_scalar_intf.h"};
   }
   [[nodiscard]] bool IsNodeValid(const AscNode &node) const override {
     GE_ASSERT_TRUE(!IsNodeHasScalarInput(node), "Node %s[%s] does not support scalar input", node.GetTypePtr(),
@@ -655,7 +653,7 @@ class MaxAscIrCodegenImpl : public AscIrCodegen {
   }
 };
 
-class ArgMaxAscIrCodegenImpl : public AscIrCodegen {
+class ArgmaxAscIrCodegenImpl : public AscIrCodegen {
  public:
   std::vector<std::unique_ptr<TmpBufDesc>> CalcTmpBufSize(const AscNode &node) override {
     return CalcReduceTmpSize(node);
@@ -664,7 +662,7 @@ class ArgMaxAscIrCodegenImpl : public AscIrCodegen {
     return "ReduceApiCall";
   }
   std::string GetApiName() const override {
-    return "ArgMax";
+    return "Argmax";
   }
   std::vector<std::string> LoadApiHeaderFiles([[maybe_unused]] bool is_dynamic) const override {
     return {"reduce_init.h", "reduce.h",    "argmax.h", "compare.h",
@@ -2020,10 +2018,27 @@ class MatMulAscIrCodegenImpl : public AscIrCodegen {
   }
   std::vector<std::string> LoadApiHeaderFiles(bool is_dynamic) const override {
     if (is_dynamic) {
-      return {"mat_mul_tiling_key_dynamic.h", "matmul_include_headers.h", "mat_mul_pingpong_basic_cmct_dynamic.h",
+      return {"mat_mul_tiling_key_dynamic.h",
+              "matmul_include_headers.h",
+              "mat_mul_tensor_include_headers.h",
+              "mat_mul_basic_cv_pipeline.h",
+              "mat_mul_pingpong_basic_cmct_dynamic.h",
+              "mat_mul_tensor_cv_block.h",
+              "mat_mul_pingpong_tensor_cv.h",
+              "mat_mul_tensor_common_scheduler.h",
+              "mat_mul_tensor_common.h",
               "matmul_dynamic.h"};
     } else {
-      return {"mat_mul_tiling_key.h", "matmul_include_headers.h", "mat_mul_pingpong_basic_cmct.h", "matmul.h"};
+      return {"mat_mul_tiling_key.h",
+              "matmul_include_headers.h",
+              "mat_mul_tensor_include_headers.h",
+              "mat_mul_basic_cv_pipeline.h",
+              "mat_mul_pingpong_basic_cmct.h",
+              "mat_mul_tensor_cv_block.h",
+              "mat_mul_pingpong_tensor_cv.h",
+              "mat_mul_tensor_common_scheduler.h",
+              "mat_mul_tensor_common.h",
+              "matmul.h"};
     }
   }
   std::vector<std::string> IncludeApiHeaderFiles() const override {
@@ -2051,11 +2066,22 @@ class BatchMatMulAscIrCodegenImpl : public AscIrCodegen {
   }
   std::vector<std::string> LoadApiHeaderFiles(bool is_dynamic) const override {
     if (is_dynamic) {
-      return {"batch_mat_mul_v3_tiling_key_dynamic.h", "batch_matmul_include_headers.h",
-              "mat_mul_pingpong_basic_cmct_dynamic.h", "batch_matmul_dynamic.h"};
+      return {"batch_mat_mul_v3_tiling_key_dynamic.h",
+              "batch_matmul_include_headers.h",
+              "mat_mul_tensor_include_headers.h",
+              "mat_mul_basic_cv_pipeline.h",
+              "mat_mul_pingpong_basic_cmct_dynamic.h",
+              "mat_mul_tensor_cv_block.h",
+              "mat_mul_pingpong_tensor_cv.h",
+              "mat_mul_tensor_common_scheduler.h",
+              "mat_mul_tensor_common.h",
+              "batch_matmul_dynamic.h"};
     } else {
-      return {"batch_mat_mul_v3_tiling_key.h", "batch_matmul_include_headers.h", "mat_mul_pingpong_basic_cmct.h",
-              "batch_matmul.h"};
+      return {"batch_mat_mul_v3_tiling_key.h",    "batch_matmul_include_headers.h",
+              "mat_mul_tensor_include_headers.h", "mat_mul_basic_cv_pipeline.h",
+              "mat_mul_pingpong_basic_cmct.h",    "mat_mul_tensor_cv_block.h",
+              "mat_mul_pingpong_tensor_cv.h",     "mat_mul_tensor_common_scheduler.h",
+              "mat_mul_tensor_common.h",          "batch_matmul.h"};
     }
   }
   std::vector<std::string> IncludeApiHeaderFiles() const override {

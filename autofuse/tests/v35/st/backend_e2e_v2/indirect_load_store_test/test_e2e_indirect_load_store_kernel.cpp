@@ -1034,12 +1034,23 @@ TEST(UserGraphConstruction, GeneratedKernelMatchesReference) {
   constexpr int32_t kDim = 16;
   constexpr int32_t kTableRows = 100;
   constexpr int32_t kIndexStride = 1;
+#elif defined(IL_USER_EMBEDDING_SUM_TRANSPOSED)
+  constexpr int32_t kLookups = 4;
+  constexpr int32_t kDim = 16;
+  constexpr int32_t kTableRows = 100;
 #else
   constexpr int32_t kLookups = 4;
   constexpr int32_t kDim = 16;
   constexpr int32_t kTableRows = 100;
   constexpr int32_t kIndexStride = 8;
 #endif
+#if defined(IL_USER_EMBEDDING_SUM_TRANSPOSED)
+  // 转置轴序形态的 GM buffer：表 [table_rows, emb] 行主序、索引 [lookups]、
+  // 输出 [emb]（Sum 沿 lookups 轴归约，统一轴序 (emb, lookups)）。
+  auto *indices = static_cast<int32_t *>(AscendC::GmAlloc(sizeof(int32_t) * kLookups));
+  auto *table = static_cast<float *>(AscendC::GmAlloc(sizeof(float) * kTableRows * kDim));
+  const int32_t output_elements = kDim;
+#else
   const int32_t kIndexStorage = (kRows - 1) * kIndexStride + kLookups;
   auto *indices = static_cast<int32_t *>(AscendC::GmAlloc(sizeof(int32_t) * kIndexStorage));
   auto *table = static_cast<float *>(AscendC::GmAlloc(sizeof(float) * kTableRows * kDim));
@@ -1048,6 +1059,7 @@ TEST(UserGraphConstruction, GeneratedKernelMatchesReference) {
       kRows;
 #else
       kRows * kDim;
+#endif
 #endif
   auto *output = static_cast<float *>(AscendC::GmAlloc(sizeof(float) * output_elements));
   ASSERT_NE(indices, nullptr);
@@ -1058,15 +1070,23 @@ TEST(UserGraphConstruction, GeneratedKernelMatchesReference) {
       table[row * kDim + col] = static_cast<float>(row * kDim + col) * 0.01F;
     }
   }
+#if defined(IL_USER_EMBEDDING_SUM_TRANSPOSED)
+  for (int32_t lookup = 0; lookup < kLookups; ++lookup) {
+    indices[lookup] = (lookup * 3 + 1) % kTableRows;
+  }
+#else
   for (int32_t row = 0; row < kRows; ++row) {
     for (int32_t lookup = 0; lookup < kLookups; ++lookup) {
       indices[row * kIndexStride + lookup] = (row * kLookups + lookup + 1) % kTableRows;
     }
   }
+#endif
   std::fill_n(output, output_elements, 0.0F);
 
   AutofuseTilingData tiling_data{};
-#if !defined(IL_USER_EMBEDDING_SUM_RANK2)
+#if defined(IL_USER_EMBEDDING_SUM_TRANSPOSED)
+  tiling_data.set_ks0(kLookups);
+#elif !defined(IL_USER_EMBEDDING_SUM_RANK2)
 #if defined(IL_USER_EMBEDDING_SUM_SIMD)
   tiling_data.graph0_result0_g0_tiling_data.set_ks0(kRows);
   tiling_data.graph0_result0_g0_tiling_data.set_s44(kIndexStride);
@@ -1082,7 +1102,16 @@ TEST(UserGraphConstruction, GeneratedKernelMatchesReference) {
   ASSERT_TRUE(workspace_size == 0U || workspace != nullptr);
   indirect_load_test::RunKernel(user_embedding_sum, block_dim, reinterpret_cast<uint8_t *>(workspace),
                                 reinterpret_cast<uint8_t *>(&tiling_data), table, indices, output);
-#if defined(IL_USER_EMBEDDING_SUM_RANK2)
+#if defined(IL_USER_EMBEDDING_SUM_TRANSPOSED)
+  // expected[emb_col] = Σ_lookup table[index[lookup] * emb + emb_col]。
+  for (int32_t col = 0; col < kDim; ++col) {
+    float expected = 0.0F;
+    for (int32_t lookup = 0; lookup < kLookups; ++lookup) {
+      expected += table[indices[lookup] * kDim + col];
+    }
+    EXPECT_NEAR(output[col], expected, 0.0625F) << "col=" << col;
+  }
+#elif defined(IL_USER_EMBEDDING_SUM_RANK2)
   for (int32_t row = 0; row < kRows; ++row) {
     float expected = 0.0F;
     const int64_t index = indices[row * kIndexStride];
@@ -1106,6 +1135,181 @@ TEST(UserGraphConstruction, GeneratedKernelMatchesReference) {
   AscendC::GmFree(indices);
   AscendC::GmFree(table);
   AscendC::GmFree(output);
+}
+
+#elif defined(IL_USER_EMBEDDING_MUL)
+namespace {
+void FillEmbeddingMulTiling(AutofuseTilingData &tiling_data, uint32_t ks0, uint32_t ks1, uint32_t ks2, uint32_t ks3) {
+  tiling_data.set_block_dim(indirect_load_test::kUserAivNum);
+  tiling_data.set_ub_size(indirect_load_test::kUserUbSize);
+  tiling_data.graph0_result0_g0_tiling_data.set_ks0(ks0);
+  tiling_data.graph0_result0_g0_tiling_data.set_ks1(ks1);
+  tiling_data.graph0_result0_g0_tiling_data.set_ks2(ks2);
+  tiling_data.graph0_result0_g0_tiling_data.set_ks3(ks3);
+  tiling_data.graph0_result1_g0_tiling_data.set_ks0(ks0);
+  tiling_data.graph0_result1_g0_tiling_data.set_ks1(ks1);
+  tiling_data.graph0_result1_g0_tiling_data.set_ks2(ks2);
+  tiling_data.graph0_result1_g0_tiling_data.set_ks3(ks3);
+  tiling_data.graph0_result2_g0_tiling_data.set_ks0(ks0);
+  tiling_data.graph0_result2_g0_tiling_data.set_ks1(ks1);
+  tiling_data.graph0_result2_g0_tiling_data.set_ks2(ks2);
+  tiling_data.graph0_result2_g0_tiling_data.set_ks3(ks3);
+}
+}  // namespace
+
+// 用户场景（inductor embedding*mul，动态 shape）：output[i0,i1,i2] =
+// table[idx[i0,i1], i2] * other[i1, i2]。idx 形状 [ks0,ks1,1]（gather 轴 a1），
+// table 形状 [1,ks3,ks2]，other 形状 [1,ks1,ks2]，均经 Broadcast 视图对齐输出。
+TEST(UserGraphConstruction, GeneratedKernelMatchesReference) {
+  constexpr int32_t kKs0 = 2;
+  constexpr int32_t kKs1 = 3;
+  constexpr int32_t kKs2 = 5;
+  constexpr int32_t kKs3 = 7;
+  constexpr int64_t kTableCount = static_cast<int64_t>(kKs3) * kKs2;
+  constexpr int64_t kIndexCount = static_cast<int64_t>(kKs0) * kKs1;
+  constexpr int64_t kOtherCount = static_cast<int64_t>(kKs1) * kKs2;
+  constexpr int64_t kOutputCount = static_cast<int64_t>(kKs0) * kKs1 * kKs2;
+
+  auto index = indirect_load_test::AllocGmBuffer<int64_t>(kIndexCount);
+  auto table = indirect_load_test::AllocGmBuffer<float>(kTableCount);
+  auto other = indirect_load_test::AllocGmBuffer<float>(kOtherCount);
+  auto output = indirect_load_test::AllocGmBuffer<float>(kOutputCount);
+  ASSERT_TRUE(index && table && other && output);
+
+  for (int64_t i = 0; i < kIndexCount; ++i) {
+    index.get()[i] = static_cast<int64_t>(i % kKs3);
+  }
+  for (int64_t i = 0; i < kTableCount; ++i) {
+    table.get()[i] = static_cast<float>(i) * 0.01F + 1.0F;
+  }
+  for (int64_t i = 0; i < kOtherCount; ++i) {
+    other.get()[i] = static_cast<float>(i) * 0.02F - 0.5F;
+  }
+  std::fill_n(output.get(), kOutputCount, 0.0F);
+
+  indirect_load_test::UserGraphTiling tiling;
+  tiling.Tile(FillEmbeddingMulTiling, kKs0, kKs1, kKs2, kKs3);
+  indirect_load_test::RunKernel(autofused_embedding_mul_d7faa8b114b9ec412ddcfe3bad00fefa, tiling.block_dim,
+                                tiling.workspace.get(), reinterpret_cast<uint8_t *>(&tiling.data), index.get(),
+                                table.get(), other.get(), output.get());
+
+  for (int32_t i0 = 0; i0 < kKs0; ++i0) {
+    for (int32_t i1 = 0; i1 < kKs1; ++i1) {
+      for (int32_t i2 = 0; i2 < kKs2; ++i2) {
+        const int64_t selected = index.get()[static_cast<int64_t>(i0) * kKs1 + i1];
+        const float expected = table.get()[selected * kKs2 + i2] * other.get()[static_cast<int64_t>(i1) * kKs2 + i2];
+        const int64_t offset = (static_cast<int64_t>(i0) * kKs1 + i1) * kKs2 + i2;
+        EXPECT_NEAR(output.get()[offset], expected, 1.0e-4F) << "i0=" << i0 << ", i1=" << i1 << ", i2=" << i2;
+      }
+    }
+  }
+}
+
+// [SIMT 动态 shape 用户场景] 用户原生 shape（ks0=400/ks1=230/ks2=160/ks3=500）：
+// 表 320KB 超单核 192KB UB，SIMD strided 窗口驻留无解，求解必退选 SIMT result2
+// （真机主路径）——动态 shape 下其 fused consumer 坐标分解走预计算 magic 的
+// UintDiv 乘移序列，须断言选中并验证数值。
+TEST(UserGraphConstruction, GeneratedKernelMatchesReferenceOversizedTable) {
+  constexpr int32_t kKs0 = 400;
+  constexpr int32_t kKs1 = 230;
+  constexpr int32_t kKs2 = 160;
+  constexpr int32_t kKs3 = 500;
+  constexpr int64_t kIndexCount = static_cast<int64_t>(kKs0) * kKs1;
+  constexpr int64_t kOtherCount = static_cast<int64_t>(kKs1) * kKs2;
+  constexpr int64_t kOutputCount = static_cast<int64_t>(kKs0) * kKs1 * kKs2;
+  constexpr int64_t kTableCount = static_cast<int64_t>(kKs3) * kKs2;
+
+  auto index = indirect_load_test::AllocGmBuffer<int64_t>(kIndexCount);
+  auto table = indirect_load_test::AllocGmBuffer<float>(kTableCount);
+  auto other = indirect_load_test::AllocGmBuffer<float>(kOtherCount);
+  auto output = indirect_load_test::AllocGmBuffer<float>(kOutputCount);
+  ASSERT_TRUE(index && table && other && output);
+
+  for (int64_t i = 0; i < kIndexCount; ++i) {
+    index.get()[i] = static_cast<int64_t>(i % kKs3);
+  }
+  for (int64_t i = 0; i < kTableCount; ++i) {
+    table.get()[i] = static_cast<float>(i) * 0.01F + 1.0F;
+  }
+  for (int64_t i = 0; i < kOtherCount; ++i) {
+    other.get()[i] = static_cast<float>(i) * 0.02F - 0.5F;
+  }
+  std::fill_n(output.get(), kOutputCount, 0.0F);
+
+  indirect_load_test::UserGraphTiling tiling;
+  tiling.Tile(FillEmbeddingMulTiling, kKs0, kKs1, kKs2, kKs3);
+  ASSERT_EQ(tiling.data.get_graph0_tiling_key(), 2U) << "oversized table must select the SIMT result";
+  indirect_load_test::RunKernel(autofused_embedding_mul_d7faa8b114b9ec412ddcfe3bad00fefa, tiling.block_dim,
+                                tiling.workspace.get(), reinterpret_cast<uint8_t *>(&tiling.data), index.get(),
+                                table.get(), other.get(), output.get());
+
+  for (int32_t i0 = 0; i0 < kKs0; ++i0) {
+    for (int32_t i1 = 0; i1 < kKs1; ++i1) {
+      for (int32_t i2 = 0; i2 < kKs2; ++i2) {
+        const int64_t selected = index.get()[static_cast<int64_t>(i0) * kKs1 + i1];
+        const float expected = table.get()[selected * kKs2 + i2] * other.get()[static_cast<int64_t>(i1) * kKs2 + i2];
+        const int64_t offset = (static_cast<int64_t>(i0) * kKs1 + i1) * kKs2 + i2;
+        EXPECT_NEAR(output.get()[offset], expected, 1.0e-4F) << "i0=" << i0 << ", i1=" << i1 << ", i2=" << i2;
+      }
+    }
+  }
+}
+
+// [SIMT 动态 shape 数值回归] 小 shape 下 host 求解常选 SIMD result，SIMT result2
+// （超大表等 SIMD 无解场景的真机主路径）不被执行。该分支 fused consumer 的坐标
+// 分解在动态 shape 下使用预计算 magic 的 UintDiv（区别于静态字面量除模的编译期
+// 折叠路径），须强制派发验证数值。
+TEST(UserGraphConstruction, GeneratedKernelMatchesReferenceSimtForced) {
+  constexpr int32_t kKs0 = 2;
+  constexpr int32_t kKs1 = 3;
+  constexpr int32_t kKs2 = 5;
+  constexpr int32_t kKs3 = 7;
+  constexpr int64_t kTableCount = static_cast<int64_t>(kKs3) * kKs2;
+  constexpr int64_t kIndexCount = static_cast<int64_t>(kKs0) * kKs1;
+  constexpr int64_t kOtherCount = static_cast<int64_t>(kKs1) * kKs2;
+  constexpr int64_t kOutputCount = static_cast<int64_t>(kKs0) * kKs1 * kKs2;
+
+  auto index = indirect_load_test::AllocGmBuffer<int64_t>(kIndexCount);
+  auto table = indirect_load_test::AllocGmBuffer<float>(kTableCount);
+  auto other = indirect_load_test::AllocGmBuffer<float>(kOtherCount);
+  auto output = indirect_load_test::AllocGmBuffer<float>(kOutputCount);
+  ASSERT_TRUE(index && table && other && output);
+
+  for (int64_t i = 0; i < kIndexCount; ++i) {
+    index.get()[i] = static_cast<int64_t>(i % kKs3);
+  }
+  for (int64_t i = 0; i < kTableCount; ++i) {
+    table.get()[i] = static_cast<float>(i) * 0.01F + 1.0F;
+  }
+  for (int64_t i = 0; i < kOtherCount; ++i) {
+    other.get()[i] = static_cast<float>(i) * 0.03F - 0.25F;
+  }
+  std::fill_n(output.get(), kOutputCount, 0.0F);
+
+  indirect_load_test::UserGraphTiling tiling;
+  tiling.Tile(FillEmbeddingMulTiling, kKs0, kKs1, kKs2, kKs3);
+  // 强制派发 SIMT result2：host 求解只填当选 result 的字段，此处改顶层 key 并
+  // 补齐 result2 的分派字段（block 分派与批切分）。
+  tiling.data.set_graph0_tiling_key(2U);
+  auto &simt_tiling = tiling.data.graph0_result2_g0_tiling_data;
+  simt_tiling.set_block_dim(indirect_load_test::kUserAivNum);
+  simt_tiling.set_ub_size(indirect_load_test::kUserUbSize);
+  simt_tiling.set_indirect_load_outerTb_size(1U);
+  simt_tiling.set_tiling_key(0U);
+  indirect_load_test::RunKernel(
+      autofused_embedding_mul_d7faa8b114b9ec412ddcfe3bad00fefa, indirect_load_test::kUserAivNum, tiling.workspace.get(),
+      reinterpret_cast<uint8_t *>(&tiling.data), index.get(), table.get(), other.get(), output.get());
+
+  for (int32_t i0 = 0; i0 < kKs0; ++i0) {
+    for (int32_t i1 = 0; i1 < kKs1; ++i1) {
+      for (int32_t i2 = 0; i2 < kKs2; ++i2) {
+        const int64_t selected = index.get()[static_cast<int64_t>(i0) * kKs1 + i1];
+        const float expected = table.get()[selected * kKs2 + i2] * other.get()[static_cast<int64_t>(i1) * kKs2 + i2];
+        const int64_t offset = (static_cast<int64_t>(i0) * kKs1 + i1) * kKs2 + i2;
+        EXPECT_NEAR(output.get()[offset], expected, 1.0e-4F) << "i0=" << i0 << ", i1=" << i1 << ", i2=" << i2;
+      }
+    }
+  }
 }
 
 #elif defined(IL_USER_GATHER_SUM_TRANSPOSE)
@@ -1518,7 +1722,7 @@ TEST(UserGraphConstruction, GeneratedKernelMatchesReference) {
 extern "C" int64_t AutofuseTiling(AutofuseTilingData *, uint64_t *, uint32_t *, uint32_t, uint32_t);
 
 #ifndef IL_ADD_IL_REDUCE
-#if defined(IL_USER_POSITION_BIAS)
+#if defined(IL_USER_POSITION_BIAS) || defined(IL_USER_POSITION_BIAS_DYNAMIC)
 extern "C" __global__ __aicore__ void user_position_bias(GM_ADDR input0, GM_ADDR input1, GM_ADDR input2, GM_ADDR output,
                                                          GM_ADDR workspace, GM_ADDR tiling);
 #elif defined(IL_USER_POSITION_BIAS_EXP_SUM)
@@ -1528,9 +1732,23 @@ extern "C" __global__ __aicore__ void user_position_bias_exp_sum(GM_ADDR input0,
 #elif defined(IL_USER_MASKED_EMBEDDING_MINIMAL) || defined(IL_USER_MASKED_EMBEDDING_SUM_FULL)
 extern "C" __global__ __aicore__ void user_masked_embedding_sum(GM_ADDR input0, GM_ADDR input1, GM_ADDR input2,
                                                                 GM_ADDR output, GM_ADDR workspace, GM_ADDR tiling);
+#elif defined(IL_USER_EMBEDDING_SLICE)
+#ifndef IL_USER_EMBEDDING_SLICE_KERNEL_NAME
+#if IL_USER_EMBEDDING_SLICE_OFFSET == 0
+#define IL_USER_EMBEDDING_SLICE_KERNEL_NAME autofused_embedding_slice_minimal_front
+#else
+#define IL_USER_EMBEDDING_SLICE_KERNEL_NAME autofused_embedding_slice_minimal_back
+#endif
+#endif
+extern "C" __global__ __aicore__ void IL_USER_EMBEDDING_SLICE_KERNEL_NAME(GM_ADDR input0, GM_ADDR input1,
+                                                                          GM_ADDR output, GM_ADDR workspace,
+                                                                          GM_ADDR tiling);
 #elif defined(IL_GRAPH_HINT_EMBEDDING_SLICE)
 extern "C" __global__ __aicore__ void autofused_to_copy_embedding_slice_161da55df6362966862381c5d053b7e7(
     GM_ADDR input0, GM_ADDR input1, GM_ADDR output, GM_ADDR workspace, GM_ADDR tiling);
+#elif defined(IL_GRAPH_HINT_DY_GATHER_SLICE)
+extern "C" __global__ __aicore__ void autofused_dy_gather_slice(GM_ADDR input0, GM_ADDR input1, GM_ADDR output,
+                                                                GM_ADDR workspace, GM_ADDR tiling);
 #elif defined(IL_GRAPH_HINT_SIMD_REPRO)
 extern "C" __global__ __aicore__ void indirect_load_graph_hint_simd_repro(GM_ADDR input0, GM_ADDR input1,
                                                                           GM_ADDR output, GM_ADDR workspace,
@@ -1556,7 +1774,7 @@ extern "C" __global__ __aicore__ void indirect_load_add_il_reduce_test(GM_ADDR i
 
 namespace {
 #ifndef IL_ADD_IL_REDUCE
-#if defined(IL_USER_POSITION_BIAS)
+#if defined(IL_USER_POSITION_BIAS) || defined(IL_USER_POSITION_BIAS_DYNAMIC)
 constexpr int32_t kUserPositionBiasRows = 8;
 constexpr int32_t kUserPositionBiasDim = 256;
 constexpr int32_t kUserPositionBiasLookups = 256;
@@ -1579,6 +1797,24 @@ TEST(E2EUserPositionBias, GeneratedKernelMatchesReference) {
   for (int64_t i = 0; i < output_count; ++i) input.get()[i] = static_cast<float>(i % 97) * 0.01F;
   std::fill_n(output.get(), output_count, 0.0F);
   AutofuseTilingData tiling_data{};
+#if defined(IL_USER_POSITION_BIAS_DYNAMIC)
+  // 动态 shape：运行期 tiling data 设符号尺寸具体值（与 inductor 动态场景的 tiling 传参一致）。
+  // 本用例的 tiling data 中符号尺寸 ksN 位于按 tiling_key 分发的 schedule result 子结构，
+  // AutofuseTiling 按 perf 在三个 result 间决策，故各 result 子结构均需填符号值（kernel
+  // 入口按 graph0_tiling_key 取对应子结构）。
+  tiling_data.graph0_result0_g0_tiling_data.set_ks0(kUserPositionBiasRows);
+  tiling_data.graph0_result0_g0_tiling_data.set_ks1(kUserPositionBiasDim);
+  tiling_data.graph0_result0_g0_tiling_data.set_ks2(kUserPositionBiasLookups);
+  tiling_data.graph0_result0_g0_tiling_data.set_ks3(kUserPositionBiasTableRows);
+  tiling_data.graph0_result1_g0_tiling_data.set_ks0(kUserPositionBiasRows);
+  tiling_data.graph0_result1_g0_tiling_data.set_ks1(kUserPositionBiasDim);
+  tiling_data.graph0_result1_g0_tiling_data.set_ks2(kUserPositionBiasLookups);
+  tiling_data.graph0_result1_g0_tiling_data.set_ks3(kUserPositionBiasTableRows);
+  tiling_data.graph0_result2_g0_tiling_data.set_ks0(kUserPositionBiasRows);
+  tiling_data.graph0_result2_g0_tiling_data.set_ks1(kUserPositionBiasDim);
+  tiling_data.graph0_result2_g0_tiling_data.set_ks2(kUserPositionBiasLookups);
+  tiling_data.graph0_result2_g0_tiling_data.set_ks3(kUserPositionBiasTableRows);
+#endif
   uint64_t workspace_size = 0U;
   uint32_t block_dim = 48U;
   ASSERT_EQ(AutofuseTiling(&tiling_data, &workspace_size, &block_dim, 48U, 192U * 1024U), 0);
@@ -1763,6 +1999,82 @@ TEST(E2EUserMaskedEmbeddingSum, GeneratedKernelMatchesReference) {
   }
 #endif
 }
+#elif defined(IL_USER_EMBEDDING_SLICE)
+#ifndef IL_USER_EMBEDDING_SLICE_ROWS
+#define IL_USER_EMBEDDING_SLICE_ROWS 2
+#endif
+#ifndef IL_USER_EMBEDDING_SLICE_COLUMNS
+#define IL_USER_EMBEDDING_SLICE_COLUMNS 4
+#endif
+#ifndef IL_USER_EMBEDDING_SLICE_INNER
+#define IL_USER_EMBEDDING_SLICE_INNER 8
+#endif
+#ifndef IL_USER_EMBEDDING_SLICE_TABLE_ROWS
+#define IL_USER_EMBEDDING_SLICE_TABLE_ROWS 3
+#endif
+#ifndef IL_USER_EMBEDDING_SLICE_INDEX_COLUMNS
+#define IL_USER_EMBEDDING_SLICE_INDEX_COLUMNS 8
+#endif
+#ifndef IL_USER_EMBEDDING_SLICE_OFFSET
+#define IL_USER_EMBEDDING_SLICE_OFFSET 0
+#endif
+constexpr int32_t kUserEmbeddingSliceRows = IL_USER_EMBEDDING_SLICE_ROWS;
+constexpr int32_t kUserEmbeddingSliceColumns = IL_USER_EMBEDDING_SLICE_COLUMNS;
+constexpr int32_t kUserEmbeddingSliceInner = IL_USER_EMBEDDING_SLICE_INNER;
+constexpr int32_t kUserEmbeddingSliceTableRows = IL_USER_EMBEDDING_SLICE_TABLE_ROWS;
+constexpr int32_t kUserEmbeddingSliceIndexColumns = IL_USER_EMBEDDING_SLICE_INDEX_COLUMNS;
+constexpr int32_t kUserEmbeddingSliceIndexOffset = IL_USER_EMBEDDING_SLICE_OFFSET;
+#define USER_EMBEDDING_SLICE_KERNEL IL_USER_EMBEDDING_SLICE_KERNEL_NAME
+
+TEST(E2EUserEmbeddingSlice, GeneratedKernelMatchesReference) {
+  // The index tensor keeps its full physical [rows, index_columns] span and the output keeps
+  // the non-owning [rows, index_columns, inner] backing span, matching the original slice views.
+  constexpr int64_t index_count = static_cast<int64_t>(kUserEmbeddingSliceRows) * kUserEmbeddingSliceIndexColumns;
+  constexpr int64_t table_count = static_cast<int64_t>(kUserEmbeddingSliceTableRows) * kUserEmbeddingSliceInner;
+  constexpr int64_t output_span =
+      static_cast<int64_t>(kUserEmbeddingSliceRows) * kUserEmbeddingSliceIndexColumns * kUserEmbeddingSliceInner;
+  auto indices = indirect_load_test::AllocGmBuffer<int64_t>(index_count);
+  auto table = indirect_load_test::AllocGmBuffer<float>(table_count);
+  auto output = indirect_load_test::AllocGmBuffer<float>(output_span);
+  ASSERT_TRUE(indices && table && output);
+
+  for (int32_t row = 0; row < kUserEmbeddingSliceTableRows; ++row) {
+    for (int32_t column = 0; column < kUserEmbeddingSliceInner; ++column) {
+      table.get()[static_cast<int64_t>(row) * kUserEmbeddingSliceInner + column] =
+          static_cast<float>((row % 97) * 0.25F + (column % 31) * 0.001F);
+    }
+  }
+  for (int32_t row = 0; row < kUserEmbeddingSliceRows; ++row) {
+    for (int32_t column = 0; column < kUserEmbeddingSliceIndexColumns; ++column) {
+      indices.get()[static_cast<int64_t>(row) * kUserEmbeddingSliceIndexColumns + column] =
+          (static_cast<int64_t>(row) * 911 + column * 37) % kUserEmbeddingSliceTableRows;
+    }
+  }
+  std::fill_n(output.get(), output_span, 0.0F);
+
+  indirect_load_test::KernelTiling tiling;
+  ASSERT_TRUE(tiling.IsValid());
+  AscendC::SetKernelMode(KernelMode::AIV_MODE);
+  ICPU_RUN_KF(USER_EMBEDDING_SLICE_KERNEL, tiling.block_dim, reinterpret_cast<uint8_t *>(indices.get()),
+              reinterpret_cast<uint8_t *>(table.get()), reinterpret_cast<uint8_t *>(output.get()),
+              reinterpret_cast<uint8_t *>(tiling.workspace.get()), reinterpret_cast<uint8_t *>(&tiling.data));
+
+  for (int32_t p0 = 0; p0 < kUserEmbeddingSliceRows; ++p0) {
+    for (int32_t p1 = 0; p1 < kUserEmbeddingSliceColumns; ++p1) {
+      const int64_t raw =
+          indices
+              .get()[static_cast<int64_t>(p0) * kUserEmbeddingSliceIndexColumns + p1 + kUserEmbeddingSliceIndexOffset];
+      const int64_t selected = raw;
+      for (int32_t p2 = 0; p2 < kUserEmbeddingSliceInner; ++p2) {
+        const int64_t offset = static_cast<int64_t>(p0) * kUserEmbeddingSliceIndexColumns * kUserEmbeddingSliceInner +
+                               static_cast<int64_t>(p1) * kUserEmbeddingSliceInner + p2;
+        const int64_t table_offset = selected * kUserEmbeddingSliceInner + p2;
+        EXPECT_FLOAT_EQ(output.get()[offset], table.get()[table_offset])
+            << "p0=" << p0 << ", p1=" << p1 << ", p2=" << p2;
+      }
+    }
+  }
+}
 #elif defined(IL_GRAPH_HINT_EMBEDDING_SLICE)
 constexpr int32_t kGraphHintEmbeddingSliceRows = 128;
 constexpr int32_t kGraphHintEmbeddingSliceColumns = 512;
@@ -1814,6 +2126,69 @@ TEST(E2EIndirectLoadGraphHintEmbeddingSlice, GeneratedKernelMatchesReference) {
       EXPECT_FLOAT_EQ(output.get()[offset], table.get()[table_offset]) << "row=" << row << ", column=" << column;
     }
   }
+}
+#elif defined(IL_GRAPH_HINT_DY_GATHER_SLICE)
+// Dynamic-shape tail-axis gather. The index source is physically [s0, s5, s76] but the kernel
+// reads it through a cross-dim sliced view [s0, columns, s76] (stride0 = s5*s76, non-continuous);
+// the table is physically [s0, s5, s86], read as [s0, columns, s86]. Semantics:
+// out[i,j,k] = exp(table_view[i,j, index_view[i,j,k]]), index values in [0, s86).
+constexpr int32_t kGraphHintDyGatherS0 = 37;
+constexpr int32_t kGraphHintDyGatherS5 = 520;
+constexpr int32_t kGraphHintDyGatherS76 = 76;
+constexpr int32_t kGraphHintDyGatherS86 = 86;
+constexpr int32_t kGraphHintDyGatherColumns = 512;
+
+TEST(E2EIndirectLoadGraphHintDyGatherSlice, GeneratedKernelMatchesReference) {
+  constexpr int64_t index_count =
+      static_cast<int64_t>(kGraphHintDyGatherS0) * kGraphHintDyGatherS5 * kGraphHintDyGatherS76;
+  constexpr int64_t table_count =
+      static_cast<int64_t>(kGraphHintDyGatherS0) * kGraphHintDyGatherS5 * kGraphHintDyGatherS86;
+  constexpr int64_t output_count =
+      static_cast<int64_t>(kGraphHintDyGatherS0) * kGraphHintDyGatherColumns * kGraphHintDyGatherS76;
+  auto index = indirect_load_test::AllocGmBuffer<int32_t>(index_count);
+  auto table = indirect_load_test::AllocGmBuffer<float>(table_count);
+  auto output = indirect_load_test::AllocGmBuffer<float>(output_count);
+  ASSERT_TRUE(index && table && output);
+
+  // Fill the whole physical index buffer; the kernel only reads the sliced first `columns` rows.
+  for (int32_t i = 0; i < kGraphHintDyGatherS0; ++i) {
+    for (int32_t j = 0; j < kGraphHintDyGatherS5; ++j) {
+      for (int32_t k = 0; k < kGraphHintDyGatherS76; ++k) {
+        const int64_t offset = (static_cast<int64_t>(i) * kGraphHintDyGatherS5 + j) * kGraphHintDyGatherS76 + k;
+        index.get()[offset] = (i * 31 + j * 7 + k * 13) % kGraphHintDyGatherS86;
+      }
+    }
+  }
+  for (int64_t t = 0; t < table_count; ++t) {
+    table.get()[t] = static_cast<float>(t % 65) * 0.25F - 8.0F;
+  }
+  std::fill_n(output.get(), output_count, 0.0F);
+
+  AutofuseTilingData tiling_data{};
+  uint64_t workspace_size = 0U;
+  uint32_t block_dim = 48U;
+  ASSERT_EQ(AutofuseTiling(&tiling_data, &workspace_size, &block_dim, 48U, 192U * 1024U), 0);
+  void *workspace = workspace_size == 0U ? nullptr : AscendC::GmAlloc(workspace_size);
+  ASSERT_TRUE(workspace_size == 0U || workspace != nullptr);
+
+  indirect_load_test::RunKernel(autofused_dy_gather_slice, block_dim, reinterpret_cast<uint8_t *>(workspace),
+                                reinterpret_cast<uint8_t *>(&tiling_data), index.get(), table.get(), output.get());
+
+  for (int32_t i = 0; i < kGraphHintDyGatherS0; ++i) {
+    for (int32_t j = 0; j < kGraphHintDyGatherColumns; ++j) {
+      for (int32_t k = 0; k < kGraphHintDyGatherS76; ++k) {
+        const int64_t output_offset =
+            (static_cast<int64_t>(i) * kGraphHintDyGatherColumns + j) * kGraphHintDyGatherS76 + k;
+        const int64_t index_offset = (static_cast<int64_t>(i) * kGraphHintDyGatherS5 + j) * kGraphHintDyGatherS76 + k;
+        const int32_t selected = index.get()[index_offset];
+        const int64_t table_offset =
+            (static_cast<int64_t>(i) * kGraphHintDyGatherS5 + j) * kGraphHintDyGatherS86 + selected;
+        EXPECT_FLOAT_EQ(output.get()[output_offset], std::exp(table.get()[table_offset]))
+            << "i=" << i << ", j=" << j << ", k=" << k;
+      }
+    }
+  }
+  if (workspace != nullptr) AscendC::GmFree(workspace);
 }
 #elif defined(IL_GRAPH_HINT_SIMD_REPRO)
 constexpr int32_t kGraphHintSimdRows = 30;
@@ -2341,6 +2716,75 @@ TEST(E2EIndirectLoadTorchGatherStrided, GeneratedKernelMatchesReference) {
   }
 }
 
+#endif
+
+#if defined(IL_CASE_STRIDED_STORE)
+extern "C" __global__ __aicore__ void indirect_load_strided_store_test(GM_ADDR x, GM_ADDR index, GM_ADDR y,
+                                                                       GM_ADDR workspace, GM_ADDR tiling);
+
+namespace {
+constexpr int32_t kSsInputS0 = IL_INPUT_S0;
+constexpr int32_t kSsInputS1 = IL_INPUT_S1;
+constexpr int32_t kSsOutS0 = IL_STRIDED_OUT_S0;
+constexpr int32_t kSsOutS1 = IL_STRIDED_OUT_S1;
+constexpr int32_t kSsOutStride0 = IL_STRIDED_OUT_STRIDE0;
+constexpr int32_t kSsOutOffset = IL_STRIDED_OUT_OFFSET;
+constexpr int32_t kSsStoreCount = kSsOutS0 * kSsOutS1;
+constexpr int32_t kSsOutputSpan = kSsOutOffset + (kSsOutS0 - 1) * kSsOutStride0 + kSsOutS1;
+}  // namespace
+
+TEST(E2EIndirectLoadStridedStore, StridedStoreMatchesReference) {
+  const int32_t input_count = kSsInputS0 * kSsInputS1;
+  const auto gm_free = [](void *ptr) { AscendC::GmFree(ptr); };
+  std::unique_ptr<half, decltype(gm_free)> x(reinterpret_cast<half *>(AscendC::GmAlloc(input_count * sizeof(half))),
+                                             gm_free);
+  std::unique_ptr<int32_t, decltype(gm_free)> index(
+      reinterpret_cast<int32_t *>(AscendC::GmAlloc(kSsStoreCount * sizeof(int32_t))), gm_free);
+  std::unique_ptr<half, decltype(gm_free)> output(
+      reinterpret_cast<half *>(AscendC::GmAlloc(kSsOutputSpan * sizeof(half))), gm_free);
+  ASSERT_NE(x, nullptr);
+  ASSERT_NE(index, nullptr);
+  ASSERT_NE(output, nullptr);
+  for (int32_t i = 0; i < input_count; ++i) {
+    x.get()[i] = static_cast<half>(static_cast<float>((i % 29) - 14) * 0.25F);
+  }
+  for (int32_t i = 0; i < kSsStoreCount; ++i) {
+    index.get()[i] = (i * 3 + 1) % kSsInputS1;
+  }
+  std::fill_n(output.get(), kSsOutputSpan, static_cast<half>(0.0F));
+  std::vector<half> expected(static_cast<size_t>(kSsOutputSpan), static_cast<half>(0.0F));
+  std::vector<bool> written(static_cast<size_t>(kSsOutputSpan), false);
+
+  indirect_load_test::KernelTiling tiling;
+  ASSERT_TRUE(tiling.IsValid());
+  AscendC::SetKernelMode(KernelMode::AIV_MODE);
+  ICPU_RUN_KF(indirect_load_strided_store_test, tiling.block_dim, reinterpret_cast<uint8_t *>(x.get()),
+              reinterpret_cast<uint8_t *>(index.get()), reinterpret_cast<uint8_t *>(output.get()),
+              reinterpret_cast<uint8_t *>(tiling.workspace.get()), reinterpret_cast<uint8_t *>(&tiling.data));
+
+  for (int32_t r = 0; r < kSsOutS0; ++r) {
+    for (int32_t c = 0; c < kSsOutS1; ++c) {
+      const int32_t linear = r * kSsOutS1 + c;
+      const int32_t input_offset = r * kSsInputS1 + index.get()[linear];
+      const size_t position = static_cast<size_t>(kSsOutOffset + r * kSsOutStride0 + c);
+      expected[position] = x.get()[input_offset];
+      written[position] = true;
+    }
+  }
+  for (int32_t r = 0; r < kSsOutS0; ++r) {
+    for (int32_t c = 0; c < kSsOutS1; ++c) {
+      const size_t position = static_cast<size_t>(kSsOutOffset + r * kSsOutStride0 + c);
+      EXPECT_NEAR(static_cast<float>(output.get()[position]), static_cast<float>(expected[position]), 0.0625F)
+          << "r=" << r << " c=" << c;
+    }
+  }
+  for (int32_t i = 0; i < kSsOutputSpan; ++i) {
+    if (!written[static_cast<size_t>(i)]) {
+      EXPECT_EQ(static_cast<float>(output.get()[static_cast<size_t>(i)]), 0.0F)
+          << "gap position " << i << " was written";
+    }
+  }
+}
 #endif
 
 #if defined(IL_CASE_EMBEDDING)

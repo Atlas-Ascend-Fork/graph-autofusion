@@ -61,10 +61,35 @@ inline __aicore__ void CastWithOneTransfer(const AscendC::LocalTensor<OutT> &dst
 template <typename InT, typename OutT, typename FirstInterT, typename SecondInterT>
 inline __aicore__ void CastWithTwoTransfer(const AscendC::LocalTensor<OutT> &dst, const AscendC::LocalTensor<InT> &src,
                                            const uint32_t size, LocalTensor<uint8_t> &tmp_buf) {
-  uint32_t buf_max_calc_size = tmp_buf.GetSize() * sizeof(uint8_t) / sizeof(FirstInterT) / 2;
+  // 两个中间张量必须放在互不重叠的区域。第二次转换可能扩大单个元素的大小
+  // （例如 half -> float）；如果共用同一个起始地址，写入 float 时可能覆盖
+  // 第一次转换留下、但第二次转换还没有读取完的 half 数据。
+  // 临时空间按字节计算，因为后面需要同时容纳两种中间类型。
+  const uint32_t tmp_buf_bytes = tmp_buf.GetSize() * sizeof(uint8_t);
+  // 每一批处理完后，下一批的 src[offset] 和 dst[offset] 都必须重新落在 32B 边界。
+  // 取两种端点类型的较大对齐粒度，保证输入和输出地址同时满足 Cast 要求。
+  constexpr uint32_t input_align_elems = ONE_BLK_SIZE / sizeof(InT);
+  constexpr uint32_t output_align_elems = ONE_BLK_SIZE / sizeof(OutT);
+  constexpr uint32_t offset_align_elems =
+      input_align_elems > output_align_elems ? input_align_elems : output_align_elems;
+  // 先按两种中间类型的总大小估算一批最多处理的元素数。
+  uint32_t buf_max_calc_size = tmp_buf_bytes / (sizeof(FirstInterT) + sizeof(SecondInterT));
+  // 向下取整到地址对齐粒度，避免下一批从非 32B 地址开始。
+  buf_max_calc_size = buf_max_calc_size / offset_align_elems * offset_align_elems;
+  const uint32_t first_buf_bytes = buf_max_calc_size * sizeof(FirstInterT);
+  // 第二个中间张量从第一个张量之后的块对齐地址开始，满足向量指令的地址对齐要求。
+  const uint32_t second_buf_offset = (first_buf_bytes + ONE_BLK_SIZE - 1) / ONE_BLK_SIZE * ONE_BLK_SIZE;
+  // 对齐会产生额外空隙，初步估算的数量可能仍然放不下第二个中间张量，需进一步缩小。
+  while (buf_max_calc_size != 0 && second_buf_offset + buf_max_calc_size * sizeof(SecondInterT) > tmp_buf_bytes) {
+    buf_max_calc_size -= offset_align_elems;
+  }
+  // 连一个元素的两份中间结果都无法容纳时，不能继续构造张量视图或执行转换。
+  if (buf_max_calc_size == 0) {
+    return;
+  }
   uint32_t calc_loop = size / buf_max_calc_size;
   LocalTensor<FirstInterT> inter_buf_1 = tmp_buf.ReinterpretCast<FirstInterT>();
-  LocalTensor<SecondInterT> inter_buf_2 = inter_buf_1.template ReinterpretCast<SecondInterT>();
+  LocalTensor<SecondInterT> inter_buf_2 = tmp_buf[second_buf_offset].template ReinterpretCast<SecondInterT>();
   uint32_t offset = 0;
   for (uint32_t i = 0; i < calc_loop; i++) {
     AscendC::Cast(inter_buf_1, src[offset], GetRoundMode<InT, FirstInterT>(), buf_max_calc_size);
@@ -105,8 +130,12 @@ inline __aicore__ void CastExtend(const AscendC::LocalTensor<OutT> &dst, const A
                 (AscendC::SupportType<InT, uint8_t, int8_t>() && AscendC::SupportType<OutT, uint8_t, int8_t>()) ||
                 (AscendC::SupportType<InT, uint64_t, int64_t>() && AscendC::SupportType<OutT, uint64_t, int64_t>())) {
     CastWithOr(dst, src, size, tmp_buf);
+  } else if constexpr (AscendC::IsSameType<InT, uint8_t>::value && AscendC::IsSameType<OutT, int64_t>::value) {
+    // uint8 -> int64 不能直接使用一条 Cast 完成；依次经过 half 和 float，
+    // 才能使用硬件支持的类型组合完成最后的 int64 转换。
+    CastWithTwoTransfer<InT, OutT, half, float>(dst, src, size, tmp_buf);
   } else if constexpr (AscendC::IsSameType<InT, uint8_t>::value && !AscendC::IsSameType<OutT, half>::value) {
-    // if input type is uint8_t, first cast it to half, then cast from half to dst type
+    // uint8 先转换为 half，再从 half 转换为目标类型。
     CastWithOneTransfer<InT, OutT, half>(dst, src, size, tmp_buf);
   } else if constexpr (AscendC::IsSameType<InT, int64_t>::value && !AscendC::SupportType<OutT, float, int32_t>()) {
     if constexpr (AscendC::IsSameType<OutT, uint8_t>::value) {
@@ -115,7 +144,7 @@ inline __aicore__ void CastExtend(const AscendC::LocalTensor<OutT> &dst, const A
       CastWithOneTransfer<InT, OutT, float>(dst, src, size, tmp_buf);
     }
   } else if constexpr (AscendC::IsSameType<InT, half>::value && AscendC::IsSameType<OutT, int64_t>::value) {
-    // if input type is half, and output type is int64, first cast it to float, then cast from float to int64
+    // half -> int64 先转换为 float，再从 float 转换为 int64。
     CastWithOneTransfer<InT, OutT, float>(dst, src, size, tmp_buf);
   } else {
     AscendC::Cast(dst, src, GetRoundMode<InT, OutT>(), size);

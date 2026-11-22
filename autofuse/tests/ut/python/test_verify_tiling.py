@@ -74,3 +74,30 @@ def test_execute_tiling_uses_uint64_workspace(verify_tiling_module, monkeypatch)
     assert result == {"block_dim": 7, "workspace_size": 0x1B0000000}
     assert isinstance(calls[0][2]._obj, ctypes.c_uint64)
     assert fake_lib.AutofuseTiling.argtypes[2] == ctypes.POINTER(ctypes.c_uint64)
+
+
+def test_execute_tiling_uses_int64_shape_dims(verify_tiling_module, monkeypatch):
+    calls = []
+
+    def fake_tiling(*args):
+        calls.append(args)
+        return 0
+
+    fake_lib = types.SimpleNamespace(
+        GetTilingDataSize=lambda: 16, AutofuseTiling=fake_tiling
+    )
+    monkeypatch.setattr(verify_tiling_module.ctypes, "CDLL", lambda path: fake_lib)
+
+    verify_tiling_module.execute_tiling(
+        "fake.so",
+        {
+            # 超过 UINT32_MAX 的 shape 也必须能原样传入
+            "dynamic_dims": [2**32 + 7],
+            "abi": {"kind": "inductor", "shape_dims": 1, "block_dim_width": 64},
+        },
+        "inductor",
+    )
+
+    assert fake_lib.AutofuseTiling.argtypes[0] == ctypes.c_int64
+    assert isinstance(calls[0][0], ctypes.c_int64)
+    assert calls[0][0].value == 2**32 + 7

@@ -9,6 +9,7 @@
  */
 
 #include "gen_model_info.h"
+#include <cstdint>
 #include <fstream>
 #include <set>
 #include "common/util/mem_utils.h"
@@ -22,6 +23,7 @@
 #include "nlohmann/json.hpp"
 #include "util/base_types_printer.h"
 #include "util/duration.h"
+#include "api_perf_register/soc_perf_config.h"
 #include "api_tiling_gen/gen_api_tiling.h"
 #include "base/att_const_values.h"
 #include "util/thread_local_context.h"
@@ -31,6 +33,7 @@
 #include "ascgraph_info_complete.h"
 #include "ascir_ops.h"
 #include "ascir/meta/ascir_ops_utils.h"
+#include "common_utils.h"
 
 namespace att {
 namespace {
@@ -187,9 +190,12 @@ af::Status RefreshCommonUbExprContext(const af::AscGraph &graph, ModelInfo &mode
 static af::Status GenerateSingleModelInfoWithContext(const af::AscGraph &graph, ModelInfo &model_info,
                                                      TuningSpacePtr &tuning_space, const uint32_t tiling_case_id,
                                                      bool is_cv_ub_fusion) {
+  GE_ASSERT_SUCCESS(ValidateSocPerfEntry(), "Validate SoC performance target failed.");
   GELOGI("[DFX]Begin to generate model info for graph %s of tiling case id %u", graph.GetName().c_str(),
          tiling_case_id);
   DURATION_GUARD(DurationType::DURATION_GEN_MODEL_INFO);
+  GE_ASSERT_TRUE(tiling_case_id <= static_cast<uint32_t>(UINT16_MAX),
+                 "tiling_case_id %u exceeds uint16 range of tiling data tiling_key", tiling_case_id);
   model_info.tiling_case_id = tiling_case_id;
   // step1: get tuningspace from compute graph
   GE_ASSERT_NOTNULL(tuning_space, "Create tuning space failed.");
@@ -217,12 +223,17 @@ af::Status CheckKeyValid(const std::vector<af::AscGraph> &graph_list) {
     for (auto &graph : graph_list) {
       GE_ASSERT_TRUE(has_set_key == (graph.GetTilingKey() >= 0),
                      "If the user has set tiling_case_id for a graph, the tiling_case_id of all graphs must be set.");
+      // GetTilingKey() 为 int64_t，负值表示未设置；tiling data 中 tiling_key 字段为 uint16_t。
+      const int64_t graph_tiling_key = graph.GetTilingKey();
+      GE_ASSERT_TRUE(graph_tiling_key < 0 || graph_tiling_key <= static_cast<int64_t>(UINT16_MAX),
+                     "User-set tiling key %ld exceeds uint16 range of tiling data tiling_key", graph_tiling_key);
     }
   }
   return af::SUCCESS;
 }
 
 af::Status GenerateModelInfo(const std::vector<af::AscGraph> &graph_list, std::vector<ModelInfo> &model_info_list) {
+  GE_ASSERT_SUCCESS(ValidateSocPerfEntry(), "Validate SoC performance target failed.");
   GE_ASSERT_SUCCESS(CheckKeyValid(graph_list));
   uint32_t tiling_key = 0U;
   for (auto &graph : graph_list) {
@@ -412,37 +423,45 @@ struct ModelGenerationContext {
   bool enable_gather_reduce_penalty{false};
   // kUBFuse 生成专用的固定 2D NDDMA 描述，不使用默认 DataCopyParams 描述。
   bool is_cv_ub_fusion{false};
+  bool enable_workspace_alignment{false};
 };
 
 static af::Status GenerateModelInfoWithContext(const std::vector<af::AscGraph> &graph_list,
                                                std::vector<ModelInfo> &model_info_list,
                                                const std::map<std::string, std::string> &options,
-                                               bool enable_group_parallel, const ModelGenerationContext &context);
+                                               bool enable_group_parallel, const ModelGenerationContext &context,
+                                               const std::string &base_semantic_name);
 
 af::Status GenerateModelInfo(const std::vector<af::AscGraph> &graph_list, std::vector<ModelInfo> &model_info_list,
                              const std::map<std::string, std::string> &options, bool enable_group_parallel) {
+  GE_ASSERT_SUCCESS(ValidateSocPerfEntry(), "Validate SoC performance target failed.");
   return GenerateModelInfo(graph_list, model_info_list, options, enable_group_parallel, false);
 }
 
 af::Status GenerateModelInfo(const std::vector<af::AscGraph> &graph_list, std::vector<ModelInfo> &model_info_list,
                              const std::map<std::string, std::string> &options, bool enable_group_parallel,
                              bool enable_gather_reduce_penalty) {
+  GE_ASSERT_SUCCESS(ValidateSocPerfEntry(), "Validate SoC performance target failed.");
   return GenerateModelInfoWithContext(graph_list, model_info_list, options, enable_group_parallel,
-                                      {enable_gather_reduce_penalty, false});
+                                      {enable_gather_reduce_penalty, false, false}, "");
 }
 
 static af::Status GenerateModelInfoWithContext(const std::vector<af::AscGraph> &graph_list,
                                                std::vector<ModelInfo> &model_info_list,
                                                const std::map<std::string, std::string> &options,
-                                               bool enable_group_parallel, const ModelGenerationContext &context) {
+                                               bool enable_group_parallel, const ModelGenerationContext &context,
+                                               const std::string &base_semantic_name) {
   GE_ASSERT_SUCCESS(CheckKeyValid(graph_list));
   uint32_t tiling_key = 0U;
   for (auto &graph : graph_list) {
     tiling_key = graph.GetTilingKey() >= 0 ? graph.GetTilingKey() : tiling_key;
     ModelInfo model_info;
     model_info.graph_name = graph.GetName();
+    model_info.semantic_name =
+        ascgen_utils::NormalizeTemplateSemanticName(ascgen_utils::GetTemplateSemanticName(graph, base_semantic_name));
     model_info.tiling_case_id = tiling_key;
     model_info.enable_group_parallel = enable_group_parallel;
+    model_info.enable_workspace_alignment = context.enable_workspace_alignment;
     std::vector<AttAxisPtr> tiling_R_arg_list;
     TuningSpacePtr tuning_space = af::MakeShared<TuningSpace>();
     GE_ASSERT_NOTNULL(tuning_space, "Make tuning space failed.");
@@ -520,12 +539,70 @@ af::Status GetAllSubImplGraphs(const ascir::FusedScheduledResult &schedule_resul
 }
 
 namespace {
+// [ScoreFunc 诊断门控] 判断本组内指定图是否含 IndirectLoad 节点。
+// 不用 semantic_name 子串匹配做门控：IL 图的语义名可为 "SIMT@Strided#Offset64" 这类形态，
+// 不含 "IndirectLoad" 字样，会让"打分函数未送达"的诊断永远不触发（真正的静默失效被吞掉）。
+bool GroupGraphContainsIndirectLoad(const std::vector<af::AscGraph> &graphs, const std::string &graph_name) {
+  for (const auto &graph : graphs) {
+    if (graph.GetName() != graph_name) {
+      continue;
+    }
+    for (const auto &node : graph.GetAllNodes()) {
+      if (node != nullptr && node->GetType() == ascgen_utils::template_semantic::kIndirectLoad) {
+        return true;
+      }
+    }
+    return false;
+  }
+  return false;
+}
+
+void FillModelInfoList(att::TilingModelInfo &model_info_list, const ModelInfoSetupContext &context) {
+  const auto &runtime_shape_vars =
+      context.schedule_result.schedule_groups[context.schedule_group_id].runtime_shape_vars;
+  for (auto &model_info : model_info_list) {
+    model_info.dynamic_size_var_names = context.dynamic_size_var_names;
+    model_info.enable_matmul_m_common_tradeoff = context.enable_matmul_m_common_tradeoff;
+    // These dimensions describe runtime guards, not searchable axes. Keep
+    // them as input parameters so tiling caches also preserve their values.
+    for (const auto &var : runtime_shape_vars) {
+      if (std::find(model_info.sizes.begin(), model_info.sizes.end(), var) == model_info.sizes.end()) {
+        model_info.sizes.push_back(var);
+      }
+    }
+    model_info.schedule_group_ident.asc_graph_id = context.asc_graph_id;
+    model_info.schedule_group_ident.impl_graph_id = context.impl_graph_id;
+    model_info.schedule_group_ident.group_id = context.schedule_group_id;
+    model_info.input_nodes = context.schedule_results.input_nodes;
+    model_info.output_nodes = context.schedule_results.output_nodes;
+    FilterOutputAliasWorkspace(model_info);
+    auto it = context.all_graph_score_funcs.find(model_info.graph_name);
+    if (it != context.all_graph_score_funcs.end()) {
+      model_info.score_func = it->second;
+    } else if (!context.all_graph_score_funcs.empty() &&
+               GroupGraphContainsIndirectLoad(context.group_graphs, model_info.graph_name)) {
+      // [静默失效诊断] IL 图的打分函数已注入（graph_name_to_score_funcs 非空）
+      // 但本图名未命中——键漂移（跨 pass 改名/过滤未同步）会使候选竞标退化到默认
+      // 分且无任何日志。门控：仅含 IndirectLoad 节点的图触发（map 为全融合结果全局，
+      // 非 IL 图不注入打分函数，未命中是常态，不告警）。显性暴露而非静默吞掉。
+      GELOGW(
+          "[ScoreFunc] IL graph[%s] (semantic[%s]) has no score func entry but %zu entries exist (first key: %s) — "
+          "key drift detected, runtime scoring may be silently disabled for this graph.",
+          model_info.graph_name.c_str(), model_info.semantic_name.c_str(), context.all_graph_score_funcs.size(),
+          context.all_graph_score_funcs.begin()->first.c_str());
+    }
+  }
+}
+
 af::Status ProcessAndSetScheduleGroupInfo(const std::vector<std::vector<af::AscGraph>> &schedule_groups,
                                           const std::map<std::string, std::string> &all_graph_score_funcs,
                                           const ascir::FusedScheduledResult &schedule_results,
                                           const std::map<std::string, std::string> &options,
                                           att::ParsedScheduleResult &out_schedule_groups, size_t asc_graph_id,
                                           size_t impl_graph_id) {
+  // 前端 ABI 动态符号集合：codegen 与 ATT 统一按该集合决定 tiling data 字段宽度。
+  std::set<std::string> dynamic_size_var_names;
+  ascgen_utils::CollectDynamicSizeVarNames(schedule_results, dynamic_size_var_names);
   // 第三层表示schedule_group_id
   for (size_t schedule_group_id = 0UL; schedule_group_id < schedule_groups.size(); schedule_group_id++) {
     auto &model_info_list = out_schedule_groups.groups_tiling_model_info[schedule_group_id];
@@ -544,22 +621,21 @@ af::Status ProcessAndSetScheduleGroupInfo(const std::vector<std::vector<af::AscG
     // ATT 必须与 Codegen 使用相同的 schedule result 路径，否则 raw 1D 节点会按 1D 模型评分，
     // 但 Codegen 最终生成 kUBFuse 固定 2D 描述。
     const bool is_cv_ub_fusion = schedule_result.cube_type == ascir::CubeTemplateType::kUBFuse;
-    const ModelGenerationContext context{enable_gather_reduce_penalty, is_cv_ub_fusion};
-    GE_ASSERT_SUCCESS(GenerateModelInfoWithContext(schedule_groups[schedule_group_id], model_info_list, options,
-                                                   out_schedule_groups.enable_group_parallel, context),
-                      "Get model info failed, impl graph id = %ld, group id = %ld.", impl_graph_id, schedule_group_id);
-    for (auto &model_info : model_info_list) {
-      model_info.schedule_group_ident.asc_graph_id = asc_graph_id;
-      model_info.schedule_group_ident.impl_graph_id = impl_graph_id;
-      model_info.schedule_group_ident.group_id = schedule_group_id;
-      model_info.input_nodes = schedule_results.input_nodes;
-      model_info.output_nodes = schedule_results.output_nodes;
-      FilterOutputAliasWorkspace(model_info);
-      auto it = all_graph_score_funcs.find(model_info.graph_name);
-      if (it != all_graph_score_funcs.end()) {
-        model_info.score_func = it->second;
-      }
-    }
+    const ModelGenerationContext context{enable_gather_reduce_penalty, is_cv_ub_fusion,
+                                         schedule_result.enable_workspace_alignment};
+    GE_ASSERT_SUCCESS(
+        GenerateModelInfoWithContext(schedule_groups[schedule_group_id], model_info_list, options,
+                                     out_schedule_groups.enable_group_parallel, context, schedule_result.semantic_name),
+        "Get model info failed, impl graph id = %ld, group id = %ld.", impl_graph_id, schedule_group_id);
+    const bool enable_matmul_m_common_tradeoff =
+        schedule_result.cube_type == ascir::CubeTemplateType::kCommon &&
+        ascgen_utils::IsFrontendStaticSchedResult(schedule_results) &&
+        schedule_result.matmul_m_common_group_ids.count(schedule_group_id) != 0UL;
+    const ModelInfoSetupContext setup_context{
+        schedule_results,      schedule_result,        schedule_groups[schedule_group_id],
+        all_graph_score_funcs, dynamic_size_var_names, asc_graph_id,
+        impl_graph_id,         schedule_group_id,      enable_matmul_m_common_tradeoff};
+    FillModelInfoList(model_info_list, setup_context);
     const auto &ident = model_info_list[0].schedule_group_ident;
     GELOGI(
         "[DFX]End to gen model info for %s tiling_case size %zu, graph name %s.", ident.GetItemPrefix().c_str(),
@@ -576,6 +652,7 @@ af::Status ProcessAndSetScheduleGroupInfo(const std::vector<std::vector<af::AscG
 af::Status GetModelInfoMap(const ascir::FusedScheduledResult &schedule_results,
                            const std::map<std::string, std::string> &options,
                            FusedParsedScheduleResult &out_all_model_infos) {
+  GE_ASSERT_SUCCESS(ValidateSocPerfEntry(), "Validate SoC performance target failed.");
   std::vector<std::vector<std::vector<std::vector<af::AscGraph>>>> all_graphs_lists;
   std::map<std::string, std::string> all_graph_score_funcs;
   GE_ASSERT_SUCCESS(GetAllSubImplGraphs(schedule_results, all_graphs_lists, all_graph_score_funcs));

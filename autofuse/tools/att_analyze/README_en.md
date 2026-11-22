@@ -6,9 +6,22 @@ In-repository ATT log analysis utilities. Run:
 python3 autofuse/tools/att_analyze/src/att.py --help
 ```
 
-The CLI provides `summary`, `compare`, `split-slog`, `perf-formula`, `verify-tiling`, and `evidence`. `summary` is read-only. `verify-tiling` compiles and executes code, so review its inputs and authorization first.
+The CLI provides `summary`, `compare`, `split-slog`, `perf-formula`, `verify-tiling`, `evidence`, and `topn-templates`. `summary` is read-only. `verify-tiling` compiles and executes code, so review its inputs and authorization first.
 
 `LogParser` exposes `OperatorSummary.parse_status` to make incomplete evidence explicit. `ok` means complete selection records; `inferred_graph_result` means graph/result came from template lines; `missing_group_case`, `missing_result_performance`, and `missing_graph_result` identify missing records. Existing CSV column meanings are unchanged.
+
+After TopN export succeeds, INFO logs emit `[ATT][TOPN_TILING] stage=topn_output` for each
+returned candidate and logical group. Each record contains `output[i]`, `graph/result/group`,
+the group's `tiling_repr` and modeled `pipe_estimates`. The value is `null` when no exact
+snapshot or model is available. Long representations use `TOPN_TILING_BEGIN/CHUNK/END`
+with a shared ID and estimates on the BEGIN line. The `evidence` command exports these as
+`record_type="topn_tiling"` with `output_index`. Runtime selections use `FINAL_TILING`.
+
+Use `summary --topn` to include returned candidate groups in console, CSV, or Excel output.
+Rows retain the graph, result, group, output index, source location, tiling representation,
+and pipe estimates. The default summary CSV remains compatible with `compare`.
+For both FINAL and TopN, `summary` and `evidence` normalize `M2/M3/V` to
+`AIV_MTE2/AIV_MTE3/AIV_VEC` and use `null` for missing estimates.
 
 ## FINAL_TILING log contract
 
@@ -65,6 +78,34 @@ candidate `GetTilingDataRepr` calls are not treated as runtime final records. A 
 sub-case identity cannot be recovered is intentionally omitted rather than reported with the
 wrong template identity.
 
+`topn-templates` reads only an Autofuse worker log and writes static Top1/TopN template CSV and
+Markdown tables. Top1 uses every group under `topn_output output_index=0`. If the log contains
+`output[i]: perf=`, the command records TopN modeled performance; otherwise that field is left
+empty. The command does not infer measured Task Duration from the log and does not read analysis
+CSV files produced by an external test framework.
+
+## TEMPLATE log contract
+
+Vocabulary and normalization are defined in `autofuse/common/common_utils.*`. The producer stores the
+canonical `semantic_name` in ModelInfo; logging and offline tools consume it without separate role dictionaries
+or reclassification.
+
+The core `[ATT][TEMPLATE]` line uses the field `semantic_name` in the format
+`<family>/<strategy>[@<role>][#<api-feature>|...][+<transform>...]`. Fields and identity are emitted separately:
+
+```text
+[ATT][TEMPLATE] stage=topn_output output[0] group=0 semantic_index=0 semantic_name_count=1 semantic_name="Pointwise/Common"
+[ATT][TEMPLATE] stage=topn_output output[0] group=0 semantic_index=0 semantic_name_count=1 fields semantic_schema=1 family="Pointwise" strategy="Common" role="" api_features="" transforms=""
+[ATT][TEMPLATE] stage=topn_output output[0] group=0 semantic_index=0 semantic_name_count=1 detail graph=0 result=0 tiling_key=0 template="graph0_result0_g0_0"
+```
+
+`name_status` is emitted only as `unavailable` or `ambiguous`; a default unique match omits it.
+When a field or an entire line exceeds 700 bytes, the formatter emits `<field>_hash`, `<field>_len`,
+`line_hash`, or `line_len` summaries instead of truncating the string. TopN analysis separates rows by
+case/visit/shape, the operator in `GenerateTopnSolutions enter`, and the call ordinal of that operator;
+multiple kernels or repeated calls in one visit are never merged. If the log has no operator association, the CSV
+`association_status` is `unconfirmed` instead of treating the call boundary as confirmed.
+
 ## verify-tiling ABI input
 
 Custom input JSON must include an explicit ABI contract. `tf_static` uses no shape dimensions; `tf_dynamic` and `inductor` require one or more shape dimensions. `block_dim_width` is either 32 or 64.
@@ -83,28 +124,38 @@ Unknown or missing ABI contracts are rejected before native code is called.
 
 ## Using the ATT template/tiling analysis skill
 
-`att_analyze` is maintained in this repository. The skill always invokes
-`autofuse/tools/att_analyze/src/att.py`; no checkout of another repository is
-required. To analyze an existing run offline from the repository root:
+When ATT succeeds but its default template or tiling is slower than a PGO or measured candidate, use
+[att-perf-selection-analysis](../../../.claude/skills/att-perf-selection-analysis/SKILL.md).
+The skill compares run-local pipe estimates and measurements, checks final identities and formulas,
+and reconstructs result-level ranking. Ambiguous final identities or profile associations remain explicit.
+To find a candidate with PGO, follow the skill's
+[PGO comparison workflow](../../../.claude/skills/att-perf-selection-analysis/references/pgo-comparison.md)
+to locate the enablement settings, complete tuning and confirm the selected solution before independently
+profiling and comparing the default and PGO results.
+
+`att_analyze` is maintained in this repository. Its entry point is
+`autofuse/tools/att_analyze/src/att.py`. To analyze existing data from the repository root:
 
 ```bash
-python3 .claude/skills/att-template-tiling-analysis/scripts/att_analysis.py \
-  analyze --run-root <run-root> --output <report-dir>
+python3 autofuse/tools/att_analyze/src/att.py evidence <default-log> -o <out>/default-evidence
+python3 autofuse/tools/att_analyze/src/att.py evidence <candidate-log> -o <out>/candidate-evidence
+python3 .claude/skills/att-perf-selection-analysis/scripts/est_vs_measured.py \
+  --plog <default-log> --op-summary <default-op-summary.csv> \
+  --plog <candidate-log> --op-summary <candidate-op-summary.csv> \
+  -o <out>/est_vs_measured.csv
 ```
 
-Place user-collected logs in `run-root/default` and `run-root/pgo` (or `base`),
-or pass arbitrary variant directories with `--default-root` and `--candidate-root`.
-The command recursively discovers logs, profiling, `kernel_meta/`, and `dump/`;
-it does not require a producer-specific directory layout. The command
-is read-only: it does not invent case scope or commands and does not rerun a
-workload. Python 3.9+ is sufficient for the base analysis; installing
-`openpyxl` additionally enables `summary.xlsx`.
+The Nth `--plog` is paired with the Nth `--op-summary`. The script only reads inputs,
+and the output file must not already exist. Optional `--op-filter <substring>` filters the original
+log operator names with case-sensitive substring matching; repeated filters use OR semantics.
+If no records match, the script writes a header-only CSV, exits with code 0, and reports no comparable items.
+Repeated FINAL records, multiple groups, or repeated profiling rows are marked as ambiguous;
+the script does not aggregate repeated samples automatically. Isolate data using confirmed call
+boundaries before comparing samples according to the skill.
 
-For live execution, provide the exact cases and command first. Local execution
-requires `python3`; remote execution uses standard `ssh` and a checkout on the
-remote host. A site-specific `devssh` wrapper is accepted only when explicitly
-provided by the user. Build, profiling, PGO, and `verify-tiling` actions require
-separate confirmation.
+Live execution follows the case scope and commands already authorized by the user.
+Check that the remote checkout can access the required scripts. Follow the repository's
+`af-build-runner` and `af-test-developer` skills for builds and tests.
 
 Keep raw evidence and conclusions in separate archives:
 
@@ -116,9 +167,10 @@ evidence-archive/<run-name>/      # raw files
 report-archive/<run-name>/        # report.md, summary.csv, root-cause.jsonl, ...
 ```
 
-The archive helper creates an incremented directory for duplicate run names and
-writes `archive-manifest.json`; existing archives are never overwritten. See
-the skill references for the execution contract and archive rules.
+Use a new output directory. Record original paths, source and tool versions, actual commands,
+and loaded-library content identifiers in the report or an existing manifest.
+For sampling, cache conditions, model fitting, and paired regression checks, see
+[validation-protocol.md](../../../.claude/skills/att-perf-selection-analysis/references/validation-protocol.md).
 
 ## Presets and real-log maintenance
 

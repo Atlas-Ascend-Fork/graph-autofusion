@@ -47,6 +47,7 @@ std::atomic<int> g_aclrtMallocHostSeen{0};
 aclError g_aclmdlRIGetStreamsRet[2] = {ACL_SUCCESS, ACL_SUCCESS};
 aclError g_aclrtStreamGetTasksRet[2] = {ACL_SUCCESS, ACL_SUCCESS};
 aclError g_aclrtTaskGetTypeRet = ACL_SUCCESS;
+aclError g_taskGetEnabledRet = ACL_SUCCESS;
 aclError g_aclrtGetDeviceRet = ACL_SUCCESS;
 uint32_t g_deviceCount = 0;
 aclError g_aclrtGetDeviceCountRet = ACL_SUCCESS;
@@ -106,6 +107,7 @@ void SkUtResetCommonStubControls() {
   g_aclrtStreamGetTasksRet[0] = ACL_SUCCESS;
   g_aclrtStreamGetTasksRet[1] = ACL_SUCCESS;
   g_aclrtTaskGetTypeRet = ACL_SUCCESS;
+  g_taskGetEnabledRet = ACL_SUCCESS;
   g_aclrtGetDeviceRet = ACL_SUCCESS;
   g_deviceCount = 0;
   g_aclrtGetDeviceCountRet = ACL_SUCCESS;
@@ -170,6 +172,13 @@ void SkUtSetAclrtStreamGetTasksRet(int phase, aclError ret) {
     return;
   }
   g_aclrtStreamGetTasksRet[phase] = ret;
+}
+
+void SkUtSetTaskGetEnabledRet(aclError ret) {
+  g_taskGetEnabledRet = ret;
+}
+aclError SkUtGetTaskGetEnabledRet() {
+  return g_taskGetEnabledRet;
 }
 
 void SkUtSetAclrtTaskGetTypeRet(aclError ret) {

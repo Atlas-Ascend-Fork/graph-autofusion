@@ -842,6 +842,10 @@ void VectorFuncPartitioner::RefineEnableVFFlag(const af::AscNodePtr &node, bool 
   }
 
   // 4. IndirectLoad template nodes with custom emit paths should not participate in regular VF fusion.
+  // [组链无角色设计下的门禁还原] kSimtFanoutBranch 仅由单 gather 扇出路径标注（含 Store）：
+  // 其既有契约为"不进 VF + 跳过 API 发射"（输出经 AddSkippedApiEmitProcessCall 注册，
+  // 单 gather ST 全量验证），进 VF 反而改变基线行为。组路径的链节点不注解任何角色
+  // （behavior 全 false → 本门禁不生效），VF/normal 由分区器自然裁决——无需豁免。
   if (ascgen_utils::indirect_load::GetTemplateBehavior(node).uses_direct_gm_pipeline) {
     enable_vf = false;
     GELOGD("Node [%s] is IndirectLoad custom emit node, disable VF support.", node->GetNamePtr());

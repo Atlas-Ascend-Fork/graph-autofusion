@@ -40,8 +40,11 @@ class NddmaTemplate : public BaseTemplate {
   static af::Status ProcessSliceToNddma(const af::AscNodePtr &node_load, bool &is_nddma_generated_cur,
                                         af::AscGraph &new_case);
   static Status ProcessTransposeNodes(af::AscGraph &new_case, bool &is_nddma_generated);
+  static Status ProcessSliceNodes(af::AscGraph &new_case, bool &is_nddma_generated);
   static af::Status IsNeedDropTransposeBrcFuse(af::AscGraph &graph, bool &is_need_drop);
   static af::Status BroadcastInputNodeIsScalar(const af::AscNodePtr &node, bool &is_scalar);
+  static af::Status BroadcastInputWindowBlockIsContiguous(const af::AscNodePtr &node, int32_t output_idx,
+                                                          bool &is_contiguous);
   static af::Status IsVectorizedAxisDoubleCut(af::AscGraph &graph, const af::AscNodePtr &node,
                                               bool &is_vectorized_axis_double_cut);
   static af::Status IsDataTypeValidInBasedCase(const af::AscGraph &graph, bool &is_dtype_valid);

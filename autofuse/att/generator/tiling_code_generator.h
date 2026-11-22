@@ -30,6 +30,7 @@ struct GenTilingTailExtParams {
   VarRelations var_relations;
   EnableGroupParallels enable_group_parallels;
   TensorIdSet workspace_tensor_id_set;
+  size_t final_tiling_observation_slot_count{1UL};
 };
 
 class TilingCodeGenerator {
@@ -74,11 +75,15 @@ class TilingCodeGenerator {
                                          const std::unordered_map<std::string, std::string> &cache_reuse_info,
                                          uint32_t cache_capacity, const EnableGroupParallels &enable_group_parallels,
                                          size_t group_num, const std::pair<const size_t, TilingModelInfo> &group_graphs,
+                                         const std::map<std::string, int32_t> &final_tiling_sub_case_ids,
+                                         size_t final_tiling_observation_slot,
                                          std::map<std::string, std::string> &tiling_res);
   af::Status GenScheduleResult(const std::string &op_type, const TilingCodeGenConfig &config,
                                const std::unordered_map<std::string, std::string> &cache_reuse_info,
                                uint32_t cache_capacity, const EnableGroupParallels &enable_group_parallels,
-                               const ParsedScheduleResult &result, std::map<std::string, std::string> &tiling_res);
+                               const ParsedScheduleResult &result,
+                               const std::map<std::string, int32_t> &final_tiling_sub_case_ids,
+                               size_t &final_tiling_observation_slot, std::map<std::string, std::string> &tiling_res);
   void MergeGeneratedHeaders(const TilingCodeGenImpl &impl);
 
   std::map<autofuse::GeneratedHeaderId, autofuse::GeneratedCode> generated_headers_;

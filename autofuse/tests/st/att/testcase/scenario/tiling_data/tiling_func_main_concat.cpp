@@ -10,7 +10,8 @@
 
 #include <iostream>
 #include "Concat_tiling_data.h"
-using namespace optiling;
+#include "autofuse_tiling_func_common.h"
+using namespace ::optiling;
 
 void PrintResult(graph_normalTilingData &tilingData) {
   std::cout << "====================================================" << std::endl;
@@ -43,7 +44,7 @@ int main() {
   tilingData.set_R(128);
   tilingData.set_BL(8);
 
-  if (GetTiling(tilingData)) {
+  if (GetTiling(tilingData, -1, nullptr)) {
     PrintResult(tilingData);
   } else {
     std::cout << "addlayernorm tiling func execute failed." << std::endl;
@@ -53,7 +54,7 @@ int main() {
   tilingData.set_block_dim(64);
   tilingData.set_A(1000);
   tilingData.set_R(256);
-  if (GetTiling(tilingData)) {
+  if (GetTiling(tilingData, -1, nullptr)) {
     PrintResult(tilingData);
   } else {
     std::cout << "addlayernorm tiling func execute failed." << std::endl;
@@ -63,7 +64,7 @@ int main() {
   tilingData.set_block_dim(64);
   tilingData.set_A(112);
   tilingData.set_R(512);
-  if (GetTiling(tilingData)) {
+  if (GetTiling(tilingData, -1, nullptr)) {
     PrintResult(tilingData);
   } else {
     std::cout << "addlayernorm tiling func execute failed." << std::endl;
@@ -73,7 +74,7 @@ int main() {
   tilingData.set_block_dim(64);
   tilingData.set_A(1000);
   tilingData.set_R(544);
-  if (GetTiling(tilingData)) {
+  if (GetTiling(tilingData, -1, nullptr)) {
     PrintResult(tilingData);
   } else {
     std::cout << "addlayernorm tiling func execute failed." << std::endl;
@@ -83,7 +84,7 @@ int main() {
   tilingData.set_block_dim(64);
   tilingData.set_A(1000);
   tilingData.set_R(511);
-  if (GetTiling(tilingData)) {
+  if (GetTiling(tilingData, -1, nullptr)) {
     PrintResult(tilingData);
   } else {
     std::cout << "addlayernorm tiling func execute failed." << std::endl;

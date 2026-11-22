@@ -333,7 +333,20 @@ af::Status AscGraphUbExprBuilder::Build(const af::AscGraph &graph, UbExprContext
   for (const auto &node : graph.GetAllNodes()) {
     GE_ASSERT_NOTNULL(node);
     if (ascgen_utils::indirect_load::GetTemplateBehavior(node).uses_direct_gm_pipeline) {
-      continue;
+      bool is_simt_local_target = false;
+      for (const auto &candidate : graph.GetAllNodes()) {
+        if (!af::ops::IsOps<af::ascir_op::IndirectLoad>(candidate)) {
+          continue;
+        }
+        const auto local_target = ascgen_utils::indirect_load::GetSimtPostReduceLocalProducer(candidate);
+        is_simt_local_target = local_target != nullptr && local_target->GetName() == node->GetName();
+        if (is_simt_local_target) {
+          break;
+        }
+      }
+      if (!is_simt_local_target) {
+        continue;
+      }
     }
     for (const auto &output : node->outputs()) {
       AddTensor(graph, output->attr, queue_bytes, buffer_bytes);

@@ -78,6 +78,38 @@ GE defines the following Reduce operator types at the Ascend IR level, mapped to
 
 Additionally, GE has variants with a "D" suffix (ReduceSumD, ReduceMaxD, etc.), where axes information is passed via attributes rather than a second input tensor.
 
+#### Prod Data Type Support
+
+In the AscIR V2 path, Prod supports `int8`, `int16`, `int32`, `int64`, and `float32`:
+
+| Data Type | Execution Type | Description |
+|-----------|----------------|-------------|
+| `int8` | `int16` | Widens input to `int16` for execution and truncates output back to `int8` |
+| `int16` | `int16` | Direct execution |
+| `int32` | `int32` | Direct execution |
+| `int64` | `int64` | Uses the b64 dual-register branch |
+| `float32` | `float32` | Direct execution |
+
+The `int8` execution result is truncated back to `int8`. For example, `100 * 100 = 10000` is output as `16` rather than the saturated value `127`.
+
+`bool` and `uint8` are not supported in this release. `Reg::Mul` on 3510-class architectures does not support 8-bit types, so these inputs retain the existing non-fused behavior.
+
+#### Any/All Data Type Support
+
+In the AscIR V2 path, Any/All supports `bool`, `uint8`, `int8`, `int16`, `int32`, `int64`, and `float32`:
+
+| Data Type | Execution Type | Description |
+|-----------|----------------|-------------|
+| `bool` | `uint8` | Executes through zero-copy reinterpretation of the 0/1 bit pattern |
+| `uint8` | `uint8` | Direct execution |
+| `int8` | `int8` | Direct execution |
+| `int16` | `int16` | Direct execution |
+| `int32` | `int32` | Direct execution |
+| `int64` | `int64` | Uses the b64 dual-register branch |
+| `float32` | `float32` | Direct execution |
+
+Logical inputs must be in the 0/1 value range; non-bool inputs should be normalized to nonzero checks before entering Any/All. `uint16`, `uint64`, `fp16`, `bf16`, and `fp64` are not registered, so these inputs retain the existing non-fused behavior.
+
 ### 3. Computation Logic
 
 The core computation logic of Reduce operators can be uniformly described as:
@@ -528,7 +560,7 @@ Status ReduceApiCall::Generate(...) {
 
   // 2. Determine AR/RA mode
   std::string reduce_pattern;
-  GetIsArAndPattern(y, x.isAr, reduce_pattern);
+  GetIsArAndPattern(x, y, x.isAr, reduce_pattern);
 
   // 3. Generate dtype name (ArgMax special handling)
   GE_CHK_STATUS_RET(GetDtypeNameForReduce(this->api_name_, x, y, dtype_name));
@@ -555,7 +587,7 @@ Status ReduceApiCall::Generate(...) {
 #### 3. AR/RA Mode Code Generation
 
 ```cpp
-void GetIsArAndPattern(const Tensor &y, bool &isAr, std::string &reduce_pattern) {
+void GetIsArAndPattern(const Tensor &x, const Tensor &y, bool &isAr, std::string &reduce_pattern) {
   isAr = (y.vectorized_strides.back() == 0);  // vectorized stride of 0 means AR mode
 
   const std::map<bool, std::string> reduce_pattern_map = {
@@ -809,6 +841,41 @@ SubAxis *FindAAxis(NodeInfo &node_info) {
 | CodeGen | `codegen/api_call/reduce/reduce_api_call_base.cpp` | `GetIsArAndPattern`, `ReduceDimACodeGen` |
 | ATT | `att/util/att_utils.cpp` | `CollectReduceAxisNames` |
 | ATT | `att/gen_model_info/expr_gen/generate_tiling_expr.cpp` | `FindAAxis` |
+
+## Rand/Randn Operator Description
+
+### 1. Input and Output Contract
+
+`Rand` and `Randn` add optional `seed` and `offset` inputs in the v35 path to replace the legacy fixed random stream:
+
+- `seed`: `int64`, which can be a compile-time scalar, runtime scalar, or per-element tensor; scalar broadcast is the main path;
+- `offset`: `int32`, which must be a per-element tensor representing the linear index of the output element, for example `rand(2,3)` maps to `[0,1,2,3,4,5]`;
+- both inputs must be connected together or omitted together; connecting only one is rejected by `IsNodeValid`.
+
+The output dtypes of both operators are identical. Both the legacy and new signatures support:
+
+| Signature | Rand path | Randn path |
+|-----------|-----------|-------------|
+| Legacy, 0 inputs | Fixed key/counter raw-word or uniform SIMT path | Fixed key/counter raw-word or normal SIMT path |
+| New, seed+offset | Per-element SIMT uniform path | Per-element SIMT normal path |
+
+The supported output dtypes are `uint32`, `int32`, `fp16`, `bf16`, and `fp32`. Neither the legacy nor new signature supports `fp64`.
+
+### 2. Legacy Graph Compatibility and Dtype Semantics
+
+- A legacy graph without `seed`/`offset` keeps the legacy signature, `inputs()` remains empty, and `StartNode` semantics are unchanged;
+- A graph with `seed`/`offset` uses the new signature, with `seed` using an independent `int64` sym and `offset` using an independent `int32` sym, not shared with the output dtype sym;
+- The Python frontend `Rand`/`Randn` add `seed=None, offset=None` optional parameters; when omitted, input anchors are not connected, preserving legacy graph compatibility;
+- Dtype validation is shared by the legacy and new signatures to avoid behavior differences between Rand and Randn.
+
+### 3. Test and Verification Scope
+
+E2E tests use the same dtype variant set for Rand and Randn, covering `uint32`, `int32`, `fp16`, `bf16`, and `fp32`, and verify:
+
+1. The fixed random stream is unchanged when `seed`/`offset` are omitted;
+2. The per-element random stream matches the golden result when `seed`/`offset` are connected;
+3. Graph validation fails when only one optional input is connected;
+4. Legacy and new graphs remain compatible in dtype inference, serialization, and the Python frontend path.
 
 ## Related Links
 

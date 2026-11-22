@@ -15,6 +15,8 @@ import os
 import subprocess
 import sys
 
+import pytest
+
 
 SRC = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../src"))
 ENTRYPOINT = os.path.join(SRC, "att.py")
@@ -273,3 +275,118 @@ def test_summary_only_final_tiling_is_exported(tmp_path):
     assert record["record_type"] == "final_tiling_summary"
     assert record["operator"] == "Fusion"
     assert record["groups"] == {"0": {"case_id": 2, "tiling_key": 7}}
+
+
+@pytest.mark.parametrize(
+    "second_source,second_case,second_key,expected_status",
+    [
+        ("pgo", 0, 0, "ok"),
+        ("runtime", 1, 1, "ok"),
+        ("runtime", 0, 1, "ok"),
+        ("runtime", 0, 0, "duplicate_final_tiling"),
+    ],
+)
+def test_final_evidence_retains_complete_record_identity(
+    tmp_path, second_source, second_case, second_key, expected_status
+):
+    """Different final choices remain valid; exact repeated identities do not."""
+
+    def final_line(source, case, key):
+        mode = "pgo" if source == "pgo" else "default"
+        return (
+            f'[ATT][FINAL_TILING] schema=1 source="{source}" '
+            f'selection_mode="{mode}" operator="Fusion" graph=0 result=0 '
+            f"group=0 case_id={case} tiling_key={key} score=1 "
+            'sub_case_tag="" template="Case" repr_kind="full_json" '
+            'pipe_estimates="{\\"AIV_MTE2\\":12.0}" '
+            'tiling_repr="{\\"tile_m\\":64}"\n'
+        )
+
+    log = tmp_path / "final-choices.log"
+    log.write_text(
+        final_line("runtime", 0, 0)
+        + final_line(second_source, second_case, second_key),
+        encoding="utf-8",
+    )
+    output = tmp_path / "evidence"
+    result = subprocess.run(
+        [sys.executable, ENTRYPOINT, "evidence", str(log), "-o", str(output)],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    records = [
+        json.loads(line)
+        for line in (output / "att-evidence.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert [record["parse_status"] for record in records] == ["ok", expected_status]
+    assert [
+        (record["source"], record["case_id"], record["tiling_key"])
+        for record in records
+    ] == [("runtime", 0, 0), (second_source, second_case, second_key)]
+    assert [record["source_line"] for record in records] == [1, 2]
+    manifest = json.loads((output / "tool-manifest.json").read_text(encoding="utf-8"))
+    assert manifest["record_count"] == 2
+
+
+def test_topn_evidence_keeps_candidates_separate_from_runtime_final(tmp_path):
+    log = tmp_path / "topn.log"
+    payload = '{"tile":64}'
+    checksum = hashlib.sha256(payload.encode()).hexdigest()
+    common = (
+        'schema=1 operator="Concat" graph=0 result=0 case_id=2 tiling_key=2 '
+        'repr_kind="full_json"'
+    )
+    log.write_text(
+        f'[ATT][FINAL_TILING] {common} source="runtime" group=0 tiling_repr="{{}}"\n'
+        f'[ATT][TOPN_TILING] stage=topn_output output[0] {common} source="topn" '
+        'group=0 pipe_estimates=null tiling_repr="{}"\n'
+        f'[ATT][TOPN_TILING_BEGIN] stage=topn_output output[0] {common} source="topn" '
+        f'group=1 pipe_estimates="{{\\"V\\":12}}" id="candidate0g1" chunks=1 len={len(payload)} hash={checksum}\n'
+        '[ATT][TOPN_TILING_CHUNK] id="candidate0g1" seq=0 data="{\\"tile\\":64}"\n'
+        f'[ATT][TOPN_TILING_END] id="candidate0g1" chunks=1 len={len(payload)} hash={checksum}\n'
+        f'[ATT][TOPN_TILING] stage=topn_output output[1] {common} source="topn" '
+        'group=1 pipe_estimates=null tiling_repr="{}"\n',
+        encoding="utf-8",
+    )
+    output = tmp_path / "evidence"
+    result = subprocess.run(
+        [sys.executable, ENTRYPOINT, "evidence", str(log), "-o", str(output)],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    records = [
+        json.loads(line)
+        for line in (output / "att-evidence.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    runtime = [record for record in records if record.get("source") == "runtime"]
+    assert len(runtime) == 1
+    candidates = [
+        record for record in records if record.get("record_type") == "topn_tiling"
+    ]
+    assert [(r["output_index"], r["group_id"]) for r in candidates] == [
+        (0, 0),
+        (0, 1),
+        (1, 1),
+    ]
+    assert all(r["parse_status"] == "ok" for r in candidates)
+    assert (
+        candidates[0]["pipe_est"]
+        == runtime[0]["pipe_est"]
+        == {
+            "AIV_MTE2": None,
+            "AIV_MTE3": None,
+            "AIV_VEC": None,
+        }
+    )
+    assert candidates[1]["pipe_est"] == {
+        "AIV_MTE2": None,
+        "AIV_MTE3": None,
+        "AIV_VEC": 12,
+    }
+    assert candidates[1]["tiling_repr"] == {"tile": 64}

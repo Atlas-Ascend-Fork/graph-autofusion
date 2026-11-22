@@ -41,10 +41,11 @@ int ConvertCounterToRealTime(uint64_t counter, const PgoDeviceTimeInfo &info, ui
   // bit-level conversion explicitly while using 128-bit intermediates.
   const auto delta =
       static_cast<__int128>(SignedCounter(counter)) - static_cast<__int128>(SignedCounter(info.start_sys_count));
-  const auto real =
-      (delta / static_cast<__int128>(info.frequency)) * kNsPerSecond +
-      (delta % static_cast<__int128>(info.frequency) * kNsPerSecond) / static_cast<__int128>(info.frequency) +
-      static_cast<__int128>(info.start_real_time_ns);
+  // |delta| <= UINT64_MAX, so scaling by 1e9 fits in __int128 and preserves
+  // truncation toward zero. A single division avoids the newer libgcc
+  // dependency introduced by a fused signed division/remainder operation.
+  const auto real = (delta * static_cast<__int128>(kNsPerSecond)) / static_cast<__int128>(info.frequency) +
+                    static_cast<__int128>(info.start_real_time_ns);
   if (real < 0 || real > std::numeric_limits<uint64_t>::max()) {
     return -1;
   }

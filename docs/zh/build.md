@@ -40,12 +40,20 @@ git clone https://gitcode.com/cann/graph-autofusion.git
 
 1. 在联网环境中，进入[本项目主页](https://gitcode.com/cann/graph-autofusion)，通过`下载zip`或`Clone`按钮，根据指导，完成源码下载。
 
-2. 下载`makeself`，`cann-cmake`第三方开源软件。
+2. 下载`makeself`，`cann-cmake`第三方开源软件。先在联网机器上解压源码，再读取该份源码要求的版本：
 
    | 开源软件 | 版本 | 下载地址 |
    |---|---|---|
    | makeself | 2.5.0 | [makeself-release-2.5.0-patch1.tar.gz](https://gitcode.com/cann-src-third-party/makeself/releases/download/release-2.5.0-patch1.0/makeself-release-2.5.0-patch1.tar.gz) |
-   | cann-cmake | master-052 | [cmake-master-052.tar.gz](https://cann-3rd.obs.cn-north-4.myhuaweicloud.com/cmake/cmake-master-052.tar.gz) |
+   | cann-cmake | 读取源码中的`CANN_CMAKE_TAG` | 使用下方命令下载 |
+
+   在解压后的`graph-autofusion`源码仓的父目录执行：
+
+   ```bash
+   CANN_CMAKE_TAG=$(sed -n 's/^[[:space:]]*set(CANN_CMAKE_TAG "\([^"]*\)").*/\1/p' graph-autofusion/cmake/fetch_cann_cmake.cmake)
+   test -n "${CANN_CMAKE_TAG}"
+   curl -fLO "https://cann-3rd.obs.cn-north-4.myhuaweicloud.com/cmake/cmake-${CANN_CMAKE_TAG}.tar.gz"
+   ```
 
 3. 将源码及第三方开源软件上传到离线编译环境中，解压缩源码。
 
@@ -54,14 +62,17 @@ git clone https://gitcode.com/cann/graph-autofusion.git
    unzip graph-autofusion.zip
    ```
 
-4. 在源码同级目录创建open_source目录，将第三方开源软件压缩包放到open_source目录下解压缩后改名。
+4. 在源码同级目录创建open_source目录存放并解压makeself；cann-cmake归档放到源码仓内output/third_party目录，不解压。
 
    ```bash
    # 创建open_source目录
    mkdir open_source
    # 将第三方开源软件压缩包放到open_source目录下
    mv makeself-release-2.5.0-patch1.tar.gz open_source/
-   mv cmake-master-052.tar.gz open_source/
+   mkdir -p graph-autofusion/output/third_party
+   CANN_CMAKE_TAG=$(sed -n 's/^[[:space:]]*set(CANN_CMAKE_TAG "\([^"]*\)").*/\1/p' graph-autofusion/cmake/fetch_cann_cmake.cmake)
+   test -n "${CANN_CMAKE_TAG}"
+   mv "cmake-${CANN_CMAKE_TAG}.tar.gz" graph-autofusion/output/third_party/
    # 解压缩第三方开源软件压缩包并改名（cann-cmake压缩包保持不变）
    cd open_source
    tar -zxvf makeself-release-2.5.0-patch1.tar.gz && mv makeself-release-2.5.0 makeself
@@ -72,6 +83,8 @@ git clone https://gitcode.com/cann/graph-autofusion.git
    ```bash
    ├── graph-autofusion           # 解压后的源码仓
    │  ├── cmake
+   │  ├── output/third_party
+   │  │  └── cmake-${CANN_CMAKE_TAG}.tar.gz
    │  └── ...
    ├── open_source                # 三方开源软件
    │  └── makeself
@@ -79,7 +92,6 @@ git clone https://gitcode.com/cann/graph-autofusion.git
    │     ├── Makefile
    │     ├── README.md
    │     └── ...
-   │  └── cmake-master-052.tar.gz
    ```
 
 ### 4.2 安装依赖
@@ -186,8 +198,17 @@ bash build.sh --pkg
 
 1. 在联网机器上下载以下第三方包：
 
+   在将用于离线构建的同一份源码仓根目录执行：
+
+   ```bash
+   CANN_CMAKE_TAG=$(sed -n 's/^[[:space:]]*set(CANN_CMAKE_TAG "\([^"]*\)").*/\1/p' cmake/fetch_cann_cmake.cmake)
+   test -n "${CANN_CMAKE_TAG}"
+   curl -fLO "https://cann-3rd.obs.cn-north-4.myhuaweicloud.com/cmake/cmake-${CANN_CMAKE_TAG}.tar.gz"
+   ```
+
    | 第三方包 | 版本 | 下载地址 |
    |---------|------|---------|
+   | cann-cmake | 读取源码中的`CANN_CMAKE_TAG` | 使用下方命令下载 |
    | abseil-cpp | 20230802.1 | https://gitcode.com/cann-src-third-party/abseil-cpp/releases/download/20230802.1/abseil-cpp-20230802.1.tar.gz |
    | json | 3.11.3 | https://gitcode.com/cann-src-third-party/json/releases/download/v3.11.3/json-3.11.3.tar.gz |
    | boost | 1.87.0 | https://gitcode.com/cann-src-third-party/boost/releases/download/v1.87.0/boost_1_87_0.tar.gz |
@@ -205,6 +226,7 @@ bash build.sh --pkg
    mkdir -p output/third_party/{abseil-cpp,json,boost,protobuf,symengine,gtest,mockcpp,makeself}
 
    # 将下载的包放入对应目录（文件名须与下表一致）
+   # cmake-${CANN_CMAKE_TAG}.tar.gz              → output/third_party/
    # abseil-cpp-20230802.1.tar.gz           → output/third_party/abseil-cpp/
    # json-3.11.3.tar.gz                     → output/third_party/json/
    # boost_1_87_0.tar.gz                    → output/third_party/boost/
@@ -216,6 +238,8 @@ bash build.sh --pkg
    # mockcpp-2.7-h5.patch                   → output/third_party/pkg/          # 备用路径
    # makeself-release-2.5.0-patch1.tar.gz   → output/third_party/makeself/
    ```
+
+   > `cann-cmake` 引导依赖必须与 `cmake/fetch_cann_cmake.cmake` 的 `CANN_CMAKE_TAG` 一致，归档直接放在 `output/third_party/` 根目录（或 `--cann_3rd_lib_path` 指定目录），无需解压；旧版本归档不会被当前引导逻辑识别。
 
    mockcpp 离线包和补丁文件放置示例：
 
@@ -307,6 +331,12 @@ bash build.sh --pkg
 安装完成后，用户可以进行开发者测试，在执行本章节操作之前，确保已完成[环境准备](./quick_install.md#1-环境准备)并已安装编译生成的 `.run` 包。
 
 其中，`.run` 包用于提供测试依赖的动态库。SuperKernel Python UT/ST 直接从当前源码目录加载 `superkernel`，不会替换或卸载通过 `--pylocal` 安装到 CANN 路径下的 wheel 包。
+
+仅选择 Autofuse 测试模块且不带 `--pkg` 时，由测试入口直接构建其目标依赖，不再预先执行产品全量构建。
+默认并行度取当前进程可用 CPU 数，并考虑 CPU 亲和性与容器 CPU 配额，不使用宿主机暴露的核数或固定 14 上限。
+`-u --module=autofuse_ascendc_api` 运行两个架构的数值 API UT，不构建测试版 `pyautofuse/optimize/codegen`。
+广播代码生成与内核执行用例由 `-s --module=autofuse_e2e` 运行；通过
+`bash scripts/test/run_autofuse_test.sh -u -m all -j 8` 执行全部 Autofuse UT 时也保留这些用例。
 
 - UT 验证
 

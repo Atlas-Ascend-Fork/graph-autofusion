@@ -9,11 +9,15 @@
  */
 
 #include "tiling_group.h"
+#include <sstream>
+
+#include "schedule_graph_validator.h"
 #include "ascir_ops_utils.h"
 #include "ascgraph_info_complete.h"
 #include "ascir_utils.h"
 #include "indirect_load_utils.h"
 #include "schedule_utils.h"
+#include "schedule_result.h"
 #include "graph/symbolizer/symbolic_utils.h"
 
 namespace optimize::autoschedule {
@@ -490,6 +494,9 @@ Status TilingGroup::GenTilingGroup(const ascir::ImplGraph &impl_graph, AxisGroup
     }
     AxisGroup single_node_axes_group;
     GE_CHK_STATUS_RET(GenAxisGroupForSingleNode(*node, single_node_axes_group, is_reduce_fullload));
+    if (ascir::IsCvMBroadcast(*node)) {
+      n_groupset.insert(ascir::GetCvBroadcastMAxis(*node));
+    }
     n_groupset.insert(single_node_axes_group.n_group.begin(), single_node_axes_group.n_group.end());
     node_name_to_tiling_group.emplace_back(node->GetName(), single_node_axes_group);
     GELOGD("GenTilingGroup node: %s, group: %s.", node->GetName().c_str(), single_node_axes_group.ToString().c_str());
@@ -498,8 +505,15 @@ Status TilingGroup::GenTilingGroup(const ascir::ImplGraph &impl_graph, AxisGroup
 
   // merge xyr groups.
   for (auto &iter : node_name_to_tiling_group) {
-    GE_ASSERT_TRUE(MergeAxesGroup(tiling_group, iter.second),
-                   "Merged axis group: %s to target: %s failed, the graph [%s] cannot be fused.",
+    const bool can_merge = MergeAxesGroup(tiling_group, iter.second);
+    if (!can_merge) {
+      std::ostringstream detail;
+      detail << kScheduleGraphValidationErrorPrefix << "[AXIS_GROUP] stage=schedule graph=" << impl_graph.GetName()
+             << " node=" << iter.first << ": axis groups are incompatible; current=" << tiling_group.ToString()
+             << " incoming=" << iter.second.ToString();
+      RecordScheduleValidationError(detail.str());
+    }
+    GE_ASSERT_TRUE(can_merge, "Merged axis group: %s to target: %s failed, the graph [%s] cannot be fused.",
                    iter.second.ToString().c_str(), tiling_group.ToString().c_str(), impl_graph.GetName().c_str());
   }
 

@@ -39,14 +39,14 @@ void LoadRargmaxStore_BeforeAutofuse(af::AscGraph &graph, ge::DataType data_type
   *load.y.repeats = {s0, s1};
   *load.y.strides = {s1, One};
 
-  af::ascir_op::ArgMax rargmax("rargmax");
+  af::ascir_op::Argmax rargmax("rargmax");
   graph.AddNode(rargmax);
   rargmax.x = load.y;
   rargmax.attr.sched.axis = {z0.id, z1.id};
   *rargmax.y.axis = {z0.id, z1.id};
   *rargmax.y.repeats = {s0, One};
   *rargmax.y.strides = {One, Zero};
-  // ArgMax requires tmp buffer for indices
+  // Argmax requires tmp buffer for indices
   rargmax.attr.tmp_buffers = {{{af::Symbol(8192), -1}, MemAttr(), 0}, {{af::Symbol(8192), 0}, MemAttr(), 1}};
 
   Store store("store");
@@ -60,7 +60,7 @@ void LoadRargmaxStore_BeforeAutofuse(af::AscGraph &graph, ge::DataType data_type
   Output y("y");
   graph.AddNode(y);
   y.x = store.y;
-  // ArgMax outputs indices (int64)
+  // Argmax outputs indices (int64)
   y.y.dtype = ge::DT_INT64;
 }
 
@@ -79,7 +79,7 @@ void LoadRargmaxStore_AfterAutofuse(af::AscGraph &graph, ge::DataType data_type)
 
   auto rargmax = graph.FindNode("rargmax");
   rargmax->attr.api.compute_type = ComputeType::kComputeReduce;
-  // ArgMax outputs int64 indices
+  // Argmax outputs int64 indices
   rargmax->outputs[0].attr.dtype = ge::DT_INT64;
 
   rargmax->attr.api.type = ApiType::kAPITypeCompute;

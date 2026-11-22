@@ -11,11 +11,13 @@
 #include "load_to_nddma_template.h"
 #include "graph_utils.h"
 #include "indirect_load_utils.h"
+#include "common_utils.h"
 #include "un_alignment_strategy.h"
 #include "tensor_layout_utils.h"
 #include "platform/common/base_alignment_strategy.h"
 
 namespace optimize {
+namespace semantic = ascgen_utils::template_semantic;
 
 std::string LoadToNddmaTemplate::GenName(const std::string &general_case_name) {
   return general_case_name + "_load_to_nddma";
@@ -35,6 +37,11 @@ af::Status LoadToNddmaTemplate::Generate(const af::AscGraph &origin_graph,
   }
   bool is_nddma_generated = false;
   for (const auto &node : new_case.GetAllNodes()) {
+    if (!ascir::GetCvBroadcastShape(*node).empty()) {
+      return af::FAILED;  // CV tile coordinates are owned by the Cube callback.
+    }
+  }
+  for (const auto &node : new_case.GetAllNodes()) {
     GE_CHECK_NOTNULL(node);
     if (!af::ops::IsOps<af::ascir_op::Load>(node)) {
       continue;
@@ -48,12 +55,18 @@ af::Status LoadToNddmaTemplate::Generate(const af::AscGraph &origin_graph,
     bool need_align_at_repeat1 = info.has_multiple_discontinuities && info.is_tail_axis_discontinuous;
     if (IsLoadNeedAlign(node) || need_align_at_repeat1) {
       GE_ASSERT_SUCCESS(GenLoadToGenNddmaNode(node));
+      GE_ASSERT_SUCCESS(ascgen_utils::SetTemplateSemanticTransform(node, semantic::kLoad));
       is_nddma_generated = true;
     }
   }
   if (!is_nddma_generated) {
     GELOGD("No load_to_nddma template generated.");
     return af::FAILED;
+  }
+  // SIMD indirect load 的 UB 布局契约由 RecalculateStridesFromRepeats 推导为紧致布局，
+  // 图级垫整改写 vectorized_strides 会造成生产/消费布局失配，与 NddmaTemplate 的改写调用一致整体绕开。
+  if (ascgen_utils::indirect_load::FindIndirectLoadNode(new_case) == nullptr) {
+    GE_ASSERT_SUCCESS(PadNddmaOutputVectorizedStrides(new_case));
   }
   GE_ASSERT_SUCCESS(ScheduleUtils::TopologicalSorting(new_case));
   return af::SUCCESS;

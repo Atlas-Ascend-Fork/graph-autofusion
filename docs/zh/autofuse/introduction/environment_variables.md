@@ -44,10 +44,10 @@ export AUTOFUSE_FLAGS="--enable_autofuse=true"
 | `--enable_autofuse` | GE 路径 | 控制整体自动融合功能是否开启。取值为 `true` 或 `false`，`false` 为默认值；未开启时，其他 AutoFuse 控制项均不生效。 |
 | `--autofuse_enable_pass` | GE 路径 | 控制指定的扩展融合能力是否开启。目前支持 `reduce` 和 `concat`；多个取值使用英文逗号分隔，默认不配置，扩展融合默认关闭。不能与 `--autofuse_disable_pass` 配置相同取值。 |
 | `--autofuse_disable_pass` | GE 路径 | 控制指定的扩展融合能力是否关闭。支持配置 `reduce`、`concat`，也可以使用英文逗号分隔，同时关闭多个扩展融合能力。默认不配置；不能与 `--autofuse_enable_pass` 配置相同取值。 |
-| `--autofuse_enhance_precision_blacklist` | GE 路径 | 控制指定 AscIR 算子类型是否跳过精度提升。取值为 AscIR 算子类型字符串，多个类型使用英文逗号分隔，也可配置为 `all`；默认值为空。`Sum`、`Mean`、`Prod` 不支持低精度类型，即使加入黑名单也仍会提升精度。配置 `Div`、`Reciprocal`、`Rsqrt`、`Sqrt` 或 `all` 后，`Div`、`Reciprocal`、`Rsqrt`、`Sqrt` 算子在代码生成时关闭高精度模式，按默认精度生成，可能影响计算精度。 |
+| `--autofuse_enhance_precision_blacklist` | GE 路径 | 控制指定 AscIR 算子类型是否跳过精度提升。取值为 AscIR 算子类型字符串，多个类型使用英文逗号分隔，也可配置为 `all`；默认值为空。`Sum`、`Mean`、`Prod` 不支持低精度类型，即使加入黑名单也仍会提升精度。配置 `Div`、`Reciprocal`、`Rsqrt`、`Sqrt`、`Pow` 或 `all` 后，`Div`、`Reciprocal`、`Rsqrt`、`Sqrt`、`Pow` 算子在代码生成时关闭高精度模式，按默认精度生成，可能影响计算精度。 |
 | `--recomputation_threshold` | GE 路径 | 设置自动融合重计算阈值。取值为 `0`～`255` 的整数，默认值为 `1`。 |
 | `--max_fusion_size` | GE 路径 | 设置单个融合算子最多包含的节点数量。取值为 `0`～`uint64_t` 最大值，配置为 `0` 表示不融合，默认值由实现决定。 |
-| `--autofuse_enable_pgo` | GE 路径、Inductor 路径 | 开启 PGO 调优，通过预先上板采样选择性能更优的 Tiling。取值为 `true` 或 `false`，默认值为 `false`。仅支持静态图调优，需要准备对应版本的 `mspti`；首次配置时不能与其他 Profiling 功能同时开启。 |
+| `--autofuse_enable_pgo` | GE 路径、Inductor 路径 | 开启 PGO 调优，通过预先上板采样选择性能更优的 Tiling。取值为 `true` 或 `false`，默认值为 `false`。仅支持静态图调优，需要准备对应版本的 `mspti`；首次配置时不能与其他 Profiling 功能同时开启。Inductor 路径可与 CV 融合同时开启：CV 子图保留融合并跳过 PGO，静态非 CV 子图执行 PGO，无需关闭 CV 融合。 |
 | `--experimental_enable_jit_executor_v2` | GE 路径 | 开启切图编译。取值为 `true` 或 `false`，默认值为 `false`。动态分档、资源类算子、V1 控制流算子、数据预处理下沉和部分 AOE 调优场景不支持该功能。 |
 
 示例：
@@ -63,6 +63,7 @@ export AUTOFUSE_FLAGS="--enable_autofuse=true;--autofuse_enable_pass=reduce,conc
 | 控制项 | 适用场景 | 作用、取值与使用约束 |
 | :----- | :------- | :------------------- |
 | `--codegen_compile_debug` | GE 路径、Inductor 路径 | 控制是否保留融合算子生成过程中的中间文件。取值为 `true` 或 `false`，默认值为 `false`；开启后保留 Kernel、Tiling、CMake 工程、编译结果并生成融合图 Dump。 |
+| `--codegen_compile_debug` 文件名策略 | GE 路径、Inductor 路径 | 融合图 Dump 文件名超过 255 字节时，自动压缩为“头信息 + 稳定哈希 + 尾信息”，避免文件系统单文件名超限导致落盘失败。 |
 | `--debug_dir` | GE 路径、Inductor 路径 | 指定融合过程中 AscGraph Dump 图的保存路径。取值为有效目录路径，未指定时保存到当前执行目录。需要先开启 `--codegen_compile_debug=true`，且执行用户需要具备目标路径的读、写和执行权限。 |
 | `--autofuse_att_algorithm` | GE 路径、Inductor 路径 | 选择 Auto Tiling 求解算法。取值为 `AxesReorder`（默认）或试验性的 `HighPerf`。`HighPerf` 不保证一定获得更好的执行性能；非法值恢复为默认值。 |
 | `--att_accuracy_level` | GE 路径、Inductor 路径 | 控制 Auto Tiling 算法的求解精度。取值为 `1`（高精度求解）或 `0`（低精度求解），默认值为 `1`。高精度求解可能得到更优的 Tiling，但会增加 Tiling 执行时间；非法值恢复为默认值。 |

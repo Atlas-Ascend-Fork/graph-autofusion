@@ -22,15 +22,16 @@ extern "C" int64_t AutofuseTiling(uint32_t s0, uint32_t s1, AutofuseTilingData *
 
 class E2EBackendLoadErfinvStoreCode : public testing::Test, public testing::WithParamInterface<std::vector<int>> {};
 
-static float ErfinvReference(float x) {
-  if (std::fabs(x - 0.5F) < 1e-6F) {
-    return 0.476936276F;
-  }
-  if (std::fabs(x + 0.5F) < 1e-6F) {
-    return -0.476936276F;
-  }
-  return 0.0F;
-}
+static constexpr size_t ERFINV_INPUT_NUM = 13;
+static constexpr float ERFINV_INPUTS[ERFINV_INPUT_NUM] = {
+    0.0F, 0.5F, -0.5F, 0.9F, -0.9F, 0.99F, -0.99F, 0.999F, -0.999F, 0.9999F, -0.9999F, 0.9998279F, -0.9998279F};
+// 期望值按输入 float32 字面量对应的精确值计算：erfinv(double(float32(x))) 后四舍五入到 float32。
+// 近 ±1 处 erfinv 导数很大，不能用十进制字面量的 erfinv 作为期望值。
+static constexpr float ERFINV_EXPECTS[ERFINV_INPUT_NUM] = {
+    0.0F,         0.476936281F,  -0.476936281F, 1.163087130F,  -1.163087130F, 1.821386576F, -1.821386576F,
+    2.326756239F, -2.326756239F, 2.751035452F,  -2.751035452F, 2.656480789F,  -2.656480789F};
+// 与单算子 SIMT erfinvf 对齐，覆盖近边界输入；容差按该 log2 近似算法的实际误差设定。
+static constexpr float ERFINV_TOL = 1e-4F;
 
 TEST_P(E2EBackendLoadErfinvStoreCode, CalculateCorrect) {
   auto erfinv_shape = GetParam();
@@ -42,8 +43,8 @@ TEST_P(E2EBackendLoadErfinvStoreCode, CalculateCorrect) {
   float *erfinv_expect = static_cast<float *>(AscendC::GmAlloc(erfinv_test_size * sizeof(float) + 32));
 
   for (int i = 0; i < erfinv_test_size; i++) {
-    erfinv_x[i] = static_cast<float>((i % 3) - 1) * 0.5F;
-    erfinv_expect[i] = ErfinvReference(erfinv_x[i]);
+    erfinv_x[i] = ERFINV_INPUTS[i % ERFINV_INPUT_NUM];
+    erfinv_expect[i] = ERFINV_EXPECTS[i % ERFINV_INPUT_NUM];
   }
 
   uint32_t ws_size = 0;
@@ -54,7 +55,7 @@ TEST_P(E2EBackendLoadErfinvStoreCode, CalculateCorrect) {
 
   uint32_t erfinv_diff_count = 0;
   for (int i = 0; i < erfinv_test_size; i++) {
-    if (std::fabs(erfinv_y[i] - erfinv_expect[i]) > 1e-4F) {
+    if (std::fabs(erfinv_y[i] - erfinv_expect[i]) > ERFINV_TOL) {
       erfinv_diff_count++;
     }
   }

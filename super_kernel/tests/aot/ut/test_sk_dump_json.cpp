@@ -55,6 +55,8 @@ class SkDumpJsonTest : public ::testing::Test {
     auto node =
         std::make_unique<SuperKernelKernelNode>(nullptr, ACL_MODEL_RI_TASK_KERNEL, nodeId, 0, 0, INVALID_TASK_ID);
     node->SetNodeId(nodeId);
+    node->taskParams.type = ACL_MODEL_RI_TASK_KERNEL;
+    node->taskParams.kernelTaskParams.argsType = ACL_RT_KERNEL_ARGS_DEVICE_BUFFER;
     return node;
   }
 
@@ -491,6 +493,7 @@ TEST_F(SkDumpJsonDirectHelperTest, TaskAndKernelTypeStringHelpers) {
 TEST_F(SkDumpJsonDirectHelperTest, BasicKernelParamsAcceptMaximumFunctionName) {
   aclmdlRIKernelTaskParams params{};
   params.funcHandle = reinterpret_cast<aclrtFuncHandle>(0x300);
+  params.argsType = ACL_RT_KERNEL_ARGS_DEVICE_BUFFER;
 
   ASSERT_EQ(MaxLengthDumpFunctionName().size(), MAX_FUNC_NAME_LEN - 1U);
   MOCKER(aclrtGetFunctionName).stubs().will(invoke(FakeAclrtGetFunctionName_MaxLengthDump));
@@ -685,9 +688,8 @@ TEST_F(SkDumpJsonDirectHelperTest, RawTaskParamJsonCoversAllTaskTypes) {
   params.opInfoPtr = reinterpret_cast<void *>(0x200);
   params.opInfoSize = 16;
   params.kernelTaskParams.funcHandle = reinterpret_cast<aclrtFuncHandle>(0x300);
-  params.kernelTaskParams.args = reinterpret_cast<void *>(0x400);
-  params.kernelTaskParams.argsSize = 32;
-  params.kernelTaskParams.isHostArgs = 1;
+  params.kernelTaskParams.argsType = ACL_RT_KERNEL_ARGS_HOST_BUFFER;
+  params.kernelTaskParams.hostBuffer = {reinterpret_cast<void *>(0x400), 32, nullptr, 0};
   params.kernelTaskParams.numBlocks = 64;
   aclrtLaunchKernelAttr attr{};
   attr.id = ACL_RT_LAUNCH_KERNEL_ATTR_SCHEM_MODE;
@@ -1345,11 +1347,83 @@ TEST_F(NodeToJsonTest, UpdatedNodeToJson) {
   kernelNode->SetUpdate(true);
   kernelNode->taskParams.type = ACL_MODEL_RI_TASK_KERNEL;
   kernelNode->taskParams.kernelTaskParams.numBlocks = 64;
-  kernelNode->taskParams.kernelTaskParams.argsSize = 128;
-  kernelNode->taskParams.kernelTaskParams.isHostArgs = 1;
+  kernelNode->taskParams.kernelTaskParams.argsType = ACL_RT_KERNEL_ARGS_HOST_BUFFER;
+  kernelNode->taskParams.kernelTaskParams.hostBuffer = {reinterpret_cast<void *>(0x400), 128, nullptr, 0};
+  kernelNode->nodeInfos.kernelInfos.devArgs = reinterpret_cast<void *>(0x800);
+  kernelNode->nodeInfos.kernelInfos.devArgsSize = 256;
 
   Json updatedJson = SuperKernelKernelNodeToJson(kernelNode.get());
   EXPECT_TRUE(updatedJson.contains("kernelParams"));
-  EXPECT_EQ(updatedJson["kernelParams"]["argsSize"], 128);
-  EXPECT_EQ(updatedJson["kernelParams"]["isHostArgs"], 1);
+  EXPECT_EQ(updatedJson["kernelParams"]["argsSize"], 256);
+  EXPECT_EQ(updatedJson["kernelParams"]["devargs"], "0x800");
+  EXPECT_EQ(updatedJson["kernelParams"]["isHostArgs"], false);
+  EXPECT_EQ(updatedJson["kernelParams"]["argsType"], ACL_RT_KERNEL_ARGS_HOST_BUFFER);
+  EXPECT_EQ(updatedJson["kernelParams"]["hostBuffer"]["hostArgs"], "0x400");
+  EXPECT_EQ(updatedJson["kernelParams"]["hostBuffer"]["hostArgsSize"], 128);
+}
+
+TEST_F(NodeToJsonTest, KernelArgsJsonUsesOnlySelectedForm) {
+  for (auto type : {ACL_RT_KERNEL_ARGS_HOST_BUFFER, ACL_RT_KERNEL_ARGS_DEVICE_BUFFER, ACL_RT_KERNEL_ARGS_ARRAY}) {
+    auto node = CreateKernelNode(51);
+    auto &params = node->taskParams.kernelTaskParams;
+    params.funcHandle = reinterpret_cast<aclrtFuncHandle>(0x300);
+    // Deliberately contradict the selected form: neither JSON entry point may consume legacy fields.
+    params.args = reinterpret_cast<void *>(0xdead);
+    params.argsSize = 999;
+    params.isHostArgs = 1;
+    params.argsType = type;
+    if (type == ACL_RT_KERNEL_ARGS_HOST_BUFFER) {
+      params.hostBuffer = {reinterpret_cast<void *>(0x400), 128, reinterpret_cast<aclrtPlaceHolderInfo *>(0x500), 2};
+    } else if (type == ACL_RT_KERNEL_ARGS_DEVICE_BUFFER) {
+      params.deviceBuffer = {reinterpret_cast<void *>(0x600), 256};
+    } else {
+      params.argsArray = reinterpret_cast<void **>(0x700);
+    }
+    Json taskJson;
+    AddBasicKernelParams(taskJson, params);
+    EXPECT_FALSE(taskJson.contains("devargs"));
+    EXPECT_FALSE(taskJson.contains("argsSize"));
+    EXPECT_FALSE(taskJson.contains("isHostArgs"));
+    Json nodeJson = SuperKernelKernelNodeToJson(node.get())["kernelParams"];
+    for (const auto &json : {taskJson, nodeJson}) {
+      EXPECT_EQ(json["argsType"], type);
+      EXPECT_EQ(json.contains("hostBuffer"), type == ACL_RT_KERNEL_ARGS_HOST_BUFFER);
+      EXPECT_EQ(json.contains("deviceBuffer"), type == ACL_RT_KERNEL_ARGS_DEVICE_BUFFER);
+      EXPECT_EQ(json.contains("argsArray"), type == ACL_RT_KERNEL_ARGS_ARRAY);
+      if (type == ACL_RT_KERNEL_ARGS_HOST_BUFFER) {
+        EXPECT_EQ(json["hostBuffer"]["hostArgs"], "0x400");
+        EXPECT_EQ(json["hostBuffer"]["hostArgsSize"], 128);
+        EXPECT_EQ(json["hostBuffer"]["placeHolderArray"], "0x500");
+        EXPECT_EQ(json["hostBuffer"]["placeHolderNum"], 2);
+      } else if (type == ACL_RT_KERNEL_ARGS_DEVICE_BUFFER) {
+        EXPECT_EQ(json["deviceBuffer"]["deviceArgs"], "0x600");
+        EXPECT_EQ(json["deviceBuffer"]["deviceArgsSize"], 256);
+      } else {
+        EXPECT_EQ(json["argsArray"], "0x700");
+      }
+    }
+  }
+}
+
+TEST_F(NodeToJsonTest, KernelArgsJsonRejectsUnsetAndUnknownForms) {
+  for (uint32_t type : {0U, 99U}) {
+    auto node = CreateKernelNode(52);
+    auto &params = node->taskParams.kernelTaskParams;
+    params.argsType = static_cast<aclrtKernelArgsType>(type);
+    params.args = reinterpret_cast<void *>(0xdead);
+    params.argsSize = 999;
+    Json taskJson;
+    AddBasicKernelParams(taskJson, params);
+    EXPECT_FALSE(taskJson.contains("devargs"));
+    EXPECT_FALSE(taskJson.contains("argsSize"));
+    EXPECT_FALSE(taskJson.contains("isHostArgs"));
+    EXPECT_FALSE(taskJson.contains("launchKernelCfg"));
+    Json nodeJson = SuperKernelKernelNodeToJson(node.get())["kernelParams"];
+    for (const auto &json : {taskJson, nodeJson}) {
+      EXPECT_EQ(json["argsType"], type);
+      EXPECT_FALSE(json.contains("hostBuffer"));
+      EXPECT_FALSE(json.contains("deviceBuffer"));
+      EXPECT_FALSE(json.contains("argsArray"));
+    }
+  }
 }

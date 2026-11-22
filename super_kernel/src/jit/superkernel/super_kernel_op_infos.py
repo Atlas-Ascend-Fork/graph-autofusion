@@ -940,6 +940,13 @@ class SuperOperatorInfos:
             if max_aiv_num <= max_aic_num:
                 self.kernel_type = SuperKernelKernelType.KERNEL_TYPE_MIX_AIC_1_1
                 self.block_num = max_aic_num
+            elif (
+                max_aiv_num & 1
+                and max_aiv_num <= int(get_soc_spec("ai_core_cnt"))
+                and self.has_batchmode_sub_operator()
+            ):
+                self.kernel_type = SuperKernelKernelType.KERNEL_TYPE_MIX_AIC_1_1
+                self.block_num = max_aiv_num
             else:
                 self.kernel_type = SuperKernelKernelType.KERNEL_TYPE_MIX_AIC_1_2
                 max_1_2_aiv_block_num = math.ceil(max_aiv_num / 2)
@@ -950,6 +957,11 @@ class SuperOperatorInfos:
                 )
 
         self.update_superkernel_blocknum_by_debug_options()
+
+    def has_batchmode_sub_operator(self):
+        return any(
+            getattr(sub_op, "schedule_mode", 0) == 1 for sub_op in self.info_base
+        )
 
     def get_summary_type_and_options(self):
         """set superkernel kernel type and block dim."""

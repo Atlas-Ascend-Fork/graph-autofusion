@@ -16,6 +16,7 @@
 #include "ascir_ops_utils.h"
 #include "ascir_utils.h"
 #include "autoschedule/autoschedule.h"
+#include "autoschedule/schedule.h"
 #include "graph_properties_cache.h"
 #include "fused_graph/fused_graph_unfolder.h"
 #include "fused_graph/fused_graph_modifier.h"
@@ -28,6 +29,7 @@
 #include "indirect_load_utils.h"
 #include "schedule_utils.h"
 #include "common_utils.h"
+#include "arg_reduce_utils.h"
 #include "v35/optimize/partition/vector_func_partitioner.h"
 #include "node_utils.h"
 #include "optimize/graph_pass/pass_runner_handler.h"
@@ -37,6 +39,7 @@
 #include "pre_process/pre_process.h"
 #include "static_ub_template_filter.h"
 #include "common/l2_cache_hint_manager.h"
+#include "schedule_graph_validator.h"
 
 using namespace ascir;
 using namespace optimize;
@@ -47,6 +50,23 @@ namespace {
 const char *const kAttrAscGraph = "ascgraph";
 constexpr int64_t kInvalidNodeId = -1;
 constexpr size_t kMaxGraphNameLength = 60UL;  // 截断后的最大graph name长度
+
+bool CanAlignRCoreWorkspace(const ScheduleTask &schedule_task) {
+  if (schedule_task.reduce_type != ReduceTemplateType::kRCore) {
+    return false;
+  }
+  for (const auto &grouped_graph : schedule_task.grouped_graphs) {
+    for (const auto &node : grouped_graph.GetAllNodes()) {
+      if (node == nullptr) {
+        continue;
+      }
+      if (ascgen_utils::IsArgReduceType(node->GetType())) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
 
 // 截断 graph name，保留前 kMaxGraphNameLength 个字符
 std::string TruncateGraphName(const std::string &name) {
@@ -83,8 +103,8 @@ Status FinalizeIndexedGraphs(std::vector<ascir::ScheduledResult> &scheduled_resu
         auto node = schedule_group.graph_name_to_score_funcs.extract(old_name);
         if (!node.empty()) {
           node.key() = std::move(new_name);
-          schedule_group.graph_name_to_score_funcs.insert(std::move(node));
-          GELOGD("Update score func key: [%s] -> [%s]", old_name.c_str(), node.key().c_str());
+          const auto inserted = schedule_group.graph_name_to_score_funcs.insert(std::move(node));
+          GELOGD("Update score func key: [%s] -> [%s]", old_name.c_str(), inserted.position->first.c_str());
         }
       }
     }
@@ -141,6 +161,137 @@ std::vector<std::vector<int64_t>> MergeContinuousPairs(const std::vector<std::pa
   continuous_ids.push_back(current_chain);
 
   return continuous_ids;
+}
+
+// gather 图合轴约束：向量化点落在 tile 内轴（TILE_IN）上，而 host 侧 tiling data 生成
+// 要求 inner 轴只能追溯到唯一原始轴（tiling_data_generator.cpp 的
+// AddAxesTailSizeAndLoopNum）。因此 MERGED 轴（from 含多个原始轴）不能作为 tile 切分
+// 对象，否则 GenTilingData 断言失败、融合算子编译失败（afError）。
+// gather 特殊分支（attr_axis/params_size 判定见 AutoSchedule::GenTilingCase）只为
+// y_group 中「首个轴之外」的轴生成 tiling case，所以允许最外层连续组参与合轴——它对应
+// y_group 首轴并被跳过；其余连续组保持原始轴，保证候选 tile 轴都是 ORIGINAL。若唯一的
+// 连续组覆盖全部循环轴，则保留该组最内层原始轴作为 tile 候选（整组合并会使 y_group
+// 只剩被跳过的 MERGED 首轴）；最外层组未从首轴开始时整体不合轴。
+std::vector<std::vector<int64_t>> LimitContinuousGroupsForGather(
+    const std::vector<std::vector<int64_t>> &merged_axis_indexes, const int64_t axis_count) {
+  if (merged_axis_indexes.empty() || merged_axis_indexes.front().front() != 0) {
+    return {};
+  }
+  std::vector<int64_t> outermost_group = merged_axis_indexes.front();
+  if (merged_axis_indexes.size() == 1UL && axis_count > 0 && outermost_group.back() == axis_count - 1) {
+    if (outermost_group.size() <= 2UL) {
+      return {};
+    }
+    outermost_group.pop_back();
+  }
+  return {outermost_group};
+}
+
+struct GatherParams {
+  bool has_gather = false;
+  int64_t attr_axis = -1;
+  int64_t param_size = -1;
+};
+
+GatherParams GetGatherParamsForMerge(ascir::ImplGraph &impl_graph) {
+  GatherParams info;
+  info.has_gather = ScheduleUtils::GetGatherParams(impl_graph, info.attr_axis, info.param_size);
+  return info;
+}
+
+std::vector<std::vector<int64_t>> MergedGroups(ascir::ImplGraph &impl_graph,
+                                               const std::vector<std::pair<int64_t, int64_t>> &potential_axis_idx,
+                                               const GatherParams &gather_info) {
+  auto merged_groups = MergeContinuousPairs(potential_axis_idx);
+  if (!gather_info.has_gather) {
+    return merged_groups;
+  }
+  // GenTilingCase 仅在 gather 特殊分支跳过 y_group 首轴；1 维 params 且 axis==0 时走
+  // 通用分支并遍历全部 y 轴，任何 MERGED 轴都可能被切为 TILE_IN，因此不合轴。
+  if (gather_info.attr_axis == gather_info.param_size - 1 && gather_info.attr_axis == 0) {
+    return {};
+  }
+  int64_t loop_axis_count = 0;
+  for (const auto &node : impl_graph.GetAllNodes()) {
+    if (!ScheduleUtils::IsBuffer(node)) {
+      loop_axis_count = static_cast<int64_t>(node->attr.sched.axis.size());
+      break;
+    }
+  }
+  return LimitContinuousGroupsForGather(merged_groups, loop_axis_count);
+}
+
+bool HasCvMBroadcast(const ascir::ImplGraph &impl_graph) {
+  for (const auto &node : impl_graph.GetAllNodes()) {
+    if (ascir::IsCvMBroadcast(*node)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+af::Status GetPotentialAxisPairs(ascir::ImplGraph &impl_graph,
+                                 const std::set<std::pair<int64_t, int64_t>> &non_continuous_pair,
+                                 std::vector<std::pair<int64_t, int64_t>> &potential_axis_idx) {
+  for (const auto &node : impl_graph.GetAllNodes()) {
+    if (!ScheduleUtils::IsBuffer(node)) {
+      auto axis_ids = node->attr.sched.axis;
+      potential_axis_idx.reserve(axis_ids.size() - 1);
+      for (size_t i = 0UL; i < axis_ids.size() - 1; ++i) {
+        potential_axis_idx.emplace_back(i, i + 1);
+      }
+      break;
+    }
+  }
+  // 剔除根据规则产生的不连续轴(后续reduce和brc考虑放规则里, 减少全局判断耗时
+  potential_axis_idx.erase(
+      std::remove_if(potential_axis_idx.begin(), potential_axis_idx.end(),
+                     [&non_continuous_pair](const auto &pair) { return non_continuous_pair.count(pair) > 0; }),
+      potential_axis_idx.end());
+  // 剩下的根据全图repeat/stride判断是否连续
+  for (auto it = potential_axis_idx.rbegin(); it != potential_axis_idx.rend();) {
+    if (!IsAxisContinuous(impl_graph, it->first, it->second)) {
+      auto normal_it = it.base();
+      ++it;
+      potential_axis_idx.erase(normal_it - 1);
+    } else {
+      ++it;
+    }
+  }
+  return af::SUCCESS;
+}
+
+af::Status ApplyMergedAxisGroups(ascir::ImplGraph &impl_graph,
+                                 const std::vector<std::vector<int64_t>> &merged_axis_indexes,
+                                 std::vector<af::AxisPtr> &new_merged_axes) {
+  std::map<std::vector<af::AxisId>, af::AxisId> from_id_to_merged_id;
+  for (auto node : impl_graph.GetAllNodes()) {
+    if (ScheduleUtils::IsBuffer(node)) {
+      continue;
+    }
+    std::vector<af::AxisId> node_merged_id;
+    for (const auto &from_idx : merged_axis_indexes) {
+      std::vector<af::AxisId> from_ids;
+      for (const int64_t index : from_idx) {
+        from_ids.emplace_back(node->attr.sched.axis[index]);
+      }
+      auto iter = from_id_to_merged_id.find(from_ids);
+      if (iter == from_id_to_merged_id.end()) {
+        auto merged_axis = impl_graph.MergeAxis(from_ids);
+        new_merged_axes.push_back(merged_axis);
+        node_merged_id.push_back(merged_axis->id);
+        from_id_to_merged_id[from_ids] = merged_axis->id;
+      } else {
+        node_merged_id.push_back(iter->second);
+      }
+    }
+    for (auto axis_id : node_merged_id) {
+      GELOGD("Apply merged axis id [%ld] to node:[%s].", axis_id, node->GetNamePtr());
+      GE_ASSERT_TRUE(impl_graph.ApplyMerge(node, axis_id), "Failed to apply merged axis id %ld to node:[%s].", axis_id,
+                     node->GetNamePtr());
+    }
+  }
+  return af::SUCCESS;
 }
 
 std::unordered_set<size_t> IdentifyZeroStrideAxisIndices(const ascir::ImplGraph &owner_graph) {
@@ -329,9 +480,26 @@ Status DoSeqAdjustment(const af::AscGraph &impl_graph, const std::map<int64_t, i
   return af::SUCCESS;
 }
 
+// [候选图级打分函数兜底] AutoSchedule 不回填 AutoScheduleOutput::score_func，
+// 任务生成侧给出的打分函数只落到 schedule_result.score_func（结果级）；
+// 候选图级注册因此因空串被跳过 → model_info.score_func 为空 → 每个
+// TilingCaseXxxImpl 继承基类 CalcScore{return 0;} → 所有候选 0 分、平票按发射序，
+// 运行期/静态打分整体静默失效（PR#2884 的收益无法落地）。
+// 兜底只在含 IndirectLoad 的图上启用（其它模板的打分注册语义保持不变）。
+bool GraphContainsIndirectLoad(const af::AscGraph &graph) {
+  for (const auto &node : graph.GetAllNodes()) {
+    if (node != nullptr && node->GetType() == ascgen_utils::template_semantic::kIndirectLoad) {
+      return true;
+    }
+  }
+  return false;
+}
+
 std::string RegisterScoreFuncInScheduleGroup(const autoschedule::AutoScheduleOutput &schedule_output,
-                                             ScheduleGroup &schedule_group, const bool should_skip_registry = true) {
-  if (schedule_output.score_func.empty()) {
+                                             ScheduleGroup &schedule_group, const bool should_skip_registry = true,
+                                             const std::string &fallback_score_func = "") {
+  const std::string score_func = schedule_output.score_func.empty() ? fallback_score_func : schedule_output.score_func;
+  if (score_func.empty()) {
     return "";
   }
 
@@ -342,8 +510,8 @@ std::string RegisterScoreFuncInScheduleGroup(const autoschedule::AutoScheduleOut
     return "";
   }
 
-  schedule_group.graph_name_to_score_funcs[graph_name] = schedule_output.score_func;
-  GELOGD("The score func of template [%s] is [%s].", graph_name.c_str(), schedule_output.score_func.c_str());
+  schedule_group.graph_name_to_score_funcs[graph_name] = score_func;
+  GELOGD("The score func of template [%s] is [%s].", graph_name.c_str(), score_func.c_str());
   return graph_name;
 }
 
@@ -385,11 +553,37 @@ void FilterComplexTilingDataScoreFuncs(std::vector<::ascir::ScheduledResult> &sc
     return;
   }
 
+  // [IL 运行期打分保留] 本过滤的语义是"复杂 tilingdata 不开放 nddma 模板打分"，
+  // 但 IndirectLoad 候选的打分函数走同一张 graph_name_to_score_funcs：若一并删掉，
+  // 复杂结果（多 result / 多 group）下 model_info.score_func 为空，候选竞标静默退化到
+  // 基类 CalcScore{return 0;}——动态 shape 的运行期打分整体失效且无日志。
+  // 因此按"图内是否含 IndirectLoad 节点"区分，IL 图一律保留。
+  std::set<std::string> indirect_load_graph_names;
+  for (const auto &result : scheduled_results) {
+    for (const auto &group : result.schedule_groups) {
+      for (const auto &impl_graph : group.impl_graphs) {
+        for (const auto &node : impl_graph.GetAllNodes()) {
+          if (node != nullptr && node->GetType() == ascgen_utils::template_semantic::kIndirectLoad) {
+            indirect_load_graph_names.insert(impl_graph.GetName());
+            break;
+          }
+        }
+      }
+    }
+  }
   for (auto &result : scheduled_results) {
     for (auto &group : result.schedule_groups) {
-      // 遍历 score_funcs，检查是否在 scored_graph_names 中
+      // 遍历 score_funcs，判断是否在 scored_graph_names 中
       auto it = group.graph_name_to_score_funcs.begin();
       while (it != group.graph_name_to_score_funcs.end()) {
+        if (indirect_load_graph_names.count(it->first) != 0UL) {
+          GELOGI(
+              "Keep autoschedule score func for IndirectLoad graph [%s] in complex tiling data: %zu results, "
+              "%zu groups",
+              it->first.c_str(), scheduled_results.size(), result.schedule_groups.size());
+          ++it;
+          continue;
+        }
         if (scored_graph_names.count(it->first) == 0) {
           ++it;
           continue;
@@ -403,7 +597,13 @@ void FilterComplexTilingDataScoreFuncs(std::vector<::ascir::ScheduledResult> &sc
   }
 }
 
+/**
+ * @brief 执行 Schedule 阶段的图契约校验及既有输出元数据检查。
+ *
+ * 新增校验必须在后续图重写、轴索引和 Codegen 前执行，失败状态沿原有 Optimize 链路返回。
+ */
 Status CheckGraphValidity(const af::AscGraph &graph) {
+  GE_CHK_STATUS_RET(ValidateScheduleGraph(graph), "%s", GetScheduleValidationError().c_str());
   for (const auto &node : graph.GetAllNodes()) {
     if (ScheduleUtils::IsBuffer(node)) {
       continue;
@@ -522,7 +722,57 @@ Status RemoveDanglingNodes(af::AscGraph &graph) {
   GE_ASSERT_GRAPH_SUCCESS(ScheduleUtils::TopologicalSorting(graph));
   return af::SUCCESS;
 }
+
+// 判定 R 轴分核 phase-1 各 tiling case 的 var relation 表达式是否跨 case 一致: relation 表达式以
+// src group tiling data 字段求值, 运行时读到的是胜出 impl 写入的求解值, 一致(各 case 切分结构
+// 相同, 如 r_group 单轴或全规约退化空 relation)时单一表达式可覆盖全部 impl; 不一致(单 reduce
+// 多 R 轴, 各 case 切分结构不同)时单一表达式会算错 workspace 尺寸, 调用方不可做多 impl 打包
+bool IsVarRelationsConsistent(const std::vector<autoschedule::AutoScheduleOutput> &schedule_outputs) {
+  const auto &base_relations = schedule_outputs.front().var_relations_;
+  for (const auto &schedule_output : schedule_outputs) {
+    const auto &cur_relations = schedule_output.var_relations_;
+    if (cur_relations.size() != base_relations.size()) {
+      return false;
+    }
+    for (const auto &relation : cur_relations) {
+      const auto base_it = base_relations.find(relation.first);
+      if (base_it == base_relations.end() ||
+          af::SymbolicUtils::ToString(base_it->second) != af::SymbolicUtils::ToString(relation.second)) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
 }  // namespace
+
+Status Optimizer::AppendReduceFirstStageGroup(std::vector<autoschedule::AutoScheduleOutput> &schedule_outputs,
+                                              std::vector<ascir::ScheduledResult> &scheduled_results_cur, size_t index,
+                                              ScheduleTask &schedule_task) const {
+  GE_ASSERT_TRUE(!schedule_outputs.empty(), "No phase-1 tiling case for reduce first stage.");
+  // 单 reduce 多 R 轴非 norm 图 (ReducePartitionCaseGenerator 仅对多 reduce / norm 类多 R 轴图跳过
+  // R-core 模板生成) 会进入此处且 relation 不一致, 回退 ExpandReduceFirstStageResults 走逐 case
+  // 展开的既有流程; 一致时走下方多 impl 打包路径
+  if (!IsVarRelationsConsistent(schedule_outputs)) {
+    return ExpandReduceFirstStageResults(schedule_outputs, scheduled_results_cur, index, schedule_task);
+  }
+  // phase_1 各 tiling case 装进同一 group 作为多 impl(与 CopyImplGraphs 的 phase_2 模式一致), 由
+  // kernel 侧 GenMulGroupKernelWithRegTilingKey 生成 TILING_KEY_IS 组合分支, 结果数不随 case 数相乘
+  const auto &base_relations = schedule_outputs.front().var_relations_;
+  for (auto &d : scheduled_results_cur) {
+    ScheduleGroup schedule_group;
+    schedule_group.impl_graphs.reserve(schedule_outputs.size());
+    for (const auto &schedule_output : schedule_outputs) {
+      ascir::ImplGraph copied_graph(schedule_output.scheduled_graph.GetName().c_str());
+      GE_ASSERT_TRUE(copied_graph.CopyFrom(schedule_output.scheduled_graph));
+      schedule_group.impl_graphs.push_back(std::move(copied_graph));
+      RegisterScoreFuncInScheduleGroup(schedule_output, schedule_group);
+    }
+    d.schedule_groups.emplace_back(std::move(schedule_group));
+    RefreshGroupRelation(index, base_relations, schedule_task, d);
+  }
+  return af::SUCCESS;
+}
 
 Status Optimizer::ExpandReduceFirstStageResults(std::vector<autoschedule::AutoScheduleOutput> &schedule_outputs,
                                                 std::vector<ascir::ScheduledResult> &scheduled_results_cur,
@@ -796,12 +1046,149 @@ Status Optimizer::GetNonContinuousAxisPairBySpecialRule(ascir::ImplGraph &impl_g
   return af::SUCCESS;
 }
 
+// ===== [删轴后退化全归约补偿] =====
+// 独立于 GraphPass 期的 ExpandDimsForAllReducePass（该 pass 保持原样，本处不改动）：
+// pass 在删轴前判定，广播轴（src == dst == 0）不计入归约轴，覆盖不了"删轴后才退化为纯 R"
+// 的图；本组函数在 RemoveAllZeroStrideLoopAxis 删轴完成后就地复检补轴。判定口径与 pass 的
+// IsAllReduce 一致，但建轴与同步方式按删轴后场景独立设计（见各函数注释）。
+
+// 判定 reduce 节点的全部 sched 轴是否均为归约轴（src != dst && dst == 0）。
+static bool IsDegeneratedAllReduce(af::AscNode &node) {
+  std::vector<ascir::AxisId> axes;
+  if (ScheduleUtils::GetLoopAxis(node, axes) != af::SUCCESS) {
+    GELOGE(af::FAILED, "Get loop axis failed, node:[%s].", node.GetNamePtr());
+    return false;
+  }
+  std::vector<ascir::SizeExpr> src_strides;
+  std::vector<ascir::SizeExpr> dst_strides = node.outputs[0].attr.strides;
+  if (ScheduleUtils::GetReduceInputStrides(node, src_strides) != af::SUCCESS) {
+    GELOGE(af::FAILED, "Get reduce input strides failed, node:[%s].", node.GetNamePtr());
+    return false;
+  }
+  GE_ASSERT_TRUE((src_strides.size() == dst_strides.size()),
+                 "The output dim cnt [%zu] of reduce mismatch with input dim cnt [%zu].", dst_strides.size(),
+                 src_strides.size());
+  GE_ASSERT_TRUE((src_strides.size() == axes.size()),
+                 "The input dim cnt [%zu] of reduce mismatch with reduce axes cnt [%zu].", src_strides.size(),
+                 axes.size());
+  std::vector<ascir::AxisId> reduce_axes;
+  for (size_t i = 0UL; i < src_strides.size(); ++i) {
+    if (src_strides[i] != dst_strides[i] && dst_strides[i] == 0) {
+      reduce_axes.push_back(axes[i]);
+    }
+  }
+  return reduce_axes.size() == axes.size();
+}
+
+// 计算节点（非 buffer）的 sched 轴是否与 Reduce 节点完全一致。比对范围与删轴循环的更新
+// 范围对齐：删轴只更新非 buffer 节点，Workspace/Constant 等 buffer 节点的 sched 轴不被
+// 删轴更新（保持原样或为空），不参与一致性判定；计算节点 sched 轴真分歧（多轴空间图，
+// 如 concat）时返回 false。
+static bool ComputeNodesShareSchedAxis(const af::AscGraph &graph, const std::vector<ascir::AxisId> &ref_axis_ids) {
+  for (const auto &node : graph.GetAllNodes()) {
+    if (ScheduleUtils::IsBuffer(node)) {
+      continue;
+    }
+    if (node->attr.sched.axis != ref_axis_ids) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// 将计算节点（非 buffer）的 sched 轴与输出视图同步到补轴后的轴空间：sched 轴与视图
+// axis 整体替换为补轴列表，strides/repeats 头插（repeat=1，stride 按原首轴推算）。
+// 仅同步非 buffer 节点——与删轴循环的更新范围一致，buffer 节点视图保持原样且旧 id
+// 因追加建轴仍有效。
+static Status SyncViewsAfterExpandDims(ascir::ImplGraph &owner_graph, const std::vector<ascir::AxisId> &old_axis_ids,
+                                       const std::vector<ascir::AxisId> &new_axis_ids) {
+  for (const auto &node : owner_graph.GetAllNodes()) {
+    if (ScheduleUtils::IsBuffer(node)) {
+      continue;
+    }
+    auto cur_axis_ids = node->attr.sched.axis;
+    GE_ASSERT_TRUE(!cur_axis_ids.empty() && cur_axis_ids == old_axis_ids,
+                   "Expand dims for degenerated all reduce failed node:%s, Axis id mismatches with reduce.",
+                   node->GetNamePtr());
+    node->attr.sched.axis = new_axis_ids;
+    for (const auto output_attr : node->outputs()) {
+      output_attr->attr.axis = new_axis_ids;
+      GE_ASSERT_TRUE(output_attr->attr.strides.size() == old_axis_ids.size(),
+                     "Expand dims for degenerated all reduce failed node:%s, Strides mismatches with reduce.",
+                     node->GetNamePtr());
+      GE_ASSERT_TRUE(output_attr->attr.repeats.size() == old_axis_ids.size(),
+                     "Expand dims for degenerated all reduce failed node:%s, Repeats mismatches with reduce.",
+                     node->GetNamePtr());
+      if (output_attr->attr.strides[0UL] == 0) {
+        output_attr->attr.strides.insert(output_attr->attr.strides.begin(), One);
+      } else {
+        output_attr->attr.strides.insert(output_attr->attr.strides.begin(),
+                                         af::sym::Mul(output_attr->attr.repeats[0UL], output_attr->attr.strides[0UL]));
+      }
+      output_attr->attr.repeats.insert(output_attr->attr.repeats.begin(), One);
+    }
+  }
+  return af::SUCCESS;
+}
+
+// 删轴后退化全归约补偿：命中全归约 reduce 时在 sched 轴最前补 size=1 的 axis_1d 并同步
+// 计算节点，保证下游 GenTilingGroup 的 y_group 非空，否则 GenTilingCase 枚举空集导致
+// "No valid tiling cases"。与 pass 的差异（按删轴后场景独立设计）：
+// 1. 追加建轴（id 取轴池尾，不重排既有轴 id）：buffer 节点视图仍引用旧 id 且不被本次
+//    同步改写，重排会使这些引用悬空；
+// 2. 同步范围与删轴循环一致，仅非 buffer 节点。
+static Status ExpandDimsForDegeneratedAllReduce(ascir::ImplGraph &owner_graph) {
+  std::vector<ascir::AxisId> old_axis_ids;
+  std::vector<ascir::AxisId> new_axis_ids;
+  for (const auto &node : owner_graph.GetAllNodes()) {
+    if (node->attr.api.compute_type != af::ComputeType::kComputeReduce) {
+      continue;
+    }
+    if (!IsDegeneratedAllReduce(*node)) {
+      GELOGD("[ExpandDimsAllReduce] Graph[%s] reduce node[%s] is not degenerated all-reduce, skip.",
+             owner_graph.GetName().c_str(), node->GetNamePtr());
+      continue;
+    }
+    old_axis_ids = node->attr.sched.axis;
+    if (!ComputeNodesShareSchedAxis(owner_graph, old_axis_ids)) {
+      GELOGW(
+          "[ExpandDimsAllReduce] Graph[%s] degenerated to all reduce but compute nodes have different sched "
+          "axes, skip expand dims.",
+          owner_graph.GetName().c_str());
+      return af::SUCCESS;
+    }
+    auto &expand_axis = owner_graph.CreateAxis("axis_1d", One);
+    GELOGI(
+        "[ExpandDimsAllReduce] Graph[%s] reduce node[%s] is degenerated all-reduce, sched axis[%s], "
+        "expand size-1 axis[axis_1d](id:%ld) at first.",
+        owner_graph.GetName().c_str(), node->GetNamePtr(), af::ViewMemberToString(old_axis_ids).c_str(),
+        expand_axis.id);
+    new_axis_ids.push_back(expand_axis.id);
+    new_axis_ids.insert(new_axis_ids.end(), old_axis_ids.begin(), old_axis_ids.end());
+    break;
+  }
+  if (new_axis_ids.empty()) {
+    GELOGD("[ExpandDimsAllReduce] Graph[%s] has no degenerated all-reduce reduce node, nothing to expand.",
+           owner_graph.GetName().c_str());
+    return af::SUCCESS;
+  }
+  GE_CHK_STATUS_RET(SyncViewsAfterExpandDims(owner_graph, old_axis_ids, new_axis_ids),
+                    "Sync views after expand dims failed, graph:[%s].", owner_graph.GetName().c_str());
+  GELOGI("[ExpandDimsAllReduce] Graph[%s] expand axis[axis_1d] done, new sched axis[%s].",
+         owner_graph.GetName().c_str(), af::ViewMemberToString(new_axis_ids).c_str());
+  return af::SUCCESS;
+}
+
 Status Optimizer::RemoveAllZeroStrideLoopAxis(ascir::ImplGraph &owner_graph) {
   if (ScheduleUtils::HasComputeType(owner_graph, af::ComputeType::kComputeGather)) {
+    GELOGD("[RemoveZeroStride] Graph[%s] contains gather node, skip removing zero-stride loop axis.",
+           owner_graph.GetName().c_str());
     return af::SUCCESS;
   }
   std::unordered_set<size_t> zero_stride_axis_indices = IdentifyZeroStrideAxisIndices(owner_graph);
   if (zero_stride_axis_indices.empty()) {
+    GELOGD("[RemoveZeroStride] Graph[%s] has no all-graph zero-stride loop axis, nothing to remove.",
+           owner_graph.GetName().c_str());
     return af::SUCCESS;
   }
 
@@ -841,82 +1228,39 @@ Status Optimizer::RemoveAllZeroStrideLoopAxis(ascir::ImplGraph &owner_graph) {
       output->attr.repeats = new_repeats;
     }
   }
+
+  // [删轴后退化全归约补偿] 删除全图零 stride 广播轴后，剩余 sched 轴可能全部是 Reduce 的
+  // 归约轴（纯 R 图）。GraphPass 期的 ExpandDimsForAllReducePass 在删轴前判定，广播轴
+  // （src == dst == 0）不计入归约轴，无法覆盖删轴后才退化为纯 R 的图；此处删除完成后
+  // 就地复检并补 axis_1d（追加建轴，不重排既有轴 id），保证下游 GenTilingGroup 的
+  // y_group 非空，否则 GenTilingCase 枚举空集导致 "No valid tiling cases"。复检仅在本次
+  // 确实删除过轴（删除集合非空）时到达，且非全归约/无 Reduce 图内为 no-op；比对与同步
+  // 范围与删轴循环一致（跳过全部 buffer 节点），计算节点 sched 轴真分歧（多轴空间图）时
+  // 跳过补偿，保持既有调度行为。
+  GE_ASSERT_SUCCESS(ExpandDimsForDegeneratedAllReduce(owner_graph),
+                    "Expand dims for degenerated all reduce failed, graph:[%s].", owner_graph.GetName().c_str());
   return af::SUCCESS;
 }
 
 Status Optimizer::MergeContinuousAxis(ascir::ImplGraph &impl_graph, ascir::CubeTemplateType cube_type) {
+  if (HasCvMBroadcast(impl_graph)) {
+    return af::SUCCESS;
+  }
   auto all_axis = impl_graph.GetAllAxis();
   if (all_axis.size() <= 1UL || ascgen_utils::indirect_load::FindIndirectLoadNode(impl_graph) != nullptr) {
     return af::SUCCESS;
   }
-  // concat等场景,会有多套轴, 只能先用循环轴的index来生成潜在连续组, 后续根据连续组会找到多个连续轴
-  std::vector<std::pair<int64_t, int64_t>> potential_axis_idx;
-  for (const auto &node : impl_graph.GetAllNodes()) {
-    if (!ScheduleUtils::IsBuffer(node)) {
-      auto axis_ids = node->attr.sched.axis;
-      potential_axis_idx.reserve(axis_ids.size() - 1);
-      for (size_t i = 0UL; i < axis_ids.size() - 1; ++i) {
-        potential_axis_idx.emplace_back(i, i + 1);
-      }
-      break;
-    }
-  }
-
-  // 剔除根据规则产生的不连续轴(后续reduce和brc考虑放规则里, 减少全局判断耗时
+  const GatherParams gather_info = GetGatherParamsForMerge(impl_graph);
   std::set<std::pair<int64_t, int64_t>> non_continuous_pair;
   GE_ASSERT_SUCCESS(GetNonContinuousAxisPairBySpecialRule(impl_graph, non_continuous_pair));
-  potential_axis_idx.erase(
-      std::remove_if(potential_axis_idx.begin(), potential_axis_idx.end(),
-                     [&non_continuous_pair](const auto &pair) { return non_continuous_pair.count(pair) > 0; }),
-      potential_axis_idx.end());
-
-  // 剩下的根据全图repeat/stride判断是否连续
-  for (auto it = potential_axis_idx.rbegin(); it != potential_axis_idx.rend();) {
-    if (!IsAxisContinuous(impl_graph, it->first, it->second)) {
-      auto normal_it = it.base();
-      ++it;
-      potential_axis_idx.erase(normal_it - 1);
-    } else {
-      ++it;
-    }
-  }
-  // 现根据id合并pair
-  std::vector<std::vector<int64_t>> merged_axis_indexes = MergeContinuousPairs(potential_axis_idx);
-  std::map<std::vector<af::AxisId>, af::AxisId> from_id_to_merged_id;
+  std::vector<std::pair<int64_t, int64_t>> potential_axis_idx;
+  GE_ASSERT_SUCCESS(GetPotentialAxisPairs(impl_graph, non_continuous_pair, potential_axis_idx));
+  auto merged_axis_indexes = MergedGroups(impl_graph, potential_axis_idx, gather_info);
   std::vector<af::AxisPtr> new_merged_axes;
-  // Do merge
-  for (auto node : impl_graph.GetAllNodes()) {
-    if (ScheduleUtils::IsBuffer(node)) {
-      continue;
-    }
-    std::vector<af::AxisId> node_merged_id;
-    for (const auto &from_idx : merged_axis_indexes) {
-      std::vector<af::AxisId> from_ids;
-      for (const int64_t index : from_idx) {
-        from_ids.emplace_back(node->attr.sched.axis[index]);
-      }
-      auto iter = from_id_to_merged_id.find(from_ids);
-      if (iter == from_id_to_merged_id.end()) {
-        auto merged_axis = impl_graph.MergeAxis(from_ids);
-        new_merged_axes.push_back(merged_axis);
-        node_merged_id.push_back(merged_axis->id);
-        from_id_to_merged_id[from_ids] = merged_axis->id;
-      } else {
-        node_merged_id.push_back(iter->second);
-      }
-    }
-    for (auto axis_id : node_merged_id) {
-      GELOGD("Apply merged axis id [%ld] to node:[%s].", axis_id, node->GetNamePtr());
-      GE_ASSERT_TRUE(impl_graph.ApplyMerge(node, axis_id), "Failed to apply merged axis id %ld to node:[%s].", axis_id,
-                     node->GetNamePtr());
-    }
-  }
+  GE_ASSERT_SUCCESS(ApplyMergedAxisGroups(impl_graph, merged_axis_indexes, new_merged_axes));
 
   // TTODO 需要考虑删轴等操作,后续优化
-  int64_t attr_axis = -1;
-  int64_t param_size = -1;
-  bool has_gather = ScheduleUtils::GetGatherParams(impl_graph, attr_axis, param_size);
-  if ((!has_gather) && (cube_type != ascir::CubeTemplateType::kUBFuse)) {
+  if ((!gather_info.has_gather) && (cube_type != ascir::CubeTemplateType::kUBFuse)) {
     // 此处合轴后的轴可以认为是original的
     for (const auto &axis : new_merged_axes) {
       axis->type = af::Axis::Type::kAxisTypeOriginal;
@@ -927,7 +1271,6 @@ Status Optimizer::MergeContinuousAxis(ascir::ImplGraph &impl_graph, ascir::CubeT
     }
     GE_ASSERT_SUCCESS(ScheduleUtils::RemoveUnusedAxes(impl_graph), "Failed to remove unused axes");
   }
-
   return af::SUCCESS;
 }
 
@@ -978,8 +1321,13 @@ Status Optimizer::OptimizeForHintGraph(af::AscGraph &hint_graph,
   GE_CHK_STATUS_RET(ScheduleTaskGenerator::GenerateTasks(optimize_graph, schedule_tasks, options_),
                     "Generate tasks failed");
   for (size_t i = 0U; i < schedule_tasks.size(); ++i) {
-    GE_CHK_STATUS_RET(AutoScheduler(hint_graph, schedule_tasks[i], scheduled_results), "AutoScheduler task[%zu] failed",
-                      i);
+    // 模板形态不支持时返回 UNSUPPORTED，跳过该候选继续尝试后续 task
+    const auto task_status = AutoScheduler(hint_graph, schedule_tasks[i], scheduled_results);
+    if (task_status == af::UNSUPPORTED) {
+      GELOGW("AutoScheduler task[%zu] is unsupported, skip it.", i);
+      continue;
+    }
+    GE_CHK_STATUS_RET(task_status, "AutoScheduler task[%zu] failed", i);
     GELOGI("AutoScheduler task[%zu] end", i);
   }
 
@@ -1057,7 +1405,7 @@ bool Optimizer::IsReduceFirstStage(size_t index, ScheduleTask &schedule_task) {
   return false;
 }
 
-void Optimizer::RefreshGroupRelation(size_t index, std::map<std::string, af::Expression> &var_relations,
+void Optimizer::RefreshGroupRelation(size_t index, const std::map<std::string, af::Expression> &var_relations,
                                      ScheduleTask &schedule_task, ScheduledResult &schedule_result) const {
   auto iter = schedule_task.groups_relations_in.find(index);
   if (iter == schedule_task.groups_relations_in.end()) {
@@ -1087,8 +1435,9 @@ static Status ProcessNonReduceSchedules(const std::vector<autoschedule::AutoSche
     schedule_group.impl_graphs.emplace_back(schedule_output.scheduled_graph);
     // 目前仅对elewise+brc/单group/单result开放nddma模板打分，单result单group场景过滤放在FilterComplexTilingDataScoreFuncs
     // transpose/split/concat有场景触发转为Load/Store
-    std::string autoschedule_graph_name =
-        RegisterScoreFuncInScheduleGroup(schedule_output, schedule_group, schedule_task.has_load_store_conversion);
+    std::string autoschedule_graph_name = RegisterScoreFuncInScheduleGroup(
+        schedule_output, schedule_group, schedule_task.has_load_store_conversion,
+        GraphContainsIndirectLoad(schedule_output.scheduled_graph) ? schedule_task.score_func : std::string());
     scored_graph_names.insert(autoschedule_graph_name);
   }
   for (auto &res : scheduled_results_cur) {
@@ -1098,24 +1447,27 @@ static Status ProcessNonReduceSchedules(const std::vector<autoschedule::AutoSche
 }
 
 Status Optimizer::InitializeScheduledResults(std::vector<ascir::ScheduledResult> &scheduled_results_cur,
-                                             ScheduleTask &schedule_task) {
+                                             const ScheduleTask &schedule_task) {
   ::ascir::ScheduledResult schedule_result;
+  // [双通道打分] 结果级 score_func 是"跨 schedule result 打分"的入口（GenGetScoreFuncs →
+  // scores[] → max_index），必须保留；其中的组绑定占位符由 GenGetScoreFuncs 在发射时替换，
+  // 不能在这里清空，否则跨 result 打分退化为全 0、max_index 恒为 0。
   schedule_result.score_func = schedule_task.score_func.c_str();
   schedule_result.is_reduce_mem_reuse = schedule_task.reduce_type == ReduceTemplateType::kAllLoad;
   schedule_result.cube_type = schedule_task.cube_type;
+  schedule_result.semantic_name = schedule_task.semantic_name.empty()
+                                      ? ascgen_utils::GetTemplateSemanticName(schedule_task.optimize_graph)
+                                      : schedule_task.semantic_name;
+  schedule_result.enable_workspace_alignment = schedule_task.enable_workspace_alignment;
+  schedule_result.matmul_m_common_group_ids = schedule_task.matmul_m_common_group_ids;
   scheduled_results_cur.emplace_back(schedule_result);
   return af::SUCCESS;
 }
 
-Status Optimizer::AutoScheduler([[maybe_unused]] const HintGraph &hint_graph, ScheduleTask &schedule_task,
-                                std::vector<ascir::ScheduledResult> &scheduled_results) const {
+Status Optimizer::ScheduleGroupedGraphs(ScheduleTask &schedule_task,
+                                        std::vector<ascir::ScheduledResult> &scheduled_results_cur,
+                                        std::set<std::string> &scored_graph_names) const {
   size_t index = 0UL;
-  std::vector<ascir::ScheduledResult> scheduled_results_cur;
-  GE_ASSERT_SUCCESS(InitializeScheduledResults(scheduled_results_cur, schedule_task));
-
-  // 记录注册打分函数的nddma模板名
-  std::set<std::string> scored_graph_names;
-
   for (auto &grouped_graph : schedule_task.grouped_graphs) {
     GE_CHK_STATUS_RET(AscGraphInfoComplete::CompleteApiInfo(grouped_graph), "CompleteApiInfo failed");
     if (CanDoReMergeAxis(grouped_graph, schedule_task.reduce_type)) {
@@ -1137,25 +1489,55 @@ Status Optimizer::AutoScheduler([[maybe_unused]] const HintGraph &hint_graph, Sc
     }
     bool is_reduce_first_stage = IsReduceFirstStage(index, schedule_task);
     std::vector<autoschedule::AutoScheduleOutput> schedule_outputs;
-    auto scheduler = autoschedule::AutoSchedule(grouped_graph, schedule_outputs, is_reduce_first_stage,
-                                                schedule_task.reduce_type, schedule_task.cube_type);
-    GE_CHK_STATUS_RET(scheduler.DoAutoSchedule(), "Failed to do schedule, graph:[%s].",
-                      grouped_graph.GetName().c_str());
-    GE_ASSERT_TRUE(!schedule_outputs.empty(), "Failed to gen tiling case for graph:[%s].",
-                   grouped_graph.GetName().c_str());
+    auto scheduler =
+        autoschedule::AutoSchedule(grouped_graph, schedule_outputs, is_reduce_first_stage, schedule_task.reduce_type,
+                                   schedule_task.cube_type, schedule_task.enable_workspace_alignment);
+    const auto auto_schedule_status = scheduler.DoAutoSchedule();
+    if (auto_schedule_status == af::UNSUPPORTED) {
+      return af::UNSUPPORTED;
+    }
+    GE_CHK_STATUS_RET(auto_schedule_status, "Failed to do schedule, graph:[%s].", grouped_graph.GetName().c_str());
+    // 全部 tiling case 均不可行（UNSUPPORTED 被跳过）时该图无可用候选，跳过该 task
+    if (schedule_outputs.empty()) {
+      GELOGW("Graph[%s] has no feasible tiling case, the schedule is unsupported.", grouped_graph.GetName().c_str());
+      return af::UNSUPPORTED;
+    }
     GELOGI("AutoScheduler end: %s, number of tiling cases = %zu", grouped_graph.GetName().c_str(),
            schedule_outputs.size());
     if (is_reduce_first_stage) {
-      GE_ASSERT_SUCCESS(ExpandReduceFirstStageResults(schedule_outputs, scheduled_results_cur, index, schedule_task));
+      GE_ASSERT_SUCCESS(AppendReduceFirstStageGroup(schedule_outputs, scheduled_results_cur, index, schedule_task));
+    } else if (schedule_task.reduce_type == ReduceTemplateType::kRCore) {
+      GE_ASSERT_SUCCESS(CopyImplGraphs(schedule_outputs, scheduled_results_cur));
     } else {
-      if (schedule_task.reduce_type == ReduceTemplateType::kRCore) {
-        GE_ASSERT_SUCCESS(CopyImplGraphs(schedule_outputs, scheduled_results_cur));
-      } else {
-        GE_ASSERT_SUCCESS(
-            ProcessNonReduceSchedules(schedule_outputs, scheduled_results_cur, schedule_task, scored_graph_names));
-      }
+      GE_ASSERT_SUCCESS(
+          ProcessNonReduceSchedules(schedule_outputs, scheduled_results_cur, schedule_task, scored_graph_names));
     }
     index++;
+  }
+  return af::SUCCESS;
+}
+
+Status Optimizer::AutoScheduler([[maybe_unused]] const HintGraph &hint_graph, ScheduleTask &schedule_task,
+                                std::vector<ascir::ScheduledResult> &scheduled_results) const {
+  schedule_task.enable_workspace_alignment = CanAlignRCoreWorkspace(schedule_task);
+  std::vector<ascir::ScheduledResult> scheduled_results_cur;
+  GE_ASSERT_SUCCESS(InitializeScheduledResults(scheduled_results_cur, schedule_task));
+
+  // 记录注册打分函数的nddma模板名
+  std::set<std::string> scored_graph_names;
+
+  // UNSUPPORTED时不打错误日志, 由上层按警告跳过该task
+  GE_CHK_STATUS_RET_NOLOG(ScheduleGroupedGraphs(schedule_task, scheduled_results_cur, scored_graph_names));
+  // [动态打分字段保活] score_func 按调度前 group 归属硬编码 tiling data 子结构字段引用, 调度期
+  // 图改写(零步长轴删除/合轴)使符号失去表达式引用后, 上方 size var 重建会裁剪对应字段, host tiling
+  // 侧编译报 no member; 将绑定符号并入对应组 runtime_shape_vars(ProcessMultiGroup 结构体字段发射
+  // 与 IsVarUsedInScheduleGroup 运行期值填充均消费该通道), 保证引用恒有效
+  for (auto &schedule_result : scheduled_results_cur) {
+    const auto &keep_vars = schedule_task.score_group_shape_vars;
+    for (size_t g = 0UL; (g < keep_vars.size()) && (g < schedule_result.schedule_groups.size()); ++g) {
+      auto &runtime_shape_vars = schedule_result.schedule_groups[g].runtime_shape_vars;
+      runtime_shape_vars.insert(runtime_shape_vars.end(), keep_vars[g].begin(), keep_vars[g].end());
+    }
   }
   scheduled_results.insert(scheduled_results.end(), scheduled_results_cur.begin(), scheduled_results_cur.end());
 

@@ -30,7 +30,7 @@ using namespace af::ascir_op;
 
 namespace {
 std::string ToString(const af::Expression &e) {
-  return std::string(e.Serialize().get());
+  return std::string(e.Str().get());
 }
 
 void SetGlobalOutput(const af::AscNodePtr &node, uint32_t tensor_id) {

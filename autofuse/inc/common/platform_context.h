@@ -37,20 +37,16 @@ class PlatformContext {
 
   void SetPlatformInfo(const PlatformInfo &platform_info);
 
+  af::Status SetPlatformTarget(const PlatformInfo &platform_info, const std::string &soc_version);
+
+  af::Status GetPlatformTarget(std::string &npu_arch, std::string &soc_version);
+
   void SetUbSizeOverride(int64_t ub_size);
 
   // 获取当前 platform 字符串
   af::Status GetCurrentPlatformString(std::string &platform_name);
 
-  void Reset() {
-    initialized_ = false;
-    platform_info_.soc_ver = "";
-    platform_info_.aiv_num = 0;
-    platform_info_.ub_size = 0;
-    platform_info_.l2_size = 0;
-    ub_size_override_ = 0;
-    has_ub_size_override_ = false;
-  }
+  void Reset();
 
   af::Status GetPlatformInfo(PlatformInfo &platform_info);
 

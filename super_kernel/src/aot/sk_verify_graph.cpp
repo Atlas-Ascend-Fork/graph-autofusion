@@ -220,6 +220,8 @@ aclError ScopeVerifyGraphBuilder::ResolveStream(SuperKernelGraph &graph, int64_t
   streamIdx = static_cast<uint32_t>(graph.streams.size());
   streamIdxById_[streamId] = streamIdx;
   graph.streams.emplace_back(nullptr);
+  graph.headNodes.emplace_back(INVALID_TASK_ID);
+  graph.tailNodes.emplace_back(INVALID_TASK_ID);
   graph.nodeSizeInStream.emplace_back(0);
   if (preNodeIds_.size() <= streamIdx) {
     preNodeIds_.resize(static_cast<size_t>(streamIdx) + 1U, INVALID_TASK_ID);
@@ -270,7 +272,7 @@ aclError ScopeVerifyGraphBuilder::AppendNode(
   if (!graph.AddNode(std::move(node))) {
     return ACL_ERROR_INVALID_PARAM;
   }
-  graph.UpdateNodeRelations(nodeId, streamIdx, nodeIdxInStream, preNodeIds_[streamIdx]);
+  graph.UpdateNodeRelations(nodeId, streamIdx, preNodeIds_[streamIdx]);
   graph.nodeSizeInStream[streamIdx]++;
 
   verifyNodesById[nodeId] = &verifyNode;

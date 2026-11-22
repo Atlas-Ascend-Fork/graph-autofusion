@@ -8,6 +8,7 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 #include "scalar_broadcast_optimization.h"
+#include "schedule_result.h"
 #include "attr_utils.h"
 #include "ascir_ops.h"
 #include "ascir_ops_utils.h"
@@ -147,7 +148,8 @@ Status ScalarBroadcastOptimizationPass::RunPass(af::AscGraph &graph) {
     GE_CHECK_NOTNULL(node);
     GELOGD("Check node : %s %s, out size: %d, in size: %d", node->GetTypePtr(), node->GetNamePtr(),
            node->GetOutDataNodesSize(), node->GetInDataNodesSize());
-    if (!IsOps<Broadcast>(node) || !ScheduleUtils::IsScalarBroadcastNode(node)) {
+    if (!IsOps<Broadcast>(node) || !ScheduleUtils::IsScalarBroadcastNode(node) ||
+        !ascir::GetCvBroadcastShape(*node).empty()) {
       continue;
     }
     GELOGD("Find scalar Broadcast node [%s], start to check", node->GetNamePtr());

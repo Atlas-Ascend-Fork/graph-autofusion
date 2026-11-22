@@ -61,6 +61,26 @@ constexpr CubeFormat format_y = CubeFormat::NZ;
 #else
 constexpr CubeFormat format_y = CubeFormat::ND;
 #endif
+#ifdef INDUCTOR_TILING_DATA
+#define MMV3_IMPL_CLASS_TRANS(tilingData, tilingGM, transA, transB, workspace, templateClass, ...)   \
+  do {                                                                                               \
+    uint64_t tilingdata_offset =                                                                     \
+        (sizeof(MatMulV3TilingData) > TILINGDATA_OFFSET)                                             \
+            ? 0                                                                                      \
+            : MMV3DivFloor(GetCurrentBlockIdx(), MMV3DivCeil(GetBlockNum(), TILINGDATA_SPLIT_NUM)) * \
+                  TILINGDATA_OFFSET;                                                                 \
+    const MatMulV3TilingData &tilingData = *reinterpret_cast<const MatMulV3TilingData *>(            \
+        reinterpret_cast<const uint8_t *>(&(tilingGM.matmul_tiling_data)) + tilingdata_offset);      \
+    using cType = MatmulType<AscendC::TPosition::GM, CubeFormat::ND, DTYPE_Y>;                       \
+    using biasType = MatmulType<AscendC::TPosition::GM, CubeFormat::ND, DTYPE_BIAS>;                 \
+    TPipe pipe;                                                                                      \
+    using aType = MatmulType<AscendC::TPosition::GM, format_x1, DTYPE_X1, transA>;                   \
+    using bType = MatmulType<AscendC::TPosition::GM, format_x2, DTYPE_X2, transB>;                   \
+    templateClass<aType, bType, cType, biasType, __VA_ARGS__> op;                                    \
+    op.Init(aGM, bGM, cGM, biasGM, offsetWGM, workspace, &tilingData, &pipe);                        \
+    op.Process();                                                                                    \
+  } while (0)
+#else
 #define MMV3_IMPL_CLASS_TRANS(tilingData, tilingGM, transA, transB, workspace, templateClass, ...)   \
   do {                                                                                               \
     uint64_t tilingdata_offset =                                                                     \
@@ -78,10 +98,23 @@ constexpr CubeFormat format_y = CubeFormat::ND;
     op.Init(aGM, bGM, cGM, biasGM, offsetWGM, workspace, &tilingData, &pipe);                        \
     op.Process();                                                                                    \
   } while (0)
+#endif
+#ifdef INDUCTOR_TILING_DATA
+template <typename CVTilingT, int8_t API_LEVEL, int8_t A_TRANS, int8_t B_TRANS, int8_t BATCH_MODEL, int8_t MODEL,
+          int8_t FULL_LOAD, int8_t L0C2OUT_MODEL>
+#else
 template <int8_t API_LEVEL, int8_t A_TRANS, int8_t B_TRANS, int8_t BATCH_MODEL, int8_t MODEL, int8_t FULL_LOAD,
           int8_t L0C2OUT_MODEL>
+#endif
+#ifdef INDUCTOR_TILING_DATA
+__aicore__ inline __attribute__((always_inline)) void mat_mul_v3(
+#else
 __global__ __aicore__ void mat_mul_v3(
-#ifdef CV_UB_FUSION
+#endif
+#ifdef INDUCTOR_TILING_DATA
+    GM_ADDR aGM, GM_ADDR bGM, GM_ADDR biasGM, GM_ADDR offsetWGM, GM_ADDR cGM, GM_ADDR workspaceGM,
+    const CVTilingT &tilingGM)
+#elif defined(CV_UB_FUSION)
     GM_ADDR aGM, GM_ADDR bGM, GM_ADDR biasGM, GM_ADDR offsetWGM, GM_ADDR cGM, GM_ADDR workspaceGM, GM_ADDR tilingGM,
     AutoFusionVector::Params *param)
 #else
@@ -94,26 +127,31 @@ __global__ __aicore__ void mat_mul_v3(
 #if !(defined(__NPU_ARCH__) && (__NPU_ARCH__ == 5102))
   using aLayout = std::conditional_t<aTran, layout::ColumnMajor, layout::RowMajor>;
   using bLayout = std::conditional_t<(format_x2 == CubeFormat::NZ), std::conditional_t<bTran, layout::Zn, layout::Nz>,
-                                     std::conditional_t<bTran, layout::ColumnMajor, layout::RowMajor> >;
+                                     std::conditional_t<bTran, layout::ColumnMajor, layout::RowMajor>>;
+  using layoutA = std::conditional_t<aTran, asc::te::dn_ext_layout_ptn, asc::te::nd_ext_layout_ptn>;
+  using layoutB = std::conditional_t<
+      bTran, std::conditional_t<(format_x2 == CubeFormat::NZ), asc::te::zn_layout_ptn, asc::te::dn_ext_layout_ptn>,
+      std::conditional_t<(format_x2 == CubeFormat::NZ), asc::te::nz_layout_ptn, asc::te::nd_ext_layout_ptn>>;
+  using layoutC = asc::te::nd_ext_layout_ptn;
 #endif
 
   REGISTER_TILING_DEFAULT(MatMulV3TilingDataCopy);
-#if (defined(CV_UB_FUSION) || defined(CV_SAFETY_FUSION))
+#if (defined(INDUCTOR_TILING_DATA) || defined(CV_UB_FUSION) || defined(CV_SAFETY_FUSION))
 #else
   KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIC_ONLY);
 #endif
-
 #if !(defined(__NPU_ARCH__) && (__NPU_ARCH__ == 5102))
   if constexpr (API_LEVEL == MAT_MUL_BASIC_LEVEL && FULL_LOAD == MAT_MUL_NO_FULL_LOAD &&
                 (MODEL == MAT_MUL_BASIC || MODEL == MAT_MUL_SLICE || MODEL == MAT_MUL_BASIC_SPLIT_K) &&
                 L0C2OUT_MODEL == MAT_MUL_ON_THE_FLY) {
     GET_TILING_DATA_WITH_STRUCT(MatMulV3BasicTilingData, tilingData, tilingGM);
-    MatmulV3Advanced::MatMulActKernel<DTYPE_X1, DTYPE_X2, DTYPE_Y, DTYPE_BIAS, aLayout, bLayout, layout::RowMajor, 0,
-                                      OP_TYPE_RELU_VALUE>(
 #ifdef CV_UB_FUSION
+    MatmulV3Advanced::MatMulTensorCVKernel<DTYPE_X1, DTYPE_X2, DTYPE_Y, DTYPE_BIAS, layoutA, layoutB, layoutC,
+                                           MAT_MUL_NO_FULL_LOAD, MAT_MUL_ON_THE_FLY, AutoFusionVector>(
         aGM, bGM, biasGM, cGM, nullptr, tilingData, param);
 #else
-        aGM, bGM, biasGM, cGM, nullptr, tilingData);
+    MatmulV3Advanced::MatMulActKernel<DTYPE_X1, DTYPE_X2, DTYPE_Y, DTYPE_BIAS, aLayout, bLayout, layout::RowMajor, 0,
+                                      OP_TYPE_RELU_VALUE>(aGM, bGM, biasGM, cGM, nullptr, tilingData);
 #endif
   } else if constexpr (API_LEVEL == MAT_MUL_BASIC_LEVEL && FULL_LOAD == MAT_MUL_B_FULL_LOAD && MODEL == MAT_MUL_BASIC &&
                        L0C2OUT_MODEL == MAT_MUL_ON_THE_FLY) {
@@ -186,6 +224,19 @@ __global__ __aicore__ void mat_mul_v3(
     GET_TILING_DATA_WITH_STRUCT(MatMulToVectorBasicTilingData, tilingData, tilingGM);
     MatmulV3Advanced::MatMulToVectorActKernel<DTYPE_X1, DTYPE_X2, DTYPE_Y, DTYPE_BIAS, aLayout, bLayout,
                                               layout::RowMajor>(aGM, bGM, biasGM, cGM, workspaceGM, tilingData);
+  } else if constexpr (API_LEVEL == MAT_MUL_TENSOR_LEVEL) {
+    GET_TILING_DATA_WITH_STRUCT(MatMulV3BasicTilingData, tilingData, tilingGM);
+#ifdef CV_UB_FUSION
+    MatmulV3Advanced::MatMulTensorCVKernel<
+        DTYPE_X1, DTYPE_X2, DTYPE_Y, DTYPE_BIAS, layoutA, layoutB, layoutC, FULL_LOAD, L0C2OUT_MODEL, AutoFusionVector,
+        MatmulV3Advanced::CvNmColumnSplit<AutoFusionVector>::value && FULL_LOAD == MAT_MUL_NO_FULL_LOAD &&
+            MODEL == MAT_MUL_BASIC && L0C2OUT_MODEL == MAT_MUL_ON_THE_FLY>(aGM, bGM, biasGM, cGM, workspaceGM,
+                                                                           tilingData, param);
+#else
+    MatmulV3Advanced::MatMulTensorCommonKernel<DTYPE_X1, DTYPE_X2, DTYPE_Y, DTYPE_BIAS, layoutA, layoutB, layoutC,
+                                               MODEL, FULL_LOAD, L0C2OUT_MODEL>(aGM, bGM, biasGM, cGM, workspaceGM,
+                                                                                tilingData);
+#endif
   }
 #endif
 }

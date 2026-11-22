@@ -78,6 +78,38 @@ GE在Ascend IR层面定义了以下Reduce算子类型，并与框架算子对应
 
 此外，GE还有带"D"后缀的变体（ReduceSumD、ReduceMaxD等），其axes信息通过属性传递而非第二个输入张量。
 
+#### Prod数据类型支持
+
+AscIR V2路径下，Prod支持`int8`、`int16`、`int32`、`int64`和`float32`：
+
+| 数据类型 | 执行类型 | 说明 |
+|---------|---------|------|
+| `int8` | `int16` | 输入加宽为`int16`执行，输出按低位截断回绕为`int8` |
+| `int16` | `int16` | 直接执行 |
+| `int32` | `int32` | 直接执行 |
+| `int64` | `int64` | 使用b64双寄存器分支执行 |
+| `float32` | `float32` | 直接执行 |
+
+`int8`执行结果按低位截断回绕到`int8`。例如`100 * 100 = 10000`输出为`16`，而不是饱和值`127`。
+
+`bool`和`uint8`本期不支持。3510类架构的`Reg::Mul`不支持8位类型，相关输入保持原有不融合行为。
+
+#### Any/All数据类型支持
+
+AscIR V2路径下，Any/All支持`bool`、`uint8`、`int8`、`int16`、`int32`、`int64`和`float32`：
+
+| 数据类型 | 执行类型 | 说明 |
+|---------|---------|------|
+| `bool` | `uint8` | 按0/1位模式零拷贝重解释执行 |
+| `uint8` | `uint8` | 直接执行 |
+| `int8` | `int8` | 直接执行 |
+| `int16` | `int16` | 直接执行 |
+| `int32` | `int32` | 直接执行 |
+| `int64` | `int64` | 使用b64双寄存器分支执行 |
+| `float32` | `float32` | 直接执行 |
+
+逻辑输入需满足0/1值域：非bool输入进入Any/All前应先完成非零归一化。`uint16`、`uint64`、`fp16`、`bf16`和`fp64`不注册，相关输入保持原有不融合行为。
+
 ### 3. 计算逻辑
 
 Reduce算子的核心计算逻辑可统一描述为：
@@ -528,7 +560,7 @@ Status ReduceApiCall::Generate(...) {
 
   // 2. 判断AR/RA模式
   std::string reduce_pattern;
-  GetIsArAndPattern(y, x.isAr, reduce_pattern);
+  GetIsArAndPattern(x, y, x.isAr, reduce_pattern);
 
   // 3. 生成dtype名称（ArgMax特殊处理）
   GE_CHK_STATUS_RET(GetDtypeNameForReduce(this->api_name_, x, y, dtype_name));
@@ -555,7 +587,7 @@ Status ReduceApiCall::Generate(...) {
 #### 3. AR/RA模式代码生成
 
 ```cpp
-void GetIsArAndPattern(const Tensor &y, bool &isAr, std::string &reduce_pattern) {
+void GetIsArAndPattern(const Tensor &x, const Tensor &y, bool &isAr, std::string &reduce_pattern) {
   isAr = (y.vectorized_strides.back() == 0);  // 向量化stride为0表示AR模式
 
   const std::map<bool, std::string> reduce_pattern_map = {
@@ -809,6 +841,41 @@ SubAxis *FindAAxis(NodeInfo &node_info) {
 | CodeGen | `codegen/api_call/reduce/reduce_api_call_base.cpp` | `GetIsArAndPattern`, `ReduceDimACodeGen` |
 | ATT | `att/util/att_utils.cpp` | `CollectReduceAxisNames` |
 | ATT | `att/gen_model_info/expr_gen/generate_tiling_expr.cpp` | `FindAAxis` |
+
+## Rand/Randn 算子说明
+
+### 1. 输入与输出契约
+
+`Rand` 与 `Randn` 在 v35 路径下新增可选输入 `seed` 与 `offset`，用于替代旧版固定随机流：
+
+- `seed`：`int64`，可为编译期标量、运行时标量或逐元素张量，主要路径为标量广播；
+- `offset`：`int32`，必须为逐元素张量，表示输出元素的线性下标，例如 `rand(2,3)` 对应 `[0,1,2,3,4,5]`；
+- 两输入必须同时连接或同时不连接，只连接其中一个会被 `IsNodeValid` 拒绝。
+
+两算子的输出 dtype 完全一致，新旧签名均支持：
+
+| 签名 | Rand 路径 | Randn 路径 |
+|------|-----------|------------|
+| 旧签名，0 输入 | 固定 key/counter 的 raw-word 或 uniform SIMT 路径 | 固定 key/counter 的 raw-word 或 normal SIMT 路径 |
+| 新签名，seed+offset | 逐元素 SIMT uniform 路径 | 逐元素 SIMT normal 路径 |
+
+输出 dtype 支持范围为 `uint32`、`int32`、`fp16`、`bf16`、`fp32`。新旧签名均不支持 `fp64`。
+
+### 2. 旧图兼容与 dtype 语义
+
+- 未连接 `seed`/`offset` 的旧图保持旧签名，`inputs()` 仍为空，`StartNode` 语义不变；
+- 连接 `seed`/`offset` 后走新签名，`seed` 使用独立 `int64` sym，`offset` 使用独立 `int32` sym，不与输出 dtype sym 共用；
+- Python 前端的 `Rand`/`Randn` 增加 `seed=None, offset=None` 可选参数，未传参时不连接输入锚点，保持旧图兼容；
+- 新旧签名的 dtype 校验共用同一实现，避免 Rand 与 Randn 行为不一致。
+
+### 3. 测试与验证范围
+
+E2E 用例对 Rand 与 Randn 使用相同 dtype 变体集合，覆盖 `uint32`、`int32`、`fp16`、`bf16`、`fp32`，并验证：
+
+1. 未连接 `seed`/`offset` 时固定随机流结果不变；
+2. 连接 `seed`/`offset` 时逐元素随机流与 golden 结果一致；
+3. 只连接一个可选输入时图校验失败；
+4. 旧图与新图在 dtype 推导、序列化和 Python 前端路径上均保持兼容。
 
 ## 相关链接
 

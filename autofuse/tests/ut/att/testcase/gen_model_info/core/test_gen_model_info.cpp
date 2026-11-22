@@ -25,6 +25,7 @@
 #include "transpose_base_type.h"
 #include "graph_construct_utils.h"
 #include "common/platform_context.h"
+#include "soc_perf_test_config.h"
 
 using namespace att;
 using att::test::CombineTilings;
@@ -679,6 +680,17 @@ TEST_F(TestGenModelInfo, ModelInfoParser) {
   EXPECT_EQ(MakeJson(model_info_list, json_info), af::SUCCESS);
 }
 
+TEST_F(TestGenModelInfo, RejectTilingKeyAboveUint16Range) {
+  std::vector<af::AscGraph> graphs;
+  TilingModelInfo model_info_list;
+  af::AscGraph graph("graph");
+  ASSERT_EQ(af::ascir::cg::Build2DTransposeAscendGraph(graph, {1, 0}), af::SUCCESS);
+  graph.SetTilingKey(static_cast<uint32_t>(UINT16_MAX) + 1U);
+  graphs.emplace_back(graph);
+  const auto &tiling_data_name = graph.GetName() + "TilingData";
+  EXPECT_NE(GenerateModelInfo(graphs, model_info_list, {{kTilingDataTypeName, tiling_data_name}}), af::SUCCESS);
+}
+
 TEST_F(TestGenModelInfo, RefreshCommonUbExprKeepsNonContainerVariables) {
   std::vector<af::AscGraph> graphs;
   TilingModelInfo model_info_list;
@@ -717,12 +729,12 @@ TEST_F(TestGenModelInfo, ModelInfoParserForV2TransposeWithoutApiTilingTypeName) 
   af::AscGraph graph("graph");
   ASSERT_EQ(af::ascir::cg::BuildTransposeAscendGraph(graph, {1, 0, 2}), af::SUCCESS);
   graphs.emplace_back(graph);
-  ge::PlatformContext::GetInstance().SetPlatform("3510");
+  ASSERT_EQ(soc_perf_test::SetSocPerfTestPlatform(soc_perf_test::kV35AltNpuArch, soc_perf_test::kSocEmpty),
+            af::SUCCESS);
   const auto &tiling_data_name = graph.GetName() + "TilingData";
-  EXPECT_EQ(GenerateModelInfo(graphs, model_info_list, {{kTilingDataTypeName, tiling_data_name}}), af::SUCCESS);
+  EXPECT_NE(GenerateModelInfo(graphs, model_info_list, {{kTilingDataTypeName, tiling_data_name}}), af::SUCCESS);
   ge::PlatformContext::GetInstance().Reset();
-  ASSERT_EQ(model_info_list.size(), 1);
-  EXPECT_TRUE(model_info_list[0].node_name_to_api_code.empty());
+  EXPECT_TRUE(model_info_list.empty());
 }
 
 TEST_F(TestGenModelInfo, Pad) {

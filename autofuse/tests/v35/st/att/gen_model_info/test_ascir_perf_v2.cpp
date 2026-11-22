@@ -10,10 +10,15 @@
 
 #include <iostream>
 #include <chrono>
+#include <sstream>
+#include <string>
+#include <vector>
 #include "gtest/gtest.h"
 #include "api_perf_register/ascendc_api_perf.h"
 #include "api_perf_register/api_perf_factory.h"
+#include "gen_model_info.h"
 #include "../../../../st/att/testcase/source_mirror/gen_model_info_content/runtime_stub.h"
+#include "../../../../common/att/soc_perf_test_config.h"
 #include "common/platform_context.h"
 #include "v35/att/api_perf_register/ascir_api_perf_v2.h"
 #include "v35/att/api_perf_register/perf_param_v2.h"
@@ -42,6 +47,224 @@ class STestAscirPerfV2 : public ::testing::Test {
   void TearDown() override {}
 };
 af::RuntimeStubV2 STestAscirPerfV2::stub_v_2;
+
+namespace {
+// LoadV2 引入单核分支后，pipe_res[AIV_MTE2]为外层load_core_case_node三元变量（block_dim==1选单核参数）。
+// 用例通过本函数取指定分支的表达式后再做公式断言；取分支失败时记录失败并返回哑值，避免解引用UB。
+Expr SelectLoadCoreBranch(const std::map<Expr, TernaryOp, ExprCmp> &ternary_ops, bool single_core) {
+  const Expr var = CreateExpr("load_core_case_node");
+  const auto iter = ternary_ops.find(var);
+  if (iter == ternary_ops.end()) {
+    ADD_FAILURE() << "load_core_case_node not found in ternary_ops";
+    return CreateExpr(0);
+  }
+  const auto if_case = iter->second.DeepCopyIfCase();
+  if (if_case == nullptr) {
+    ADD_FAILURE() << "DeepCopyIfCase of load_core_case_node returned nullptr";
+    return CreateExpr(0);
+  }
+  const auto branch = single_core ? if_case->GetChoiceA() : if_case->GetChoiceB();
+  if (branch == nullptr) {
+    ADD_FAILURE() << "branch of load_core_case_node is nullptr, single_core=" << single_core;
+    return CreateExpr(0);
+  }
+  return branch->GetExpr();
+}
+
+NodePerfInfo MakeSocStAbsPerfInfo() {
+  NodePerfInfo node;
+  node.optype = "Abs";
+  node.input_dtype = "float16";
+  node.output_dtype = "float16";
+  node.dims = {CreateExpr(64)};
+  return node;
+}
+
+::ascir::FusedScheduledResult MakeSocStScheduleResult() {
+  af::AscGraph graph("soc_st_abs_graph");
+  if (GraphConstructUtils::CreateSimpleLoadStoreOp(graph) != af::SUCCESS) {
+    return {};
+  }
+  GraphConstructUtils::UpdateGraphVectorizedStride(graph);
+
+  ::ascir::ScheduledResult schedule_result;
+  ::ascir::ScheduleGroup schedule_group;
+  schedule_group.impl_graphs.emplace_back(graph);
+  schedule_result.schedule_groups.emplace_back(schedule_group);
+  ::ascir::FusedScheduledResult fused_schedule_result;
+  fused_schedule_result.node_idx_to_scheduled_results.emplace_back(
+      std::vector<::ascir::ScheduledResult>{schedule_result});
+  return fused_schedule_result;
+}
+
+af::Status GenerateSocStModelInfos(const std::string &soc_version, FusedParsedScheduleResult &model_infos) {
+  if (att::soc_perf_test::SetSocPerfTestPlatform(att::soc_perf_test::kV35NpuArch, soc_version) != af::SUCCESS) {
+    return af::FAILED;
+  }
+  model_infos.clear();
+  return GetModelInfoMap(MakeSocStScheduleResult(), {}, model_infos);
+}
+
+std::vector<const ModelInfo *> CollectSocStModelInfos(const FusedParsedScheduleResult &model_infos) {
+  std::vector<const ModelInfo *> result;
+  for (const auto &asc_graph_item : model_infos) {
+    for (const auto &impl_graph_item : asc_graph_item.second) {
+      for (const auto &group_item : impl_graph_item.second.groups_tiling_model_info) {
+        for (const auto &model_info : group_item.second) {
+          result.emplace_back(&model_info);
+        }
+      }
+    }
+  }
+  return result;
+}
+
+std::string MakeSocStTilingIdentity(const ModelInfo &model_info) {
+  std::ostringstream identity;
+  identity << model_info.tiling_case_id << "|" << model_info.graph_name << "|" << model_info.score_func << "|"
+           << model_info.sub_case_tag << "|" << model_info.is_enable_equal_order_tiling << "|"
+           << model_info.tiling_schedule_config.DebugString();
+  return identity.str();
+}
+
+std::string MakeSocStCostIdentity(const ModelInfo &model_info) {
+  std::ostringstream cost;
+  for (const auto &object_item : model_info.objects) {
+    cost << static_cast<int32_t>(object_item.first) << ":" << Str(object_item.second) << ";";
+  }
+  return cost.str();
+}
+}  // namespace
+
+TEST_F(STestAscirPerfV2, TestSocPerfSerialTargetSelection) {
+  Expr abs_perf;
+  ASSERT_EQ(att::soc_perf_test::SetSocPerfTestPlatform(att::soc_perf_test::kV35NpuArch, att::soc_perf_test::kSocA),
+            af::SUCCESS);
+  ASSERT_EQ(GetPerf(MakeSocStAbsPerfInfo(), abs_perf), af::SUCCESS);
+  EXPECT_EQ(Str(abs_perf), "74.0");
+  const auto abs_api_a1 = GetApiPerf("Abs");
+  ASSERT_NE(abs_api_a1, nullptr);
+  EXPECT_EQ(abs_api_a1->GetPerfFunc(), EvalCosts::Instance().GetFunc("ExpV2"));
+
+  ASSERT_EQ(att::soc_perf_test::SetSocPerfTestPlatform(att::soc_perf_test::kV35NpuArch, att::soc_perf_test::kSocB),
+            af::SUCCESS);
+  ASSERT_EQ(GetPerf(MakeSocStAbsPerfInfo(), abs_perf), af::SUCCESS);
+  EXPECT_EQ(Str(abs_perf), "148.0");
+  const auto abs_api_b = GetApiPerf("Abs");
+  ASSERT_NE(abs_api_b, nullptr);
+  EXPECT_EQ(abs_api_b->GetPerfFunc(), EvalCosts::Instance().GetFunc("AbsV2"));
+
+  ASSERT_EQ(att::soc_perf_test::SetSocPerfTestPlatform(att::soc_perf_test::kV35NpuArch, att::soc_perf_test::kSocA),
+            af::SUCCESS);
+  ASSERT_EQ(GetPerf(MakeSocStAbsPerfInfo(), abs_perf), af::SUCCESS);
+  EXPECT_EQ(Str(abs_perf), "74.0");
+  const auto abs_api_a2 = GetApiPerf("Abs");
+  ASSERT_NE(abs_api_a2, nullptr);
+  EXPECT_EQ(abs_api_a2->GetPerfFunc(), EvalCosts::Instance().GetFunc("ExpV2"));
+  EXPECT_EQ(abs_api_a1->GetTilingScheduleConfigTable(), abs_api_a2->GetTilingScheduleConfigTable());
+
+  FusedParsedScheduleResult model_infos_a1;
+  FusedParsedScheduleResult model_infos_b;
+  FusedParsedScheduleResult model_infos_a2;
+  ASSERT_EQ(GenerateSocStModelInfos(att::soc_perf_test::kSocA, model_infos_a1), af::SUCCESS);
+  ASSERT_EQ(GenerateSocStModelInfos(att::soc_perf_test::kSocB, model_infos_b), af::SUCCESS);
+  ASSERT_EQ(GenerateSocStModelInfos(att::soc_perf_test::kSocA, model_infos_a2), af::SUCCESS);
+  const auto model_info_ptrs_a1 = CollectSocStModelInfos(model_infos_a1);
+  const auto model_info_ptrs_b = CollectSocStModelInfos(model_infos_b);
+  const auto model_info_ptrs_a2 = CollectSocStModelInfos(model_infos_a2);
+  ASSERT_FALSE(model_info_ptrs_a1.empty());
+  ASSERT_EQ(model_info_ptrs_a1.size(), model_info_ptrs_b.size());
+  ASSERT_EQ(model_info_ptrs_a1.size(), model_info_ptrs_a2.size());
+  for (size_t i = 0U; i < model_info_ptrs_a1.size(); ++i) {
+    const std::string tiling_identity_a1 = MakeSocStTilingIdentity(*model_info_ptrs_a1[i]);
+    EXPECT_EQ(tiling_identity_a1, MakeSocStTilingIdentity(*model_info_ptrs_b[i]));
+    EXPECT_EQ(tiling_identity_a1, MakeSocStTilingIdentity(*model_info_ptrs_a2[i]));
+    EXPECT_EQ(model_info_ptrs_a1[i]->tiling_schedule_config_table, model_info_ptrs_b[i]->tiling_schedule_config_table);
+    const std::string cost_identity_a1 = MakeSocStCostIdentity(*model_info_ptrs_a1[i]);
+    EXPECT_EQ(cost_identity_a1, MakeSocStCostIdentity(*model_info_ptrs_a2[i]));
+    EXPECT_NE(cost_identity_a1, MakeSocStCostIdentity(*model_info_ptrs_b[i]));
+  }
+}
+
+TEST_F(STestAscirPerfV2, TestSocPerfV2ArchitecturesUnknownSocUseOriginalBaseline) {
+  for (const std::string &npu_arch : {"3510", "5102", "9201", "9202"}) {
+    FusedParsedScheduleResult baseline;
+    ASSERT_EQ(soc_perf_test::SetSocPerfTestPlatform(npu_arch, ""), af::SUCCESS);
+    ASSERT_EQ(GetModelInfoMap(MakeSocStScheduleResult(), {}, baseline), af::SUCCESS);
+    const auto baseline_models = CollectSocStModelInfos(baseline);
+    ASSERT_FALSE(baseline_models.empty());
+    for (const std::string &soc : {"SOC_UNREGISTERED", "SOC_UNREGISTERED_AGAIN"}) {
+      ASSERT_EQ(soc_perf_test::SetSocPerfTestPlatform(npu_arch, soc), af::SUCCESS);
+      FusedParsedScheduleResult models;
+      ASSERT_EQ(GetModelInfoMap(MakeSocStScheduleResult(), {}, models), af::SUCCESS);
+      const auto actual_models = CollectSocStModelInfos(models);
+      ASSERT_EQ(actual_models.size(), baseline_models.size());
+      for (size_t i = 0U; i < actual_models.size(); ++i) {
+        EXPECT_EQ(MakeSocStTilingIdentity(*actual_models[i]), MakeSocStTilingIdentity(*baseline_models[i]));
+        EXPECT_EQ(MakeSocStCostIdentity(*actual_models[i]), MakeSocStCostIdentity(*baseline_models[i]));
+      }
+    }
+  }
+  ge::PlatformContext::GetInstance().Reset();
+}
+
+TEST_F(STestAscirPerfV2, TestSocPerfRegisteredArchitectureKeepsOriginalModel) {
+  ASSERT_EQ(soc_perf_test::SetSocPerfTestPlatform(soc_perf_test::kV35AltNpuArch, ""), af::SUCCESS);
+  Expr baseline;
+  ASSERT_EQ(GetPerf(MakeSocStAbsPerfInfo(), baseline), af::SUCCESS);
+  const auto default_api = GetApiPerf("Abs");
+  ASSERT_NE(default_api, nullptr);
+
+  soc_perf_test::RegisterSocPerfTestArchitecture();
+  ASSERT_EQ(soc_perf_test::SetSocPerfTestPlatform(soc_perf_test::kRegisteredNpuArch, "SOC_UNREGISTERED"), af::SUCCESS);
+  ASSERT_EQ(ValidateSocPerfEntry(), af::SUCCESS);
+  Expr perf;
+  ASSERT_EQ(GetPerf(MakeSocStAbsPerfInfo(), perf), af::SUCCESS);
+  EXPECT_EQ(Str(perf), Str(baseline));
+  const auto actual_api = GetApiPerf("Abs");
+  ASSERT_NE(actual_api, nullptr);
+  EXPECT_EQ(actual_api->GetPerfFunc(), default_api->GetPerfFunc());
+  ge::PlatformContext::GetInstance().Reset();
+}
+
+TEST_F(STestAscirPerfV2, TestSocPerfUnknownArchFailsAndUnknownSocKeepsBaseline) {
+  FusedParsedScheduleResult model_infos;
+  ge::PlatformContext::GetInstance().SetPlatform("UnknownArch");
+  EXPECT_NE(GetModelInfoMap(MakeSocStScheduleResult(), {}, model_infos), af::SUCCESS);
+  EXPECT_TRUE(model_infos.empty());
+
+  ASSERT_EQ(att::soc_perf_test::SetSocPerfTestPlatform(att::soc_perf_test::kV35NpuArch, "SOC_NOT_BOUND"), af::SUCCESS);
+  EXPECT_EQ(GetModelInfoMap(MakeSocStScheduleResult(), {}, model_infos), af::SUCCESS);
+  EXPECT_FALSE(model_infos.empty());
+
+  ASSERT_EQ(GenerateSocStModelInfos(att::soc_perf_test::kSocEmpty, model_infos), af::SUCCESS);
+  EXPECT_FALSE(model_infos.empty());
+}
+
+TEST_F(STestAscirPerfV2, TestSocPerfDefaultModelIsStableAndTimed) {
+  FusedParsedScheduleResult first_model_infos;
+  FusedParsedScheduleResult second_model_infos;
+  auto start_time = std::chrono::steady_clock::now();
+  ASSERT_EQ(GenerateSocStModelInfos(att::soc_perf_test::kSocEmpty, first_model_infos), af::SUCCESS);
+  const auto first_duration = std::chrono::steady_clock::now() - start_time;
+
+  start_time = std::chrono::steady_clock::now();
+  ASSERT_EQ(GenerateSocStModelInfos(att::soc_perf_test::kSocEmpty, second_model_infos), af::SUCCESS);
+  const auto second_duration = std::chrono::steady_clock::now() - start_time;
+
+  const auto first_model_info_ptrs = CollectSocStModelInfos(first_model_infos);
+  const auto second_model_info_ptrs = CollectSocStModelInfos(second_model_infos);
+  ASSERT_FALSE(first_model_info_ptrs.empty());
+  ASSERT_EQ(first_model_info_ptrs.size(), second_model_info_ptrs.size());
+  for (size_t i = 0U; i < first_model_info_ptrs.size(); ++i) {
+    EXPECT_EQ(MakeSocStTilingIdentity(*first_model_info_ptrs[i]), MakeSocStTilingIdentity(*second_model_info_ptrs[i]));
+    EXPECT_EQ(MakeSocStCostIdentity(*first_model_info_ptrs[i]), MakeSocStCostIdentity(*second_model_info_ptrs[i]));
+  }
+
+  const auto first_ms = std::chrono::duration_cast<std::chrono::milliseconds>(first_duration).count();
+  const auto second_ms = std::chrono::duration_cast<std::chrono::milliseconds>(second_duration).count();
+  std::cout << "[SocPerfST] default model first=" << first_ms << "ms, second=" << second_ms << "ms" << std::endl;
+}
 
 // 测试 Load/Store API - 不同数据类型大小
 TEST_F(STestAscirPerfV2, TestLoadStoreDataTypeSizes) {
@@ -132,14 +355,12 @@ TEST_F(STestAscirPerfV2, TestLoadApiForTypev1) {
   node.node_ptr = node_ptr;
   auto result = perf(input_shapes, output_shapes, node, perf_res);
   EXPECT_EQ(result, af::SUCCESS);
-  Expr res = perf_res.pipe_res[PipeType::AIV_MTE2];
   // 存在外抛
   auto ternary_ops = perf_res.ternary_ops;
   auto ret = ConcursiveReplaceVars(ternary_ops);
-  EXPECT_EQ(
-      Str(res.Replace(ret)),
-      "TernaryOp((-256 + z0t_size) < 0, ((4 * z0t_size / (((6.40880012512207 / (block_dim)) + 13.1354999542236))) + "
-      "160.0), ((4 * z0t_size / (((6.61549997329712 / (block_dim)) + 11.8291997909546))) + 160.0))");
+  Expr res = SelectLoadCoreBranch(ternary_ops, false);
+  EXPECT_EQ(Str(res.Replace(ret)),
+            "((256 * z0t_size * z1t_size / (((6.40880012512207 / (block_dim)) + 13.1354999542236))) + 160.0)");
 }
 
 TEST_F(STestAscirPerfV2, TestLoadApiForTypev2) {
@@ -176,14 +397,15 @@ TEST_F(STestAscirPerfV2, TestLoadApiForTypev2) {
   node.node_ptr = node_ptr;
   auto result = perf(input_shapes, output_shapes, node, perf_res);
   EXPECT_EQ(result, af::SUCCESS);
-  Expr res = perf_res.pipe_res[PipeType::AIV_MTE2];
   // 外抛for循环
   auto ternary_ops = perf_res.ternary_ops;
   auto ret = ConcursiveReplaceVars(ternary_ops);
-  const std::string is_cache_line = "(-256 + z0z1t_size) < 0";
-  const std::string perf1 = "((8 * z0z1t_size / (((6.40880012512207 / (block_dim)) + 13.1354999542236))) + 160.0)";
-  const std::string perf2 = "((8 * z0z1t_size / (((6.61549997329712 / (block_dim)) + 11.8291997909546))) + 160.0))";
-  EXPECT_EQ(Str(res.Replace(ret)), "TernaryOp(" + is_cache_line + ", " + perf1 + ", " + perf2);
+  Expr res = SelectLoadCoreBranch(ternary_ops, false);
+  EXPECT_EQ(
+      Str(res.Replace(ret)),
+      "TernaryOp(((7 * z4t_size) + -256) < 0, ((13328 * z0z1t_size * z4t_size / (((6.40880012512207 / (block_dim)) + "
+      "13.1354999542236))) + 160.0), ((13328 * z0z1t_size * z4t_size / (((6.61549997329712 / (block_dim)) + "
+      "11.8291997909546))) + 160.0))");
 }
 
 TEST_F(STestAscirPerfV2, TestStoreApiForType) {
@@ -231,10 +453,11 @@ TEST_F(STestAscirPerfV2, TestStoreApiForType) {
   // 存在外抛
   auto ternary_ops = perf_res.ternary_ops;
   auto ret = ConcursiveReplaceVars(ternary_ops);
-  // 注意：由于 LoadStoreStrideFunc 不支持 block_count_idx，block_count 计算可能不包括 z0z1t_size
-  const std::string expect_stride = "(8 * z0z1t_size)";
-  EXPECT_EQ(Str(res.Replace(ret)),
-            "((8 * z0z1t_size / (((10.2650003433228 / (block_dim)) + 11.7740001678467))) + 160.0)");
+  EXPECT_EQ(
+      Str(res.Replace(ret)),
+      "((0.171042612753808 * Min((8 * Abs(z6t_size)), 4096.0)) + (1904 * TernaryOp(IsEqual(LogicAnd(ExpectLt((8 * "
+      "z6t_size), 128), ExpectLt(0, Abs(z6t_size))), 0), z6t_size, 16) * z0z1t_size / (((10.2650003433228 / "
+      "(block_dim)) + 11.7740001678467))) + 160.0)");
 }
 
 TEST_F(STestAscirPerfV2, TestStoreApiForSmallStride) {
@@ -286,9 +509,9 @@ TEST_F(STestAscirPerfV2, TestStoreApiForSmallStride) {
   auto ret = ConcursiveReplaceVars(ternary_ops);
   // 注意：由于 LoadStoreStrideFunc 不支持 block_count_idx，block_count 计算基于实际维度
   // 当 z6t_size 作为符号变量时，计算结果可能与包含 z0z1t_size 的期望不同
-  const std::string kStride = "(8 * z0z1t_size)";
   EXPECT_EQ(Str(res.Replace(ret)),
-            "((8 * z0z1t_size / (((10.2650003433228 / (block_dim)) + 11.7740001678467))) + 160.0)");
+            "((1904 * TernaryOp(IsEqual(ExpectLt((8 * z6t_size), 128), 0), z6t_size, 16) * z0z1t_size / "
+            "(((10.2650003433228 / (block_dim)) + 11.7740001678467))) + 335.1476354599)");
 }
 
 TEST_F(STestAscirPerfV2, TestStoreApiForBiggerStride) {
@@ -340,9 +563,9 @@ TEST_F(STestAscirPerfV2, TestStoreApiForBiggerStride) {
   auto ret = ConcursiveReplaceVars(ternary_ops);
   // 注意：由于 LoadStoreStrideFunc 不支持 block_count_idx，block_count 计算基于实际维度
   // 当 z6t_size 作为符号变量时，计算结果可能与包含 z0z1t_size 的期望不同
-  const std::string kStride = "(8 * z0z1t_size)";
   EXPECT_EQ(Str(res.Replace(ret)),
-            "((8 * z0z1t_size / (((10.2650003433228 / (block_dim)) + 11.7740001678467))) + 160.0)");
+            "((1904 * TernaryOp(IsEqual(ExpectLt((8 * z6t_size), 128), 0), z6t_size, 16) * z0z1t_size / "
+            "(((10.2650003433228 / (block_dim)) + 11.7740001678467))) + 860.5905418396)");
 }
 
 TEST_F(STestAscirPerfV2, TestNddmaApiForType) {

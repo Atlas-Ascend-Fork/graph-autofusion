@@ -26,6 +26,213 @@ using namespace af::ops;
 using namespace af::ascir_op;
 using namespace codegen;
 
+TEST(CodegenKernel, CvNBroadcastUsesItsAllocatedOutputAndTailSemantic) {
+  af::AscGraph graph("cv_explicit_n_broadcast");
+  const auto m = graph.CreateAxis("m", af::Symbol(128));
+  const auto n = graph.CreateAxis("n", af::Symbol(256));
+  Data data("data", graph);
+  Load load_op("load");
+  Broadcast broadcast_op("broadcast");
+  graph.AddNode(load_op);
+  graph.AddNode(broadcast_op);
+  load_op.x = data.y;
+  broadcast_op.x = load_op.y;
+  const auto load = graph.FindNode("load");
+  const auto broadcast = graph.FindNode("broadcast");
+  for (const auto &node : {load, broadcast}) {
+    node->attr.sched.axis = {m.id, n.id};
+    node->attr.api.type = af::ApiType::kAPITypeCompute;
+    auto &attr = node->outputs[0].attr;
+    attr.axis = {m.id, n.id};
+    attr.vectorized_axis = {m.id, n.id};
+    attr.dtype = af::DT_FLOAT16;
+    attr.mem.position = af::Position::kPositionVecCalc;
+    attr.mem.alloc_type = af::AllocType::kAllocTypeBuffer;
+    attr.opt.merge_scope = af::kIdNone;
+  }
+  load->outputs[0].attr.repeats = {af::Symbol(128), One};
+  load->outputs[0].attr.strides = {One, Zero};
+  load->outputs[0].attr.vectorized_strides = {af::Symbol(16), Zero};
+  load->outputs[0].attr.mem.tensor_id = 0;
+  load->outputs[0].attr.buf.id = 0;
+  broadcast->outputs[0].attr.repeats = {af::Symbol(128), af::Symbol(256)};
+  broadcast->outputs[0].attr.strides = {af::Symbol(256), One};
+  broadcast->outputs[0].attr.vectorized_strides = {af::Symbol(256), One};
+  broadcast->outputs[0].attr.mem.tensor_id = 1;
+  broadcast->outputs[0].attr.buf.id = 1;
+  broadcast->attr.api.compute_type = af::ComputeType::kComputeBroadcast;
+  broadcast->attr.api.unit = af::ComputeUnit::kUnitVector;
+  Tiler tiler;
+  ASSERT_EQ(tiler.AddAxis(m), af::SUCCESS);
+  ASSERT_EQ(tiler.AddAxis(n), af::SUCCESS);
+  TPipe tpipe("tpipe", tiler);
+  ASSERT_EQ(tpipe.AddTensor(load->outputs[0]), af::SUCCESS);
+  ASSERT_EQ(tpipe.AddTensor(broadcast->outputs[0]), af::SUCCESS);
+  tpipe.cv_fusion_type = ascir::CubeTemplateType::kUBFuse;
+  tpipe.cv_output_broadcast = true;
+  tpipe.cv_n_axis = n.id;
+  ApiTensor input;
+  input.id = 0;
+  BroadcastRegApiCall call("BroadcastExtend");
+  ASSERT_EQ(call.Init(broadcast), af::SUCCESS);
+  call.inputs.push_back(&input);
+  std::string result;
+  ASSERT_EQ(call.Generate(tpipe, std::vector<af::AxisId>{}, result), af::SUCCESS);
+  EXPECT_NE(result.find("BroadcastExtend<half,2>(local_1, local_0, cv_dst_shape, cv_src_shape)"), std::string::npos);
+  EXPECT_NE(result.find("cv_src_shape[2] = {1U, 1U}"), std::string::npos);
+  const auto api = CodegenApiParam::GetNodeApiParam(broadcast);
+  ASSERT_NE(api, nullptr);
+  EXPECT_EQ(api->semantic_feature, "Broadcast.Tail");
+  const auto params = ascir_param::GetAscirNodeParams(broadcast);
+  ASSERT_NE(params, nullptr);
+  const auto specific = std::get_if<ascir_param::BroadcastNodeParams>(&params->specific_params);
+  ASSERT_NE(specific, nullptr);
+  EXPECT_TRUE(specific->valid);
+  EXPECT_FALSE(specific->is_scalar);
+  EXPECT_EQ(specific->const_rank, 2);
+  ASSERT_EQ(specific->dst_shape.size(), 2UL);
+  EXPECT_EQ(specific->dst_shape.front().expr, af::Symbol(1));
+
+  ASSERT_EQ(
+      ascir::SetCvBroadcastShape(broadcast, {af::Symbol(128), af::Symbol(256)}, n.id, {af::Symbol(128), One}, m.id),
+      af::SUCCESS);
+  tpipe.cv_n_batch = true;
+  tpipe.cv_m_axis = m.id;
+  tpipe.cube_output_tensor_id = 0;
+  ASSERT_EQ(call.Generate(tpipe, std::vector<af::AxisId>{}, result), af::SUCCESS);
+  EXPECT_NE(result.find("local_1[cv_row * cv_dst_shape[1]], local_0[cv_row * curAlignN]"), std::string::npos);
+  EXPECT_NE(result.find("local_1_actual_size = curAivM * KernelUtils::BlkAlign<half>(curAivN)"), std::string::npos);
+  tpipe.cube_output_tensor_id = af::kIdNone;
+  ASSERT_EQ(call.Generate(tpipe, std::vector<af::AxisId>{}, result), af::SUCCESS);
+  EXPECT_NE(result.find("local_0[cv_row * KernelUtils::BlkAlign<half>(1)]"), std::string::npos);
+  EXPECT_EQ(specific->src_shape.size(), 2UL);
+  EXPECT_EQ(specific->dst_shape.size(), 2UL);
+
+  // The scheduler can keep M as an outer loop while vectorizing only N.
+  // The device call stays rank two, but ATT binds only the N expression.
+  auto *source = tpipe.GetTensor(0);
+  auto *target = tpipe.GetTensor(1);
+  ASSERT_NE(source, nullptr);
+  ASSERT_NE(target, nullptr);
+  source->vectorized_axis = {n.id};
+  source->vectorized_axis_pos = {1};
+  source->vectorized_strides = {Zero};
+  target->vectorized_axis = {n.id};
+  target->vectorized_axis_pos = {1};
+  target->vectorized_strides = {One};
+  ASSERT_EQ(call.Generate(tpipe, std::vector<af::AxisId>{}, result), af::SUCCESS);
+  EXPECT_NE(result.find("BroadcastExtend<half,2>"), std::string::npos);
+  EXPECT_EQ(specific->const_rank, 2);
+  ASSERT_EQ(specific->src_shape.size(), 1UL);
+  ASSERT_EQ(specific->dst_shape.size(), 1UL);
+  EXPECT_EQ(specific->src_shape.front().expr, One);
+  EXPECT_EQ(specific->dst_shape.front().expr, af::Symbol(256));
+  source->vectorized_axis = {m.id, n.id};
+  source->vectorized_axis_pos = {0, 1};
+  source->vectorized_strides = {af::Symbol(16), Zero};
+  target->vectorized_axis = {m.id, n.id};
+  target->vectorized_axis_pos = {0, 1};
+  target->vectorized_strides = {af::Symbol(256), One};
+  tpipe.cv_n_batch = false;
+
+  tpipe.cv_m_broadcast = true;
+  tpipe.cv_m_axis = m.id;
+  source->axis_size = {One, af::Symbol(256)};
+  source->vectorized_strides = {Zero, One};
+  source->axis_strides = {Zero, One};
+  load->outputs[0].attr.repeats = source->axis_size;
+  load->outputs[0].attr.strides = source->axis_strides;
+  load->outputs[0].attr.vectorized_strides = source->vectorized_strides;
+  EXPECT_EQ(tpipe.CvRows(*source), "1");
+  EXPECT_EQ(tpipe.CvColumns(*source), "curAivN");
+  EXPECT_EQ(tpipe.CvRows(*tpipe.GetTensor(1)), "curAivM");
+  ASSERT_EQ(call.Generate(tpipe, std::vector<af::AxisId>{}, result), af::SUCCESS);
+  EXPECT_NE(result.find("cv_src_shape[2] = {1U, static_cast<uint32_t>"), std::string::npos);
+  EXPECT_NE(result.find("cv_dst_shape[2] = {static_cast<uint32_t>(curAivM)"), std::string::npos);
+  EXPECT_EQ(CodegenApiParam::GetNodeApiParam(broadcast)->semantic_feature, "Broadcast.NonTail");
+  const auto m_params = ascir_param::GetAscirNodeParams(broadcast);
+  ASSERT_NE(m_params, nullptr);
+  const auto m_specific = std::get_if<ascir_param::BroadcastNodeParams>(&m_params->specific_params);
+  ASSERT_NE(m_specific, nullptr);
+  EXPECT_EQ(m_specific->src_shape.front().expr, af::Symbol(1));
+  EXPECT_EQ(m_specific->dst_shape.front().expr, af::Symbol(128));
+
+  // MN becomes a scalar Duplicate, but still writes a callback-local full-M
+  // tile. A symbolic graph stride must not leak a t pointer into that scope.
+  const auto tile_n = af::Symbol("cv_tile_n_size");
+  tiler.AddSizeVar(af::SizeVar(tile_n));
+  target->vectorized_strides = {tile_n, One};
+  source->axis_size = {One, One};
+  source->vectorized_strides = {Zero, Zero};
+  source->axis_strides = {Zero, Zero};
+  source->is_ub_scalar = false;
+  source->position = af::Position::kPositionVecCalc;
+  ASSERT_EQ(call.Generate(tpipe, std::vector<af::AxisId>{m.id}, result), af::SUCCESS);
+  EXPECT_NE(result.find("local_1_actual_size = curAivM * KernelUtils::BlkAlign<half>(curAivN);"), std::string::npos);
+  EXPECT_NE(result.find("Duplicate(local_1[0], local_0.GetValue(0), local_1_actual_size)"), std::string::npos);
+  EXPECT_NE(result.find("WaitFlag<HardEvent::V_S>"), std::string::npos);
+  EXPECT_EQ(result.find("t->"), std::string::npos);
+  EXPECT_EQ(CodegenApiParam::GetNodeApiParam(broadcast)->semantic_feature, "Broadcast.Scalar");
+
+  source->dtype = af::DT_FLOAT;
+  target->dtype = af::DT_FLOAT;
+  source->position = af::Position::kPositionVecIn;
+  tpipe.cube_output_tensor_id = source->id;
+  tpipe.cv_broadcast_n = true;
+  ASSERT_EQ(call.Generate(tpipe, std::vector<af::AxisId>{m.id}, result), af::SUCCESS);
+  EXPECT_NE(result.find("BroadcastExtend<float,1>(local_1, local_0, cv_dst_shape, cv_src_shape)"), std::string::npos);
+  EXPECT_EQ(result.find("GetValue"), std::string::npos);
+  ASSERT_TRUE(specific->is_scalar);
+  EXPECT_EQ(specific->const_rank, 1);
+  tpipe.is_inductor = true;
+  ASSERT_EQ(call.Generate(tpipe, std::vector<af::AxisId>{m.id}, result), af::SUCCESS);
+  EXPECT_NE(result.find("local_0.GetValue(0)"), std::string::npos);
+  EXPECT_EQ(specific->const_rank, -1);
+
+  tpipe.cv_split_nm_columns = true;
+  for (const auto dtype : {af::DT_FLOAT16, af::DT_BF16, af::DT_FLOAT}) {
+    SCOPED_TRACE(static_cast<int>(dtype));
+    source->dtype = dtype;
+    target->dtype = dtype;
+    std::string dtype_name;
+    ASSERT_EQ(codegen::Tensor::DtypeName(dtype, dtype_name), af::SUCCESS);
+    ASSERT_EQ(call.Generate(tpipe, std::vector<af::AxisId>{m.id}, result), af::SUCCESS);
+    EXPECT_NE(result.find("BroadcastExtend<" + dtype_name + ",1>"), std::string::npos);
+    EXPECT_EQ(result.find("GetValue"), std::string::npos);
+    EXPECT_EQ(result.find("t->"), std::string::npos);
+    EXPECT_TRUE(specific->is_scalar);
+    EXPECT_EQ(specific->const_rank, 1);
+  }
+  tpipe.cv_split_nm_columns = false;
+  tpipe.is_inductor = false;
+
+  tpipe.cv_output_broadcast = false;
+  ASSERT_EQ(call.Generate(tpipe, std::vector<af::AxisId>{m.id}, result), af::SUCCESS);
+  EXPECT_NE(result.find("t->cv_tile_n_size"), std::string::npos);
+
+  tpipe.cv_fusion_type = ascir::CubeTemplateType::kCommon;
+  source->axis_size = {One, af::Symbol(256)};
+  source->axis_strides = {Zero, One};
+  source->vectorized_strides = {Zero, One};
+  target->vectorized_strides = {af::Symbol(256), One};
+  tpipe.common_m_row_broadcast = {target->id, 256};
+  ASSERT_EQ(call.Generate(tpipe, std::vector<af::AxisId>{}, result), af::SUCCESS);
+  EXPECT_NE(result.find("if constexpr (256 % (AscendC::GetVecLen() / sizeof(float)) == 0)"), std::string::npos);
+  const auto row_view = result.find("local_1 = local_0;");
+  const auto fallback = result.find("} else {");
+  const auto materialize = result.find("BroadcastExtend<float,2>");
+  ASSERT_NE(row_view, std::string::npos);
+  ASSERT_NE(fallback, std::string::npos);
+  ASSERT_NE(materialize, std::string::npos);
+  EXPECT_LT(row_view, fallback);
+  EXPECT_LT(fallback, materialize);
+
+  tpipe.common_m_row_broadcast.output_id = source->id;
+  ASSERT_EQ(call.Generate(tpipe, std::vector<af::AxisId>{}, result), af::SUCCESS);
+  EXPECT_EQ(result.find("local_1 = local_0;"), std::string::npos);
+  EXPECT_NE(result.find("BroadcastExtend<float,2>"), std::string::npos);
+}
+
 static void BuildBroadcastRegApiCallPrePosNotFoundGraph(af::AscGraph &graph, af::Expression s0, af::Expression s1,
                                                         af::Expression s2, af::Axis z0, af::Axis z1, af::Axis z2) {
   Data x_op("x", graph);
@@ -147,6 +354,9 @@ TEST(CodegenKernel, BroadcastRegApiCallAllCommonAxis) {
 
   std::string result;
   call.Generate(tpipe, vector<af::AxisId>{}, result);
+  const auto api_param = CodegenApiParam::GetNodeApiParam(broadcast);
+  ASSERT_NE(api_param, nullptr);
+  EXPECT_EQ(api_param->semantic_feature, "Broadcast");
   EXPECT_EQ(
       result,
       std::string{
@@ -227,6 +437,9 @@ TEST(CodegenKernel, BroadcastRegApiCallUBScalar) {
 
   std::string result;
   call.Generate(tpipe, vector<af::AxisId>{}, result);
+  const auto api_param = CodegenApiParam::GetNodeApiParam(broadcast);
+  ASSERT_NE(api_param, nullptr);
+  EXPECT_EQ(api_param->semantic_feature, "Broadcast.Scalar");
   EXPECT_EQ(result, std::string{"Duplicate(local_1[0], local_0_ub_scalar, local_1_actual_size);\n"});
 }
 

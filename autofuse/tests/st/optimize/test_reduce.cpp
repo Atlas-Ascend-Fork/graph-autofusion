@@ -80,15 +80,15 @@ void Construct_Reduce_RR(af::AscGraph &graph) {
   *load.y.axis = {z0.id, z1.id};
   load.y.dtype = af::DT_FLOAT;
   *load.y.strides = {s1, af::ops::One};
-  *load.y.repeats = {s1, s0};
+  *load.y.repeats = {s0, s1};
 
   Sum sum("sum");
   sum.attr.sched.axis = {z0.id, z1.id};
   sum.x = load.y;
   *sum.y.axis = {z0.id, z1.id};
   sum.y.dtype = af::DT_FLOAT;
-  *sum.y.strides = {af::ops::One, af::ops::One};
-  *sum.y.repeats = {af::ops::Zero, af::ops::Zero};
+  *sum.y.strides = {af::ops::Zero, af::ops::Zero};
+  *sum.y.repeats = {af::ops::One, af::ops::One};
 
   Store store_op1("store1");
   store_op1.attr.sched.axis = {z0.id, z1.id};
@@ -96,8 +96,8 @@ void Construct_Reduce_RR(af::AscGraph &graph) {
   *store_op1.y.axis = {z0.id, z1.id};
   store_op1.y.dtype = af::DT_FLOAT;
   *store_op1.y.axis = {z0.id, z1.id};
-  *store_op1.y.strides = {af::ops::One, af::ops::One};
-  *store_op1.y.repeats = {af::ops::Zero, af::ops::Zero};
+  *store_op1.y.strides = {af::ops::Zero, af::ops::Zero};
+  *store_op1.y.repeats = {af::ops::One, af::ops::One};
 
   Output output_op("output");
   output_op.x = store_op1.y;
@@ -244,15 +244,15 @@ void Construct_Reduce_Cast_RR(af::AscGraph &graph) {
   *load.y.axis = {z0.id, z1.id};
   load.y.dtype = af::DT_FLOAT;
   *load.y.strides = {s1, af::ops::One};
-  *load.y.repeats = {s1, s0};
+  *load.y.repeats = {s0, s1};
 
   Sum sum("sum");
   sum.attr.sched.axis = {z0.id, z1.id};
   sum.x = load.y;
   *sum.y.axis = {z0.id, z1.id};
   sum.y.dtype = af::DT_FLOAT;
-  *sum.y.strides = {af::ops::One, af::ops::One};
-  *sum.y.repeats = {af::ops::Zero, af::ops::Zero};
+  *sum.y.strides = {af::ops::Zero, af::ops::Zero};
+  *sum.y.repeats = {af::ops::One, af::ops::One};
 
   Cast cast("cast");
   cast.attr.sched.axis = {z0.id, z1.id};
@@ -260,8 +260,8 @@ void Construct_Reduce_Cast_RR(af::AscGraph &graph) {
   *cast.y.axis = {z0.id, z1.id};
   cast.y.dtype = af::DT_FLOAT16;
   *cast.y.axis = {z0.id, z1.id};
-  *cast.y.strides = {af::ops::One, af::ops::One};
-  *cast.y.repeats = {af::ops::Zero, af::ops::Zero};
+  *cast.y.strides = {af::ops::Zero, af::ops::Zero};
+  *cast.y.repeats = {af::ops::One, af::ops::One};
 
   Store store_op1("store1");
   store_op1.attr.sched.axis = {z0.id, z1.id};
@@ -269,8 +269,8 @@ void Construct_Reduce_Cast_RR(af::AscGraph &graph) {
   *store_op1.y.axis = {z0.id, z1.id};
   store_op1.y.dtype = af::DT_FLOAT16;
   *store_op1.y.axis = {z0.id, z1.id};
-  *store_op1.y.strides = {af::ops::One, af::ops::One};
-  *store_op1.y.repeats = {af::ops::Zero, af::ops::Zero};
+  *store_op1.y.strides = {af::ops::Zero, af::ops::Zero};
+  *store_op1.y.repeats = {af::ops::One, af::ops::One};
 
   Output output_op("output");
   output_op.x = store_op1.y;
@@ -432,7 +432,9 @@ TEST_F(OptimizerReduceSt, TestReduce_RARA) {
   ::ascir::FusedScheduledResult fused_scheduled_result;
   Status res = optimizer.Optimize(graph, fused_scheduled_result);
   EXPECT_EQ(res, af::SUCCESS);
-  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 5UL);
+  // RARA 单 reduce 双 R 轴: phase-1 各 tiling case 切分结构不同(relation 不一致), AppendReduceFirstStageGroup
+  // 回退逐 case 展开, 每个展开结果携带该 case 自身的 relation; 6 = Common 1 + RCore 展开 4 + AllLoad 1
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 6UL);
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups.size(), 1UL);
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs.size(), 4UL);
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][1].schedule_groups.size(), 2UL);
@@ -456,7 +458,9 @@ TEST_F(OptimizerReduceSt, TestReduce_ARAR) {
   ::ascir::FusedScheduledResult fused_scheduled_result;
   Status res = optimizer.Optimize(graph, fused_scheduled_result);
   EXPECT_EQ(res, af::SUCCESS);
-  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 5UL);
+  // ARAR 同 RARA: 单 reduce 双 R 轴 relation 不一致, 走逐 case 展开回退路径,
+  // 6 = Common 1 + RCore 展开 4 + AllLoad 1
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 6UL);
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups.size(), 1UL);
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs.size(), 4UL);
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][1].schedule_groups.size(), 2UL);
@@ -469,6 +473,7 @@ TEST_F(OptimizerReduceSt, TestReduce_RR) {
   ::ascir::FusedScheduledResult fused_scheduled_result;
   Status res = optimizer.Optimize(graph, fused_scheduled_result);
   EXPECT_EQ(res, af::SUCCESS);
+  // R-core phase-1 两个 tiling case 收敛为同 group 多 impl, RCore 任务的结果数 2 -> 1, 调度结果由 4 减为 3
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 3UL);
 }
 
@@ -479,6 +484,7 @@ TEST_F(OptimizerReduceSt, TestReduce_Cast_RR) {
   ::ascir::FusedScheduledResult fused_scheduled_result;
   Status res = optimizer.Optimize(graph, fused_scheduled_result);
   EXPECT_EQ(res, af::SUCCESS);
+  // 同 TestReduce_RR: R-core phase-1 多 case 收敛为同 group 多 impl, 调度结果由 4 减为 3
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 3UL);
 }
 
@@ -488,7 +494,7 @@ TEST_F(OptimizerReduceSt, TestReduce_PatitionNorm) {
   optimize::Optimizer optimizer(optimize::OptimizerOptions{});
   optimizer.Optimize(graph, fused_scheduled_result);
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results.size(), 1UL);
-  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0UL].size(), 2UL);
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0UL].size(), 3UL);
 }
 
 TEST_F(OptimizerReduceSt, TestReduce_Three_Elewise_Store) {
@@ -532,7 +538,7 @@ TEST_F(OptimizerReduceSt, TestReduce_Four_Elewise_Store_V2) {
   optimize::Optimizer optimizer(optimize::OptimizerOptions{});
   optimizer.Optimize(graph, fused_scheduled_result);
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results.size(), 1UL);
-  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0UL].size(), 2UL);
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0UL].size(), 3UL);
 }
 
 TEST_F(OptimizerReduceSt, TestReduce_Three_Elewise_Store_Multi_Citation) {
@@ -541,7 +547,7 @@ TEST_F(OptimizerReduceSt, TestReduce_Three_Elewise_Store_Multi_Citation) {
   optimize::Optimizer optimizer(optimize::OptimizerOptions{});
   optimizer.Optimize(graph, fused_scheduled_result);
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results.size(), 1UL);
-  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0UL].size(), 2UL);
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0UL].size(), 3UL);
 }
 
 TEST_F(OptimizerReduceSt, TestReduce_Four_Elewise_Store_V3) {
@@ -562,7 +568,9 @@ TEST_F(OptimizerReduceSt, TestReduce_Elewise_Store_MulReduce) {
   optimize::Optimizer optimizer(optimize::OptimizerOptions{});
   EXPECT_EQ(optimizer.Optimize(graph, fused_scheduled_result), af::SUCCESS);
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results.size(), 1UL);
-  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0UL].size(), 2UL);
+  // 双 reduce 链放开 R 轴分核后新增 RCore 调度结果, phase-1 多 tiling case 收敛为同 group 多
+  // impl, 共 3 个结果(Common/RCore/AllLoad 各一)
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0UL].size(), 3UL);
 }
 
 TEST_F(OptimizerReduceSt, TestReduce_Three_Elewise_Reduce_Post_Node_Multi_Input_V1) {
@@ -583,7 +591,7 @@ TEST_F(OptimizerReduceSt, TestReduce_Three_Elewise_Reduce_Post_Node_Multi_Input_
   optimize::Optimizer optimizer(optimize::OptimizerOptions{});
   optimizer.Optimize(graph, fused_scheduled_result);
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results.size(), 1UL);
-  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0UL].size(), 2UL);
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0UL].size(), 3UL);
 }
 
 TEST_F(OptimizerReduceSt, TestReduce_Three_Elewise_Store_Multi_Citation_Multi_Out) {
@@ -592,7 +600,7 @@ TEST_F(OptimizerReduceSt, TestReduce_Three_Elewise_Store_Multi_Citation_Multi_Ou
   optimize::Optimizer optimizer(optimize::OptimizerOptions{});
   optimizer.Optimize(graph, fused_scheduled_result);
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results.size(), 1UL);
-  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0UL].size(), 2UL);
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0UL].size(), 3UL);
 }
 
 // 双reduce水平融合（同输入不同输出、规约轴相同）场景走全流程Optimize，

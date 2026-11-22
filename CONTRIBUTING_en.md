@@ -63,3 +63,43 @@ Developer contribution scenarios mainly include:
   If you have appropriate solutions for problems encountered by others in the community, you are welcome to post comments in the Issue to exchange ideas, help others solve problems and pain points, and jointly optimize usability.
 
   If the corresponding Issue requires code modification, you can enter "/assign" or "/assign @yourself" in the Issue comment box to assign the Issue to yourself to track and assist in solving the problem.
+
+## Compiler and Runtime Library Compatibility
+
+The minimum GCC version for source builds is **7.3.0**; see [build dependencies](docs/en/build.md#421-install-dependencies).
+Avoid introducing features unsupported by GCC 7.3.0. The project does not require support for older compilers.
+The Autofuse [runtime requirements](docs/en/autofuse/introduction/enable_autofuse_inductor.md#runtime-requirements) separately specify GCC >= 9.5.0.
+Check the requirements for the actual component and use case; do not treat the build compiler requirement as the runtime library ABI baseline.
+
+### Development and Review Checks
+
+1. **Check language, standard library, and compiler extension support separately.** Enabling `-std=c++17` does not mean GCC 7.3.0 implements every C++17 feature.
+   Check new language features against the [GCC C++ support table](https://gcc.gnu.org/projects/cxx-status.html), and new standard library interfaces against the
+   [libstdc++ support table](https://gcc.gnu.org/onlinedocs/libstdc++/manual/status.html).
+   For example, the standard `<filesystem>` header was introduced in GCC 8 and cannot be assumed available in GCC 7.3.0.
+   Prefer existing compatible implementations in the project. Before using features that require a newer compiler, define the support changes and delivery impact.
+2. **Compile with the minimum supported toolchain.** Use GCC/G++ 7.3.0 with its matching headers and standard library to configure and build the relevant targets in a separate build directory.
+   Limit all builds to `-j 8` and run the relevant UT/ST. Reconfigure the build directory when changing compilers to avoid reusing an old cache.
+   Using `-std=c++17` with a newer compiler or checking `__GNUC__` alone does not demonstrate compatibility with the minimum version.
+3. **Inspect optimized ELF dependencies.** Compilers can turn ordinary arithmetic into runtime library calls. For example, signed `__int128` division and remainder operations on the same operands
+   can generate `__divmodti4@GCC_7.0.0` in optimized x86-64 builds.
+   Build with the actual delivery toolchain and optimization options. For each architecture, compare `GCC_*`, `GLIBCXX_*`, `CXXABI_*`, and `GLIBC_*` against its accepted delivery baseline,
+   and verify loading in the target runtime environment. Include third-party static libraries and generated code when inspecting the final shared library.
+4. **Explain new symbol version dependencies.** Record their source, whether the target runtime libraries provide them, and whether runtime requirements need to change.
+   `GCC_7.0.0` is an ELF symbol version name, not a compiler version. This repository currently provides no separate libgcc 4.8 compatibility guarantee; do not infer one.
+   If delivery requirements include compatibility with older runtime libraries, eliminate unnecessary new dependencies and add regression tests for actual compiled artifacts.
+
+Use the following commands to inspect delivered shared libraries and their dependency chains. `gcc --version` does not identify the runtime library versions actually loaded by a process:
+
+```bash
+readelf --wide --dyn-syms <delivered-library.so>
+readelf --wide --version-info <delivered-library.so>
+ldd -v <trusted-delivered-library.so>
+```
+
+The PGO timestamp ABI regression test compiles the actual source file with both `-O2` and `-O3` and inspects its ELF dynamic symbols.
+It guards against reintroducing the dependency described above and does not replace compatibility verification of the complete delivery package and target runtime environment:
+
+```bash
+python -m pytest autofuse/tests/st/python/test_pgo_timestamp_abi.py -q
+```

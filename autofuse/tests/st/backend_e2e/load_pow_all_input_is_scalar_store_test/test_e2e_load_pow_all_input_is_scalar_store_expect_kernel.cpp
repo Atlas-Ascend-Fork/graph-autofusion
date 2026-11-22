@@ -45,7 +45,8 @@ TEST_P(E2E_LoadPowAllInputIsScalarStore_Code, CalculateCorrect) {
   // Launch
   uint64_t ws_size = 0;
   AutofuseTiling(&tiling_data, &ws_size, &block_dim, 48, 192 * 1024);
-  printf("tiling key: %d, core_num: %d\n", tiling_data.tiling_key, tiling_data.block_dim);
+  // 新增 Brc workspace 切分候选后该图产生 2 个 scheduled result, tiling 字段按 graph 编号
+  printf("tiling key: %d, core_num: %d\n", tiling_data.graph0_tiling_key, tiling_data.block_dim);
 
   AscendC::SetKernelMode(KernelMode::AIV_MODE);
   ICPU_RUN_KF(load_pow_all_input_is_scalar_store_test, tiling_data.block_dim, (uint8_t *)x0, (uint8_t *)x1,

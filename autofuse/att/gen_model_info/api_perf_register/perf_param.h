@@ -24,7 +24,8 @@ struct NodePerfInfo {
   std::string output_dtype;
   std::vector<Expr> dims;
   Expr gm_stride;
-  int32_t block_count_idx{0};  // 用于 LoadStoreStrideV2Func，表示发生非连续的轴索引
+  int32_t block_count_idx{0};      // 用于 LoadStoreStrideV2Func，表示发生非连续的轴索引
+  int32_t loop_mode_dim_count{0};  // Codegen 外抛到 LoopMode 的维度数
 };
 using PipeHeadPerfFunc = att::Expr (*)(const std::vector<att::NodeInfo> &,
                                        std::map<att::Expr, att::TernaryOp, att::ExprCmp> &);

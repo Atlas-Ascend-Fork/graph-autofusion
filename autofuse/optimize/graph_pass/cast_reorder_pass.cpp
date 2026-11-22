@@ -103,7 +103,8 @@ bool IsLoadCastTransposePattern(const af::AscNodePtr &cast_node, const af::AscNo
   }
   const af::DataType src_dtype = cast_node->inputs[0].attr.dtype;
   const af::DataType dst_dtype = cast_node->outputs[0].attr.dtype;
-  return IsLowPrecisionFloat(src_dtype) && (dst_dtype == ge::DT_FLOAT);
+  return IsLowPrecisionFloat(src_dtype) && (dst_dtype == ge::DT_FLOAT) &&
+         ScheduleUtils::IsNodeSupportDataType<af::ascir_op::Transpose>(src_dtype);
 }
 
 bool IsTransposeCastStorePattern(const af::AscNodePtr &cast_node, const af::AscNodePtr &input_node,
@@ -113,7 +114,8 @@ bool IsTransposeCastStorePattern(const af::AscNodePtr &cast_node, const af::AscN
   }
   const af::DataType src_dtype = cast_node->inputs[0].attr.dtype;
   const af::DataType dst_dtype = cast_node->outputs[0].attr.dtype;
-  return (src_dtype == ge::DT_FLOAT) && IsLowPrecisionFloat(dst_dtype);
+  return (src_dtype == ge::DT_FLOAT) && IsLowPrecisionFloat(dst_dtype) &&
+         ScheduleUtils::IsNodeSupportDataType<af::ascir_op::Transpose>(dst_dtype);
 }
 
 af::Status ReorderLoadCastTranspose(const af::AscNodePtr &cast_node, const af::AscNodePtr &transpose_node) {

@@ -33,8 +33,7 @@ class VectorFuncSt : public ::testing::Test {
   void SetUp() override {
     setenv("DUMP_GE_GRAPH", "2", 1);
     ge::PlatformContext::GetInstance().Reset();
-    auto stub_v2 = std::make_shared<af::RuntimeStubV2>();
-    RuntimeStub::SetInstance(stub_v2);
+    af::InstallV35SocPerfRuntimeStub();
   }
   void TearDown() override {
     setenv("DUMP_GE_GRAPH", "0", 1);
@@ -966,7 +965,8 @@ TEST_F(VectorFuncSt, CastHorizontolFusion) {
   EXPECT_EQ(res, af::SUCCESS);
 
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results.size(), 1UL);
-  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 4UL);
+  // R-core phase-1 多 tiling case 收敛为同 group 多 impl, RCore 任务的结果数 2 -> 1, 调度结果由 4 减为 3
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 3UL);
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups.size(), 1UL);
   ASSERT_TRUE(!fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs.empty());
   std::vector<af::AscGraph> asc_graphs;
@@ -1055,7 +1055,8 @@ TEST_F(VectorFuncSt, vectorized_not_empty) {
   EXPECT_EQ(res, af::SUCCESS);
 
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results.size(), 1UL);
-  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 4UL);
+  // R-core phase-1 多 tiling case 收敛为同 group 多 impl, RCore 任务的结果数 2 -> 1, 调度结果由 4 减为 3
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 3UL);
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups.size(), 1UL);
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs.size(), 2UL);
   std::vector<af::AscGraph> asc_graphs;
@@ -1151,13 +1152,28 @@ TEST_F(VectorFuncSt, scalar_brc_fusion) {
   EXPECT_EQ(res, af::SUCCESS);
 
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results.size(), 1UL);
-
-  for (const auto &group : fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups) {
+  // 新增 Brc workspace 候选(恒为 result0): abs0->brc0 断边切分; 原 VF 融合模板为 fallback 候选(result1)
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 2UL);
+  // 两个候选的所有 impl 图中 brc0/brc1 均被消除(折叠进 VF 节点或算子属性)
+  for (const auto &result : fused_scheduled_result.node_idx_to_scheduled_results[0]) {
+    for (const auto &group : result.schedule_groups) {
+      for (const auto &impl_graph : group.impl_graphs) {
+        auto brc_node0 = impl_graph.FindNode("brc0");
+        EXPECT_EQ(brc_node0, nullptr);
+        auto brc_node1 = impl_graph.FindNode("brc1");
+        EXPECT_EQ(brc_node1, nullptr);
+      }
+    }
+  }
+  // ws 候选: 生产/消费两个调度组, 生产侧经 Store 写 workspace
+  const auto &ws_result = fused_scheduled_result.node_idx_to_scheduled_results[0][0];
+  ASSERT_EQ(ws_result.schedule_groups.size(), 2UL);
+  EXPECT_NE(ws_result.schedule_groups[0].impl_graphs[0].FindNode("abs0_to_brc0_Store_0"), nullptr);
+  // fallback 候选: VF 融合单图结构, 子图数为 1
+  const auto &fallback_result = fused_scheduled_result.node_idx_to_scheduled_results[0][1];
+  ASSERT_EQ(fallback_result.schedule_groups.size(), 1UL);
+  for (const auto &group : fallback_result.schedule_groups) {
     for (const auto &impl_graph : group.impl_graphs) {
-      auto brc_node0 = impl_graph.FindNode("brc0");
-      EXPECT_EQ(brc_node0, nullptr);
-      auto brc_node1 = impl_graph.FindNode("brc1");
-      EXPECT_EQ(brc_node1, nullptr);
       std::vector<af::AscGraph> asc_graphs;
       impl_graph.GetAllSubGraphs(asc_graphs);
       EXPECT_EQ(asc_graphs.size(), 1UL);
@@ -1492,11 +1508,22 @@ TEST_F(VectorFuncSt, CastNotFusion) {
   EXPECT_EQ(res, af::SUCCESS);
 
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results.size(), 1UL);
+  // 新增 Brc workspace 候选(恒为 result0): 广播后移后 Abs1->brc4 断边切分; 原模板为 fallback 候选(result1)
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 2UL);
+  const auto &ws_result = fused_scheduled_result.node_idx_to_scheduled_results[0][0];
+  ASSERT_EQ(ws_result.schedule_groups.size(), 2UL);
+  EXPECT_NE(ws_result.schedule_groups[0].impl_graphs[0].FindNode("Abs1_to_brc4_Store_0"), nullptr);
+  EXPECT_EQ(ws_result.schedule_groups[0].impl_graphs[0].FindNode("brc4"), nullptr);
+  EXPECT_NE(ws_result.schedule_groups[1].impl_graphs[0].FindNode("Abs1_to_brc4_Load_0"), nullptr);
+  EXPECT_NE(ws_result.schedule_groups[1].impl_graphs[0].FindNode("brc4"), nullptr);
+
+  // fallback 候选: 原 Cast 不融合模板结构保持
+  const auto &fallback_result = fused_scheduled_result.node_idx_to_scheduled_results[0][1];
+  ASSERT_EQ(fallback_result.schedule_groups.size(), 1UL);
   std::vector<af::AscGraph> asc_graphs;
-  fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs[0].GetAllSubGraphs(
-      asc_graphs);
+  fallback_result.schedule_groups[0].impl_graphs[0].GetAllSubGraphs(asc_graphs);
   EXPECT_EQ(asc_graphs.size(), 3UL);
-  auto graph1 = fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs[1];
+  auto graph1 = fallback_result.schedule_groups[0].impl_graphs[1];
   std::vector<af::AscGraph> asc_graphs1;
   graph1.GetAllSubGraphs(asc_graphs1);
   ASSERT_EQ(asc_graphs1.size(), 2UL);

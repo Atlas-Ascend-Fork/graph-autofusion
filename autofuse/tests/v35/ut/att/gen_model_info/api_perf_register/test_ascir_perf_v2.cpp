@@ -28,6 +28,7 @@
 #include "tests/ut/common/ascir_reduce_test_helpers.h"
 #include "tests/depends/slog/src/slog_stub.h"
 #include "../../../../att/gen_model_info/api_perf_register/nddma_test_utils.h"
+#include "soc_perf_test_config.h"
 
 using namespace att;
 using namespace af::sym;
@@ -36,7 +37,31 @@ using namespace af::ascir;
 namespace att {
 af::Status LoadStoreStrideV2Func(const std::map<std::string, float> &param_map, const std::vector<Expr> &dims,
                                  const Expr &stride, Expr &res);
+}  // namespace att
+
+namespace {
+// LoadV2 引入单核分支后，pipe_res[AIV_MTE2]为外层load_core_case_node三元变量（block_dim==1选单核参数）。
+// 用例通过本函数取指定分支的表达式后再做公式断言；取分支失败时记录失败并返回哑值，避免解引用UB。
+Expr SelectLoadCoreBranch(const std::map<Expr, TernaryOp, ExprCmp> &ternary_ops, bool single_core) {
+  const Expr var = CreateExpr("load_core_case_node");
+  const auto iter = ternary_ops.find(var);
+  if (iter == ternary_ops.end()) {
+    ADD_FAILURE() << "load_core_case_node not found in ternary_ops";
+    return CreateExpr(0);
+  }
+  const auto if_case = iter->second.DeepCopyIfCase();
+  if (if_case == nullptr) {
+    ADD_FAILURE() << "DeepCopyIfCase of load_core_case_node returned nullptr";
+    return CreateExpr(0);
+  }
+  const auto branch = single_core ? if_case->GetChoiceA() : if_case->GetChoiceB();
+  if (branch == nullptr) {
+    ADD_FAILURE() << "branch of load_core_case_node is nullptr, single_core=" << single_core;
+    return CreateExpr(0);
+  }
+  return branch->GetExpr();
 }
+}  // namespace
 
 class UTestAscirPerfV2 : public ::testing::Test {
  public:
@@ -54,6 +79,7 @@ class UTestAscirPerfV2 : public ::testing::Test {
   void SetUp() override {
     setenv("ASCEND_GLOBAL_LOG_LEVEL", "0", 1);
     setenv("ASCEND_SLOG_PRINT_TO_STDOUT", "1", 1);
+    ASSERT_EQ(soc_perf_test::SetSocPerfTestPlatform(soc_perf_test::kV35NpuArch, soc_perf_test::kSocEmpty), af::SUCCESS);
   }
   void TearDown() override {}
 };
@@ -122,15 +148,17 @@ std::string GetUnaryPerfExpr(const std::string &api_name, const std::string &inp
 struct TransposePerfResult {
   std::string pipe_expr;
   std::string ternary_expr;
+  PerfOutputInfo perf;
 };
 
 TransposePerfResult GetTransposePerfExpr(uint32_t total_dim, uint32_t inner_dim, const std::vector<Expr> &output_dims,
                                          const std::vector<Expr> &outer_loop_axes,
-                                         const std::vector<Expr> &input_strides, bool valid = true) {
+                                         const std::vector<Expr> &input_strides, bool valid = true,
+                                         const std::string &dtype = kFloat16) {
   auto api = ApiPerfFactory::Instance().Create("TransposeV2");
   EXPECT_NE(api, nullptr);
   NodeDetail node_info;
-  node_info.input_dtype = {kFloat16};
+  node_info.input_dtype = {dtype};
   node_info.input_dims = output_dims;
   node_info.transpose_node_params.valid = valid;
   node_info.transpose_node_params.total_dim = total_dim;
@@ -146,7 +174,7 @@ TransposePerfResult GetTransposePerfExpr(uint32_t total_dim, uint32_t inner_dim,
     const auto &ternary = perf_res.ternary_ops.begin()->second;
     ternary_expr = ternary.GetTernaryOpStr();
   }
-  return {Str(perf_res.pipe_res[PipeType::AIV_VEC]), ternary_expr};
+  return {Str(perf_res.pipe_res[PipeType::AIV_VEC]), ternary_expr, perf_res};
 }
 
 TEST_F(UTestAscirPerfV2, IsNanPerfUsesFloat32BoolFormula) {
@@ -226,6 +254,144 @@ TEST_F(UTestAscirPerfV2, TransposePerfUsesGenericFormulaAndStrideTernary) {
       {CreateExpr(256), CreateExpr(128), CreateExpr(64), CreateExpr(32), CreateExpr("transpose_stride")});
   EXPECT_EQ(result.pipe_expr, "(22 + transpose_stride_count)");
   EXPECT_EQ(result.ternary_expr, "TernaryOp(IsEqual(Mod(transpose_stride, 64), 0), 64, Mod(transpose_stride, 64))");
+}
+
+bool GetTransposeConstantValue(Expr value, double &result) {
+  value.Simplify();
+  if (value.GetExprType() == af::ExprType::kExprConstantInteger) {
+    int64_t integer = 0;
+    if (!value.GetConstValue(integer)) {
+      return false;
+    }
+    result = static_cast<double>(integer);
+    return true;
+  }
+  return value.IsConstExpr() && value.GetConstValue(result);
+}
+
+double EvaluateTransposeCycles(const TransposePerfResult &result, std::vector<std::pair<Expr, Expr>> bindings = {}) {
+  Expr cycles = result.perf.pipe_res.at(PipeType::AIV_VEC);
+  for (size_t pass = 0U; pass <= result.perf.ternary_ops.size(); ++pass) {
+    for (const auto &item : result.perf.ternary_ops) {
+      auto choice = item.second.DeepCopyIfCase();
+      choice->Replace(bindings);
+      bool resolved = true;
+      while (!choice->IsLeaf()) {
+        const auto equal = choice->GetCondType() == CondType::K_GE
+                               ? af::SymbolicUtils::StaticCheckLe(choice->GetCondRight(), choice->GetCondLeft())
+                               : af::SymbolicUtils::StaticCheckEq(choice->GetCondLeft(), choice->GetCondRight());
+        if (equal == af::TriBool::kUnknown) {
+          resolved = false;
+          break;
+        }
+        choice = equal == af::TriBool::kTrue ? choice->GetChoiceA() : choice->GetChoiceB();
+      }
+      double value = 0.0;
+      if (resolved && GetTransposeConstantValue(choice->GetExpr(), value)) {
+        bindings.emplace_back(item.first, CreateExpr(value));
+      }
+    }
+    Expr current = cycles.Replace(bindings);
+    current.Simplify();
+    double value = 0.0;
+    if (GetTransposeConstantValue(current, value)) {
+      return value;
+    }
+  }
+  ADD_FAILURE() << "Unresolved transpose performance: " << result.pipe_expr;
+  return 0.0;
+}
+
+TEST_F(UTestAscirPerfV2, TransposeUnitOuterMatchesIndependentComponentMeasurements) {
+  // Separate INDEX/GATHER/FULL microkernels; these points are excluded from coefficient fitting.
+  const std::vector<std::pair<std::string, double>> measured = {
+      {kFloat16, 9762.27}, {kFloat32, 11200.04}, {kInt64, 20246.41}};
+  for (const auto &item : measured) {
+    SCOPED_TRACE(item.first);
+    const auto result = GetTransposePerfExpr(3, 3, {CreateExpr(1), CreateExpr(64), CreateExpr(128)}, {},
+                                             {CreateExpr(8192), CreateExpr(1), CreateExpr(64)}, true, item.first);
+    EXPECT_NEAR(EvaluateTransposeCycles(result), item.second, item.second * 0.1);
+  }
+}
+
+TEST_F(UTestAscirPerfV2, TransposeUnitOuterUsesBankGcdForNonPowerOfTwoStride) {
+  for (const auto &dtype : {kFloat16, kFloat32, kInt64}) {
+    const auto stride_twelve = GetTransposePerfExpr(3, 3, {CreateExpr(1), CreateExpr(12), CreateExpr(64)}, {},
+                                                    {CreateExpr(768), CreateExpr(1), CreateExpr(12)}, true, dtype);
+    const auto stride_four = GetTransposePerfExpr(3, 3, {CreateExpr(1), CreateExpr(4), CreateExpr(192)}, {},
+                                                  {CreateExpr(768), CreateExpr(1), CreateExpr(4)}, true, dtype);
+    EXPECT_NEAR(EvaluateTransposeCycles(stride_twelve), EvaluateTransposeCycles(stride_four), 1e-6);
+  }
+}
+
+TEST_F(UTestAscirPerfV2, TransposeUnitOuterSymbolicPredicateAndGcdMatchConstantDescriptors) {
+  const Expr outer = CreateExpr("unit_outer"), rows = CreateExpr("transpose_rows");
+  const auto symbolic = GetTransposePerfExpr(3, 3, {outer, rows, CreateExpr(64)}, {CreateExpr(2)},
+                                             {CreateExpr(768), CreateExpr(1), rows}, true, kFloat32);
+  for (const int64_t o : {1L, 2L}) {
+    for (const int64_t r : {4L, 12L, 32L, 64L}) {
+      const auto constant = GetTransposePerfExpr(3, 3, {CreateExpr(o), CreateExpr(r), CreateExpr(64)}, {CreateExpr(2)},
+                                                 {CreateExpr(768), CreateExpr(1), CreateExpr(r)}, true, kFloat32);
+      EXPECT_NEAR(EvaluateTransposeCycles(symbolic, {{outer, CreateExpr(o)}, {rows, CreateExpr(r)}}),
+                  EvaluateTransposeCycles(constant), 1e-6);
+    }
+  }
+}
+
+TEST_F(UTestAscirPerfV2, TransposeUnitOuterB64SymbolicRowsMatchConstantDescriptors) {
+  const Expr rows = CreateExpr("b64_rows"), columns = CreateExpr("b64_columns");
+  const auto symbolic = GetTransposePerfExpr(3, 3, {CreateExpr(1), rows, columns}, {},
+                                             {rows * columns, CreateExpr(1), rows}, true, kInt64);
+  for (const int64_t r : {5L, 12L, 28L, 40L}) {
+    for (const int64_t c : {8L, 16L, 20L, 36L, 56L, 104L}) {
+      const auto constant = GetTransposePerfExpr(3, 3, {CreateExpr(1), CreateExpr(r), CreateExpr(c)}, {},
+                                                 {CreateExpr(r * c), CreateExpr(1), CreateExpr(r)}, true, kInt64);
+      EXPECT_NEAR(EvaluateTransposeCycles(symbolic, {{rows, CreateExpr(r)}, {columns, CreateExpr(c)}}),
+                  EvaluateTransposeCycles(constant), 1e-6);
+    }
+  }
+}
+
+TEST_F(UTestAscirPerfV2, TransposeUnitOuterB32ShortRowsMatchIndependentMeasurements) {
+  // Independent short-row holdout; no coefficient was fitted to these points.
+  for (const auto &dtype : {kFloat32, kInt32}) {
+    const auto short_row = GetTransposePerfExpr(3, 3, {CreateExpr(1), CreateExpr(20), CreateExpr(14)}, {},
+                                                {CreateExpr(280), CreateExpr(1), CreateExpr(20)}, true, dtype);
+    const auto near_boundary = GetTransposePerfExpr(3, 3, {CreateExpr(1), CreateExpr(80), CreateExpr(26)}, {},
+                                                    {CreateExpr(2080), CreateExpr(1), CreateExpr(80)}, true, dtype);
+    EXPECT_NEAR(EvaluateTransposeCycles(short_row), 379.6842, 379.6842 * 0.1);
+    EXPECT_NEAR(EvaluateTransposeCycles(near_boundary), 1718.0726, 1718.0726 * 0.1);
+  }
+}
+
+TEST_F(UTestAscirPerfV2, TransposeUnitOuterB32SymbolicShortRowBoundaryMatchesConstantDescriptors) {
+  const Expr rows = CreateExpr("b32_rows"), columns = CreateExpr("b32_columns");
+  const auto symbolic = GetTransposePerfExpr(3, 3, {CreateExpr(1), rows, columns}, {},
+                                             {rows * columns, CreateExpr(1), rows}, true, kFloat32);
+  for (const int64_t r : {12L, 48L, 80L}) {
+    for (const int64_t c : {8L, 24L, 31L, 32L, 33L, 40L}) {
+      const auto constant = GetTransposePerfExpr(3, 3, {CreateExpr(1), CreateExpr(r), CreateExpr(c)}, {},
+                                                 {CreateExpr(r * c), CreateExpr(1), CreateExpr(r)}, true, kFloat32);
+      EXPECT_NEAR(EvaluateTransposeCycles(symbolic, {{rows, CreateExpr(r)}, {columns, CreateExpr(c)}}),
+                  EvaluateTransposeCycles(constant), 1e-6);
+    }
+  }
+}
+
+TEST_F(UTestAscirPerfV2, TransposeUnitOuterSymbolicPaddedInputKeepsLegacyBranch) {
+  const Expr pitch = CreateExpr("transpose_input_pitch");
+  const auto symbolic = GetTransposePerfExpr(3, 3, {CreateExpr(1), CreateExpr(64), CreateExpr(128)}, {},
+                                             {CreateExpr(8192), CreateExpr(1), pitch}, true, kFloat32);
+  const auto compact = GetTransposePerfExpr(3, 3, {CreateExpr(1), CreateExpr(64), CreateExpr(128)}, {},
+                                            {CreateExpr(8192), CreateExpr(1), CreateExpr(64)}, true, kFloat32);
+  EXPECT_NEAR(EvaluateTransposeCycles(symbolic, {{pitch, CreateExpr(64)}}), EvaluateTransposeCycles(compact), 1e-6);
+  EXPECT_NEAR(EvaluateTransposeCycles(symbolic, {{pitch, CreateExpr(128)}}), 6680.0, 1e-6);
+}
+
+TEST_F(UTestAscirPerfV2, TransposeUnitOuterPreservesPaddedInputLegacyCost) {
+  const auto padded = GetTransposePerfExpr(3, 3, {CreateExpr(1), CreateExpr(64), CreateExpr(128)}, {},
+                                           {CreateExpr(8192), CreateExpr(1), CreateExpr(128)}, true, kFloat32);
+  EXPECT_NEAR(EvaluateTransposeCycles(padded), 6680.0, 1e-6);
 }
 
 TEST_F(UTestAscirPerfV2, TransposePerfFallsBackToUnitVectorWhenParamsInvalid) {
@@ -357,6 +523,96 @@ TEST_F(UTestAscirPerfV2, CastSameBitCallCountUsesOuterDim) {
   EXPECT_TRUE(perf.ternary_ops.empty());
   EXPECT_EQ(Str(perf.pipe_res[PipeType::AIV_VEC]).find("cast_call_count"), std::string::npos);
   EXPECT_NE(Str(perf.pipe_res[PipeType::AIV_VEC]).find("cast_outer"), std::string::npos);
+}
+
+std::string GetFloatToUintCastPerfExpr(const std::string &output_dtype) {
+  NodeDetail node_detail = MakeCastNodeDetail(kFloat32, output_dtype);
+  PerfOutputInfo perf;
+  EXPECT_EQ(att::ascendcperf_v2::CastPerf(node_detail, perf), af::SUCCESS);
+  return Str(perf.pipe_res[PipeType::AIV_VEC]);
+}
+
+TEST_F(UTestAscirPerfV2, CastFloatToUint8PerfExpr) {
+  EXPECT_EQ(GetFloatToUintCastPerfExpr(kUInt8), "(((15 * cast_repeat_time) + 28) * cast_call_count)");
+}
+
+TEST_F(UTestAscirPerfV2, CastFloatToUint16PerfExpr) {
+  EXPECT_EQ(GetFloatToUintCastPerfExpr(kUInt16), "(((15 * cast_repeat_time) + 28) * cast_call_count)");
+}
+
+TEST_F(UTestAscirPerfV2, CastFloatToUint32PerfExpr) {
+  EXPECT_EQ(GetFloatToUintCastPerfExpr(kUInt32), "(((6 * cast_repeat_time) + 28) * cast_call_count)");
+}
+
+TEST_F(UTestAscirPerfV2, CastFloatToUint64PerfExpr) {
+  EXPECT_EQ(GetFloatToUintCastPerfExpr(kUInt64), "(((5 * cast_repeat_time) + 28) * cast_call_count)");
+}
+
+std::string GetCastV2PerfExpr(const std::string &input_dtype, const std::string &output_dtype) {
+  NodeDetail node_detail = MakeCastNodeDetail(input_dtype, output_dtype);
+  PerfOutputInfo perf;
+  EXPECT_EQ(att::ascendcperf_v2::CastPerf(node_detail, perf), af::SUCCESS);
+  return Str(perf.pipe_res[PipeType::AIV_VEC]);
+}
+
+TEST_F(UTestAscirPerfV2, CastInt8ToInt32PerfExpr) {
+  EXPECT_EQ(GetCastV2PerfExpr(kInt8, kInt32), "(((3 * cast_repeat_time) + 25) * cast_call_count)");
+}
+
+TEST_F(UTestAscirPerfV2, CastInt16ToInt32PerfExpr) {
+  EXPECT_EQ(GetCastV2PerfExpr(kInt16, kInt32), "(((3 * cast_repeat_time) + 25) * cast_call_count)");
+}
+
+TEST_F(UTestAscirPerfV2, CastInt8ToInt64PerfExpr) {
+  EXPECT_EQ(GetCastV2PerfExpr(kInt8, kInt64), "(((5 * cast_repeat_time) + 28) * cast_call_count)");
+}
+
+TEST_F(UTestAscirPerfV2, CastInt16ToInt64PerfExpr) {
+  EXPECT_EQ(GetCastV2PerfExpr(kInt16, kInt64), "(((5 * cast_repeat_time) + 28) * cast_call_count)");
+}
+
+TEST_F(UTestAscirPerfV2, CastUint8ToBoolPerfExpr) {
+  EXPECT_EQ(GetCastV2PerfExpr(kUInt8, kBool), "(((4 * cast_repeat_time) + 30) * cast_call_count)");
+}
+
+TEST_F(UTestAscirPerfV2, CastUint16ToBoolPerfExpr) {
+  EXPECT_EQ(GetCastV2PerfExpr(kUInt16, kBool), "(((4 * cast_repeat_time) + 30) * cast_call_count)");
+}
+
+TEST_F(UTestAscirPerfV2, CastUint32ToBoolPerfExpr) {
+  EXPECT_EQ(GetCastV2PerfExpr(kUInt32, kBool), "(((4 * cast_repeat_time) + 30) * cast_call_count)");
+}
+
+TEST_F(UTestAscirPerfV2, CastUint64ToBoolPerfExpr) {
+  EXPECT_EQ(GetCastV2PerfExpr(kUInt64, kBool), "(((26 * cast_repeat_time) + 37) * cast_call_count)");
+}
+
+TEST_F(UTestAscirPerfV2, CastInt32ToUint8PerfExpr) {
+  EXPECT_EQ(GetCastV2PerfExpr(kInt32, kUInt8), "(((3 * cast_repeat_time) + 25) * cast_call_count)");
+}
+
+TEST_F(UTestAscirPerfV2, CastInt32ToInt8PerfExpr) {
+  EXPECT_EQ(GetCastV2PerfExpr(kInt32, kInt8), "(((4 * cast_repeat_time) + 28) * cast_call_count)");
+}
+
+TEST_F(UTestAscirPerfV2, CastInt64ToInt16PerfExpr) {
+  EXPECT_EQ(GetCastV2PerfExpr(kInt64, kInt16), "(((5 * cast_repeat_time) + 28) * cast_call_count)");
+}
+
+TEST_F(UTestAscirPerfV2, CastInt64ToInt8PerfExpr) {
+  EXPECT_EQ(GetCastV2PerfExpr(kInt64, kInt8), "(((6 * cast_repeat_time) + 28) * cast_call_count)");
+}
+
+TEST_F(UTestAscirPerfV2, CastUint16ToFloatPerfExpr) {
+  EXPECT_EQ(GetCastV2PerfExpr(kUInt16, kFloat32), "(((4 * cast_repeat_time) + 25) * cast_call_count)");
+}
+
+TEST_F(UTestAscirPerfV2, CastUint32ToFloatPerfExpr) {
+  EXPECT_EQ(GetCastV2PerfExpr(kUInt32, kFloat32), "(((6 * cast_repeat_time) + 29) * cast_call_count)");
+}
+
+TEST_F(UTestAscirPerfV2, CastUint64ToFloatPerfExpr) {
+  EXPECT_EQ(GetCastV2PerfExpr(kUInt64, kFloat32), "(((9 * cast_repeat_time) + 31) * cast_call_count)");
 }
 TEST_F(UTestAscirPerfV2, FillSpecificParamsStoresSharedReduceParamsOnAscNode) {
   using ascir_reduce_test_helpers::BuildReduceNodeInfo;
@@ -529,7 +785,8 @@ TEST_F(UTestAscirPerfV2, TestLoadApiForTypev1) {
   std::vector<att::TensorShapeInfo> input_shapes(1);
   std::vector<att::TensorShapeInfo> output_shapes(1);
   Expr z0t_size = CreateExpr("z0t_size");
-  Expr z1t_size = CreateExpr("z1t_size");
+  // Keep a real repeated row; dynamic unit-axis behavior is covered separately.
+  Expr z1t_size = CreateExpr(2);
 
   input_shapes[0].data_type = "float32";
   input_shapes[0].repeats = {z0t_size, z1t_size, CreateExpr(64)};
@@ -550,16 +807,17 @@ TEST_F(UTestAscirPerfV2, TestLoadApiForTypev1) {
   node.node_ptr = GraphConstructUtils::ConstructSingleOp("Load", 1, 1);
   auto result = perf(input_shapes, output_shapes, node, perf_res);
   EXPECT_EQ(result, af::SUCCESS);
-  Expr res = perf_res.pipe_res[PipeType::AIV_MTE2];
   // 存在外抛
   const auto ternary_ops = perf_res.ternary_ops;
   const auto ret = ConcursiveReplaceVars(ternary_ops);
+  Expr res = SelectLoadCoreBranch(ternary_ops, false);
   // LoadStride calculation: k=0.005, block_count=z0t_size*z1t_size, stride_used=min(448*4, 4096)=1792
   // Result: 0.005 * z0t_size * z1t_size * 1792 = 8.96 * z0t_size * z1t_size
-  const std::string expect_stride = "(8.95999979972839 * z0t_size * z1t_size)";
-  const std::string load_perf = "(256 * z0t_size * z1t_size / (((6.40880012512207 / (block_dim)) + 13.1354999542236)))";
-  // Note: The order of terms in the output is (load_perf + stride + 160.0)
-  EXPECT_EQ(Str(res.Replace(ret)), "(" + load_perf + " + " + expect_stride + " + 160.0)");
+  const Expr expected =
+      CreateExpr(256) * z0t_size * z1t_size / (CreateExpr(6.4088F) / CreateExpr("block_dim") + CreateExpr(13.1355F)) +
+      CreateExpr(0.005F) * z0t_size * z1t_size * CreateExpr(1792) + CreateExpr(160.0F);
+  EXPECT_EQ(af::SymbolicUtils::StaticCheckEq(res.Replace(ret), expected), af::TriBool::kTrue)
+      << Str(res.Replace(ret)) << " vs " << Str(expected);
 }
 
 TEST_F(UTestAscirPerfV2, TestLoadApiForTypev2) {
@@ -587,10 +845,10 @@ TEST_F(UTestAscirPerfV2, TestLoadApiForTypev2) {
   node.node_ptr = GraphConstructUtils::ConstructSingleOp("Load", 1, 1);
   auto result = perf(input_shapes, output_shapes, node, perf_res);
   EXPECT_EQ(result, af::SUCCESS);
-  Expr res = perf_res.pipe_res[PipeType::AIV_MTE2];
   // 存在外抛
   auto ternary_ops = perf_res.ternary_ops;
   auto ret = ConcursiveReplaceVars(ternary_ops);
+  Expr res = SelectLoadCoreBranch(ternary_ops, false);
   EXPECT_EQ(Str(res.Replace(ret)),
             "((256 * z0t_size * z1t_size / (((6.40880012512207 / (block_dim)) + 13.1354999542236))) + 160.0)");
 }
@@ -627,15 +885,97 @@ TEST_F(UTestAscirPerfV2, TestLoadApiForTypev3) {
   node.node_ptr = GraphConstructUtils::ConstructSingleOp("Load", 1, 1);
   auto result = perf(input_shapes, output_shapes, node, perf_res);
   EXPECT_EQ(result, af::SUCCESS);
-  Expr res = perf_res.pipe_res[PipeType::AIV_MTE2];
   // 存在外抛
   auto ternary_ops = perf_res.ternary_ops;
   auto ret = ConcursiveReplaceVars(ternary_ops);
+  Expr res = SelectLoadCoreBranch(ternary_ops, false);
   EXPECT_EQ(Str(res.Replace(ret)),
             "TernaryOp(((1666 * z0z1t_size * z4t_size) + -256) < 0, ((13328 * z0z1t_size * z4t_size / "
             "(((6.40880012512207 / (block_dim)) + 13.1354999542236))) + 160.0), ((13328 * z0z1t_size * z4t_size / "
             "(((6.61549997329712 / (block_dim)) + 11.8291997909546))) + 160.0))");
   EXPECT_EQ(config.size(), 1);
+}
+
+// LoadV2: block_dim==1 时切换 LoadSingleCore 参数分支；静态 use_case 下两分支均为具体公式
+TEST_F(UTestAscirPerfV2, TestLoadApiSingleCoreBranchStructure) {
+  std::vector<att::TensorShapeInfo> input_shapes(1);
+  std::vector<att::TensorShapeInfo> output_shapes(1);
+  Expr z0t_size = CreateExpr("z0t_size");
+  // Keep a real repeated row; dynamic unit-axis behavior is covered separately.
+  Expr z1t_size = CreateExpr(2);
+
+  input_shapes[0].data_type = "float32";
+  input_shapes[0].repeats = {z0t_size, z1t_size, CreateExpr(64)};
+  input_shapes[0].gm_strides = {z0t_size * CreateExpr(512), CreateExpr(512), CreateExpr(1)};
+  input_shapes[0].strides = input_shapes[0].gm_strides;
+  output_shapes[0].data_type = "float32";
+  output_shapes[0].repeats = input_shapes[0].repeats;
+  output_shapes[0].gm_strides = {z0t_size * CreateExpr(512), CreateExpr(512), CreateExpr(1)};
+  output_shapes[0].strides = output_shapes[0].gm_strides;
+  input_shapes[0].data_type_size = 2;
+  output_shapes[0].data_type_size = 2;
+
+  PerfOutputInfo perf_res;
+  NodeInfo node;
+  auto load_v2 = ApiPerfFactory::Instance().Create("LoadV2");
+  ASSERT_NE(load_v2, nullptr);
+  auto perf = load_v2->GetPerfFunc();
+  node.node_ptr = GraphConstructUtils::ConstructSingleOp("Load", 1, 1);
+  auto result = perf(input_shapes, output_shapes, node, perf_res);
+  EXPECT_EQ(result, af::SUCCESS);
+  EXPECT_EQ(Str(perf_res.pipe_res[PipeType::AIV_MTE2]), "load_core_case_node");
+  const auto ternary_ops = perf_res.ternary_ops;
+  const auto ret = ConcursiveReplaceVars(ternary_ops);
+  const auto iter = ternary_ops.find(CreateExpr("load_core_case_node"));
+  ASSERT_NE(iter, ternary_ops.end());
+  const auto if_case = iter->second.DeepCopyIfCase();
+  ASSERT_NE(if_case, nullptr);
+  EXPECT_EQ(if_case->GetCondType(), CondType::K_EQ);
+  EXPECT_EQ(Str(if_case->GetCondLeft()), "block_dim");
+  EXPECT_EQ(Str(if_case->GetCondRight()), "1");
+  // 单核条目当前占位值与多核一致，两分支公式相同；上板拟合值合入后需更新单核分支断言
+  const std::string expect_stride = "(17.9199995994568 * z0t_size)";
+  const std::string load_perf = "(512 * z0t_size / (((6.40880012512207 / (block_dim)) + 13.1354999542236)))";
+  const std::string expect_expr = "(" + expect_stride + " + " + load_perf + " + 160.0)";
+  EXPECT_EQ(Str(SelectLoadCoreBranch(ternary_ops, false).Replace(ret)), expect_expr);
+  EXPECT_EQ(Str(SelectLoadCoreBranch(ternary_ops, true).Replace(ret)), expect_expr);
+}
+
+// LoadV2: 动态 use_case 时外层单核/多核分支分别为内层三元变量 load_single_core_node / load_node
+TEST_F(UTestAscirPerfV2, TestLoadApiSingleCoreDynamicCaseNested) {
+  std::vector<att::TensorShapeInfo> input_shapes(1);
+  std::vector<att::TensorShapeInfo> output_shapes(1);
+  Expr z0t_size = CreateExpr("z0t_size");
+  Expr dyn_len = CreateExpr("dyn_len");
+
+  input_shapes[0].data_type = "float32";
+  input_shapes[0].repeats = {z0t_size, dyn_len};
+  input_shapes[0].gm_strides = {CreateExpr(512), CreateExpr(1)};
+  input_shapes[0].strides = input_shapes[0].gm_strides;
+  output_shapes[0].data_type = "float32";
+  output_shapes[0].repeats = input_shapes[0].repeats;
+  output_shapes[0].gm_strides = input_shapes[0].gm_strides;
+  output_shapes[0].strides = output_shapes[0].gm_strides;
+  input_shapes[0].data_type_size = 2;
+  output_shapes[0].data_type_size = 2;
+
+  PerfOutputInfo perf_res;
+  NodeInfo node;
+  auto load_v2 = ApiPerfFactory::Instance().Create("LoadV2");
+  ASSERT_NE(load_v2, nullptr);
+  auto perf = load_v2->GetPerfFunc();
+  node.node_ptr = GraphConstructUtils::ConstructSingleOp("Load", 1, 1);
+  auto result = perf(input_shapes, output_shapes, node, perf_res);
+  EXPECT_EQ(result, af::SUCCESS);
+  const auto ternary_ops = perf_res.ternary_ops;
+  const auto iter = ternary_ops.find(CreateExpr("load_core_case_node"));
+  ASSERT_NE(iter, ternary_ops.end());
+  const auto if_case = iter->second.DeepCopyIfCase();
+  ASSERT_NE(if_case, nullptr);
+  EXPECT_EQ(Str(if_case->GetChoiceA()->GetExpr()), "load_single_core_node");
+  EXPECT_EQ(Str(if_case->GetChoiceB()->GetExpr()), "load_node");
+  EXPECT_NE(ternary_ops.find(CreateExpr("load_single_core_node")), ternary_ops.end());
+  EXPECT_NE(ternary_ops.find(CreateExpr("load_node")), ternary_ops.end());
 }
 
 TEST_F(UTestAscirPerfV2, TestStoreApiForType) {
@@ -705,8 +1045,132 @@ TEST_F(UTestAscirPerfV2, TestStoreApiCacheLineExprUsesSingleTransferLen) {
 
   EXPECT_EQ(result, af::SUCCESS);
   ASSERT_EQ(config.size(), 1U);
-  EXPECT_TRUE(config[0].cache_line_expr == inner_bytes);
+  // 该 shape 在 GM/UB 上都完全连续，合轴后只剩一维，DataCopyPad 的 blockCount=1、
+  // blockLen 为整块，因此单次 burst 就是整块字节数。
+  const Expr whole_block_bytes = s18 * s1 * s20 * CreateExpr(4);
+  EXPECT_TRUE(config[0].cache_line_expr == whole_block_bytes);
+  EXPECT_TRUE(config[0].cache_line_expr != inner_bytes);
   EXPECT_EQ(config[0].direction, CacheLineDirection::kUbToGm);
+}
+
+TEST_F(UTestAscirPerfV2, TestStoreApiSolverCacheLineExprUsesSingleBurstBytes) {
+  // reduce 主 store 的实际 DMA 是 DataCopyPad(blockCount=30, blockLen=a0t)：
+  // GM 外轴 stride 138 与内轴 a0t 不等，合轴后保留 {blockCount, blockLen} 两维。
+  // 本用例锁定求解器判据取单次 burst 字节；若退回整块总字节，则判据恒大于 cache line，
+  // 约束等于失效。repeats 尾轴与 input_dims 尾轴的差异由上一个用例覆盖（合轴为单轴后
+  // repeats.back() 是内轴，而实际 burst 是整块）。
+  constexpr int32_t kFp16Bytes = 2;
+  std::vector<att::TensorShapeInfo> input_shapes(1);
+  std::vector<att::TensorShapeInfo> output_shapes(1);
+  Expr block_count = CreateExpr(30);
+  Expr block_len = CreateExpr("a0t_size");
+  Expr burst_bytes = block_len * CreateExpr(kFp16Bytes);
+  Expr whole_block_bytes = block_count * burst_bytes;
+
+  input_shapes[0].data_type = "float16";
+  input_shapes[0].dims = {block_count, block_len};
+  input_shapes[0].repeats = {block_count, block_len};
+  input_shapes[0].strides = {block_len, af::sym::kSymbolOne};
+  input_shapes[0].gm_strides = {CreateExpr(138), af::sym::kSymbolOne};
+  // 原始 shape 为整张量 30 * 138；a0t 只影响单个 tile 的 burst 大小，不改变整张量规模。
+  input_shapes[0].origin_repeats = {block_count, CreateExpr(138)};
+  output_shapes[0] = input_shapes[0];
+  input_shapes[0].data_type_size = kFp16Bytes;
+  output_shapes[0].data_type_size = kFp16Bytes;
+
+  PerfOutputInfo perf_res;
+  std::vector<CacheLineConfig> config;
+  perf_res.cache_line_config = &config;
+  auto store_v2 = ApiPerfFactory::Instance().Create("StoreV2");
+  ASSERT_NE(store_v2, nullptr);
+  auto perf = store_v2->GetPerfFunc();
+  NodeInfo node;
+  node.node_ptr = GraphConstructUtils::ConstructSingleOp("Store", 1, 1);
+  EXPECT_EQ(perf(input_shapes, output_shapes, node, perf_res), af::SUCCESS);
+
+  ASSERT_EQ(config.size(), 1U);
+  EXPECT_TRUE(config[0].cache_line_expr == burst_bytes);
+  EXPECT_TRUE(config[0].solver_cache_line_expr == burst_bytes);
+  EXPECT_TRUE(config[0].solver_cache_line_expr != whole_block_bytes);
+  // 单次 burst 判据只有在整张量可能发生多核 cache line 争抢时才启用，
+  // 因此配置必须同时携带该节点整张张量的字节数，供求解器门控判断。
+  // 这里必须取未切分原始 shape 的乘积，a0t 变化不能改变门控结果。
+  EXPECT_TRUE(config[0].solver_uses_burst);
+  int64_t whole_tensor_bytes = 0;
+  ASSERT_TRUE(config[0].whole_tensor_bytes.GetConstValue(whole_tensor_bytes));
+  EXPECT_EQ(whole_tensor_bytes, 30 * 138 * kFp16Bytes);
+  EXPECT_TRUE(config[0].whole_tensor_bytes != whole_block_bytes);
+}
+
+TEST_F(UTestAscirPerfV2, TestLoadApiCacheLineUsesCodegenTailAxisAfterPadding) {
+  // codegen 对非连续尾轴补 repeat=1 时，实际 blockLen 是 1 个元素；ATT 侧
+  // LoadV2 的 cache line 判据必须随之取 codegen 尾轴，而不是补轴前的内层维。
+  TensorShapeInfo shape;
+  const Expr z0z1t_size = CreateExpr("z0z1t_size");
+  shape.data_type = "float16";
+  shape.dims = {CreateExpr(128) * z0z1t_size};
+  shape.repeats = {z0z1t_size, CreateExpr(128)};
+  shape.strides = {CreateExpr(128), CreateExpr(1)};
+  shape.gm_strides = {CreateExpr(384), CreateExpr(3)};
+  shape.data_type_size = 2;
+
+  std::vector<TensorShapeInfo> input_shapes{shape};
+  std::vector<TensorShapeInfo> output_shapes{shape};
+  PerfOutputInfo perf_res;
+  std::vector<CacheLineConfig> config;
+  perf_res.cache_line_config = &config;
+  auto load_v2 = ApiPerfFactory::Instance().Create("LoadV2");
+  ASSERT_NE(load_v2, nullptr);
+  NodeInfo node;
+  node.node_ptr = GraphConstructUtils::ConstructSingleOp("Load", 1, 1);
+  EXPECT_EQ(load_v2->GetPerfFunc()(input_shapes, output_shapes, node, perf_res), af::SUCCESS);
+
+  ASSERT_EQ(config.size(), 1U);
+  // 补轴后 blockLen=1、dtype 为 FP16，单次 burst 即 2B。
+  EXPECT_TRUE(config[0].cache_line_expr == CreateExpr(2));
+  EXPECT_EQ(config[0].direction, CacheLineDirection::kGmToUb);
+  // burst 是常量且小于 cache line 时，若直接跳过约束就等于关闭 cache line 判据，
+  // 求解器会退化为"核数用满"的极值解；此时回退为块内总字节数继续约束分块。
+  const Expr whole_block_bytes = CreateExpr(128) * z0z1t_size * CreateExpr(2);
+  EXPECT_TRUE(config[0].solver_cache_line_expr == whole_block_bytes);
+}
+
+TEST_F(UTestAscirPerfV2, TestStoreApiSolverCacheLineFallsBackWhenTailAxisIsConstantOne) {
+  // Reduce 类输出合轴后为 {s1t_size, 1}：codegen 的 blockLen 恒为 1 个元素（4B burst），
+  // 单次 burst 不随分块变化。此时求解器判据必须回退为块内总字节数，否则这条约束会被
+  // 整条跳过，cache line 判据对分块失效，求解器回到"核数用满"的解。
+  constexpr int32_t kFp32Bytes = 4;
+  std::vector<att::TensorShapeInfo> input_shapes(1);
+  std::vector<att::TensorShapeInfo> output_shapes(1);
+  Expr outer = CreateExpr("s1t_size");
+  Expr degenerate_tail = CreateExpr(1);
+  Expr block_bytes = outer * degenerate_tail * CreateExpr(kFp32Bytes);
+
+  input_shapes[0].data_type = "float32";
+  input_shapes[0].dims = {outer, degenerate_tail};
+  input_shapes[0].repeats = {outer, degenerate_tail};
+  input_shapes[0].strides = {degenerate_tail, af::sym::kSymbolZero};
+  input_shapes[0].gm_strides = {degenerate_tail, af::sym::kSymbolZero};
+  output_shapes[0] = input_shapes[0];
+  input_shapes[0].data_type_size = kFp32Bytes;
+  output_shapes[0].data_type_size = kFp32Bytes;
+
+  PerfOutputInfo perf_res;
+  std::vector<CacheLineConfig> config;
+  perf_res.cache_line_config = &config;
+  auto store_v2 = ApiPerfFactory::Instance().Create("StoreV2");
+  ASSERT_NE(store_v2, nullptr);
+  NodeInfo node;
+  node.node_ptr = GraphConstructUtils::ConstructSingleOp("Store", 1, 1);
+  EXPECT_EQ(store_v2->GetPerfFunc()(input_shapes, output_shapes, node, perf_res), af::SUCCESS);
+
+  ASSERT_EQ(config.size(), 1U);
+  // 运行期冲突检测仍看单次 burst（常量 4B）。
+  EXPECT_TRUE(config[0].cache_line_expr == CreateExpr(kFp32Bytes));
+  // 求解器判据回退为块内总字节，仍随外层 tile 变化。
+  EXPECT_TRUE(IsValid(config[0].solver_cache_line_expr));
+  EXPECT_TRUE(config[0].solver_cache_line_expr == block_bytes);
+  EXPECT_FALSE(config[0].solver_cache_line_expr.IsConstExpr());
 }
 
 TEST_F(UTestAscirPerfV2, TestStoreApiForSmallStride) {
@@ -742,13 +1206,15 @@ TEST_F(UTestAscirPerfV2, TestStoreApiForSmallStride) {
   auto ternary_ops = perf_res.ternary_ops;
   auto ret = ConcursiveReplaceVars(ternary_ops);
   // MTE3 padding: 由于gm_stride>0且z6t_size可能<16(int64的128B是16个元素),会生成三元表达式
-  // StoreStride: 0.0385 * z0z1t_size * min(128*8, 4096) = 9382.9119... * z0z1t_size
-  const std::string kStride = "(9382.91194915771 * z0z1t_size)";
+  // StoreStride uses the DMA block count (34) after the two LoopMode dimensions are removed.
+  Expr stride_cost = CreateExpr(160) + CreateExpr(0.0050306649073631F) * CreateExpr(34) * CreateExpr(1024);
+  stride_cost.Simplify();
+  const std::string kStride = Str(stride_cost);
   // Note: 由于padding, z6t_size会被替换为TernaryOp表达式,且TernaryOp在z0z1t_size之前
   EXPECT_EQ(Str(res.Replace(ret)),
             "((1904 * TernaryOp(IsEqual(ExpectLt((8 * z6t_size), 128), 0), z6t_size, 16) * z0z1t_size / "
             "(((10.2650003433228 / (block_dim)) + 11.7740001678467))) + " +
-                kStride + " + 160.0)");
+                kStride + ")");
 }
 
 TEST_F(UTestAscirPerfV2, TestStoreApiForBiggerStride) {
@@ -784,13 +1250,62 @@ TEST_F(UTestAscirPerfV2, TestStoreApiForBiggerStride) {
   auto ternary_ops = perf_res.ternary_ops;
   auto ret = ConcursiveReplaceVars(ternary_ops);
   // MTE3 padding: 由于gm_stride>0且z6t_size可能<16(int64的128B是16个元素),会生成三元表达式
-  // StoreStride calculation: k=0.0385, block_count=238*z0z1t_size, stride_used=min(40960*8, 4096)=4096
-  // Result: 0.0385 * 238 * z0z1t_size * 4096 = 37531.6477966309 * z0z1t_size
-  const std::string kStride = "(37531.6477966309 * z0z1t_size)";
+  // StoreStride uses the DMA block count (34) after the two LoopMode dimensions are removed.
+  Expr stride_cost = CreateExpr(160) + CreateExpr(0.0050306649073631F) * CreateExpr(34) * CreateExpr(4096);
+  stride_cost.Simplify();
+  const std::string kStride = Str(stride_cost);
   EXPECT_EQ(Str(res.Replace(ret)),
             "((1904 * TernaryOp(IsEqual(ExpectLt((8 * z6t_size), 128), 0), z6t_size, 16) * z0z1t_size / "
             "(((10.2650003433228 / (block_dim)) + 11.7740001678467))) + " +
-                kStride + " + 160.0)");
+                kStride + ")");
+}
+
+TEST_F(UTestAscirPerfV2, TestStoreStrideLoopModeUsesDmaBlockCount) {
+  const std::map<std::string, float> params = {{"k", 0.0385F},
+                                               {"u", 4096.0F},
+                                               {"data_type_size", 4.0F},
+                                               {"block_count_idx", 1.0F},
+                                               {"loop_mode_dim_count", 1.0F}};
+  Expr result;
+  ASSERT_EQ(LoadStoreStrideV2Func(params, {CreateExpr(20), CreateExpr(57), CreateExpr(20)}, CreateExpr(380), result),
+            af::SUCCESS);
+  Expr expected = CreateExpr(0.0385F) * CreateExpr(57) * CreateExpr(380) * CreateExpr(4);
+  result.Simplify();
+  expected.Simplify();
+  EXPECT_EQ(Str(result), Str(expected));
+}
+
+TEST_F(UTestAscirPerfV2, TestStoreApiLoopModeEndToEnd) {
+  std::vector<att::TensorShapeInfo> input_shapes(1);
+  std::vector<att::TensorShapeInfo> output_shapes(1);
+  Expr z2t_size = CreateExpr("z2t_size");
+  Expr z0z1t_size = CreateExpr("z0z1t_size");
+  Expr block_len = CreateExpr(20);
+  input_shapes[0].data_type = "float32";
+  input_shapes[0].dims = {z2t_size, z0z1t_size, block_len};
+  input_shapes[0].repeats = input_shapes[0].dims;
+  input_shapes[0].strides = {z0z1t_size * CreateExpr(400), CreateExpr(400), CreateExpr(1)};
+  input_shapes[0].gm_strides = input_shapes[0].strides;
+  input_shapes[0].data_type_size = 4;
+  output_shapes[0] = input_shapes[0];
+  output_shapes[0].strides = {z0z1t_size * CreateExpr(400), CreateExpr(400), CreateExpr(1)};
+  output_shapes[0].gm_strides = output_shapes[0].strides;
+
+  PerfOutputInfo perf_res;
+  auto store_v2 = ApiPerfFactory::Instance().Create("StoreV2");
+  ASSERT_NE(store_v2, nullptr);
+  auto perf = store_v2->GetPerfFunc();
+  NodeInfo node;
+  node.node_ptr = GraphConstructUtils::ConstructSingleOp("Store", 1, 1);
+  ASSERT_EQ(perf(input_shapes, output_shapes, node, perf_res), af::SUCCESS);
+  auto ternary_ops = perf_res.ternary_ops;
+  auto ret = ConcursiveReplaceVars(ternary_ops);
+  Expr stride_cost = CreateExpr(0.0050093180829704F) * CreateExpr(380) * CreateExpr(4);
+  stride_cost.Simplify();
+  EXPECT_EQ(Str(perf_res.pipe_res[PipeType::AIV_MTE3].Replace(ret)),
+            "((" + Str(stride_cost) +
+                " * z0z1t_size) + (80 * z0z1t_size * z2t_size / "
+                "(((10.2650003433228 / (block_dim)) + 11.7740001678467))) + 160.0)");
 }
 
 TEST_F(UTestAscirPerfV2, TestNddmaApiForType) {
@@ -1288,6 +1803,38 @@ TEST_F(UTestAscirPerfV2, TestGetReduceProdApiPerf) {
   EXPECT_NE(reduce_prod_ir_att_v2.GetApiPerf(), nullptr);
 }
 
+TEST_F(UTestAscirPerfV2, TestGetArgmaxApiPerf) {
+  ArgmaxAscIrAttImplV2 argmax_ir_att_v2;
+  EXPECT_TRUE(strcmp(af::PtrToPtr<void, af::char_t>(argmax_ir_att_v2.GetApiPerf()), "ArgmaxV2") == 0);
+  EXPECT_NE(argmax_ir_att_v2.GetApiPerf(), nullptr);
+}
+
+TEST_F(UTestAscirPerfV2, TestGetArgMaxMultiRPhase1ApiPerf) {
+  ArgMaxMultiRPhase1AscIrAttImplV2 phase1_ir_att_v2;
+  EXPECT_TRUE(strcmp(af::PtrToPtr<void, af::char_t>(phase1_ir_att_v2.GetApiPerf()), "ArgMaxMultiRPhase1V2") == 0);
+  EXPECT_NE(phase1_ir_att_v2.GetApiPerf(), nullptr);
+}
+
+TEST_F(UTestAscirPerfV2, TestGetArgMaxMultiRPhase2ApiPerf) {
+  ArgMaxMultiRPhase2AscIrAttImplV2 phase2_ir_att_v2;
+  EXPECT_TRUE(strcmp(af::PtrToPtr<void, af::char_t>(phase2_ir_att_v2.GetApiPerf()), "ArgMaxMultiRPhase2V2") == 0);
+  EXPECT_NE(phase2_ir_att_v2.GetApiPerf(), nullptr);
+}
+
+TEST_F(UTestAscirPerfV2, TestGetArgmaxWithValueApiPerf) {
+  ArgmaxWithValueAscIrAttImplV2 argmax_with_value_ir_att_v2;
+  EXPECT_TRUE(strcmp(af::PtrToPtr<void, af::char_t>(argmax_with_value_ir_att_v2.GetApiPerf()), "ArgmaxWithValueV2") ==
+              0);
+  EXPECT_NE(argmax_with_value_ir_att_v2.GetApiPerf(), nullptr);
+}
+
+TEST_F(UTestAscirPerfV2, TestGetArgMaxMultiRPhase2WithValueApiPerf) {
+  ArgMaxMultiRPhase2WithValueAscIrAttImplV2 phase2_with_value_ir_att_v2;
+  EXPECT_TRUE(strcmp(af::PtrToPtr<void, af::char_t>(phase2_with_value_ir_att_v2.GetApiPerf()),
+                     "ArgMaxMultiRPhase2WithValueV2") == 0);
+  EXPECT_NE(phase2_with_value_ir_att_v2.GetApiPerf(), nullptr);
+}
+
 TEST_F(UTestAscirPerfV2, TestGetRemovePadApiPerf) {
   RemovePadAscIrAttImplV2 remove_pad_ir_att_v2;
   EXPECT_NE(remove_pad_ir_att_v2.GetApiPerf(), nullptr);
@@ -1372,6 +1919,12 @@ TEST_F(UTestAscirPerfV2, TestLoadStoreStrideModelParamsCoverSupportedTypes) {
   const auto table = Json::parse(kParamV2Info);
   const std::vector<std::string> dtypes = {"int8",  "uint8",  "int16",   "uint16",   "int32",   "uint32",
                                            "int64", "uint64", "float16", "bfloat16", "float32", "bool"};
+  const std::map<std::string, float> store_coefficients = {
+      {"int8", 0.0050441522125085F},     {"uint8", 0.0049922306718019F},  {"bool", 0.0050337712308162F},
+      {"int16", 0.0050219521009849F},    {"uint16", 0.0049981859819869F}, {"float16", 0.005009566773717F},
+      {"bfloat16", 0.0050004678761787F}, {"int32", 0.0050058211763464F},  {"uint32", 0.0050046751614247F},
+      {"float32", 0.0050093180829704F},  {"int64", 0.0050306649073631F},  {"uint64", 0.0049785878890068F},
+  };
   for (const auto &op : {"LoadStride", "StoreStride"}) {
     const auto &params = table.at(op).at("model_params");
     EXPECT_EQ(params.size(), dtypes.size());
@@ -1379,11 +1932,69 @@ TEST_F(UTestAscirPerfV2, TestLoadStoreStrideModelParamsCoverSupportedTypes) {
       SCOPED_TRACE(std::string(op) + ":" + dtype);
       const auto key = dtype + "to" + dtype;
       ASSERT_TRUE(params.contains(key));
-      EXPECT_FLOAT_EQ(params.at(key).at("k").get<float>(), std::string(op) == "LoadStride" ? 0.005f : 0.0385f);
+      EXPECT_FLOAT_EQ(params.at(key).at("k").get<float>(),
+                      std::string(op) == "LoadStride" ? 0.005f : store_coefficients.at(dtype));
       EXPECT_FLOAT_EQ(params.at(key).at("u").get<float>(), 4096.0f);
       EXPECT_FLOAT_EQ(params.at(key).at("penalty_coeff").get<float>(), 0.0f);
     }
     EXPECT_FALSE(params.contains("int4toint4"));
+  }
+}
+
+TEST_F(UTestAscirPerfV2, TestStoreStrideUsesPerTypeCostAndDtypeSize) {
+  const auto table = Json::parse(kParamV2Info);
+  const auto &types = table.at("StoreStride").at("model_params");
+  for (const auto &[dtype, type_size] : kDataTypeSizeMap) {
+    const auto key = dtype + "to" + dtype;
+    if (!types.contains(key)) {
+      continue;
+    }
+    SCOPED_TRACE(dtype);
+    int32_t bytes_per_element = 0;
+    type_size.GetConstValue(bytes_per_element);
+    ASSERT_GT(bytes_per_element, 0);
+    const std::map<std::string, float> params = {{"k", types.at(key).at("k").get<float>()},
+                                                 {"u", types.at(key).at("u").get<float>()},
+                                                 {"data_type_size", static_cast<float>(bytes_per_element)}};
+    for (const int32_t stride_elements : {0, 31, 124, 1024, 8192}) {
+      Expr result;
+      ASSERT_EQ(LoadStoreStrideV2Func(params, {CreateExpr(34), CreateExpr(32 / bytes_per_element)},
+                                      CreateExpr(stride_elements), result),
+                af::SUCCESS);
+      Expr expected =
+          CreateExpr(params.at("k")) * CreateExpr(34) * CreateExpr(std::min(stride_elements * bytes_per_element, 4096));
+      result.Simplify();
+      expected.Simplify();
+      EXPECT_EQ(Str(result), Str(expected));
+    }
+  }
+}
+
+// 单核参数条目必须与对应多核条目的 model_type 和 dtype 覆盖一致，保证 CalculatePerfFromParams 查表不回退
+TEST_F(UTestAscirPerfV2, TestLoadSingleCoreModelParamsEntryCover) {
+  const auto table = Json::parse(kParamV2Info);
+  const std::vector<std::pair<std::string, std::string>> single_to_multi = {
+      {"LoadSingleCore", "Load"}, {"LoadSmallBlkSingleCore", "LoadSmallBlk"}, {"LoadStrideSingleCore", "LoadStride"}};
+  for (const auto &entry : single_to_multi) {
+    SCOPED_TRACE(entry.first);
+    ASSERT_TRUE(table.contains(entry.first));
+    EXPECT_EQ(table.at(entry.first).at("model_type").get<std::string>(),
+              table.at(entry.second).at("model_type").get<std::string>());
+    const auto &single_params = table.at(entry.first).at("model_params");
+    const auto &multi_params = table.at(entry.second).at("model_params");
+    ASSERT_EQ(single_params.size(), multi_params.size());
+    for (auto param_iter = multi_params.begin(); param_iter != multi_params.end(); ++param_iter) {
+      ASSERT_TRUE(single_params.contains(param_iter.key()));
+      const auto &single_dtype_params = single_params.at(param_iter.key());
+      EXPECT_EQ(single_dtype_params.size(), param_iter.value().size());
+      for (auto field_iter = param_iter.value().begin(); field_iter != param_iter.value().end(); ++field_iter) {
+        EXPECT_TRUE(single_dtype_params.contains(field_iter.key()));
+      }
+      // per-instruction头开销h须与多核条目同口径，避免核数分支切换处出现成本断崖
+      if (param_iter.value().contains("h")) {
+        EXPECT_EQ(single_dtype_params.at("h"), param_iter.value().at("h"));
+      }
+    }
   }
 }
 
@@ -2535,7 +3146,7 @@ TEST_F(UTestAscirPerfV2, TestCeil2IntV2ReusesCastV2Formula) {
     EXPECT_EQ(ceil2int_expr, GetCastPerfExpr("CastV2", input_dtype, "int32", cast_params));
     EXPECT_NE(ceil2int_expr, "0");
   }
-  EXPECT_EQ(GetCastPerfExpr("Ceil2IntV2", "float32", "int32", cast_params), "34");
+  EXPECT_EQ(GetCastPerfExpr("Ceil2IntV2", "float32", "int32", cast_params), "64");
 }
 
 TEST_F(UTestAscirPerfV2, TestSumV2) {
@@ -3302,7 +3913,8 @@ TEST_F(UTestAscirPerfV2, TestLoadApiExpandBlockLenSmallBlock) {
   std::vector<att::TensorShapeInfo> input_shapes(1);
   std::vector<att::TensorShapeInfo> output_shapes(1);
   Expr z0t_size = CreateExpr("z0t_size");
-  Expr z1t_size = CreateExpr("z1t_size");
+  // Keep a real repeated row; dynamic unit-axis behavior is covered separately.
+  Expr z1t_size = CreateExpr(2);
 
   input_shapes[0].data_type = "float16";
   // block_len = 8 elements * 2B = 16B < 128B cache line, 且 gm_stride > 0
@@ -3324,15 +3936,17 @@ TEST_F(UTestAscirPerfV2, TestLoadApiExpandBlockLenSmallBlock) {
   node.node_ptr = GraphConstructUtils::ConstructSingleOp("Load", 1, 1);
   auto result = perf(input_shapes, output_shapes, node, perf_res);
   EXPECT_EQ(result, af::SUCCESS);
-  Expr res = perf_res.pipe_res[PipeType::AIV_MTE2];
   auto ternary_ops = perf_res.ternary_ops;
   auto ret = ConcursiveReplaceVars(ternary_ops);
+  Expr res = SelectLoadCoreBranch(ternary_ops, false);
   // ExpandLoadBlockLen: block_len(8)*2=16B < 128B, stride>0 → pad to 64(=128/2)
   // data_size = z0t * z1t * 64 * 2 = 128 * z0t * z1t, SmallBlk case
   // stride_cost = 0.005 * z0t * z1t * min((64-8)*2, 4096) = 0.56 * z0t * z1t
-  const std::string expect_stride = "(0.559999987483025 * z0t_size * z1t_size)";
-  const std::string load_perf = "(128 * z0t_size * z1t_size / (((6.40880012512207 / (block_dim)) + 13.1354999542236)))";
-  EXPECT_EQ(Str(res.Replace(ret)), "(" + expect_stride + " + " + load_perf + " + 160.0)");
+  const Expr expected =
+      CreateExpr(128) * z0t_size * z1t_size / (CreateExpr(6.4088F) / CreateExpr("block_dim") + CreateExpr(13.1355F)) +
+      CreateExpr(0.005F) * z0t_size * z1t_size * CreateExpr(112) + CreateExpr(160.0F);
+  EXPECT_EQ(af::SymbolicUtils::StaticCheckEq(res.Replace(ret), expected), af::TriBool::kTrue)
+      << Str(res.Replace(ret)) << " vs " << Str(expected);
 }
 
 // LoadV2: codegen 对非连续尾轴补 repeat=1，ATT 必须保留合轴后的 block_count。
@@ -3434,7 +4048,12 @@ TEST_F(UTestAscirPerfV2, TestLoadApiCodegenTailAxisSwapUsesVectorizedShape) {
   PerfOutputInfo perf;
   ASSERT_EQ(GetDmaPerf(shape, node, perf, 2, true), af::SUCCESS);
   EXPECT_NE(perf.pipe_res.find(PipeType::AIV_MTE2), perf.pipe_res.end());
-  EXPECT_TRUE(perf.ternary_ops.empty());
+  // 仅剩 LoadV2 固有的单核分支三元表达式（swap 场景 GetDMAActualPerf 执行两次，各产生一个）；
+  // 静态 swap 择优不应引入维度大小比较的三元表达式
+  ASSERT_EQ(perf.ternary_ops.size(), 2U);
+  for (const auto &ternary_op : perf.ternary_ops) {
+    EXPECT_NE(Str(ternary_op.first).find("load_core_case_node"), std::string::npos);
+  }
 }
 
 TEST_F(UTestAscirPerfV2, TestLoadApiCodegenTailAxisContinuous) {
@@ -3456,7 +4075,8 @@ TEST_F(UTestAscirPerfV2, TestLoadApiExpandBlockLenLargeBlock) {
   std::vector<att::TensorShapeInfo> input_shapes(1);
   std::vector<att::TensorShapeInfo> output_shapes(1);
   Expr z0t_size = CreateExpr("z0t_size");
-  Expr z1t_size = CreateExpr("z1t_size");
+  // Keep a real repeated row; dynamic unit-axis behavior is covered separately.
+  Expr z1t_size = CreateExpr(2);
 
   input_shapes[0].data_type = "float16";
   // block_len = 128 elements * 2B = 256B > 128B cache line, gm_stride > 0 但不触发
@@ -3478,15 +4098,17 @@ TEST_F(UTestAscirPerfV2, TestLoadApiExpandBlockLenLargeBlock) {
   node.node_ptr = GraphConstructUtils::ConstructSingleOp("Load", 1, 1);
   auto result = perf(input_shapes, output_shapes, node, perf_res);
   EXPECT_EQ(result, af::SUCCESS);
-  Expr res = perf_res.pipe_res[PipeType::AIV_MTE2];
   auto ternary_ops = perf_res.ternary_ops;
   auto ret = ConcursiveReplaceVars(ternary_ops);
+  Expr res = SelectLoadCoreBranch(ternary_ops, false);
   // block_len=128*2=256B > 128B, 不触发pad; SmallBlk case
   // data_size = 256 * z0t * z1t
   // stride = 0.005 * z0t * z1t * min((256-128)*2, 4096) = 1.28 * z0t * z1t
-  const std::string expect_stride = "(1.27999997138977 * z0t_size * z1t_size)";
-  const std::string load_perf = "(256 * z0t_size * z1t_size / (((6.40880012512207 / (block_dim)) + 13.1354999542236)))";
-  EXPECT_EQ(Str(res.Replace(ret)), "(" + expect_stride + " + " + load_perf + " + 160.0)");
+  const Expr expected =
+      CreateExpr(256) * z0t_size * z1t_size / (CreateExpr(6.4088F) / CreateExpr("block_dim") + CreateExpr(13.1355F)) +
+      CreateExpr(0.005F) * z0t_size * z1t_size * CreateExpr(256) + CreateExpr(160.0F);
+  EXPECT_EQ(af::SymbolicUtils::StaticCheckEq(res.Replace(ret), expected), af::TriBool::kTrue)
+      << Str(res.Replace(ret)) << " vs " << Str(expected);
 }
 
 // LoadV2: 连续场景(gm_stride=0)，不触发ExpandLoadBlockLen
@@ -3513,9 +4135,9 @@ TEST_F(UTestAscirPerfV2, TestLoadApiExpandBlockLenContinuous) {
   node.node_ptr = GraphConstructUtils::ConstructSingleOp("Load", 1, 1);
   auto result = perf(input_shapes, output_shapes, node, perf_res);
   EXPECT_EQ(result, af::SUCCESS);
-  Expr res = perf_res.pipe_res[PipeType::AIV_MTE2];
   auto ternary_ops = perf_res.ternary_ops;
   auto ret = ConcursiveReplaceVars(ternary_ops);
+  Expr res = SelectLoadCoreBranch(ternary_ops, false);
   // 连续: gm_stride=0, 不触发pad, SmallBlk case
   // data_size = 10 * 8 * 2 = 160
   const std::string load_perf = "(160 / (((6.40880012512207 / (block_dim)) + 13.1354999542236)))";
@@ -3536,4 +4158,179 @@ TEST_F(UTestAscirPerfV2, TestGetDmaParamsSwapDimLessEqual) {
   EXPECT_EQ(Str(used_dims[0]), "z0t");
   EXPECT_EQ(Str(used_dims[1]), "34");
   EXPECT_EQ(Str(outer_repeat), "1");
+}
+
+namespace {
+TensorShapeInfo MakeLoadStrideTestShape(const std::vector<Expr> &dims, const std::vector<Expr> &gm_strides) {
+  TensorShapeInfo shape;
+  shape.dims = dims;
+  shape.repeats = dims;
+  shape.origin_repeats = dims;
+  shape.gm_strides = gm_strides;
+  shape.strides.resize(dims.size());
+  Expr inner = CreateExpr(1);
+  for (size_t i = dims.size(); i > 0U; --i) {
+    shape.strides[i - 1U] = inner;
+    inner = inner * dims[i - 1U];
+  }
+  return shape;
+}
+
+}  // namespace
+
+TEST_F(UTestAscirPerfV2, LoadContiguousStrideStaticUnitAxes) {
+  NodeDetail node;
+  node.optype = kLoad;
+  const std::vector<TensorShapeInfo> shapes = {
+      MakeLoadStrideTestShape({CreateExpr(1), CreateExpr(512)}, {CreateExpr(65536), CreateExpr(1)}),
+      MakeLoadStrideTestShape({CreateExpr(7), CreateExpr(1), CreateExpr(512)},
+                              {CreateExpr(512), CreateExpr(65536), CreateExpr(1)}),
+      MakeLoadStrideTestShape({CreateExpr(3), CreateExpr(7), CreateExpr(1), CreateExpr(512)},
+                              {CreateExpr(3584), CreateExpr(512), CreateExpr(65536), CreateExpr(1)})};
+  for (const auto &shape : shapes) {
+    const auto result = CalculateStride(shape, false, node, 4, false);
+    EXPECT_EQ(af::SymbolicUtils::StaticCheckEq(result.stride, CreateExpr(0)), af::TriBool::kTrue);
+    EXPECT_TRUE(result.ternary_ops.empty());
+  }
+}
+
+TEST_F(UTestAscirPerfV2, LoadContiguousStrideDynamicUnitAxis) {
+  const Expr m = CreateExpr("load_test_m");
+  const Expr n = CreateExpr("load_test_n");
+  const Expr outer_stride = CreateExpr("load_test_outer_stride");
+  const auto shape = MakeLoadStrideTestShape({m, n, CreateExpr(512)}, {outer_stride, CreateExpr(65536), CreateExpr(1)});
+  NodeDetail node;
+  node.optype = kLoad;
+  const auto result = CalculateStride(shape, false, node, 4, false);
+  const auto branch = result.ternary_ops.find(result.stride);
+  ASSERT_NE(branch, result.ternary_ops.end());
+  EXPECT_EQ(branch->second.GetTernaryOpStr().find("ExpectEq"), std::string::npos);
+  EXPECT_EQ(branch->second.GetTernaryOpStr().find("LogicAnd"), std::string::npos);
+  struct Point {
+    int64_t m;
+    int64_t n;
+    int64_t outer_stride;
+    bool continuous;
+  };
+  // A unit inner row cannot hide a real gap in the outer LoopMode step.
+  for (const auto &point :
+       {Point{7, 1, 512, true}, Point{7, 2, 512, false}, Point{7, 1, 1024, false}, Point{1, 1, 1024, true}}) {
+    auto condition = branch->second.DeepCopyIfCase();
+    ASSERT_NE(condition, nullptr);
+    condition->Replace(
+        {{m, CreateExpr(point.m)}, {n, CreateExpr(point.n)}, {outer_stride, CreateExpr(point.outer_stride)}});
+    while (!condition->IsLeaf()) {
+      ASSERT_EQ(condition->GetCondType(), CondType::K_EQ);
+      const auto equal = af::SymbolicUtils::StaticCheckEq(condition->GetCondLeft(), condition->GetCondRight());
+      ASSERT_NE(equal, af::TriBool::kUnknown);
+      condition = equal == af::TriBool::kTrue ? condition->GetChoiceA() : condition->GetChoiceB();
+      ASSERT_NE(condition, nullptr);
+    }
+    EXPECT_EQ(af::SymbolicUtils::StaticCheckEq(condition->GetExpr(), CreateExpr(point.continuous ? 0 : 65024)),
+              af::TriBool::kTrue);
+  }
+}
+
+TEST_F(UTestAscirPerfV2, LoadContiguousStridePreservesOtherPaths) {
+  auto shape = MakeLoadStrideTestShape({CreateExpr(7), CreateExpr(1), CreateExpr(512)},
+                                       {CreateExpr(1024), CreateExpr(65536), CreateExpr(1)});
+  NodeDetail node;
+  node.optype = kLoad;
+  EXPECT_EQ(Str(CalculateStride(shape, false, node, 4, false).stride), "65024");
+  shape.gm_strides[0] = CreateExpr(512);
+  for (const auto &type : {kNddma, kMoveUbToGm}) {
+    node.optype = type;
+    EXPECT_EQ(Str(CalculateStride(shape, false, node, 4, false).stride), "65024");
+  }
+  node.optype = kLoad;
+  shape.strides = shape.gm_strides;
+  EXPECT_EQ(Str(CalculateStride(shape, true, node, 4, false).stride), "65024");
+
+  const auto larger_shape =
+      MakeLoadStrideTestShape({CreateExpr(2), CreateExpr(3), CreateExpr(7), CreateExpr(1), CreateExpr(512)},
+                              {CreateExpr(10752), CreateExpr(3584), CreateExpr(512), CreateExpr(65536), CreateExpr(1)});
+  for (const bool swap : {false, true}) {
+    const auto load_result = CalculateStride(larger_shape, false, node, 4, swap);
+    NodeDetail other_node;
+    other_node.optype = kNddma;
+    const auto existing_result = CalculateStride(larger_shape, false, other_node, 4, swap);
+    EXPECT_EQ(af::SymbolicUtils::StaticCheckEq(load_result.stride, existing_result.stride), af::TriBool::kTrue);
+  }
+}
+
+TEST_F(UTestAscirPerfV2, LoadContiguousStrideFactoryMatchesDenseSource) {
+  auto api = ApiPerfFactory::Instance().Create("LoadV2");
+  ASSERT_NE(api, nullptr);
+  for (const auto &dtype : {std::make_pair("uint8", 1), std::make_pair("float16", 2), std::make_pair("float32", 4),
+                            std::make_pair("int64", 8)}) {
+    SCOPED_TRACE(dtype.first);
+    auto unit = MakeLoadStrideTestShape({CreateExpr(7), CreateExpr(1), CreateExpr(512)},
+                                        {CreateExpr(512), CreateExpr(65536), CreateExpr(1)});
+    auto dense = MakeLoadStrideTestShape({CreateExpr(3584)}, {CreateExpr(1)});
+    unit.data_type = dense.data_type = dtype.first;
+    unit.data_type_size = dense.data_type_size = dtype.second;
+    NodeInfo node;
+    node.node_ptr = GraphConstructUtils::ConstructSingleOp("Load", 1, 1);
+    PerfOutputInfo unit_perf;
+    PerfOutputInfo dense_perf;
+    ASSERT_EQ(api->GetPerfFunc()({unit}, {unit}, node, unit_perf), af::SUCCESS);
+    ASSERT_EQ(api->GetPerfFunc()({dense}, {dense}, node, dense_perf), af::SUCCESS);
+    const auto unit_cycles =
+        unit_perf.pipe_res.at(PipeType::AIV_MTE2).Replace(ConcursiveReplaceVars(unit_perf.ternary_ops));
+    const auto dense_cycles =
+        dense_perf.pipe_res.at(PipeType::AIV_MTE2).Replace(ConcursiveReplaceVars(dense_perf.ternary_ops));
+    EXPECT_EQ(af::SymbolicUtils::StaticCheckEq(unit_cycles, dense_cycles), af::TriBool::kTrue)
+        << Str(unit_cycles) << " vs " << Str(dense_cycles);
+  }
+}
+
+TEST_F(UTestAscirPerfV2, TransposedLoadMergesDimsInVectorizedOrder) {
+  af::AscGraph graph("transpose_load_merge");
+  ASSERT_EQ(GraphConstructUtils::CreateSimpleLoadStoreOp(graph), af::SUCCESS);
+  auto node = graph.FindNode("load");
+  ASSERT_NE(node, nullptr);
+  auto &attr = node->outputs[0].attr;
+  attr.axis = {1, 0, 2};
+  attr.vectorized_axis = {0, 1, 2};
+  attr.repeats = {CreateExpr(1), CreateExpr(7), CreateExpr(512)};
+  attr.strides = {CreateExpr(512), CreateExpr(512), CreateExpr(1)};
+
+  auto shape = MakeLoadStrideTestShape({CreateExpr(7), CreateExpr(1), CreateExpr(512)},
+                                       {CreateExpr(512), CreateExpr(512), CreateExpr(1)});
+  ASSERT_EQ(MergeTensorContinuousDims(node, "transposed_load", shape), af::SUCCESS);
+  EXPECT_EQ(shape.dims, std::vector<Expr>{CreateExpr(3584)});
+}
+
+TEST_F(UTestAscirPerfV2, LoadContiguousStridePreservesVectorizedRepeatsAfterMerge) {
+  struct Layout {
+    int32_t outer;
+    int32_t rows;
+    int32_t tail;
+    bool is_tail;
+    bool contiguous;
+  };
+  for (const auto &layout : {Layout{7, 1, 512, false, true}, Layout{1, 7, 512, false, false},
+                             Layout{7, 1, 512, true, true}, Layout{7, 1, 256, true, false}}) {
+    auto shape = MakeLoadStrideTestShape({CreateExpr(layout.outer), CreateExpr(layout.rows), CreateExpr(layout.tail)},
+                                         {CreateExpr(512), CreateExpr(65536), CreateExpr(1)});
+    const auto vectorized_repeats = shape.repeats;
+    if (layout.is_tail) {
+      shape.origin_repeats = {CreateExpr(8), CreateExpr(8), CreateExpr(512)};
+    }
+    af::AscGraph graph("transpose_load_stride");
+    ASSERT_EQ(GraphConstructUtils::CreateSimpleLoadStoreOp(graph), af::SUCCESS);
+    auto node = graph.FindNode("load");
+    ASSERT_NE(node, nullptr);
+    node->outputs[0].attr.axis = {1, 0, 2};
+    node->outputs[0].attr.vectorized_axis = {0, 1, 2};
+    node->outputs[0].attr.repeats = {shape.origin_repeats[1], shape.origin_repeats[0], shape.origin_repeats[2]};
+    node->outputs[0].attr.strides = {CreateExpr(65536), CreateExpr(512), CreateExpr(1)};
+    ASSERT_EQ(MergeTensorContinuousDims(node, "transposed_load", shape), af::SUCCESS);
+    EXPECT_EQ(shape.repeats, vectorized_repeats);
+    NodeDetail detail;
+    detail.optype = kLoad;
+    const auto stride = CalculateStride(shape, false, detail, 4, false);
+    const auto expected = CreateExpr(layout.contiguous ? 0 : 65536 - layout.tail);
+    EXPECT_EQ(af::SymbolicUtils::StaticCheckEq(stride.stride, expected), af::TriBool::kTrue);
+  }
 }

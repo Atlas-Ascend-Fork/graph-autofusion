@@ -206,8 +206,7 @@ bool EquivalentGraphRecognizer::CompareExpression(const af::Expression &expr1, c
   }
   if (expr1.IsConstExpr() && expr2.IsConstExpr()) {
     if (expr1 != expr2) {
-      GELOGD("Expression: [%s] and Expression: [%s] has different const value", expr1.Serialize().get(),
-             expr2.Serialize().get());
+      GELOGD("Expression: [%s] and Expression: [%s] has different const value", expr1.Str().get(), expr2.Str().get());
       return false;
     }
     return true;

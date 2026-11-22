@@ -11,10 +11,45 @@
 
 set -e
 
+get_cgroup_cpu_quota() {
+  if [ -r /sys/fs/cgroup/cpu.max ]; then
+    cat /sys/fs/cgroup/cpu.max
+    return
+  fi
+
+  local controller quota period
+  for controller in /sys/fs/cgroup/cpu /sys/fs/cgroup/cpu,cpuacct; do
+    if [ -r "${controller}/cpu.cfs_quota_us" ] && [ -r "${controller}/cpu.cfs_period_us" ]; then
+      read -r quota < "${controller}/cpu.cfs_quota_us"
+      read -r period < "${controller}/cpu.cfs_period_us"
+      printf '%s %s\n' "${quota}" "${period}"
+      return
+    fi
+  done
+}
+
+get_available_cpu_count() {
+  local cpu_num quota period quota_cpu_num
+  # OpenMP runtime settings must not constrain the build's CPU discovery.
+  cpu_num=$(
+    unset OMP_NUM_THREADS OMP_THREAD_LIMIT
+    nproc
+  ) || return 1
+  if read -r quota period < <(get_cgroup_cpu_quota); then
+    if [[ "${quota}" =~ ^[1-9][0-9]*$ && "${period}" =~ ^[1-9][0-9]*$ ]]; then
+      quota_cpu_num=$((quota / period + (quota % period != 0)))
+      if [ "${quota_cpu_num}" -lt "${cpu_num}" ]; then
+        cpu_num=${quota_cpu_num}
+      fi
+    fi
+  fi
+  printf '%s\n' "${cpu_num}"
+}
+
 BASEPATH=$(cd "$(dirname $0)"; pwd)
 BUILD_PATH="${BASEPATH}/build"
 OUTPUT_PATH="${BASEPATH}/build_out"
-CPU_NUM=$(($(cat /proc/cpuinfo | grep "^processor" | wc -l)))
+CPU_NUM=$(get_available_cpu_count)
 THREAD_NUM=${CPU_NUM}
 ASCEND_INSTALL_PATH="${ASCEND_HOME_PATH}"
 BUILD_TYPE="Release"
@@ -28,8 +63,10 @@ else
   PYTHON_CMD="python3"
 fi
 
-SUPPORTED_MODULES=("superkernel" "autofuse_framework" "autofuse_ascendc_api" "autofuse_e2e")
+SUPPORTED_MODULES=("multistream" "superkernel" "autofuse_framework" "autofuse_ascendc_api" "autofuse_e2e" "autofuse_v35_1" "autofuse_v35_2" "autofuse_v35_3")
 declare -A MODULE_ACTION_HANDLERS=(
+  ["multistream:py_ut"]="multistream_py_ut"
+  ["multistream:py_st"]="multistream_py_st"
   ["superkernel:py_ut"]="superkernel_py_ut"
   ["superkernel:cpp_ut"]="superkernel_cpp_ut"
   ["superkernel:py_st"]="superkernel_py_st"
@@ -39,6 +76,9 @@ declare -A MODULE_ACTION_HANDLERS=(
   ["autofuse_ascendc_api:all_ut"]="autofuse_module_test_suite"
   ["autofuse_ascendc_api:all_st"]="autofuse_module_test_suite"
   ["autofuse_e2e:all_st"]="autofuse_module_test_suite"
+  ["autofuse_v35_1:all_st"]="autofuse_module_test_suite"
+  ["autofuse_v35_2:all_st"]="autofuse_module_test_suite"
+  ["autofuse_v35_3:all_st"]="autofuse_module_test_suite"
 )
 
 # print usage message
@@ -55,6 +95,7 @@ usage() {
   echo "  sh build.sh [-h|--help] [--pkg] [-u|--ut] [-s|--st] [--impl=<py|cpp|all>]"
   echo "              [--module=<name>] [-c|--coverage] [-j]"
   echo "              [--output_path=<PATH>] [--cann_3rd_lib_path=<PATH>] [--build-type=<TYPE>] [--no-autofuse]"
+  echo "              [--enable-mlir]"
   echo "              [--pkg-type=<TYPE>]"
   echo "              [-f <FILE>]"
   echo ""
@@ -62,7 +103,9 @@ usage() {
   echo "    -h, --help            Print usage"
   echo "    --pkg                 Build package"
   echo "    --no-autofuse         Skip autofuse backend build/package artifacts"
-  echo "    -j                    Compile thread nums, default is 16, eg: -j 8"
+  echo "    --enable-mlir"
+  echo "                          Enable Autofuse MLIR migration infrastructure"
+  echo "    -j                    Compile thread nums, default is available CPU count (affinity/quota), eg: -j 8"
   echo "    -u, --ut              Run unit tests for supported implementations"
   echo "    -s, --st              Run system tests for supported implementations"
   echo "    --impl=<py|cpp|all>   Select implementation under -u/-s (default: all supported)"
@@ -315,10 +358,11 @@ checkopts() {
   TARGET_MODULE="all"
   CANN_3RD_LIB_PATH="$BASEPATH/output/third_party"
   ENABLE_AUTOFUSE="on"
+  ENABLE_AUTOFUSE_MLIR="auto"
   CHANGED_FILES=""
   PACKAGE_TYPE="run"
 
-  parsed_args=$(getopt -a -o j:huscf: -l help,pkg,autofuse,no-autofuse,impl:,module:,test_case:,ut,st,coverage,output_path:,cann_3rd_lib_path:,build-type:,pkg-type: -- "$@") || {
+  parsed_args=$(getopt -a -o j:huscf: -l help,pkg,autofuse,no-autofuse,enable-mlir,impl:,module:,test_case:,run_example,ut,st,coverage,output_path:,cann_3rd_lib_path:,build-type:,pkg-type: -- "$@") || {
     usage
     exit 1
   }
@@ -341,6 +385,10 @@ checkopts() {
         ;;
       --no-autofuse)
         ENABLE_AUTOFUSE="off"
+        shift
+        ;;
+      --enable-mlir)
+        ENABLE_AUTOFUSE_MLIR="on"
         shift
         ;;
       -j)
@@ -434,6 +482,14 @@ checkopts() {
     esac
   done
 
+  if [[ "${ENABLE_AUTOFUSE_MLIR}" == "auto" ]]; then
+    if [[ "${BUILD_TYPE}" == "Debug" ]]; then
+      ENABLE_AUTOFUSE_MLIR="on"
+    else
+      ENABLE_AUTOFUSE_MLIR="off"
+    fi
+  fi
+
   normalize_test_selection
 
   if [ "X$ENABLE_BUILD_PACKAGE" != "Xon" ] && [ ${#EXEC_ACTIONS[@]} -eq 0 ]; then
@@ -454,6 +510,11 @@ function cmake_config()
   if [ "X$ENABLE_AUTOFUSE" == "Xoff" ]; then
     extra_option="${extra_option} -DBUILD_AUTOFUSE=OFF"
   fi
+  if [ "X$ENABLE_AUTOFUSE_MLIR" == "Xon" ]; then
+    extra_option="${extra_option} -DENABLE_AUTOFUSE_MLIR=ON"
+  else
+    extra_option="${extra_option} -DENABLE_AUTOFUSE_MLIR=OFF"
+  fi
   echo "Info: cmake config ${cmake_option} ${extra_option} ."
   cmake .. ${cmake_option} ${extra_option}
 }
@@ -462,6 +523,22 @@ function build()
 {
   local target="$1"
   cmake --build . --target ${target} -j ${THREAD_NUM}
+}
+
+autofuse_product_build_required() {
+  if [ "X$ENABLE_BUILD_PACKAGE" == "Xon" ]; then
+    return 0
+  fi
+
+  local action_entry
+  for action_entry in "${EXEC_ACTIONS[@]}"; do
+    case "${action_entry%%:*}" in
+      autofuse_*) ;;
+      *) return 0 ;;
+    esac
+  done
+  # Autofuse test handlers configure and build their own target dependencies.
+  return 1
 }
 
 clean_coverage_artifacts() {
@@ -618,6 +695,7 @@ autofuse_module_test_suite() {
     autofuse_framework) test_module="framework" ;;
     autofuse_ascendc_api) test_module="ascendc_api" ;;
     autofuse_e2e) test_module="e2e" ;;
+    autofuse_v35_1|autofuse_v35_2|autofuse_v35_3) test_module="${module#autofuse_}" ;;
     *)
       echo "ERROR: Unsupported autofuse test module: ${module}."
       return 1
@@ -634,8 +712,42 @@ autofuse_module_test_suite() {
   if [ "X${ENABLE_COVERAGE}" == "Xon" ]; then
     test_args+=("-c")
   fi
+  BUILD_TYPE="${BUILD_TYPE}" bash "${BASEPATH}/scripts/test/run_autofuse_test.sh" "${test_args[@]}"
+}
 
-  bash "${BASEPATH}/scripts/test/run_autofuse_test.sh" "${test_args[@]}"
+multistream_py_ut() {
+  echo "---------------- Start multistream UT ----------------"
+  cd "${BASEPATH}/multistream" &&
+  "${PYTHON_CMD}" -m pip install --upgrade pip -q &&
+  "${PYTHON_CMD}" -m pip install -e ".[dev]" --force-reinstall -q &&
+  if [ "X$ENABLE_COVERAGE" == "Xon" ]; then
+    "${PYTHON_CMD}" -m pytest tests/ut -m ut -n auto \
+                                     --cov-config=scripts/ms_ut_cfg.toml \
+                                     --cov=. \
+                                     --cov-report=term-missing \
+                                     --cov-report=html \
+                                     --cov-report=xml \
+                                     --cov-report=lcov:"${BASEPATH}/coverage_multistream.info"
+  else
+    "${PYTHON_CMD}" -m pytest tests/ut -m ut -n auto
+  fi
+}
+
+multistream_py_st() {
+  echo "---------------- Start multistream ST ----------------"
+  cd "${BASEPATH}/multistream" &&
+  "${PYTHON_CMD}" -m pip install --upgrade pip -q &&
+  "${PYTHON_CMD}" -m pip install -e ".[dev]" --force-reinstall -q &&
+  if [ "X$ENABLE_COVERAGE" == "Xon" ]; then
+    "${PYTHON_CMD}" -m pytest tests/st -m st --junitxml="${BASEPATH}/build_out/multistream_st/junit.xml" \
+                                     --cov-config=scripts/ms_st_cfg.toml \
+                                     --cov=. \
+                                     --cov-report=term-missing \
+                                     --cov-report=html \
+                                     --cov-report=xml
+  else
+    "${PYTHON_CMD}" -m pytest tests/st -m st --junitxml="${BASEPATH}/build_out/multistream_st/junit.xml"
+  fi
 }
 
 main() {
@@ -716,7 +828,7 @@ PYEOF
 
   clean_coverage_artifacts
 
-  if [ "X$ENABLE_AUTOFUSE" == "Xon" ]; then
+  if [ "X$ENABLE_AUTOFUSE" == "Xon" ] && autofuse_product_build_required; then
     echo "---------------- Start build autofuse ----------------"
     mkdir -pv ${BUILD_PATH} &&
     cd ${BUILD_PATH} || { echo "Prepare autofuse build failed."; exit 1; }

@@ -34,6 +34,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_summary.add_argument(
         "-f", "--format", choices=["console", "csv", "excel"], default="console"
     )
+    p_summary.add_argument(
+        "--topn", action="store_true", help="同时汇总 TopN 返回候选的逐组详情"
+    )
     p_summary.add_argument("-o", "--output", default=None)
 
     # compare 子命令
@@ -89,6 +92,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_ev.add_argument("log_path", help="日志文件或目录")
     p_ev.add_argument("-o", "--output", required=True, help="输出目录")
 
+    # topn-templates 子命令
+    p_topn = subparsers.add_parser(
+        "topn-templates", help="生成静态 Top1/TopN 模板与性能表"
+    )
+    p_topn.add_argument("log_path", help="Autofuse worker 日志文件")
+    p_topn.add_argument("-o", "--output", required=True, help="输出目录")
+
     return parser
 
 
@@ -119,6 +129,10 @@ def main():
         result = run(args)
     elif args.command == "evidence":
         from commands.evidence import run
+
+        result = run(args)
+    elif args.command == "topn-templates":
+        from commands.template_topn import run
 
         result = run(args)
     if isinstance(result, int):

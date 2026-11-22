@@ -26,6 +26,7 @@ description: |
 - [ ] **贡献规范**：读取 `CONTRIBUTING.md`，检查 Issue/PR、commit message、CLA 和贡献流程要求。
 - [ ] **代码格式**：读取 `.clang-format`，确认 C++ 文件符合格式要求。
 - [ ] **Pre-commit**：读取 `.pre-commit-config.yaml`，确认 clang-format 和 OAT 检查要求。
+- [ ] **Autofuse 模板命名**：涉及新增模板、实现策略、API 分支/回退或影响名称的分组、图改写、reuse 映射时，读取 [Codegen 语义命名规范](../../../docs/zh/autofuse/design/features/codegen.md#template-semantic-naming) 和 [Schedule 传递规则](../../../docs/zh/autofuse/design/features/schedule.md#template-semantic-propagation)，按下述专项要求审查。
 - [ ] **PR 模板**：若准备提交 PR，读取 `.gitcode/PULL_REQUEST_TEMPLATE.zh-CN.md` 或 `.gitcode/PULL_REQUEST_TEMPLATE.en-US.md`。
 - [ ] **设计文档/spec 模板**：任何输出设计文档/spec 的场景（包括但不限于 superpowers brainstorming skill、用户直接要求写设计文档、输出设计方案），必须先读取 `docs/guidelines/design_document_template.md`，按模板格式输出并覆盖每个章节；即使 superpowers skill 有自己的格式要求，也要以本模板为准。
 
@@ -105,6 +106,16 @@ description: |
 - 新功能必须覆盖正向、异常和边界场景。
 - SuperKernel Python 变更优先 pytest；C++/AOT 变更优先 gtest/RDV。
 - Autofuse optimize/codegen 变更优先 UT + E2E ST。
+
+#### Autofuse 模板语义命名
+
+仅在上述模板命名变更范围内检查；具体格式、词表和边界以 Codegen/Schedule 规范为准：
+
+- 分类或继承理由是否明确，是否在实际策略选择、成功转换和最终 API 选择点采集，复制/失败/回退后是否仍反映最终实现。
+- 是否保持当前调用、候选及完整逻辑身份，组级 role 是否被父策略覆盖，reuse 是否串组，快照是否与最终 data 同步选择。
+- 是否复用公共词表和规范化入口，是否准确区分合理父名/`Adaptive`、`ambiguous` 和 `unavailable`，而非掩盖接入遗漏。
+- 测试是否验证实际分支、完整身份、名称和状态，以及本次受影响的边界；PR 是否分开记录名称适配、设备执行、精度、性能和未执行项。
+- INFO 关闭时是否避免新增诊断构造，诊断失败是否影响真实求解，原编译、tiling 和 kernel 性能 gate 是否保持。自动接入 CI 尚未实施，不能将现有 CI 通过视为命名适配已验证。
 
 #### 性能与日志
 

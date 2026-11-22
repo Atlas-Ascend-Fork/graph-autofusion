@@ -59,7 +59,7 @@ Before running this example, complete the following steps in sequence:
 export CANN_INSTALL_PATH=/usr/local/Ascend
 
 # Load the driver-related environment variables from the CANN package.
-source $CANN_INSTALL_PATH/driver/bin/setenv.sh
+source $CANN_INSTALL_PATH/driver/bin/setenv.bash
 
 # Load the Toolkit-related environment variables from the CANN package.
 source $CANN_INSTALL_PATH/ascend-toolkit/set_env.sh

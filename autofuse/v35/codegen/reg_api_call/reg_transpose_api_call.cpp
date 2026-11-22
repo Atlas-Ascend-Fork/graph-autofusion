@@ -26,6 +26,7 @@ constexpr uint64_t kMaxDiscontinuousAxisNum = 2U;
 }
 
 namespace codegen {
+namespace semantic = ascgen_utils::template_semantic;
 using namespace std;
 using namespace af::ops;
 using namespace af::ascir_op;
@@ -175,6 +176,8 @@ Status TransposeRegApiCall::BuildApiParam(const TPipe &tpipe, const std::vector<
   GetTensorVectorizedRepeats(y, out_vectorized_repeats);
   uint32_t transpose_inner_axis_num = GetContinuousInnerAxisNum(y, out_vectorized_repeats);
   uint32_t transpose_total_axis_num = y.vectorized_axis.size() > 4U ? 4U : y.vectorized_axis.size();
+  api_param->semantic_feature = semantic::kInner + std::to_string(transpose_inner_axis_num) + semantic::kTotalSuffix +
+                                std::to_string(transpose_total_axis_num);
   api_param->template_params.emplace_back(std::to_string(transpose_inner_axis_num));
   api_param->template_params.emplace_back(std::to_string(transpose_total_axis_num));
   std::vector<ascir::SizeExpr> reordered_in_vectorized_strides;

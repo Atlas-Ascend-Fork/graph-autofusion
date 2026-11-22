@@ -1,0 +1,265 @@
+# reg 全量接管表：step 2a（ceil2int / floor_to_int）落地后（2026-10-28）
+#
+# 量具: autofuse/mlir/test/probe/legacy_takeover_table.sh -j 40 -R '_v2$'
+# 环境: 远端 AF_MLIR_0814，legacy ST 档（本次重配过）。
+# 自检: 用例数 200、二进制不存在的行 0、没打出标签的行 0、量具 WARNING 0 条。
+#
+# 基线是 faa0b190（第 9 批）那份 2026-10-28-legacy-takeover-table-reg-b9.txt。
+#
+#   四态                基线      S2a
+#   takeover              79   ->   81    （+2）
+#   fallback             108   ->  106    （-2）
+#   hard-failure          11   ->   11    （**不变**）
+#   out-of-scope           2   ->    2
+#
+# **逐格对比：200 行里只有 2 行变，198 行逐字未变，0 格变差。**
+#
+#   ceil2int_bf16_test       fallback -> takeover
+#   floortoint_float_test    fallback -> takeover
+#
+#===----------------------------------------------------------------------===#
+# step 2 原计划 4 格，实际交付 2 格：2b 已退回，原因记下来
+#
+#   `round_to_int` / `trunc_to_int` 写过一遍、UT 也过了，但**实测让它们从干净回落变成
+#   硬失败**（takeover 79 -> 81 而 hard-failure 11 -> 13），所以整个 2b 退回。
+#
+#   卡点**不是**那张 (输入, 输出) 对表——对表量清楚了，而且结论有用：那 8 对全在
+#   `getRegBasedCastPairs()` 里，但 reg 的 cast 表还多 `f32->i8` 与 `f16->i64`，所以不能
+#   复用 `CastPair`（会比 legacy 宽，宽就是注册表里的一句假话），要另起一张 8 对表。
+#
+#   真卡点是 **`afir.store` 的「两端 dtype 必须相同」**。legacy 自己调度出来的图就是矛盾的：
+#
+#     func @round_to_int_float_to_int32_test_0_B0Y2_S0G0C0(%data: f32[s0,s1], %output: f32[s0,s1])
+#       %2 = ascir.ops.RoundToInt(%1) -> vector<z0z1t_sizexi32>
+#       %3 = ascir.ops.Store(%2) -> output: %output        <- %output 是 f32
+#
+#   存的是 i32、GM 那一侧是 f32。那个 f32 是 legacy 在 MLIR 跑起来之前定的（函数签名出自
+#   legacy 的调度结果）。legacy 的 store 按字节搬、两者都是 4 字节所以它「能跑」；MLIR 的
+#   `afir.store` 有那条不变量，于是硬失败。**与 uint8 那一族是同一道闸门。**
+#
+#   不为这两格放开 store 那条闸门：硬失败换成按字节重解释的静默错值更糟，而且影响所有图。
+#   接 2b 的前置是先给「两端 dtype 不同但字节宽度相同」的 store 定语义（capability 层干净
+#   拒收，或显式建模成一次 reinterpret），那是独立一件活。
+#
+#===----------------------------------------------------------------------===#
+
+
+case                                                 state         gate                     shortfall  first diagnostic
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+abs_bf16_test_codegen_v2                             takeover      none                     no
+abs_brc_add_test_codegen_v2                          fallback      lowering                 yes        error: UnsupportedOperation: VectorFunc subgraph node 'Scalar_scalar' of type 'Scalar' is not modeled yet; scalar operands inside a vector function ar
+abs_clip_by_value_test_codegen_v2                    takeover      none                     no
+abs_fma_bf16_test_codegen_v2                         fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'fma' of type 'Fma'
+abs_fma_test_codegen_v2                              fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'fma' of type 'Fma'
+abs_uint8_test_codegen_v2                            takeover      none                     no
+acos_bf16_test_codegen_v2                            takeover      none                     no
+acosh_bf16_test_codegen_v2                           takeover      none                     no
+add_abs_float_scalar_test_codegen_v2                 fallback      lowering                 yes        error: 'afir.load' op has no supported Ascend implementation
+add_abs_half_scalar_test_codegen_v2                  fallback      lowering                 yes        error: 'afir.load' op has no supported Ascend implementation
+add_abs_int8_scalar_test_codegen_v2                  fallback      lowering                 yes        error: UnsupportedOperation: element type 'int8' is not in the AFIR supply table
+add_abs_test_codegen_v2                              takeover      none                     no
+add_exp2_test_codegen_v2                             takeover      none                     no
+add_exp_bf16_test_codegen_v2                         fallback      lowering                 yes        error: 'afir.add' op has no supported Ascend implementation
+add_floor_bf16_test_codegen_v2                       fallback      lowering                 yes        error: 'afir.add' op has no supported Ascend implementation
+add_floor_test_codegen_v2                            takeover      none                     no
+asin_bf16_test_codegen_v2                            takeover      none                     no
+asinh_bf16_test_codegen_v2                           takeover      none                     no
+atan2_bf16_test_codegen_v2                           takeover      none                     no
+atan_bf16_test_codegen_v2                            takeover      none                     no
+atanh_bf16_test_codegen_v2                           takeover      none                     no
+bessel_j0_store_test_codegen_v2                      takeover      none                     no
+bessel_j1_store_test_codegen_v2                      takeover      none                     no
+bessel_y0_store_test_codegen_v2                      takeover      none                     no
+bessel_y1_store_test_codegen_v2                      takeover      none                     no
+bf16_add_test_codegen_v2                             fallback      lowering                 yes        error: 'afir.add' op has no supported Ascend implementation
+bf16_nddma_add_test_codegen_v2                       fallback      lowering                 yes        error: 'afir.nddma' op has no supported Ascend implementation
+binary_api_scalar_test_codegen_v2                    fallback      candidate-preparation    yes        error: subgraph 0 contains no plan with an MLIR-supported template (plan 0 stage 0: 1 template(s), all rejected by: elementwise-broadcast 1)
+bitwise_bool_store_test_codegen_v2                   fallback      lowering                 yes        error: UnsupportedOperation: scheduler dtype value 12 is not modeled by AFIR
+bool_mask_flow_test_codegen_v2                       fallback      lowering                 yes        error: UnsupportedOperation: scheduler dtype value 12 is not modeled by AFIR
+brc_reduce_test_codegen_v2                           fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'max' of type 'Max'
+cast_abs_float16_float_test_codegen_v2               takeover      none                     no
+cast_abs_test_codegen_v2                             takeover      none                     no
+cast_nan_test_codegen_v2                             takeover      none                     no
+ceil2int_bf16_test_codegen_v2                        takeover      none                     no
+ceil_bf16_test_codegen_v2                            takeover      none                     no
+chebyshev_polynomial_t_store_test_codegen_v2         takeover      none                     no
+chebyshev_polynomial_u_store_test_codegen_v2         takeover      none                     no
+chebyshev_polynomial_v_store_test_codegen_v2         takeover      none                     no
+chebyshev_polynomial_w_store_test_codegen_v2         takeover      none                     no
+concat_test_codegen_v2                               fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'concat' of type 'Concat'
+continues_brc_test_codegen_v2                        takeover      none                     no
+copysign_bf16_test_codegen_v2                        takeover      none                     no
+cos_bf16_test_codegen_v2                             takeover      none                     no
+cosh_bf16_test_codegen_v2                            takeover      none                     no
+digamma_bf16_test_codegen_v2                         takeover      none                     no
+div_abs_test_codegen_v2                              takeover      none                     no
+erf_bf16_test_codegen_v2                             takeover      none                     no
+erfc_bf16_test_codegen_v2                            takeover      none                     no
+erfcx_test_codegen_v2                                takeover      none                     no
+expm1_test_codegen_v2                                takeover      none                     no
+float_logical_not_test_codegen_v2                    hard-failure  lowering                 no         error: 'afir.store' op transfer source and destination must have the same element type
+floor_div_int32_store_test_codegen_v2                takeover      none                     no
+floordiv_abs_test_codegen_v2                         fallback      lowering                 yes        error: UnsupportedOperation: element type 'int8' is not in the AFIR supply table
+floordiv_mul_le_select_test_codegen_v2               fallback      candidate-preparation    yes        error: subgraph 0 contains no plan with an MLIR-supported template (plan 0 stage 0: 5 template(s), all rejected by: elementwise-broadcast 5)
+floortoint_float_test_codegen_v2                     takeover      none                     no
+fmod_float_test_codegen_v2                           takeover      none                     no
+frexp_store_test_codegen_v2                          fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'frexp' of type 'Frexp'
+gather_reduce_store_test_codegen_v2                  fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'gather' of type 'Gather'
+half_logical_not_test_codegen_v2                     hard-failure  lowering                 no         error: 'afir.store' op transfer source and destination must have the same element type
+hermite_polynomial_h_store_test_codegen_v2           fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'hermite_polynomial_h' of type 'HermitePolynomialH'
+hermite_polynomial_he_store_test_codegen_v2          fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'hermite_polynomial_he' of type 'HermitePolynomialHe'
+hypot_float_test_codegen_v2                          takeover      none                     no
+i0_store_test_codegen_v2                             takeover      none                     no
+i0e_store_test_codegen_v2                            takeover      none                     no
+i1e_store_test_codegen_v2                            takeover      none                     no
+indirect_load_add_il_reduce_test_codegen_v2          fallback      lowering                 yes        error: UnsupportedOperation: element type 'int64' is not in the AFIR supply table
+indirect_load_both_transpose_simd_fallback_test_codegen_v2 fallback      candidate-preparation    yes        error: subgraph 0 contains no plan with an MLIR-supported template (plan 0 stage 0: 2 template(s), all rejected by: queue-resources 2; partially: elem
+indirect_load_both_transpose_simd_nddma_test_codegen_v2 fallback      candidate-preparation    yes        error: subgraph 0 contains no plan with an MLIR-supported template (plan 0 stage 0: 2 template(s), all rejected by: queue-resources 2; partially: elem
+indirect_load_both_transpose_simd_test_codegen_v2    fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'input_transpose' of type 'Transpose'
+indirect_load_both_transpose_simt_test_codegen_v2    fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'input_transpose' of type 'Transpose'
+indirect_load_broadcast_axis_simd_test_codegen_v2    fallback      lowering                 yes        error: UnsupportedOperation: element type 'int64' is not in the AFIR supply table
+indirect_load_broadcast_axis_simt_test_codegen_v2    fallback      candidate-preparation    yes        error: subgraph 0 contains no plan with an MLIR-supported template (plan 0 stage 0: 1 template(s), all rejected by: elementwise-broadcast 1)
+indirect_load_broadcast_continuous_index_simt_test_codegen_v2 fallback      lowering                 yes        error: UnsupportedOperation: element type 'int64' is not in the AFIR supply table
+indirect_load_broadcast_continuous_simd_test_codegen_v2 fallback      candidate-preparation    yes        error: subgraph 0 contains no plan with an MLIR-supported template (plan 0 stage 0: 1 template(s), all rejected by: queue-resources 1)
+indirect_load_broadcast_cross_boundary_simt_fallback_test_codegen_v2 fallback      lowering                 yes        error: UnsupportedOperation: element type 'int64' is not in the AFIR supply table
+indirect_load_broadcast_cross_boundary_simt_test_codegen_v2 fallback      lowering                 yes        error: UnsupportedOperation: element type 'int64' is not in the AFIR supply table
+indirect_load_broadcast_elements_sk_test_codegen_v2  fallback      candidate-preparation    yes        error: subgraph 0 contains no plan with an MLIR-supported template (plan 0 stage 2: 1 template(s), all rejected by: queue-resources 1)
+indirect_load_broadcast_index_abs_simt_test_codegen_v2 fallback      candidate-preparation    yes        error: subgraph 0 contains no plan with an MLIR-supported template (plan 0 stage 0: 1 template(s), all rejected by: elementwise-broadcast 1)
+indirect_load_broadcast_index_mixed_view_simt_test_codegen_v2 fallback      lowering                 yes        error: UnsupportedOperation: element type 'int64' is not in the AFIR supply table
+indirect_load_broadcast_index_physical_view_simt_test_codegen_v2 fallback      candidate-preparation    yes        error: subgraph 0 contains no plan with an MLIR-supported template (plan 0 stage 0: 1 template(s), all rejected by: queue-resources 1)
+indirect_load_broadcast_index_where_simt_test_codegen_v2 fallback      lowering                 yes        error: UnsupportedOperation: element type 'int64' is not in the AFIR supply table
+indirect_load_broadcast_inner_adjacent_simd_test_codegen_v2 fallback      lowering                 yes        error: UnsupportedOperation: element type 'int64' is not in the AFIR supply table
+indirect_load_broadcast_reduce_simt_fallback_test_codegen_v2 fallback      candidate-preparation    yes        error: subgraph 0 contains no plan with an MLIR-supported template (plan 0 stage 0: 1 template(s), all rejected by: queue-resources 1)
+indirect_load_broadcast_retained_simd_test_codegen_v2 fallback      candidate-preparation    yes        error: subgraph 0 contains no plan with an MLIR-supported template (plan 0 stage 0: 1 template(s), all rejected by: queue-resources 1)
+indirect_load_broadcast_retained_simt_test_codegen_v2 fallback      candidate-preparation    yes        error: subgraph 0 contains no plan with an MLIR-supported template (plan 0 stage 0: 1 template(s), all rejected by: queue-resources 1)
+indirect_load_complex_broadcast_simd_test_codegen_v2 fallback      lowering                 yes        error: UnsupportedOperation: element type 'int64' is not in the AFIR supply table
+indirect_load_complex_broadcast_simt_test_codegen_v2 fallback      lowering                 yes        error: UnsupportedOperation: element type 'int64' is not in the AFIR supply table
+indirect_load_complex_input_broadcast_simd_test_codegen_v2 fallback      lowering                 yes        error: UnsupportedOperation: VectorFunc subgraph node 'Scalar_input_scalar0' of type 'Scalar' is not modeled yet; scalar operands inside a vector func
+indirect_load_embedding_reduce_simt_test_codegen_v2  fallback      candidate-preparation    yes        error: subgraph 0 contains no plan with an MLIR-supported template (plan 0 stage 0: 1 template(s), all rejected by: elementwise-broadcast 1)
+indirect_load_embedding_tail_simd_codegen_v2         fallback      lowering                 yes        error: UnsupportedOperation: element type 'int64' is not in the AFIR supply table
+indirect_load_embedding_test_codegen_v2              fallback      lowering                 yes        error: UnsupportedOperation: element type 'int64' is not in the AFIR supply table
+indirect_load_graph_hint_embedding_slice_codegen_v2  fallback      lowering                 yes        error: UnsupportedOperation: element type 'int64' is not in the AFIR supply table
+indirect_load_graph_hint_reduce_simt_test_codegen_v2 fallback      lowering                 yes        error: UnsupportedOperation: element type 'int64' is not in the AFIR supply table
+indirect_load_graph_hint_simd_repro_codegen_v2       fallback      candidate-preparation    yes        error: subgraph 0 contains no plan with an MLIR-supported template (plan 0 stage 0: 1 template(s), all rejected by: queue-resources 1)
+indirect_load_index_binary_same_view_simd_test_codegen_v2 fallback      lowering                 yes        error: UnsupportedOperation: element type 'int64' is not in the AFIR supply table
+indirect_load_mixed_rank4_axis2_simd_codegen_v2      fallback      lowering                 yes        error: UnsupportedOperation: VectorFunc node 'indirect_load_mixed_elementwise_test_0_B0Y9_S0G0C0_VfNode_0' reads 'int32', which the register-form lowe
+indirect_load_rank2_axis1_simd_codegen_v2            fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'indirect_load' of type 'IndirectLoad'
+indirect_load_rank3_axis1_float_int64_gather_codegen_v2 fallback      candidate-preparation    yes        error: subgraph 0 contains no plan with an MLIR-supported template (plan 0 stage 0: 1 template(s), all rejected by: queue-resources 1)
+indirect_load_rank3_axis1_input_index_gap_simd_test_codegen_v2 fallback      candidate-preparation    yes        error: subgraph 0 contains no plan with an MLIR-supported template (plan 0 stage 0: 2 template(s), all rejected by: queue-resources 2; partially: data
+indirect_load_rank3_axis1_input_index_gap_simt_test_codegen_v2 fallback      candidate-preparation    yes        error: subgraph 0 contains no plan with an MLIR-supported template (plan 0 stage 0: 1 template(s), all rejected by: queue-resources 1)
+indirect_load_rank3_axis1_input_index_outer_gap_simt_test_codegen_v2 fallback      candidate-preparation    yes        error: subgraph 0 contains no plan with an MLIR-supported template (plan 0 stage 0: 1 template(s), all rejected by: queue-resources 1)
+indirect_load_rank3_axis1_torch_gather_frontend_codegen_v2 fallback      lowering                 yes        error: UnsupportedOperation: element type 'int64' is not in the AFIR supply table
+indirect_load_rank4_axis1_full_prefix_bessel_k0_sum_simd_codegen_v2 fallback      lowering                 yes        error: UnsupportedOperation: VectorFunc node 'indirect_load_store_test_0_B0Y4_S0G0C0_VfNode_0' reads 'int32', which the register-form lowering does no
+indirect_load_user_dtype_sweep_codegen_v2            fallback      candidate-preparation    yes        error: subgraph 0 contains no plan with an MLIR-supported template (plan 0 stage 0: 1 template(s), all rejected by: queue-resources 1)
+indirect_load_user_dynamic_shape_sweep_codegen_v2    fallback      candidate-preparation    yes        error: subgraph 0 contains no plan with an MLIR-supported template (plan 0 stage 0: 1 template(s), all rejected by: queue-resources 1)
+indirect_load_user_embedding_exp_abs_add_simt_codegen_v2 fallback      candidate-preparation    yes        error: subgraph 0 contains no plan with an MLIR-supported template (plan 0 stage 0: 1 template(s), all rejected by: queue-resources 1)
+indirect_load_user_embedding_sum_codegen_v2          fallback      candidate-preparation    yes        error: subgraph 0 contains no plan with an MLIR-supported template (plan 0 stage 0: 1 template(s), all rejected by: queue-resources 1)
+indirect_load_user_embedding_sum_rank2_codegen_v2    fallback      candidate-preparation    yes        error: subgraph 0 contains no plan with an MLIR-supported template (plan 0 stage 0: 1 template(s), all rejected by: queue-resources 1)
+indirect_load_user_embedding_sum_simd_codegen_v2     fallback      candidate-preparation    yes        error: subgraph 0 contains no plan with an MLIR-supported template (plan 0 stage 0: 2 template(s), all rejected by: queue-resources 2; partially: data
+indirect_load_user_fanout_direct_reduce_simt_codegen_v2 fallback      candidate-preparation    yes        error: subgraph 0 contains no plan with an MLIR-supported template (plan 0 stage 0: 1 template(s), all rejected by: queue-resources 1)
+indirect_load_user_fanout_direct_stores_simd_codegen_v2 fallback      candidate-preparation    yes        error: subgraph 0 contains no plan with an MLIR-supported template (plan 0 stage 0: 1 template(s), all rejected by: queue-resources 1)
+indirect_load_user_fanout_direct_stores_simt_codegen_v2 fallback      candidate-preparation    yes        error: subgraph 0 contains no plan with an MLIR-supported template (plan 0 stage 0: 1 template(s), all rejected by: queue-resources 1)
+indirect_load_user_fanout_post_reduce_simt_codegen_v2 fallback      candidate-preparation    yes        error: subgraph 0 contains no plan with an MLIR-supported template (plan 0 stage 0: 1 template(s), all rejected by: queue-resources 1)
+indirect_load_user_fanout_post_stores_simd_codegen_v2 fallback      candidate-preparation    yes        error: subgraph 0 contains no plan with an MLIR-supported template (plan 0 stage 0: 1 template(s), all rejected by: queue-resources 1)
+indirect_load_user_fanout_post_stores_simt_codegen_v2 fallback      candidate-preparation    yes        error: subgraph 0 contains no plan with an MLIR-supported template (plan 0 stage 0: 1 template(s), all rejected by: queue-resources 1)
+indirect_load_user_fanout_side_input_simt_codegen_v2 fallback      candidate-preparation    yes        error: subgraph 0 contains no plan with an MLIR-supported template (plan 0 stage 0: 1 template(s), all rejected by: elementwise-broadcast 1, queue-res
+indirect_load_user_int64_dense_sweep_codegen_v2      fallback      candidate-preparation    yes        error: subgraph 0 contains no plan with an MLIR-supported template (plan 0 stage 0: 1 template(s), all rejected by: queue-resources 1)
+indirect_load_user_layernorm_codegen_v2              fallback      candidate-preparation    yes        error: subgraph 0 contains no plan with an MLIR-supported template (plan 0 stage 0: 1 template(s), all rejected by: queue-resources 1)
+indirect_load_user_masked_embedding_minimal_codegen_v2 fallback      candidate-preparation    yes        error: subgraph 0 contains no plan with an MLIR-supported template (plan 0 stage 0: 1 template(s), all rejected by: elementwise-broadcast 1, queue-res
+indirect_load_user_masked_embedding_sum_full_auto_codegen_v2 fallback      candidate-preparation    yes        error: subgraph 0 contains no plan with an MLIR-supported template (plan 0 stage 0: 1 template(s), all rejected by: elementwise-broadcast 1, queue-res
+indirect_load_user_position_bias_codegen_v2          fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'transpose' of type 'Transpose'
+indirect_load_user_side_input_fanout_simd_codegen_v2 fallback      candidate-preparation    yes        error: subgraph 0 contains no plan with an MLIR-supported template (plan 0 stage 0: 2 template(s), all rejected by: elementwise-broadcast 2)
+indirect_load_user_side_input_fanout_simt_codegen_v2 fallback      lowering                 yes        error: UnsupportedOperation: element type 'int64' is not in the AFIR supply table
+int16_logical_not_test_codegen_v2                    hard-failure  lowering                 no         error: 'afir.store' op transfer source and destination must have the same element type
+int32_logical_not_test_codegen_v2                    hard-failure  lowering                 no         error: 'afir.store' op transfer source and destination must have the same element type
+laguerre_polynomial_l_store_test_codegen_v2          fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'laguerre_polynomial_l' of type 'LaguerrePolynomialL'
+le_bool_store_test_codegen_v2                        fallback      lowering                 yes        error: UnsupportedOperation: scheduler dtype value 12 is not modeled by AFIR
+legendre_polynomial_p_store_test_codegen_v2          fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'legendre_polynomial_p' of type 'LegendrePolynomialP'
+lgamma_float_test_codegen_v2                         takeover      none                     no
+load_airy_ai_store_test_codegen_v2                   takeover      none                     no
+load_bitwise_and_store_test_codegen_v2               hard-failure  lowering                 no         error: 'afir.store' op transfer source and destination must have the same element type
+load_bitwise_not_store_test_codegen_v2               fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'bitwisenot' of type 'BitwiseNot'
+load_bitwise_or_store_test_codegen_v2                fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'bitwiseor' of type 'BitwiseOr'
+load_bitwise_xor_store_test_codegen_v2               fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'bitwisexor' of type 'BitwiseXor'
+load_brc_test_codegen_v2                             takeover      none                     no
+load_compare_cast_sum_store_test_codegen_v2          fallback      lowering                 yes        error: UnsupportedOperation: element type 'int8' is not in the AFIR supply table
+load_compare_scalar_where_store_test_codegen_v2      fallback      lowering                 yes        error: UnsupportedOperation: VectorFunc subgraph node 'Scalar_scalar0' of type 'Scalar' is not modeled yet; scalar operands inside a vector function a
+load_compare_store_test_codegen_v2                   takeover      none                     no
+load_compare_where_store_test_codegen_v2             takeover      none                     no
+load_erfinv_store_test_codegen_v2                    takeover      none                     no
+load_gather_one_axis_split_b_t_abs_store_test_codegen_v2 fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'gather' of type 'Gather'
+load_gather_split_b_t_abs_store_test_codegen_v2      fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'gather' of type 'Gather'
+load_gather_tail_split_b_t_abs_store_test_codegen_v2 fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'gather' of type 'Gather'
+load_leaky_relu_store_test_codegen_v2                takeover      none                     no
+load_log2_store_test_codegen_v2                      takeover      none                     no
+load_logicaland_store_test_codegen_v2                hard-failure  lowering                 no         error: 'afir.store' op transfer source and destination must have the same element type
+load_logicalor_store_test_codegen_v2                 hard-failure  lowering                 no         error: 'afir.store' op transfer source and destination must have the same element type
+load_loop_mode_test_codegen_v2                       fallback      candidate-preparation    yes        error: subgraph 0 contains no plan with an MLIR-supported template (plan 0 stage 0: 5 template(s), all rejected by: elementwise-broadcast 5, queue-res
+load_lshift_store_test_codegen_v2                    fallback      lowering                 yes        error: UnsupportedOperation: element type 'int8' is not in the AFIR supply table
+load_modified_bessel_i0_store_test_codegen_v2        takeover      none                     no
+load_modified_bessel_i1_store_test_codegen_v2        takeover      none                     no
+load_modified_bessel_k0_store_test_codegen_v2        takeover      none                     no
+load_modified_bessel_k1_store_test_codegen_v2        takeover      none                     no
+load_tanh_store_test_codegen_v2                      takeover      none                     no
+load_where_store_test_codegen_v2                     fallback      candidate-preparation    yes        error: subgraph 0 contains no plan with an MLIR-supported template (plan 0 stage 0: 2 template(s), all rejected by: queue-resources 2; partially: data
+load_where_x2_is_ubscalar_store_test_codegen_v2      takeover      none                     no
+load_where_x2_x3_is_ubscalar_store_test_codegen_v2   takeover      none                     no
+load_where_x3_is_ubscalar_store_test_codegen_v2      takeover      none                     no
+log10_float_test_codegen_v2                          takeover      none                     no
+log1p_bfloat16_test_codegen_v2                       takeover      none                     no
+log_ndtr_store_test_codegen_v2                       takeover      none                     no
+logicalxor_float_test_codegen_v2                     takeover      none                     no
+matmul_compare_scalar_test_codegen_v2                out-of-scope  cube-fusion              no
+matmul_elemwise_brc_test_codegen_v2                  out-of-scope  cube-fusion              no
+mod_test_codegen_v2                                  takeover      none                     no
+ndtr_store_test_codegen_v2                           takeover      none                     no
+ndtri_store_test_codegen_v2                          takeover      none                     no
+next_after_store_test_codegen_v2                     takeover      none                     no
+poly_gamma_store_test_codegen_v2                     fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'poly_gamma' of type 'PolyGamma'
+pow_bf16_test_codegen_v2                             takeover      none                     no
+rand_store_test_codegen_v2                           fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'rand' of type 'Rand'
+randn_store_test_codegen_v2                          fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'randn' of type 'Randn'
+reciprocal_bf16_test_codegen_v2                      fallback      lowering                 yes        error: 'afir.reciprocal' op has no supported Ascend implementation
+relu_uint8_test_codegen_v2                           takeover      none                     no
+remainder_int32_store_test_codegen_v2                takeover      none                     no
+round_bf16_test_codegen_v2                           takeover      none                     no
+round_to_int_float_to_int32_test_codegen_v2          fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'round_to_int' of type 'RoundToInt'
+rshift_uint8_test_codegen_v2                         fallback      lowering                 yes        error: UnsupportedOperation: element type 'int8' is not in the AFIR supply table
+scalar_brc_test_codegen_v2                           fallback      lowering                 yes        error: 'afir.nddma' op has no supported Ascend implementation
+scalar_cast_add_test_codegen_v2                      hard-failure  lowering                 no         error: 'afir.cast' op operand #0 must be Tensor or MemRef of 4-bit signless integer or 8-bit signless integer or 8-bit unsigned integer or 16-bit sign
+scalar_div_inf_test_codegen_v2                       hard-failure  lowering                 no         error: UnsupportedOperation: Scalar node 'scalar0' value 'inf' is not a numeric literal
+scaled_modified_bessel_k0_store_test_codegen_v2      takeover      none                     no
+scaled_modified_bessel_k1_store_test_codegen_v2      takeover      none                     no
+select_bool_test_codegen_v2                          fallback      lowering                 yes        error: UnsupportedOperation: scheduler dtype value 12 is not modeled by AFIR
+shifted_chebyshev_polynomial_t_store_test_codegen_v2 takeover      none                     no
+shifted_chebyshev_polynomial_u_store_test_codegen_v2 takeover      none                     no
+shifted_chebyshev_polynomial_v_store_test_codegen_v2 takeover      none                     no
+shifted_chebyshev_polynomial_w_store_test_codegen_v2 takeover      none                     no
+sign_bf16_test_codegen_v2                            takeover      none                     no
+sign_uint8_test_codegen_v2                           hard-failure  lowering                 no         error: 'afir.store' op transfer source and destination must have the same element type
+signbit_store_test_codegen_v2                        fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'signbit' of type 'SignBit'
+spherical_bessel_j0_store_test_codegen_v2            takeover      none                     no
+tail_brc_tail_reduce_test_codegen_v2                 fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'max' of type 'Max'
+transpose_bool_test_codegen_v2                       fallback      lowering                 yes        error: UnsupportedOperation: scheduler dtype value 12 is not modeled by AFIR
+truediv_bf16_test_codegen_v2                         takeover      none                     no
+trunc_to_int_bf16_to_int32_test_codegen_v2           fallback      lowering                 yes        error: UnsupportedOperation: Schedule buffer-form bridge does not support node 'trunc_to_int' of type 'TruncToInt'
+ub_scalar_brc_abs_add_test_codegen_v2                fallback      candidate-preparation    yes        error: subgraph 0 contains no plan with an MLIR-supported template (plan 0 stage 0: 1 template(s), all rejected by: elementwise-broadcast 1, queue-res
+uint8_logical_not_test_codegen_v2                    hard-failure  lowering                 no         error: 'afir.store' op transfer source and destination must have the same element type
+zeta_store_test_codegen_v2                           takeover      none                     no
+
+state                              count
+------------------------------------------------
+fallback                           106
+hard-failure                       11
+out-of-scope                       2
+takeover                           81
+
+gate                               count
+------------------------------------------------
+candidate-preparation              39
+cube-fusion                        2
+lowering                           78
+none                               81
+
+二进制不存在的行: 0
+没打出标签的行: 0

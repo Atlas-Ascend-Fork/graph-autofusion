@@ -172,6 +172,177 @@ class TestApiCompareV2UT : public testing::Test {
     AscendC::GmFree(param.src0);
     AscendC::GmFree(param.src1);
   }
+
+  template <CMPMODE mode>
+  static void TensorCompareV2Int64RegressionTest(uint32_t row_size) {
+    constexpr uint32_t rows = 4;
+    const uint32_t size = rows * row_size;
+    const int64_t src0_values[] = {2, -4, -1, 0, 1, 4, 4294967296LL, -4294967296LL};
+    const int64_t src1_values[] = {-8, -5, 0, 0, 2, 4, 4294967295LL, -4294967295LL};
+    TensorCompareV2InputParam<uint8_t, int64_t> param{};
+    param.size = size;
+    param.y = static_cast<uint8_t *>(AscendC::GmAlloc(sizeof(uint8_t) * size));
+    param.exp = static_cast<bool *>(AscendC::GmAlloc(sizeof(bool) * size));
+    param.src0 = static_cast<int64_t *>(AscendC::GmAlloc(sizeof(int64_t) * size));
+    param.src1 = static_cast<int64_t *>(AscendC::GmAlloc(sizeof(int64_t) * size));
+    for (uint32_t i = 0; i < size; i++) {
+      const uint32_t index = (i + i / row_size) % 8;
+      param.src0[i] = src0_values[index];
+      param.src1[i] = src1_values[index];
+      param.exp[i] = mode == CMPMODE::GE ? param.src0[i] >= param.src1[i] : param.src0[i] > param.src1[i];
+    }
+
+    auto kernel = [&param, row_size] {
+      const uint32_t input_stride = AlignUp(row_size, ONE_BLK_SIZE / sizeof(int64_t));
+      const uint32_t output_stride = AlignUp(row_size, ONE_BLK_SIZE / sizeof(uint8_t));
+      TPipe tpipe;
+      TBuf<TPosition::VECCALC> x1buf, x2buf, ybuf, tmp;
+      tpipe.InitBuffer(x1buf, sizeof(int64_t) * rows * input_stride);
+      tpipe.InitBuffer(x2buf, sizeof(int64_t) * rows * input_stride);
+      tpipe.InitBuffer(ybuf, rows * output_stride);
+      tpipe.InitBuffer(tmp, 40 * rows * KernelUtils::Max(row_size, 32U));
+      auto lhs = x1buf.Get<int64_t>();
+      auto rhs = x2buf.Get<int64_t>();
+      auto output = ybuf.Get<uint8_t>();
+      auto scratch = tmp.Get<uint8_t>();
+      for (uint32_t row = 0; row < rows; ++row) {
+        auto lhs_row = lhs[row * input_stride];
+        auto rhs_row = rhs[row * input_stride];
+        GmToUb(lhs_row, param.src0 + row * row_size, row_size);
+        GmToUb(rhs_row, param.src1 + row * row_size, row_size);
+      }
+      CompareExtend<int64_t, mode>(output, lhs, rhs, rows, row_size, input_stride, output_stride, scratch);
+      for (uint32_t row = 0; row < rows; ++row) {
+        auto output_row = output[row * output_stride];
+        UbToGm(param.y + row * row_size, output_row, row_size);
+      }
+    };
+    AscendC::SetKernelMode(KernelMode::AIV_MODE);
+    ICPU_RUN_KF(kernel, 1);
+
+    EXPECT_EQ(Valid(param.y, param.exp, param.size), 0);
+    AscendC::GmFree(param.y);
+    AscendC::GmFree(param.exp);
+    AscendC::GmFree(param.src0);
+    AscendC::GmFree(param.src1);
+  }
+
+  template <CMPMODE mode, typename O, typename I>
+  static void InvokeKernelWithBroadcastTensorInput(TensorCompareV2InputParam<O, I> &param, uint32_t first_axis,
+                                                   uint32_t row_size, uint32_t out_stride) {
+    TPipe tpipe;
+    TBuf<TPosition::VECCALC> x1buf, x2buf, ybuf, tmp;
+
+    tpipe.InitBuffer(x1buf, sizeof(I) * first_axis * row_size);
+    tpipe.InitBuffer(x2buf, ONE_BLK_SIZE);
+    tpipe.InitBuffer(ybuf, sizeof(O) * first_axis * out_stride);
+    tpipe.InitBuffer(tmp, TMP_UB_SIZE);
+
+    LocalTensor<I> l_x1 = x1buf.Get<I>();
+    LocalTensor<I> l_x2 = x2buf.Get<I>();
+    LocalTensor<O> l_y = ybuf.Get<O>();
+    LocalTensor<uint8_t> l_tmp = tmp.Get<uint8_t>();
+
+    GmToUb(l_x1, param.src0, first_axis * row_size);
+    GmToUb(l_x2, param.src1, row_size);
+    CompareExtend<I, mode>(l_y, l_x1, l_x2, first_axis, row_size, row_size, out_stride, l_tmp);
+    for (uint32_t i = 0; i < first_axis; i++) {
+      for (uint32_t j = 0; j < row_size; j++) {
+        param.y[i * row_size + j] = l_y.GetValue(i * out_stride + j);
+      }
+    }
+  }
+
+  template <CMPMODE mode, typename O, typename I>
+  static void CreateBroadcastTensorInput(TensorCompareV2InputParam<O, I> &param, uint32_t first_axis,
+                                         uint32_t row_size) {
+    const uint32_t total_size = first_axis * row_size;
+    // 构造测试输入和预期结果：src0为(first_axis, row_size)，src1为1行(row_size)，按行广播
+    param.y = static_cast<O *>(AscendC::GmAlloc(sizeof(O) * total_size));
+    param.exp = static_cast<bool *>(AscendC::GmAlloc(sizeof(bool) * total_size));
+    param.src0 = static_cast<I *>(AscendC::GmAlloc(sizeof(I) * total_size));
+    param.src1 = static_cast<I *>(AscendC::GmAlloc(sizeof(I) * row_size));
+
+    int input_range = 10;
+    std::mt19937 eng(1);
+    std::uniform_int_distribution distr(0, input_range);
+    std::mt19937 eng1(3);
+    std::uniform_int_distribution distr1(0, input_range);
+
+    for (uint32_t j = 0; j < row_size; j++) {
+      param.src1[j] = distr1(eng1);
+    }
+    for (uint32_t i = 0; i < total_size; i++) {
+      param.src0[i] = distr(eng);
+    }
+    for (uint32_t i = 0; i < first_axis; i++) {
+      for (uint32_t j = 0; j < row_size; j++) {
+        const I lhs = param.src0[i * row_size + j];
+        const I rhs = param.src1[j];
+        switch (mode) {
+          case CMPMODE::EQ:
+            param.exp[i * row_size + j] = lhs == rhs;
+            break;
+          case CMPMODE::NE:
+            param.exp[i * row_size + j] = lhs != rhs;
+            break;
+          case CMPMODE::GE:
+            if constexpr (std::is_same_v<I, half>) {
+              param.exp[i * row_size + j] = static_cast<half>(lhs) >= rhs;
+            } else {
+              param.exp[i * row_size + j] = lhs >= rhs;
+            }
+            break;
+          case CMPMODE::LE:
+            if constexpr (std::is_same_v<I, half>) {
+              param.exp[i * row_size + j] = static_cast<half>(lhs) <= rhs;
+            } else {
+              param.exp[i * row_size + j] = lhs <= rhs;
+            }
+            break;
+          case CMPMODE::GT:
+            param.exp[i * row_size + j] = lhs > rhs;
+            break;
+          case CMPMODE::LT:
+            if constexpr (std::is_same_v<I, half>) {
+              param.exp[i * row_size + j] = static_cast<half>(lhs) < rhs;
+            } else {
+              param.exp[i * row_size + j] = lhs < rhs;
+            }
+            break;
+          default:
+            break;
+        }
+      }
+    }
+  }
+
+  template <CMPMODE mode, typename O, typename I>
+  static void TensorCompareV2BroadcastTest(uint32_t first_axis) {
+    TensorCompareV2InputParam<O, I> param{};
+    // 广播行恰占一个block，满足CompareExtend的32B广播判定契约
+    const uint32_t row_size = ONE_BLK_SIZE / sizeof(I);
+    const uint32_t out_stride = AlignUp(row_size, ONE_BLK_SIZE / sizeof(O));
+
+    CreateBroadcastTensorInput<mode>(param, first_axis, row_size);
+
+    // 构造Api调用函数
+    auto kernel = [&param, first_axis, row_size, out_stride] {
+      InvokeKernelWithBroadcastTensorInput<mode>(param, first_axis, row_size, out_stride);
+    };
+
+    // 调用kernel
+    AscendC::SetKernelMode(KernelMode::AIV_MODE);
+    ICPU_RUN_KF(kernel, 1);
+
+    // 验证结果
+    uint32_t diff_count = Valid(param.y, param.exp, first_axis * row_size);
+    EXPECT_EQ(diff_count, 0) << "of first_axis " << first_axis;
+    AscendC::GmFree(param.y);
+    AscendC::GmFree(param.exp);
+    AscendC::GmFree(param.src0);
+    AscendC::GmFree(param.src1);
+  }
 };
 
 // 场景1：GT-int32
@@ -254,6 +425,26 @@ TEST_F(TestApiCompareV2UT, CompareV2_Ge_input_tensor_int32_output_uint8) {
                                                      sizeof(int32_t));
 }
 
+// 场景5.1：GE-int64，覆盖多repeat的正数、负数及相等值。
+TEST_F(TestApiCompareV2UT, CompareV2_Ge_input_tensor_int64_output_uint8) {
+  TensorCompareV2Int64RegressionTest<CMPMODE::GE>(4);
+  TensorCompareV2Int64RegressionTest<CMPMODE::GE>(16);
+  TensorCompareV2Int64RegressionTest<CMPMODE::GE>(32);
+  TensorCompareV2Int64RegressionTest<CMPMODE::GE>(40);
+  TensorCompareV2Int64RegressionTest<CMPMODE::GE>(100);
+  TensorCompareV2Int64RegressionTest<CMPMODE::GE>(128);
+}
+
+// 场景5.2：GT-int64，覆盖多repeat的正数、负数及相等值。
+TEST_F(TestApiCompareV2UT, CompareV2_Gt_input_tensor_int64_output_uint8) {
+  TensorCompareV2Int64RegressionTest<CMPMODE::GT>(4);
+  TensorCompareV2Int64RegressionTest<CMPMODE::GT>(16);
+  TensorCompareV2Int64RegressionTest<CMPMODE::GT>(32);
+  TensorCompareV2Int64RegressionTest<CMPMODE::GT>(40);
+  TensorCompareV2Int64RegressionTest<CMPMODE::GT>(100);
+  TensorCompareV2Int64RegressionTest<CMPMODE::GT>(128);
+}
+
 // 场景5：LT-int32
 TEST_F(TestApiCompareV2UT, CompareV2_Lt_input_tensor_int32_output_uint8) {
   TensorCompareV2Test<CMPMODE::LT, uint8_t, int32_t>(ONE_BLK_SIZE / sizeof(int32_t));
@@ -275,5 +466,22 @@ TEST_F(TestApiCompareV2UT, CompareV2_Lt_input_tensor_int32_output_uint8) {
 }
 
 /* End: 输入是两个tensor的 compare 测试--------------------------------------- */
+
+/* Begin: 输入是tensor广播单block tensor的 compare 测试------------------------ */
+
+// 场景6：GT-int32广播（src1为单block张量，覆盖CompareExtendInt32的广播分支）。
+// 大repeat_times受ProcessSmallAxisCase临时空间约束、CompareNormalNoLoop通用广播分支
+// 在first_axis>1时存在已知问题，待compare_v2.h侧修复后补充覆盖。
+TEST_F(TestApiCompareV2UT, CompareV2_Gt_input_broadcast_int32_output_uint8) {
+  TensorCompareV2BroadcastTest<CMPMODE::GT, uint8_t, int32_t>(2);
+}
+
+// 场景7：NE-half广播（覆盖NaN修正路径的==32判定，无NaN输入下结果应与非广播语义一致）
+TEST_F(TestApiCompareV2UT, CompareV2_Ne_input_broadcast_half_output_uint8) {
+  TensorCompareV2BroadcastTest<CMPMODE::NE, uint8_t, half>(2);
+  TensorCompareV2BroadcastTest<CMPMODE::NE, uint8_t, half>(5);
+}
+
+/* End: 输入是tensor广播单block tensor的 compare 测试-------------------------- */
 
 }  // namespace af

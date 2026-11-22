@@ -26,12 +26,15 @@ add_executable(test_ascir_st
     reg_func/test_reg_func_axpy.cpp
     reg_func/test_reg_func_unsupported.cpp
     reg_func_v2/test_reg_func_sin_v2.cpp
+    generator/test_rand_dtype_contract_st.cpp
     code_dumper/code_dumper_unittest.cc
+    ascir_utils/ascir_utils_st.cpp
 )
 
 target_include_directories(test_ascir_st PRIVATE
     ${ASCEND_ROOT}/x86_64-linux/include
-    ${ASCEND_ROOT}/opp/built-in/op_proto/inc)
+    ${ASCEND_ROOT}/opp/built-in/op_proto/inc
+    ${CODE_ROOT_DIR})
 
 target_link_libraries(test_ascir_st
     -Wl,--no-as-needed

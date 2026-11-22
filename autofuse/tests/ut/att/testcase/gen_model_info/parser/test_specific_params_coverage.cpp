@@ -12,6 +12,7 @@
 #include "ascir_ops.h"
 #include "base/att_const_values.h"
 #include "parser/specific_params_builder.h"
+#include "ascir_node_param/ascir_param_builder.h"
 
 namespace att {
 namespace {
@@ -169,5 +170,55 @@ TEST_F(SpecificParamsCoverageTest, RejectsMissingPayloadAndInvalidBuildStateWith
   params_->status = ascir_param::ParamBuildStatus::kBuilt;
   EXPECT_EQ(Fill("Add", std::monostate{}), af::SUCCESS);
 }
+TEST_F(SpecificParamsCoverageTest, CacheExecutionSurvivesSkippedSpecificPayloadAndIsCopiedByValue) {
+  params_->status = ascir_param::ParamBuildStatus::kSkipped;
+  params_->cache_executions.emplace_back();
+  params_->cache_executions.front().mode = ascir_param::CacheExecutionMode::kNoGuard;
+  params_->cache_executions.front().call_loop_axis_id = 9;
+  ASSERT_EQ(FillSpecificParams(node_, info_), af::SUCCESS);
+  params_->cache_executions.front().mode = ascir_param::CacheExecutionMode::kUnknown;
+  EXPECT_EQ(info_.cache_executions.front().mode, ascir_param::CacheExecutionMode::kNoGuard);
+  EXPECT_EQ(info_.cache_executions.front().call_loop_axis_id, 9);
+}
+
+TEST_F(SpecificParamsCoverageTest, CacheExecutionRetainsDistinctCalls) {
+  ascir_param::CacheExecutionParams execution;
+  execution.mode = ascir_param::CacheExecutionMode::kNoGuard;
+  execution.call_loop_axis_id = 9;
+  ascir_param::RecordCacheExecution(*params_, execution);
+  execution.mode = ascir_param::CacheExecutionMode::kOriginBroadcast;
+  execution.call_loop_axis_id = 10;
+  ascir_param::RecordCacheExecution(*params_, execution);
+  ASSERT_EQ(params_->cache_executions.size(), 2U);
+  EXPECT_EQ(params_->cache_executions[0].mode, ascir_param::CacheExecutionMode::kNoGuard);
+  EXPECT_EQ(params_->cache_executions[0].call_loop_axis_id, 9);
+  EXPECT_EQ(params_->cache_executions[1].mode, ascir_param::CacheExecutionMode::kOriginBroadcast);
+  EXPECT_EQ(params_->cache_executions[1].call_loop_axis_id, 10);
+}
+
+TEST_F(SpecificParamsCoverageTest, EnrichmentClearsPriorGenerationCacheExecution) {
+  params_->cache_executions.emplace_back();
+  params_->cache_executions.front().mode = ascir_param::CacheExecutionMode::kOriginBroadcast;
+  ASSERT_EQ(ascir_param::EnrichAscirGraphNodeParams(graph_), af::SUCCESS);
+  EXPECT_TRUE(ascir_param::GetAscirNodeParams(node_)->cache_executions.empty());
+}
+TEST_F(SpecificParamsCoverageTest, EnrichmentDoesNotClearAnotherCandidatesRecords) {
+  node_->GetOpDesc()->SetType("Broadcast");
+  ascir_param::BroadcastNodeParams payload;
+  payload.valid = true;
+  params_->specific_params = payload;
+  params_->cache_executions.emplace_back();
+  params_->cache_executions.front().mode = ascir_param::CacheExecutionMode::kNoGuard;
+  af::AscGraph clone("cloned_candidate");
+  ASSERT_TRUE(clone.CopyFrom(graph_));
+  ASSERT_EQ(ascir_param::EnrichAscirGraphNodeParams(clone), af::SUCCESS);
+  const auto cloned_params = ascir_param::GetAscirNodeParams(clone.FindNode("node"));
+  ASSERT_NE(cloned_params, nullptr);
+  EXPECT_NE(cloned_params, params_);
+  EXPECT_TRUE(cloned_params->cache_executions.empty());
+  ASSERT_EQ(params_->cache_executions.size(), 1U);
+  EXPECT_EQ(params_->cache_executions.front().mode, ascir_param::CacheExecutionMode::kNoGuard);
+}
+
 }  // namespace
 }  // namespace att

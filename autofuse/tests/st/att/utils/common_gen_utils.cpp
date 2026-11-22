@@ -9,3 +9,22 @@
  */
 
 #include "common_gen_utils.h"
+
+#include <cstdlib>
+
+namespace att {
+namespace test {
+int CompileGeneratedTiling(const std::string &arguments) {
+  std::string command = "'";
+  for (const char ch : std::string(ATT_ST_CXX_COMPILER)) {
+    if (ch == '\'') {
+      command += "'\\''";
+    } else {
+      command += ch;
+    }
+  }
+  command += "' -std=c++" + std::to_string(ATT_ST_CXX_STANDARD) + " " + arguments;
+  return std::system(command.c_str());
+}
+}  // namespace test
+}  // namespace att

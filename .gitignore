@@ -20,7 +20,9 @@ dist/
 super_kernel/tests/generated/
 
 # Coverage reports
+cov/
 super_kernel/coverage/
+multistream/coverage/
 
 # UT temporary files
 super_kernel/kernel_meta
@@ -49,6 +51,13 @@ super_kernel/tests/aot/third_party/mockcpp_src/
 .vscode/
 .idea/
 
+# macOS
+.DS_Store
+
+# Autofuse MLIR environment artifacts
+autofuse/mlir/.artifacts/
+autofuse/mlir/.deps/
+/autofuse/CLAUDE.md
 # AOT reports
 oat_reports/
 

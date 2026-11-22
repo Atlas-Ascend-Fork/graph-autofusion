@@ -13,6 +13,7 @@
 #include <sstream>
 
 #include "ascir_ops.h"
+#include "common_utils.h"
 #include "common/ge_common/debug/log.h"
 #include "graph/ascendc_ir/utils/asc_tensor_utils.h"
 #include "common/checker.h"
@@ -50,6 +51,9 @@ Status LoadRegApiCall::BuildApiParam(const TPipe &tpipe, const std::vector<ascir
     BuildDataCopyApiParamInNormal(tpipe, *api_param, dma_specific_params, gm, ub, gm_offset, true, has_transpose);
   }
   api_param->specific_params = dma_specific_params;
+  if (ascgen_utils::GetTemplateSemanticTransform(*this->node) == ascgen_utils::template_semantic::kTranspose) {
+    api_param->semantic_feature = ascgen_utils::template_semantic::kLoad;
+  }
 
   GE_CHK_STATUS_RET(CodegenApiParam::Register(this->node, api_param));
   return af::SUCCESS;

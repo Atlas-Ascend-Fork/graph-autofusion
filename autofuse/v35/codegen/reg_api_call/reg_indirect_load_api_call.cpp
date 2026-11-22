@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cctype>
 #include <map>
+#include <optional>
 #include <sstream>
 #include <unordered_map>
 #include "api_call/utils/api_call_factory.h"
@@ -24,20 +25,162 @@
 #include "v35/ascir/ascir_codegen_v2.h"
 
 namespace codegen {
+namespace semantic = ascgen_utils::template_semantic;
 namespace {
 constexpr size_t kIndirectLoadInputCount = 2UL;
 constexpr size_t kIndirectLoadOutputCount = 1UL;
 constexpr char kSimtContextNamePrefix[] = "IndirectLoadSimtContext_";
+constexpr char kSimtContextGuardPrefix[] = "AUTOFUSE_INDIRECT_LOAD_SIMT_CONTEXT_DEFINED_";
 constexpr char kSimtBodyNamePrefix[] = "IndirectLoadSimtBody_";
 constexpr char kSimtBodyGuardPrefix[] = "AUTOFUSE_INDIRECT_LOAD_SIMT_BODY_DEFINED_";
 constexpr char kGlobalTensorNamePrefix[] = "global_";
 constexpr char kSimtGmFieldNamePrefix[] = "gm_";
 constexpr char kSimtValueNamePrefix[] = "v_";
 
+std::string PromoteSizeExpr(const std::string &expr, const std::string &type) {
+  if (type == "uint32_t") {
+    return expr;
+  }
+  const size_t begin = expr.find("t->");
+  if (begin == std::string::npos) {
+    return "static_cast<" + type + ">(" + expr + ")";
+  }
+  size_t end = begin + 3U;
+  while (end < expr.size() && (std::isalnum(static_cast<unsigned char>(expr[end])) != 0 || expr[end] == '_')) {
+    ++end;
+  }
+  return expr.substr(0U, begin) + "static_cast<" + type + ">(" + expr.substr(begin, end - begin) + ")" +
+         expr.substr(end);
+}
+
+// [SIMT 动态 shape 坐标分解] SIMT 静态方法体（Index/AicoreIndex/Outputs/Store）作用域
+// 内没有 tiling 数据指针 t，坐标分解涉及的运行期符号尺寸/偏移（t->ksN）不能内联——与
+// 后置 Reduce 的 output_inner_size 同法，经 Context 字段传入。注册表按 tiler 表达式串
+// 去重；空跑收集（CollectSimtRuntimeSizeExprs / fused 空跑）产出表达式列表，Context 字
+// 段声明（GenerateSimtContextDefinition，文件作用域）与初始化
+// （GenerateSimtContextInitializer，kernel 作用域，t 可见）按同序复现。
+class SimtRuntimeSizeRegistry {
+ public:
+  SimtRuntimeSizeRegistry() = default;
+  // 预填已收集条目：正式发射阶段复用收集结果（同输入确定性，查找不新增条目）。
+  explicit SimtRuntimeSizeRegistry(std::vector<std::string> prefill) : entries_(std::move(prefill)) {}
+
+  // 编译期常量直接内联渲染；运行期符号注册进 Context 并返回字段引用表达式。
+  std::string InlineOrContext(const af::Expression &expr, const TPipe &tpipe, const std::string &offset_type) {
+    if (expr.IsConstExpr()) {
+      return PromoteSizeExpr(tpipe.tiler.Size(expr), offset_type);
+    }
+    const std::string tiler_expr = tpipe.tiler.Size(expr);
+    for (size_t i = 0UL; i < entries_.size(); ++i) {
+      if (entries_[i] == tiler_expr) {
+        return ContextFieldRef(i, offset_type);
+      }
+    }
+    entries_.emplace_back(tiler_expr);
+    return ContextFieldRef(entries_.size() - 1UL, offset_type);
+  }
+
+  const std::vector<std::string> &Entries() const {
+    return entries_;
+  }
+
+  // 表达式已注册为运行期字段时返回 true 并给出序号（与 InlineOrContext 同一比
+  // 较基准：tiler 渲染串）。调用前提：该表达式已被 InlineOrContext 注册过。
+  bool TryGetContextIndex(const af::Expression &expr, const TPipe &tpipe, size_t &index) const {
+    if (expr.IsConstExpr()) {
+      return false;
+    }
+    const std::string tiler_expr = tpipe.tiler.Size(expr);
+    for (size_t i = 0UL; i < entries_.size(); ++i) {
+      if (entries_[i] == tiler_expr) {
+        index = i;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // [SIMT 动态 shape 坐标分解加速] 运行期除数的热循环 div/mod 若直译为软件除法
+  // （AIV 无硬件除法器，数十 cycle/次），逐元素坐标分解（fused 消费者的按维取
+  // 模）会成为数倍于常量形态（aicc 将字面量除模折叠为乘移）的性能差源。与
+  // SIMT 模板 Policy 的 AddressDecoder 同源：每个 rt_size_N 配对预计算一次
+  // magic/shift（Context 初始化处），热循环 div/mod 改用 Simt::UintDiv 乘移
+  // 序列；静态除数保持字面量除法（编译期折叠）不变。
+  static std::string MagicFieldName(size_t index) {
+    return "rt_div_magic_" + std::to_string(index);
+  }
+  static std::string ShiftFieldName(size_t index) {
+    return "rt_div_shift_" + std::to_string(index);
+  }
+  static std::string MagicFieldRef(size_t index) {
+    return "context." + MagicFieldName(index);
+  }
+  static std::string ShiftFieldRef(size_t index) {
+    return "context." + ShiftFieldName(index);
+  }
+
+  // 除数静态：字面量除法（aicc 折叠）；除数运行期：magic 乘移除法。返回值为商表
+  // 达式；quotient_var 非空时改为「先声明商变量再引用」两段式（避免上层取模展开
+  // 中重复内联同一除法表达式）。先渲染一次（含注册副作用：运行期除数进入
+  // Context 字段表），再查索引分流。
+  std::string MakeRuntimeDiv(const std::string &dividend, const af::Expression &divisor, const TPipe &tpipe,
+                             const std::string &offset_type, std::string *quotient_var = nullptr) {
+    const std::string rendered = InlineOrContext(divisor, tpipe, offset_type);
+    size_t index = 0UL;
+    const bool is_runtime = TryGetContextIndex(divisor, tpipe, index);
+    if (quotient_var != nullptr && is_runtime) {
+      *quotient_var = "index_div_" + std::to_string(div_quotient_count_++);
+      quotient_stmts_.push_back("    const " + offset_type + " " + *quotient_var + " = Simt::UintDiv(" + dividend +
+                                ", " + MagicFieldRef(index) + ", " + ShiftFieldRef(index) + ");");
+      return *quotient_var;
+    }
+    if (!is_runtime) {
+      return "(" + dividend + ") / " + rendered;
+    }
+    return "Simt::UintDiv(" + dividend + ", " + MagicFieldRef(index) + ", " + ShiftFieldRef(index) + ")";
+  }
+
+  // 取模展开为 x - div(x) * divisor（乘法廉价；div(x) 的除数与本层除数一致，直
+  // 接内联 UintDiv——若 value 已是上层商变量则无重复展开）；除数静态保持字面量
+  // 取模。注意：不能复用上层「不同除数」的商变量（语义错配）。
+  std::string MakeRuntimeMod(const std::string &value, const af::Expression &divisor, const TPipe &tpipe,
+                             const std::string &offset_type) {
+    const std::string rendered = InlineOrContext(divisor, tpipe, offset_type);
+    size_t index = 0UL;
+    if (!TryGetContextIndex(divisor, tpipe, index)) {
+      return "(" + value + ") % " + rendered;
+    }
+    return "(" + value + " - Simt::UintDiv(" + value + ", " + MagicFieldRef(index) + ", " + ShiftFieldRef(index) +
+           ") * " + rendered + ")";
+  }
+
+  // 一次坐标分解内累积的商变量声明（发射坐标行前先落地，避免重复内联）。
+  void TakeQuotientStmts(std::vector<std::string> &stmts) {
+    stmts = std::move(quotient_stmts_);
+    quotient_stmts_.clear();
+  }
+
+  size_t div_quotient_count_ = 0UL;
+  std::vector<std::string> quotient_stmts_;
+  std::vector<std::string> TakeEntries() {
+    return std::move(entries_);
+  }
+
+  static std::string FieldName(size_t index) {
+    return "rt_size_" + std::to_string(index);
+  }
+  static std::string ContextFieldRef(size_t index, const std::string &offset_type) {
+    return "static_cast<" + offset_type + ">(context." + FieldName(index) + ")";
+  }
+
+ private:
+  std::vector<std::string> entries_;
+};
+
 Status GenerateSimtContextDefinition(const std::string &context_name,
                                      const std::vector<ascgen_utils::indirect_load::SimtGmTensorMetadata> &gm_tensors,
                                      bool has_output_inner_size, bool has_idx_table, const std::string &offset_type,
-                                     std::stringstream &ss) {
+                                     const std::vector<std::string> &runtime_size_exprs, std::stringstream &ss) {
   ss << "struct " << context_name << " {" << std::endl;
   for (const auto &tensor : gm_tensors) {
     std::string dtype;
@@ -60,6 +203,31 @@ Status GenerateSimtContextDefinition(const std::string &context_name,
     ss << "  const __ubuf__ int32_t *idx_table;" << std::endl;
     ss << "  " << offset_type << " idx_base;" << std::endl;
     ss << "  " << offset_type << " idx_row_stride;" << std::endl;
+  }
+  // [SIMT 动态 shape 坐标分解] 静态方法体内的运行期符号尺寸/偏移（t->ksN）经以下字
+  // 段传入；字段序与 GenerateSimtContextInitializer 的初始化序一致。
+  for (size_t i = 0UL; i < runtime_size_exprs.size(); ++i) {
+    ss << "  uint64_t " << SimtRuntimeSizeRegistry::FieldName(i) << ";" << std::endl;
+  }
+  // [SIMT 动态 shape 坐标分解加速] 与 rt_size_N 一一配对的除法 magic/shift（初
+  // 始化一次，热循环 UintDiv 消费），类型随偏移宽度。
+  for (size_t i = 0UL; i < runtime_size_exprs.size(); ++i) {
+    ss << "  " << offset_type << " " << SimtRuntimeSizeRegistry::MagicFieldName(i) << ";" << std::endl;
+    ss << "  " << offset_type << " " << SimtRuntimeSizeRegistry::ShiftFieldName(i) << ";" << std::endl;
+  }
+  // [后置 Reduce 行对齐写回加速] 局部目标写回索引为
+  // (local_index / inner) * SizeAlign(inner, 8) + local_index % inner；静态 shape 下 inner 是
+  // 编译期常量，aicc 折叠为恒等 local_index，动态 shape 下 inner 是运行期符号，直译成软件
+  // 除模（AIV 无硬件除法器，数十 cycle/次）即为与融合算子/图规模无关的固定额外开销。与
+  // rt_size_N 同法：Context 初始化处预算一次 magic/shift，热循环改用乘移除法。字段置于
+  // 末尾，保持聚合初始化的尾部零值语义；32 位 body 另配 32 位 magic（64 位 mulhi 在 AIV
+  // 上是长序列，32 位乘移序列显著更短）。
+  if (has_output_inner_size) {
+    ss << "  uint64_t output_inner_div_magic;" << std::endl;
+    ss << "  uint64_t output_inner_div_shift;" << std::endl;
+    ss << "  uint64_t output_inner_div_magic32;" << std::endl;
+    ss << "  uint64_t output_inner_div_shift32;" << std::endl;
+    ss << "  uint64_t output_inner_pad;" << std::endl;
   }
   ss << "};" << std::endl;
   return af::SUCCESS;
@@ -93,7 +261,49 @@ bool IsAxisDerivedFrom(const TPipe &tpipe, ascir::AxisId axis_id, ascir::AxisId 
   return false;
 }
 
-af::Status BuildTensorWindowInfo(const ascgen_utils::indirect_load::IndirectLoadTensorLayout &layout,
+// 判断张量向量化视图是否越出 gather 窗口：存在未被窗口维（布局轴 [axis_pos, rank)）
+// 派生覆盖的轴（如窗口跨行时由模板 outer 轴派生的 tile 轴出现在视图首部）。
+bool TensorViewSpansRows(const TPipe &tpipe, const Tensor &tensor,
+                         const ascgen_utils::indirect_load::IndirectLoadTensorLayout &layout, size_t axis_pos) {
+  for (ascir::AxisId vec_axis : tensor.vectorized_axis) {
+    bool inside_window = false;
+    for (size_t dim = axis_pos; dim < layout.axis_ids.size(); ++dim) {
+      if (IsAxisDerivedFrom(tpipe, vec_axis, layout.axis_ids[dim])) {
+        inside_window = true;
+        break;
+      }
+    }
+    if (!inside_window) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// 取 layout 轴在张量物理视图中的步长，查找顺序与输出侧一致：向量化视图轴 → 张量物理
+// 轴步长 → 派生后代轴（多行 tile 分裂形态，如 a0 -> a0t）的向量化步长；均未命中返回
+// 空，调用方按自身语义兜底。
+std::optional<ascir::SizeExpr> FindTensorPhysicalStride(const TPipe &tpipe, const Tensor &tensor,
+                                                        const ascir::AxisId &axis_id) {
+  const auto it = std::find(tensor.vectorized_axis.begin(), tensor.vectorized_axis.end(), axis_id);
+  if (it != tensor.vectorized_axis.end()) {
+    return tensor.vectorized_strides[static_cast<size_t>(std::distance(tensor.vectorized_axis.begin(), it))];
+  }
+  const auto axis_it = std::find(tensor.axis.begin(), tensor.axis.end(), axis_id);
+  if (axis_it != tensor.axis.end()) {
+    return tensor.axis_strides[static_cast<size_t>(std::distance(tensor.axis.begin(), axis_it))];
+  }
+  std::optional<ascir::SizeExpr> result;
+  for (size_t vec_pos = 0UL; vec_pos < tensor.vectorized_axis.size(); ++vec_pos) {
+    if (IsAxisDerivedFrom(tpipe, tensor.vectorized_axis[vec_pos], axis_id)) {
+      result = tensor.vectorized_strides[vec_pos];
+    }
+  }
+  return result;
+}
+
+af::Status BuildTensorWindowInfo(const TPipe &tpipe,
+                                 const ascgen_utils::indirect_load::IndirectLoadTensorLayout &layout,
                                  const Tensor &tensor, size_t axis_pos, LogicalTensorInfo &info) {
   GE_ASSERT_TRUE(layout.axis_ids.size() == layout.sizes.size() && layout.sizes.size() == layout.strides.size(),
                  "IndirectLoad tensor window layout rank mismatch.");
@@ -106,10 +316,27 @@ af::Status BuildTensorWindowInfo(const ascgen_utils::indirect_load::IndirectLoad
   // view, preserve zero-stride axes but derive non-zero window strides from the physical vectorized tensor view;
   // bitwidth-changing producers can introduce padding between logical elements.
   if (layout.kind == ascgen_utils::indirect_load::IndirectLoadLayoutKind::kDense) {
+    // 变位宽生产者（cast）的通用对齐会在行间引入物理 padding（如 int64 cast 输出行步长
+    // 4*Ceil(ks1/4)）：dense 逻辑视图的紧凑步长不体现该 padding，消费者按逻辑步长寻址
+    // 会漂移进 padding 区。物理跨度无法静态证明等于逻辑元素积时按物理向量化步长替换
+    // 窗口步长；轴的物理步长查找与输出侧 GetSimdOutputStrides 共用同一套兜底顺序
+    // （向量化视图 → 张量物理步长 → 派生后代轴），避免两处语义分叉。
+    if (ascgen_utils::indirect_load::MayHaveVectorizedPadding(tensor.axis, tensor.axis_size, tensor.vectorized_axis,
+                                                              tensor.vectorized_strides)) {
+      for (size_t dim = 0UL; dim < info.strides.size(); ++dim) {
+        if (af::SymbolicUtils::StaticCheckEq(layout.strides[dim], af::sym::kSymbolZero) == af::TriBool::kTrue) {
+          continue;
+        }
+        const auto physical_stride = FindTensorPhysicalStride(tpipe, tensor, layout.axis_ids[dim]);
+        if (physical_stride.has_value()) {
+          info.strides[dim] = *physical_stride;
+        }
+      }
+    }
     return af::SUCCESS;
   }
   af::Expression compact_stride = af::sym::kSymbolOne;
-  for (size_t index = info.sizes.size(); index > axis_pos; --index) {
+  for (size_t index = info.sizes.size(); index > 0UL; --index) {
     const size_t dim = index - 1UL;
     if (af::SymbolicUtils::StaticCheckEq(layout.strides[dim], af::sym::kSymbolZero) == af::TriBool::kTrue) {
       info.strides[dim] = af::sym::kSymbolZero;
@@ -122,29 +349,47 @@ af::Status BuildTensorWindowInfo(const ascgen_utils::indirect_load::IndirectLoad
           tensor
               .vectorized_strides[static_cast<size_t>(std::distance(tensor.vectorized_axis.begin(), vectorized_axis))];
     } else {
-      info.strides[dim] = compact_stride;
+      // 可求解多行 tile：逻辑视图轴在张量中被分裂为 TileInner 后代轴（如 a0 -> a0t），
+      // 取后代轴的向量化步长（staging 视图步长）。行维（dim < axis_pos）的 staging 按
+      // 紧凑布局写入（DMA 剥离行间 padding），行步长必须取 staging 视图步长而非逻辑
+      // （GM）步长，否则多行窗口按 padding 步长寻址紧凑缓冲会读错行。gather 轴
+      // （dim == axis_pos）步长描述 staged 源区内被 gather 行的寻址几何：staging 按
+      // GM 布局整块拷贝源区（含行间 gap，如 rank3_axis1_input_index_gap 用例的
+      // 16x8 源区仅内层 5 有效），必须保留逻辑步长，不得取输出侧 tile 后代（如 a2t）
+      // 的步长 1（mixed_rank4_axis2 用例回归：行 gather 退化为滑动窗口 gather）；
+      // 轴内维度（dim > axis_pos）无后代时沿用 compact_stride（紧凑写回语义）。
+      // 固定单行 tile 无向量化后代，保留逻辑步长：单行窗口下行步长不参与寻址（由
+      // 窗口基址吸收），维持既有产物不变。
+      bool derived = false;
+      if (dim < axis_pos) {
+        for (size_t vec_pos = 0UL; vec_pos < tensor.vectorized_axis.size(); ++vec_pos) {
+          if (IsAxisDerivedFrom(tpipe, tensor.vectorized_axis[vec_pos], layout.axis_ids[dim])) {
+            info.strides[dim] = tensor.vectorized_strides[vec_pos];
+            derived = true;
+            break;
+          }
+        }
+        if (!derived && TensorViewSpansRows(tpipe, tensor, layout, axis_pos)) {
+          // 窗口跨行但行维后代轴不可达（tile 轴派生自模板 outer 轴——其谱系根为新建的
+          // 模板轴而非本维布局轴，派生查找失败）：staging 将各行按窗口跨度紧凑写入
+          // （多块 DMA，dstStride=0），行步长取紧凑累积步长。模板 OuterOffset 按
+          // strides 逐维分解 merged outer 行号，紧凑布局下各 row 维步长恰为
+          // compact_stride 的逐级累积（最内 row 维为窗口跨度，更外层逐级乘以内层
+          // 尺寸），与 staging 逐块紧凑写入的布局一致（如 torch_gather_frontend
+          // 用例：GM 64-stride 行 staged 为 32 紧凑块，行步长须 32 而非 64）。
+          info.strides[dim] = compact_stride;
+          derived = true;
+        }
+      }
+      if (!derived && dim > axis_pos) {
+        info.strides[dim] = compact_stride;
+      }
     }
     if (af::SymbolicUtils::StaticCheckEq(info.strides[dim], af::sym::kSymbolZero) != af::TriBool::kTrue) {
       compact_stride = af::sym::Mul(info.strides[dim], info.sizes[dim]);
     }
   }
   return af::SUCCESS;
-}
-
-std::string PromoteSizeExpr(const std::string &expr, const std::string &type) {
-  if (type == "uint32_t") {
-    return expr;
-  }
-  const size_t begin = expr.find("t->");
-  if (begin == std::string::npos) {
-    return "static_cast<" + type + ">(" + expr + ")";
-  }
-  size_t end = begin + 3U;
-  while (end < expr.size() && (std::isalnum(static_cast<unsigned char>(expr[end])) != 0 || expr[end] == '_')) {
-    ++end;
-  }
-  return expr.substr(0U, begin) + "static_cast<" + type + ">(" + expr.substr(begin, end - begin) + ")" +
-         expr.substr(end);
 }
 
 std::string JoinSizeExprs(const std::vector<ascir::SizeExpr> &exprs, const TPipe &tpipe,
@@ -213,6 +458,7 @@ af::Status BuildSimtPerLoadIndexOffsetExpressions(const ascgen_utils::indirect_l
                                                   const SimtLoadMetadataMap &load_metadata, const TPipe &tpipe,
                                                   const std::string &offset_type, const std::string &output_index_expr,
                                                   const std::string &direct_offset_expr, bool has_post_reduce,
+                                                  int64_t gather_axis, SimtRuntimeSizeRegistry &runtime_sizes,
                                                   SimtLoadIndexOffsetExpressions &expressions, std::stringstream &ss) {
   expressions.clear();
   const size_t rank = logical_view.output.sizes.size();
@@ -229,7 +475,7 @@ af::Status BuildSimtPerLoadIndexOffsetExpressions(const ascgen_utils::indirect_l
     }
     const bool has_load_offset = af::SymbolicUtils::StaticCheckEq(load_offset, af::ops::Zero) != af::TriBool::kTrue;
     const std::string load_offset_expr =
-        has_load_offset ? PromoteSizeExpr(tpipe.tiler.Size(load_offset), offset_type) : "";
+        has_load_offset ? runtime_sizes.InlineOrContext(load_offset, tpipe, offset_type) : "";
     const auto append_load_offset = [&load_offset_expr, has_load_offset](std::string offset) {
       if (has_load_offset) {
         offset += " + " + load_offset_expr;
@@ -274,33 +520,84 @@ af::Status BuildSimtPerLoadIndexOffsetExpressions(const ascgen_utils::indirect_l
         expressions[node->GetName()] = append_load_offset("0");
         continue;
       }
-      // 归约为『零贡献前缀（stride==0 或 size==1）+ 常量尺寸的稠密尾段』的广播
-      // side-input（如生产 softmax 图 load4 的 [1,1,1,2048]）：正确寻址是对尾段
-      // 尺寸取模（每 tail_size 个输出元素重复一轮）。尾段尺寸必须为编译期常量：
-      // SIMT body 是静态成员函数，无 tiling data 参数，不能引用 t-> 运行时变量。
-      // （该形态源于 SIMT 角色节点视图 split 产生的 rank 差与 develop ea563ac0
-      // 强制 GM load 坐标重建的交互，与 tile 形态无关，固定 tile 同样触发。）
-      int64_t dense_tail_size = 1;
+      // 归约为『零贡献前缀（stride==0 广播维或 size==1 单例维）+ 单位步长稠密尾段』的
+      // 形态（如生产 softmax 图 load4 的 [1,1,1,2048]）：正确寻址是对尾段尺寸取模
+      // （每 tail_size 个输出元素重复一轮）。尾段尺寸可为运行期符号（动态 shape 图的
+      // index 源 Load：[1,ks0]/[0,1] 经调度期轴 split 改写为 [1,1,ks0]/[0,0,1]）：常量
+      // 走字面量取模，符号经注册表落 rt_size_N Context 字段并以 magic 乘移取模。
+      // [输出侧对齐校验] 取模语义成立的前提是稠密尾段逐维对齐到输出的最内层后缀——
+      // 稠密维落在输出前导轴时（如 [1,s2]/[0,1] 对 [s2,s3] 输出、稠密维在 z2）取模会
+      // 静默错址。判据分级：1) 双侧 axis_ids 齐备 → 按轴 id 对齐输出尾侧逐维比较（尺寸
+      // 巧合不误放，最稳）；2) 否则 → 位置尾对齐 + 逐维 size 相等（axis_ids 基数失配
+      // 的防御回退，GetNodeOutputView 恒带 axis_ids，残余巧合风险近零）；3) 均不满足 →
+      // 不取模，落回后续路径。该校验对常量尾段同样生效（常量路径的校验缺失先于本次
+      // 修改存在）。稠密段必须是尾侧连续块（零贡献维全部在前）：稠密维在前的形态由
+      // 轴对齐分解路径按除法坐标处理，此处不得窃占。另隐含假设：输出尾段为连续
+      // row-major（output.strides 链式递减、最内层为 1）——与坐标循环以 output.strides
+      // 为除数的既有假设同源（非本次引入），模板归一化保证输出视图连续。
+      std::vector<size_t> dense_dim_indices;
       bool has_dense_tail = true;
       for (size_t dim = 0UL; dim < view.sizes.size(); ++dim) {
         const bool zero_contribution =
             (af::SymbolicUtils::StaticCheckEq(view.strides[dim], af::ops::Zero) == af::TriBool::kTrue) ||
             (af::SymbolicUtils::StaticCheckEq(view.sizes[dim], af::ops::One) == af::TriBool::kTrue);
         if (zero_contribution) {
+          if (!dense_dim_indices.empty()) {
+            has_dense_tail = false;  // 稠密段之后再现零贡献维：非尾侧块，取模语义不成立
+            break;
+          }
           continue;
         }
         const bool unit_stride =
             af::SymbolicUtils::StaticCheckEq(view.strides[dim], af::ops::One) == af::TriBool::kTrue;
-        int64_t tail_const = 0;
-        if (!unit_stride || !view.sizes[dim].GetConstValue(tail_const)) {
+        if (!unit_stride) {
           has_dense_tail = false;
           break;
         }
-        dense_tail_size *= tail_const;
+        dense_dim_indices.emplace_back(dim);
       }
-      if (has_dense_tail && dense_tail_size > 1) {
-        expressions[node->GetName()] = append_load_offset(output_index_expr + " % " + std::to_string(dense_tail_size));
-        continue;
+      bool dense_tail_aligned = false;
+      if (has_dense_tail && !dense_dim_indices.empty() && dense_dim_indices.size() <= rank) {
+        dense_tail_aligned = true;
+        const bool axis_ids_usable =
+            view.axis_ids.size() == view.sizes.size() && logical_view.output.axis_ids.size() == rank;
+        for (size_t index = 0UL; index < dense_dim_indices.size(); ++index) {
+          const size_t out_dim = rank - dense_dim_indices.size() + index;
+          if (af::SymbolicUtils::StaticCheckEq(view.sizes[dense_dim_indices[index]],
+                                               logical_view.output.sizes[out_dim]) != af::TriBool::kTrue) {
+            dense_tail_aligned = false;
+            break;
+          }
+          if (axis_ids_usable && view.axis_ids[dense_dim_indices[index]] != logical_view.output.axis_ids[out_dim]) {
+            dense_tail_aligned = false;
+            break;
+          }
+        }
+      }
+      if (dense_tail_aligned) {
+        af::Expression dense_tail_expr = view.sizes[dense_dim_indices.front()];
+        for (size_t index = 1UL; index < dense_dim_indices.size(); ++index) {
+          dense_tail_expr = af::sym::Mul(dense_tail_expr, view.sizes[dense_dim_indices[index]]);
+        }
+        int64_t dense_tail_size = 0;
+        if (dense_tail_expr.GetConstValue(dense_tail_size) && dense_tail_size > 1) {
+          expressions[node->GetName()] =
+              append_load_offset(output_index_expr + " % " + std::to_string(dense_tail_size));
+          continue;
+        }
+        if (!dense_tail_expr.IsConstExpr()) {
+          // 符号尾段（如 ks0）：取模经 rt_size_N 字段 + magic 乘移展开；尾段运行期真值
+          // 为 1 时取模退化为 0（视图仅一个活跃元素，偏移 0 语义正确）；为 0（空张量）
+          // 时 magic 计算退化，但 actual_size=0 循环体不执行、值不被消费。
+          // [类型契约] FusedCtx 的 magic/shift 字段恒为 uint64、单 gather 双实例 Context
+          // 宽度亦可高于 body——除法统一在宽类型上求值后截断回 offset_type（对齐下方
+          // 坐标循环的 wide_type 模式，避免 UintDiv 混参）。
+          const std::string wide_type = (offset_type == "uint32_t") ? "uint64_t" : offset_type;
+          const std::string wide_mod = runtime_sizes.MakeRuntimeMod(
+              "static_cast<" + wide_type + ">(" + output_index_expr + ")", dense_tail_expr, tpipe, wide_type);
+          expressions[node->GetName()] = append_load_offset("static_cast<" + offset_type + ">(" + wide_mod + ")");
+          continue;
+        }
       }
       // [行级广播 side-input] 尾轴零贡献（stride==0 且 size==1、其余轴稠密）的广播
       // 形态（如生产 gather+softmax 图 load3 [8,2048,1]/[2048,1,0]）：每行读一个
@@ -332,6 +629,101 @@ af::Status BuildSimtPerLoadIndexOffsetExpressions(const ascgen_utils::indirect_l
         expressions[node->GetName()] = append_load_offset(output_index_expr + " / " + std::to_string(payload_size));
         continue;
       }
+      // [轴对齐坐标分解] rank 失配视图的通用兜底：负载各维按 axis id 对齐到输出维，
+      // 坐标经输出侧 stride 反解（div + mod，宽类型求值后截断回 offset_type）。维度
+      // 分类（精确语义，勿混淆）：
+      // - 广播维（stride==0 且 size>1）：值沿该轴重复，地址贡献 0，位置不限；
+      // - 单例维（size==1，stride 可非 0）：物理存在的单元素（坐标恒 0），地址贡献
+      //   0，位置不限——覆盖尾侧单例形态（[1,ks0,1]/[0,1,5]：正确寻址
+      //   (output_index/E2) % ks0，E2 为单例维所映射输出维的尺寸，经输出 stride
+      //   除法自然涌现，非简单取模）；
+      // - 稠密维（stride!=0 且 size>1）：按 axis id 在输出维中查找同轴维并要求 size
+      //   相等，坐标 = (output_index / 输出stride) % size——含稠密维在前导轴的形态
+      //   （[1,s2,1]/[0,1,0]：s2 落在输出 dim0 → output_index / s3）。
+      // 稠密维轴无法直接匹配（split/merged 部分轴、axis_ids 基数失配）时落回 flatten
+      // 路径（保留原断言兜底）。坐标表达式按 (输出维, size) 入共享表，与 rank 相等
+      // 坐标循环复用同一键空间。
+      if (view.axis_ids.size() == view.sizes.size() && view.strides.size() == view.sizes.size() &&
+          logical_view.output.axis_ids.size() == rank) {
+        const size_t kNoOutDim = SIZE_MAX;
+        std::vector<size_t> out_dim_of(view.sizes.size(), kNoOutDim);
+        // [R2 唯一性守卫] view.axis_ids 可能含重复 id（split 视图两侧同轴）：两个稠密维
+        // 映射到同一输出维会使坐标被加两次（静默多算）——同轴多稠密维的形态交还
+        // flatten 路径（其相邻轴合并正是处理该形态的机制）。
+        std::vector<bool> out_dim_used(rank, false);
+        bool alignable = true;
+        for (size_t dim = 0UL; dim < view.sizes.size() && alignable; ++dim) {
+          const bool broadcast_dim =
+              af::SymbolicUtils::StaticCheckEq(view.strides[dim], af::ops::Zero) == af::TriBool::kTrue &&
+              af::SymbolicUtils::StaticCheckEq(view.sizes[dim], af::ops::One) != af::TriBool::kTrue;
+          const bool singleton_dim =
+              af::SymbolicUtils::StaticCheckEq(view.sizes[dim], af::ops::One) == af::TriBool::kTrue;
+          if (broadcast_dim || singleton_dim) {
+            continue;  // 地址零贡献，位置不限
+          }
+          size_t matched = rank;
+          for (size_t out_dim = 0UL; out_dim < rank; ++out_dim) {
+            if (logical_view.output.axis_ids[out_dim] == view.axis_ids[dim]) {
+              matched = out_dim;
+              break;
+            }
+          }
+          if (matched == rank || af::SymbolicUtils::StaticCheckEq(
+                                     view.sizes[dim], logical_view.output.sizes[matched]) != af::TriBool::kTrue) {
+            alignable = false;
+            break;
+          }
+          if (out_dim_used[matched]) {
+            alignable = false;
+            break;
+          }
+          out_dim_used[matched] = true;
+          out_dim_of[dim] = matched;
+        }
+        if (alignable) {
+          const std::string wide_type = (offset_type == "uint32_t") ? "uint64_t" : offset_type;
+          std::string axis_aligned_offset;
+          for (size_t dim = 0UL; dim < view.sizes.size(); ++dim) {
+            if (out_dim_of[dim] == kNoOutDim) {
+              continue;
+            }
+            const size_t out_dim = out_dim_of[dim];
+            const std::string output_size = runtime_sizes.InlineOrContext(view.sizes[dim], tpipe, wide_type);
+            const auto key = std::make_pair(out_dim, output_size);
+            auto found = coordinates.find(key);
+            if (found == coordinates.end()) {
+              const std::string name = "index_coord_" + std::to_string(coordinates.size());
+              std::string quotient_var;
+              // [R3 快路径] 输出 stride==1（最内层维）时被积元直取 output_index（宽类型
+              // 包装），免去 /1 除法——与 rank 相等坐标循环的 unit_output_stride 优化
+              // 同款（对齐 :647-653）。
+              const bool unit_output_stride = af::SymbolicUtils::StaticCheckEq(logical_view.output.strides[out_dim],
+                                                                               af::ops::One) == af::TriBool::kTrue;
+              const std::string dividend =
+                  unit_output_stride
+                      ? "static_cast<" + wide_type + ">(" + output_index_expr + ")"
+                      : runtime_sizes.MakeRuntimeDiv(output_index_expr, logical_view.output.strides[out_dim], tpipe,
+                                                     wide_type, &quotient_var);
+              const std::string mod_expr = runtime_sizes.MakeRuntimeMod(dividend, view.sizes[dim], tpipe, wide_type);
+              std::vector<std::string> quotient_stmts;
+              runtime_sizes.TakeQuotientStmts(quotient_stmts);
+              for (const std::string &stmt : quotient_stmts) {
+                ss << stmt << std::endl;
+              }
+              ss << "    const " << offset_type << " " << name << " = static_cast<" << offset_type << ">(" << mod_expr
+                 << ");" << std::endl;
+              found = coordinates.emplace(key, name).first;
+            }
+            const bool unit_load_stride =
+                af::SymbolicUtils::StaticCheckEq(view.strides[dim], af::ops::One) == af::TriBool::kTrue;
+            const std::string load_stride = runtime_sizes.InlineOrContext(view.strides[dim], tpipe, wide_type);
+            const std::string term = unit_load_stride ? found->second : found->second + " * " + load_stride;
+            axis_aligned_offset += (axis_aligned_offset.empty() ? "" : " + ") + term;
+          }
+          expressions[node->GetName()] = append_load_offset(axis_aligned_offset.empty() ? "0" : axis_aligned_offset);
+          continue;
+        }
+      }
       // [strided 视图扁平化] 调度器 split 改写产生的 rank 差 strided 视图（如
       // [128]/[39]+offset 列切片被改写为 [128/Tb, Tb, 1]/[39*Tb, 39, 39]）此前
       // 均走 dense 线性路径，折叠路径从未覆盖：先符号化扁平化（去退化轴 + 相邻
@@ -356,21 +748,55 @@ af::Status BuildSimtPerLoadIndexOffsetExpressions(const ascgen_utils::indirect_l
           af::SymbolicUtils::StaticCheckEq(view.sizes[dim], af::ops::One) == af::TriBool::kTrue) {
         continue;
       }
-      const std::string output_stride =
-          PromoteSizeExpr(tpipe.tiler.Size(logical_view.output.strides[dim]), offset_type);
-      const std::string output_size = PromoteSizeExpr(tpipe.tiler.Size(view.sizes[dim]), offset_type);
-      const std::string load_stride = PromoteSizeExpr(tpipe.tiler.Size(view.strides[dim]), offset_type);
+      const std::string output_size = runtime_sizes.InlineOrContext(view.sizes[dim], tpipe, offset_type);
+      const std::string load_stride = runtime_sizes.InlineOrContext(view.strides[dim], tpipe, offset_type);
       // Different physical extents on the same axis must not share a modulo expression.
       const auto key = std::make_pair(dim, output_size);
       auto found = coordinates.find(key);
       if (found == coordinates.end()) {
         const std::string name = "index_coord_" + std::to_string(coordinates.size());
-        const bool unit_output_stride =
-            af::SymbolicUtils::StaticCheckEq(logical_view.output.strides[dim], af::ops::One) == af::TriBool::kTrue;
-        const std::string dividend =
-            unit_output_stride ? output_index_expr : "((" + output_index_expr + ") / " + output_stride + ")";
-        ss << "    const " << offset_type << " " << name << " = static_cast<" << offset_type << ">(" << dividend
-           << " % " << output_size << ");" << std::endl;
+        // [SIMT 分解共享] fused 视图与输出视图按维对齐时直接复用 Policy 分解结果
+        // （随 Address 透传），坐标零除法：gather 轴维取 address.coord_axis（要求
+        // 同轴宽）；轴内单维（dim == gather_axis + 1 == rank - 1，两侧单位步长）
+        // 用差分 output_index - address.axis_prefix * inner_size。其余形态回退
+        // magic div/mod（除数运行期时 UintDiv 乘移序列，静态字面量除模由 aicc
+        // 折叠）；商先落局部变量供取模复用。
+        bool shared_coord = false;
+        if (gather_axis >= 0L && !has_load_offset &&
+            af::SymbolicUtils::StaticCheckEq(view.sizes[dim], logical_view.output.sizes[dim]) == af::TriBool::kTrue) {
+          if (static_cast<int64_t>(dim) == gather_axis) {
+            ss << "    const " << offset_type << " " << name << " = coord_axis;" << std::endl;
+            shared_coord = true;
+          } else if (static_cast<int64_t>(dim) == gather_axis + 1L && dim + 1UL == rank &&
+                     af::SymbolicUtils::StaticCheckEq(view.strides[dim], af::ops::One) == af::TriBool::kTrue &&
+                     af::SymbolicUtils::StaticCheckEq(logical_view.output.strides[dim], af::ops::One) ==
+                         af::TriBool::kTrue) {
+            const std::string inner_total = runtime_sizes.InlineOrContext(view.sizes[dim], tpipe, offset_type);
+            ss << "    const " << offset_type << " " << name << " = " << output_index_expr << " - axis_prefix"
+               << " * " << inner_total << ";" << std::endl;
+            shared_coord = true;
+          }
+        }
+        if (!shared_coord) {
+          // [SIMT 32 位双实例] magic 表按 64 位公式预算，32 位 body 的除法回退在
+          // 宽类型上求值后截断回 offset_type（共享坐标路径无除法，不受影响）。
+          const std::string wide_type = (offset_type == "uint32_t") ? "uint64_t" : offset_type;
+          const bool unit_output_stride =
+              af::SymbolicUtils::StaticCheckEq(logical_view.output.strides[dim], af::ops::One) == af::TriBool::kTrue;
+          std::string quotient_var;
+          const std::string dividend =
+              unit_output_stride ? "static_cast<" + wide_type + ">(" + output_index_expr + ")"
+                                 : runtime_sizes.MakeRuntimeDiv(output_index_expr, logical_view.output.strides[dim],
+                                                                tpipe, wide_type, &quotient_var);
+          const std::string mod_expr = runtime_sizes.MakeRuntimeMod(dividend, view.sizes[dim], tpipe, wide_type);
+          std::vector<std::string> quotient_stmts;
+          runtime_sizes.TakeQuotientStmts(quotient_stmts);
+          for (const std::string &stmt : quotient_stmts) {
+            ss << stmt << std::endl;
+          }
+          ss << "    const " << offset_type << " " << name << " = static_cast<" << offset_type << ">(" << mod_expr
+             << ");" << std::endl;
+        }
         found = coordinates.emplace(key, name).first;
       }
       const bool unit_load_stride =
@@ -387,8 +813,9 @@ std::string GetSimtOffsetType(const ascgen_utils::indirect_load::SimtPolicyMetad
   return policy.offset_width == ascgen_utils::indirect_load::SimtOffsetWidth::kUint32 ? "uint32_t" : "uint64_t";
 }
 
-std::string GetSimtCaseTag(const ascgen_utils::indirect_load::SimtPolicyMetadata &policy, size_t rank, int64_t axis) {
-  const std::string offset_type = GetSimtOffsetType(policy);
+std::string GetSimtCaseTag(const ascgen_utils::indirect_load::SimtPolicyMetadata &policy, size_t rank, int64_t axis,
+                           const std::string &offset_type_override = std::string()) {
+  const std::string offset_type = offset_type_override.empty() ? GetSimtOffsetType(policy) : offset_type_override;
   std::stringstream ss;
   ss << "AscendC::IndirectLoadSimtCaseTag<static_cast<AscendC::IndirectLoadSimtCase>("
      << static_cast<int64_t>(policy.policy) << "), " << offset_type << ", " << rank << ", " << axis << ", "
@@ -397,8 +824,9 @@ std::string GetSimtCaseTag(const ascgen_utils::indirect_load::SimtPolicyMetadata
   return ss.str();
 }
 
-std::string GetSimtPolicyParams(const ascgen_utils::indirect_load::SimtPolicyMetadata &policy, const TPipe &tpipe) {
-  const std::string offset_type = GetSimtOffsetType(policy);
+std::string GetSimtPolicyParams(const ascgen_utils::indirect_load::SimtPolicyMetadata &policy, const TPipe &tpipe,
+                                const std::string &offset_type_override = std::string()) {
+  const std::string offset_type = offset_type_override.empty() ? GetSimtOffsetType(policy) : offset_type_override;
   std::stringstream ss;
   for (size_t i = 0UL; i < policy.runtime_params.size(); ++i) {
     if (i != 0UL) {
@@ -498,7 +926,9 @@ af::Status EmitSimtTransform(const af::AscNodePtr &node, std::map<ascir::TensorI
 
 af::Status EmitSimtArangeExpr(const af::AscNodePtr &node,
                               const ascgen_utils::indirect_load::TemplateLogicalView &logical_view,
-                              const std::string &offset_expr, std::map<ascir::TensorId, std::string> &values) {
+                              const std::string &offset_expr, const TPipe &tpipe,
+                              SimtRuntimeSizeRegistry &runtime_sizes, const std::string &offset_type,
+                              std::map<ascir::TensorId, std::string> &values) {
   const auto impl = ascgen_utils::GetAscIrCodegenImpl(node->GetType());
   GE_ASSERT_NOTNULL(impl, "SIMT zero-input codegen is not registered for node %s[%s].", node->GetTypePtr(),
                     node->GetNamePtr());
@@ -518,12 +948,17 @@ af::Status EmitSimtArangeExpr(const af::AscNodePtr &node,
   const size_t logical_pos = static_cast<size_t>(std::distance(logical_view.output.axis_ids.begin(), logical_axis));
   GE_ASSERT_TRUE(logical_pos < logical_view.output.sizes.size() && logical_pos < logical_view.output.strides.size(),
                  "Arange output view metadata is incomplete.");
+  // [SIMT 动态 shape 节点链] Arange 坐标的视图步长/尺寸与坐标分解同源：动态 shape 下
+  // 是运行期符号（ksN），静态方法体内既无 tiling 指针 t 也不能裸渲染符号名，须与坐标
+  // 分解同法经 Context（rt_size_N）传入；静态 shape 保持常量内联（uint32 产物不变）。
   std::string coordinate = std::string("(") + offset_expr;
   if (af::SymbolicUtils::StaticCheckEq(logical_view.output.strides[logical_pos], af::sym::kSymbolOne) !=
       af::TriBool::kTrue) {
-    coordinate += std::string(" / ") + logical_view.output.strides[logical_pos].Str().get();
+    coordinate += std::string(" / ") +
+                  runtime_sizes.InlineOrContext(logical_view.output.strides[logical_pos], tpipe, offset_type);
   }
-  coordinate += std::string(") % (") + logical_view.output.sizes[logical_pos].Str().get() + ")";
+  coordinate += std::string(") % (") +
+                runtime_sizes.InlineOrContext(logical_view.output.sizes[logical_pos], tpipe, offset_type) + ")";
   std::string expr;
   GE_ASSERT_GRAPH_SUCCESS(v2_impl->GenerateSimtScalarExpr(*node, {coordinate}, expr));
   values[node->outputs()[0]->attr.mem.tensor_id] = expr;
@@ -534,7 +969,9 @@ af::Status EmitSimtEvaluatorNodes(const std::vector<af::AscNodePtr> &nodes, cons
                                   const SimtLoadIndexOffsetExpressions *index_offset_expressions,
                                   const ascgen_utils::indirect_load::TemplateLogicalView &logical_view,
                                   const std::string &output_offset_expr, const std::string &arange_offset_expr,
-                                  std::map<ascir::TensorId, std::string> &values, std::stringstream &ss) {
+                                  const TPipe &tpipe, SimtRuntimeSizeRegistry &runtime_sizes,
+                                  const std::string &offset_type, std::map<ascir::TensorId, std::string> &values,
+                                  std::stringstream &ss) {
   for (const af::AscNodePtr &node : nodes) {
     const auto load = load_metadata.find(node->GetName());
     if (load != load_metadata.end()) {
@@ -580,7 +1017,8 @@ af::Status EmitSimtEvaluatorNodes(const std::vector<af::AscNodePtr> &nodes, cons
       continue;
     }
     if (af::ops::IsOps<af::ascir_op::Arange>(node)) {
-      GE_ASSERT_SUCCESS(EmitSimtArangeExpr(node, logical_view, arange_offset_expr, values));
+      GE_ASSERT_SUCCESS(
+          EmitSimtArangeExpr(node, logical_view, arange_offset_expr, tpipe, runtime_sizes, offset_type, values));
       continue;
     }
     if (af::ops::IsOps<af::ascir_op::Store>(node)) {
@@ -609,9 +1047,12 @@ af::Status GenerateSimtEvaluatorBody(const std::vector<af::AscNodePtr> &nodes,
                                      const SimtLoadMetadataMap &load_metadata, std::stringstream &ss,
                                      const ascgen_utils::indirect_load::TemplateLogicalView &logical_view,
                                      const std::string &output_offset_expr, const std::string &arange_offset_expr,
+                                     const TPipe &tpipe, SimtRuntimeSizeRegistry &runtime_sizes,
+                                     const std::string &offset_type,
                                      const SimtLoadIndexOffsetExpressions *index_offset_expressions = nullptr) {
   GE_ASSERT_SUCCESS(EmitSimtEvaluatorNodes(nodes, load_metadata, index_offset_expressions, logical_view,
-                                           output_offset_expr, arange_offset_expr, values, ss));
+                                           output_offset_expr, arange_offset_expr, tpipe, runtime_sizes, offset_type,
+                                           values, ss));
   const auto result = values.find(result_tensor_id);
   GE_ASSERT_TRUE(result != values.end(), "SIMT evaluator result tensor[%ld] has no scalar value.", result_tensor_id);
   ss << "    return " << result->second << ";" << std::endl;
@@ -794,19 +1235,95 @@ bool UseRuntimeOutputInnerSize(bool has_post_reduce,
 }
 }  // namespace
 
+// [非连续 Store 目标寻址] 尾部 Store 目标视图与逻辑输出视图同 rank 同 sizes 且 strides 不同
+// （NonOwningLayout 切片 / cat 输出切片，行 stride 大于逻辑行宽）时，逻辑线性 output_index 不再
+// 等于物理元素偏移：按输出轴逐维折叠坐标（offset + Σ coord×stride）。坐标按逻辑 stride 取商、
+// 按目标维宽取模，商/模与 Load 侧同法（静态除数编译期折叠，运行期除数走 magic 乘移，符号尺寸
+// 经 Context 传入，见 SimtRuntimeSizeRegistry）。目标视图与逻辑视图不一致（ApplyMerge 合并视图、
+// post Reduce 并行写回）时保持既有线性寻址，其稠密序不变性由调度门控保证。
+std::string BuildSimtStoreTargetOffsetExpr(const SimtOutputChain &chain,
+                                           const ascgen_utils::indirect_load::TemplateLogicalView &logical_view,
+                                           const TPipe &tpipe, const std::string &offset_type,
+                                           SimtRuntimeSizeRegistry &runtime_sizes,
+                                           std::map<std::pair<size_t, std::string>, std::string> &coordinates,
+                                           std::stringstream &ss) {
+  const size_t rank = logical_view.output.sizes.size();
+  std::string offset;
+  if (af::SymbolicUtils::StaticCheckEq(chain.target_offset, af::ops::Zero) != af::TriBool::kTrue) {
+    offset = runtime_sizes.InlineOrContext(chain.target_offset, tpipe, offset_type);
+  }
+  const std::string linear = offset.empty() ? "output_index" : offset + " + output_index";
+  const bool view_matches_logical = chain.target_sizes.size() == rank && chain.target_strides.size() == rank &&
+                                    chain.target_sizes == logical_view.output.sizes;
+  if (!view_matches_logical) {
+    return linear;
+  }
+  if (chain.target_strides == logical_view.output.strides) {
+    return linear;
+  }
+  std::string expression;
+  for (size_t dim = 0UL; dim < rank; ++dim) {
+    if (af::SymbolicUtils::StaticCheckEq(chain.target_strides[dim], af::ops::Zero) == af::TriBool::kTrue ||
+        af::SymbolicUtils::StaticCheckEq(chain.target_sizes[dim], af::ops::One) == af::TriBool::kTrue) {
+      continue;
+    }
+    const std::string target_size = runtime_sizes.InlineOrContext(chain.target_sizes[dim], tpipe, offset_type);
+    // Different target extents on the same axis must not share a modulo expression.
+    const auto key = std::make_pair(dim, target_size);
+    auto found = coordinates.find(key);
+    if (found == coordinates.end()) {
+      const std::string name = "store_coord_" + std::to_string(coordinates.size());
+      // [SIMT 32 位双实例] 与 Load 侧同法：div/mod 在宽类型上求值后截断回 offset_type。
+      const std::string wide_type = (offset_type == "uint32_t") ? "uint64_t" : offset_type;
+      const bool unit_logical_stride =
+          af::SymbolicUtils::StaticCheckEq(logical_view.output.strides[dim], af::ops::One) == af::TriBool::kTrue;
+      std::string quotient_var;
+      const std::string dividend = unit_logical_stride
+                                       ? "static_cast<" + wide_type + ">(output_index)"
+                                       : runtime_sizes.MakeRuntimeDiv("output_index", logical_view.output.strides[dim],
+                                                                      tpipe, wide_type, &quotient_var);
+      const std::string mod_expr = runtime_sizes.MakeRuntimeMod(dividend, chain.target_sizes[dim], tpipe, wide_type);
+      std::vector<std::string> quotient_stmts;
+      runtime_sizes.TakeQuotientStmts(quotient_stmts);
+      for (const std::string &stmt : quotient_stmts) {
+        ss << stmt << std::endl;
+      }
+      ss << "    const " << offset_type << " " << name << " = static_cast<" << offset_type << ">(" << mod_expr << ");"
+         << std::endl;
+      found = coordinates.emplace(key, name).first;
+    }
+    const bool unit_target_stride =
+        af::SymbolicUtils::StaticCheckEq(chain.target_strides[dim], af::ops::One) == af::TriBool::kTrue;
+    std::string target_stride;
+    if (!unit_target_stride) {
+      target_stride = runtime_sizes.InlineOrContext(chain.target_strides[dim], tpipe, offset_type);
+    }
+    const std::string term = unit_target_stride ? found->second : found->second + " * " + target_stride;
+    expression += (expression.empty() ? "" : " + ") + term;
+  }
+  if (!offset.empty()) {
+    expression = expression.empty() ? offset : offset + " + " + expression;
+  }
+  return expression.empty() ? "0" : expression;
+}
+
 af::Status GenerateSimtOutputsEvaluator(const std::string &input_dtype, const std::string &offset_type,
-                                        ascir::TensorId value_tensor_id, const std::vector<SimtOutputChain> &chains,
+                                        int64_t gather_axis, ascir::TensorId value_tensor_id,
+                                        const std::vector<SimtOutputChain> &chains,
                                         const std::vector<af::AscNodePtr> &nodes,
                                         const SimtLoadMetadataMap &load_metadata,
                                         const ascgen_utils::indirect_load::TemplateLogicalView &logical_view,
-                                        const TPipe &tpipe, bool has_post_reduce, std::stringstream &ss) {
+                                        const TPipe &tpipe, bool has_post_reduce,
+                                        SimtRuntimeSizeRegistry &runtime_sizes, std::stringstream &ss) {
   GE_ASSERT_TRUE(!chains.empty(), "IndirectLoad SIMT output chains are empty.");
   std::string primary_output_dtype;
   GE_ASSERT_SUCCESS(Tensor::DtypeName(chains[0].dtype, primary_output_dtype));
   ss << "  using PrimaryOutputType = " << primary_output_dtype << ";" << std::endl;
-  // 只有输出为gm，纯搬运操作，无element算子操作，才走mte快速搬运路径
-  if (chains.size() == 1UL && !chains[0].local_target &&
-      IsLosslessSimtCastChain(nodes, value_tensor_id, chains[0].result_tensor_id)) {
+  // 只有输出为gm，纯搬运操作，无element算子操作，且目标为 dense 零偏移布局，才走mte快速搬运路径
+  const bool identity_target_dense =
+      chains.size() == 1UL && !chains[0].local_target && chains[0].target_strides == logical_view.output.strides &&
+      af::SymbolicUtils::StaticCheckEq(chains[0].target_offset, af::ops::Zero) == af::TriBool::kTrue;
+  if (identity_target_dense && IsLosslessSimtCastChain(nodes, value_tensor_id, chains[0].result_tensor_id)) {
     ss << "  static constexpr bool kSimtOutputIdentity = true;" << std::endl;
   }
   ss << "  struct OutputPack {" << std::endl;
@@ -824,14 +1341,18 @@ af::Status GenerateSimtOutputsEvaluator(const std::string &input_dtype, const st
   }
   ss << "  };" << std::endl;
   std::map<ascir::TensorId, std::string> values{{value_tensor_id, "value"}};
+  // [SIMT 分解共享] Policy 分解的 gather 轴坐标与轴前压平商以标量透传（bisheng
+  // -x asc 的 SIMT 通道限制 __simt_callee__ 签名引用 Internal 类模板），fused
+  // consumer 可差分免除逐元素除法（不可差分维回退除法）。
   ss << "  __simt_callee__ __aicore__ inline static OutputPack Outputs(" << input_dtype << " value, " << offset_type
-     << " output_index, " << offset_type << " index_offset, const Context &context) {" << std::endl;
+     << " output_index, " << offset_type << " index_offset, " << offset_type << " coord_axis, " << offset_type
+     << " axis_prefix, const Context &context) {" << std::endl;
   SimtLoadIndexOffsetExpressions offsets;
   GE_ASSERT_SUCCESS(BuildSimtPerLoadIndexOffsetExpressions(logical_view, nodes, load_metadata, tpipe, offset_type,
-                                                           "output_index", "output_index", has_post_reduce, offsets,
-                                                           ss));
-  GE_ASSERT_SUCCESS(
-      EmitSimtEvaluatorNodes(nodes, load_metadata, &offsets, logical_view, "output_index", "output_index", values, ss));
+                                                           "output_index", "output_index", has_post_reduce, gather_axis,
+                                                           runtime_sizes, offsets, ss));
+  GE_ASSERT_SUCCESS(EmitSimtEvaluatorNodes(nodes, load_metadata, &offsets, logical_view, "output_index", "output_index",
+                                           tpipe, runtime_sizes, offset_type, values, ss));
   // index 生产链尾部的外部 store 收为空节点输出链：链值由 Index() 求值器结果注入
   // （与 gather 值的 "value" 种子同构）。已由值侧求值产出（含输出侧 GM load 产出）
   // 的张量不注入，避免合流链双写。
@@ -861,28 +1382,100 @@ af::Status GenerateSimtOutputsEvaluator(const std::string &input_dtype, const st
   ss << "  __simt_callee__ __aicore__ inline static void Store(const OutputTargets &targets, " << offset_type
      << " output_index, " << offset_type << " local_index, const Context &context, const OutputPack &outputs) {"
      << std::endl;
+  std::map<std::pair<size_t, std::string>, std::string> coordinates;
+  std::vector<std::string> store_exprs(chains.size());
   for (size_t i = 0UL; i < chains.size(); ++i) {
-    std::string output_offset = "output_index";
     if (chains[i].local_target) {
-      if (!logical_view.output.sizes.empty()) {
-        // 编译期常量直接内联；仅运行期符号（如 t->ksN）经 Context 传入，避免在静态 Store 中引用 t->。
-        const std::string inner_size = UseRuntimeOutputInnerSize(has_post_reduce, logical_view)
-                                           ? "static_cast<" + offset_type + ">(context.output_inner_size)"
-                                           : tpipe.tiler.Size(logical_view.output.sizes.back());
-        std::string dtype;
-        GE_ASSERT_SUCCESS(Tensor::DtypeName(chains[i].dtype, dtype));
-        const auto row_stride = "KernelUtils::SizeAlign(" + inner_size + ", 32/sizeof(" + dtype + "))";
-        output_offset =
-            "(local_index / (" + inner_size + ")) * (" + row_stride + ") + local_index % (" + inner_size + ")";
-      } else {
-        output_offset = "local_index";
-      }
+      continue;
     }
-    ss << "    targets.output" << i << "[" << output_offset << "] = outputs.output" << i << ";" << std::endl;
+    store_exprs[i] =
+        BuildSimtStoreTargetOffsetExpr(chains[i], logical_view, tpipe, offset_type, runtime_sizes, coordinates, ss);
+  }
+  size_t local_target_div_count = 0UL;
+  for (size_t i = 0UL; i < chains.size(); ++i) {
+    std::string dtype;
+    GE_ASSERT_SUCCESS(Tensor::DtypeName(chains[i].dtype, dtype));
+    if (!chains[i].local_target) {
+      ss << "    targets.output" << i << "[" << store_exprs[i] << "] = outputs.output" << i << ";" << std::endl;
+      continue;
+    }
+    if (logical_view.output.sizes.empty()) {
+      ss << "    targets.output" << i << "[local_index] = outputs.output" << i << ";" << std::endl;
+      continue;
+    }
+    if (!UseRuntimeOutputInnerSize(has_post_reduce, logical_view)) {
+      // 编译期常量直接内联；仅运行期符号（如 t->ksN）经 Context 传入，避免在静态 Store
+      // 中引用 t->。组员形态（post-Reduce 置空、value 直写 UB 局部目标——多 gather L4
+      // 逐成员发射）的动态 shape 行宽经注册表的 rt_size_N 字段寻址（空跑收集已含本
+      // 发射，登记自动完成）。
+      const std::string inner_size =
+          runtime_sizes.InlineOrContext(logical_view.output.sizes.back(), tpipe, offset_type);
+      const auto row_stride = "KernelUtils::SizeAlign(" + inner_size + ", 32/sizeof(" + dtype + "))";
+      const std::string const_offset =
+          "(local_index / (" + inner_size + ")) * (" + row_stride + ") + local_index % (" + inner_size + ")";
+      ss << "    targets.output" << i << "[" << const_offset << "] = outputs.output" << i << ";" << std::endl;
+      continue;
+    }
+    // [后置 Reduce 行对齐写回加速] 行宽是运行期符号时，写回索引
+    // (local_index / inner) * SizeAlign(inner, 8) + local_index % inner 若逐元素直译为软件
+    // 除模（AIV 无硬件除法器，数十 cycle/次），会成为与融合算子/图规模无关的固定开销
+    // （同图定/动态实测 49us/68us——静态字面量被 aicc 折叠为恒等 local_index）。
+    // 行尾补齐量 pad 由 Context 初始化处预算一次：pad == 0（行宽已 32B 对齐，主流形态）
+    // 时写回索引恒等于 local_index，与静态常量路径完全同构；非对齐形态才走 magic/shift
+    // 乘移除法（与 rt_size_N 坐标分解同法），取余展开为 local_index - 商 * inner。
+    const std::string quotient = "local_target_div_" + std::to_string(local_target_div_count++);
+    std::string output_offset;
+    ss << "    if constexpr (kAlignedLocalRow) {" << std::endl;
+    ss << "      targets.output" << i << "[local_index] = outputs.output" << i << ";" << std::endl;
+    ss << "    } else {" << std::endl;
+    if (offset_type == "uint32_t") {
+      // 32 位 body：索引全链保持 32 位（偏移域 < 2^31），商走 32 位乘移序列。
+      const std::string inner_size = "static_cast<uint32_t>(context.output_inner_size)";
+      ss << "      const uint32_t " << quotient << " = Simt::UintDiv(local_index, static_cast<uint32_t>(context."
+         << "output_inner_div_magic32), static_cast<uint32_t>(context.output_inner_div_shift32));" << std::endl;
+      output_offset = quotient + " * KernelUtils::SizeAlign(" + inner_size + ", 32/sizeof(" + dtype + ")) + (" +
+                      "local_index - " + quotient + " * " + inner_size + ")";
+    } else {
+      const std::string wide_local = "static_cast<uint64_t>(local_index)";
+      const std::string inner_size = "static_cast<uint64_t>(context.output_inner_size)";
+      ss << "      const uint64_t " << quotient << " = Simt::UintDiv(" << wide_local
+         << ", context.output_inner_div_magic, context.output_inner_div_shift);" << std::endl;
+      output_offset = quotient + " * KernelUtils::SizeAlign(" + inner_size + ", 32/sizeof(" + dtype + ")) + (" +
+                      wide_local + " - " + quotient + " * " + inner_size + ")";
+    }
+    ss << "      targets.output" << i << "[" << output_offset << "] = outputs.output" << i << ";" << std::endl;
+    ss << "    }" << std::endl;
   }
   ss << "  }" << std::endl;
   return af::SUCCESS;
 }
+
+namespace {
+// 单 gather 的输出目标实参串（UB 局部目标 / GM 直出逐链 GetPhyAddr）：调用点与目标表达式
+// 解耦预计算，供行对齐双实例复用同一份实参。
+af::Status BuildSimtOutputTargetFields(const TPipe &tpipe, const std::vector<SimtOutputChain> &chains,
+                                       std::string &fields) {
+  std::stringstream tss;
+  for (size_t i = 0UL; i < chains.size(); ++i) {
+    const auto &chain = chains[i];
+    std::string dtype;
+    GE_ASSERT_SUCCESS(Tensor::DtypeName(chain.dtype, dtype));
+    if (i != 0UL) {
+      tss << ", ";
+    }
+    if (chain.local_target) {
+      const Tensor *output_tensor = tpipe.GetTensor(chain.target_tensor_id);
+      GE_ASSERT_NOTNULL(output_tensor, "IndirectLoad SIMT local output tensor[%ld] is missing.",
+                        chain.target_tensor_id);
+      tss << "(__ubuf__ " << dtype << " *)" << output_tensor->name << ".GetPhyAddr()";
+    } else {
+      tss << "(__gm__ " << dtype << " *)" << kGlobalTensorNamePrefix << chain.target_tensor_id << ".GetPhyAddr()";
+    }
+  }
+  fields = tss.str();
+  return af::SUCCESS;
+}
+}  // namespace
 
 std::string GetSimdLogicalOutputSize(const TPipe &tpipe, const Tensor &tensor) {
   std::stringstream ss;
@@ -906,7 +1499,8 @@ af::Status GenSimtIndexEvaluator(const std::string &index_dtype, const std::stri
                                  const SimtLoadMetadataMap &load_metadata,
                                  const ascgen_utils::indirect_load::TemplateLogicalView &logical_view,
                                  const TPipe &tpipe, bool has_post_reduce, bool use_idx_table,
-                                 const std::string &idx_inner_expr, std::stringstream &ss) {
+                                 const std::string &idx_inner_expr, SimtRuntimeSizeRegistry &runtime_sizes,
+                                 std::stringstream &ss) {
   std::map<ascir::TensorId, std::string> values;
   ss << "  __simt_callee__ __aicore__ inline static " << index_dtype << " Index(" << offset_type << " output_index, "
      << offset_type << " index_offset, const Context &context) {" << std::endl;
@@ -923,25 +1517,26 @@ af::Status GenSimtIndexEvaluator(const std::string &index_dtype, const std::stri
   }
   SimtLoadIndexOffsetExpressions offsets;
   GE_ASSERT_SUCCESS(BuildSimtPerLoadIndexOffsetExpressions(logical_view, nodes, load_metadata, tpipe, offset_type,
-                                                           "output_index", "index_offset", has_post_reduce, offsets,
-                                                           ss));
+                                                           "output_index", "index_offset", has_post_reduce, -1L,
+                                                           runtime_sizes, offsets, ss));
   return GenerateSimtEvaluatorBody(nodes, values, result_tensor_id, load_metadata, ss, logical_view, "index_offset",
-                                   "output_index", &offsets);
+                                   "output_index", tpipe, runtime_sizes, offset_type, &offsets);
 }
 
 af::Status GenAicoreIndexEvaluator(const std::string &index_dtype, const std::string &offset_type,
                                    ascir::TensorId result_tensor_id, const std::vector<af::AscNodePtr> &nodes,
                                    const SimtLoadMetadataMap &load_metadata,
                                    const ascgen_utils::indirect_load::TemplateLogicalView &logical_view,
-                                   const TPipe &tpipe, bool has_post_reduce, std::stringstream &ss) {
+                                   const TPipe &tpipe, bool has_post_reduce, SimtRuntimeSizeRegistry &runtime_sizes,
+                                   std::stringstream &ss) {
   std::map<ascir::TensorId, std::string> values;
   ss << "  static constexpr bool kSupportsAicoreIndex = true;" << std::endl;
   ss << "  __aicore__ inline static " << index_dtype << " AicoreIndex(" << offset_type
      << " output_index, const Context &context) {" << std::endl;
   SimtLoadIndexOffsetExpressions offsets;
   GE_ASSERT_SUCCESS(BuildSimtPerLoadIndexOffsetExpressions(logical_view, nodes, load_metadata, tpipe, offset_type,
-                                                           "output_index", "output_index", has_post_reduce, offsets,
-                                                           ss));
+                                                           "output_index", "output_index", has_post_reduce, -1L,
+                                                           runtime_sizes, offsets, ss));
   return GenerateAicoreIndexEvaluatorBody(nodes, values, result_tensor_id, load_metadata, offsets, ss);
 }
 
@@ -1150,19 +1745,11 @@ af::Status EmitSimtIndexPrepass(const ascgen_utils::indirect_load::SimtIndexPrep
   return af::SUCCESS;
 }
 
-std::vector<ascir::SizeExpr> GetSimdOutputStrides(const Tensor &tensor,
+std::vector<ascir::SizeExpr> GetSimdOutputStrides(const TPipe &tpipe, const Tensor &tensor,
                                                   const ascgen_utils::indirect_load::LogicalTensorView &layout) {
   std::vector<ascir::SizeExpr> strides(layout.axis_ids.size(), af::sym::kSymbolOne);
   for (size_t dim = 0; dim < layout.axis_ids.size(); ++dim) {
-    const auto it = std::find(tensor.vectorized_axis.begin(), tensor.vectorized_axis.end(), layout.axis_ids[dim]);
-    if (it != tensor.vectorized_axis.end()) {
-      strides[dim] = tensor.vectorized_strides[static_cast<size_t>(std::distance(tensor.vectorized_axis.begin(), it))];
-      continue;
-    }
-    const auto axis_it = std::find(tensor.axis.begin(), tensor.axis.end(), layout.axis_ids[dim]);
-    if (axis_it != tensor.axis.end()) {
-      strides[dim] = tensor.axis_strides[static_cast<size_t>(std::distance(tensor.axis.begin(), axis_it))];
-    }
+    strides[dim] = FindTensorPhysicalStride(tpipe, tensor, layout.axis_ids[dim]).value_or(af::sym::kSymbolOne);
   }
   return strides;
 }
@@ -1192,7 +1779,7 @@ void EmitSimdParams(const TPipe &tpipe, const std::vector<ascir::AxisId> &curren
   const std::string output_offset = tpipe.tiler.Offset(current_axis, output.axis, output.axis_strides);
   if (metadata.try_embedding) {
     const std::string logical_output_size = GetSimdLogicalOutputSize(tpipe, output);
-    const auto output_strides = GetSimdOutputStrides(output, output_layout);
+    const auto output_strides = GetSimdOutputStrides(tpipe, output, output_layout);
     ss << "static_cast<uint32_t>(" << logical_output_size << "), static_cast<uint32_t>(" << output.actual_size
        << "), static_cast<uint32_t>(" << input.actual_size << "), " << output_offset << ", "
        << tpipe.tiler.Size(input_info.sizes[axis_pos]) << ", {" << JoinSizeExprs(index_info.sizes, tpipe) << "}, {"
@@ -1200,7 +1787,7 @@ void EmitSimdParams(const TPipe &tpipe, const std::vector<ascir::AxisId> &curren
        << JoinSizeExprs(output_strides, tpipe) << "}";
   } else if (metadata.fallback == ascgen_utils::indirect_load::SimdFallback::kStrided) {
     const std::string logical_output_size = GetSimdLogicalOutputSize(tpipe, output);
-    const auto output_strides = GetSimdOutputStrides(output, output_layout);
+    const auto output_strides = GetSimdOutputStrides(tpipe, output, output_layout);
     ss << "static_cast<uint32_t>(" << logical_output_size << "), static_cast<uint32_t>(" << output.actual_size << "), "
        << output_offset << ", {" << JoinSizeExprs(index_info.sizes, tpipe) << "}, {"
        << JoinSizeExprs(input_info.strides, tpipe) << "}, {" << JoinSizeExprs(index_info.strides, tpipe) << "}, {"
@@ -1227,16 +1814,20 @@ void EmitSimdInvocation(const Tensor &input, const Tensor &index, const Tensor &
 }
 
 void EmitSimtPolicyParams(const TPipe &tpipe, const ascgen_utils::indirect_load::SimtPolicyMetadata &policy,
-                          size_t rank, int64_t axis, std::stringstream &ss) {
-  ss << "  using IndirectLoadSimtCase = " << GetSimtCaseTag(policy, rank, axis) << ";" << std::endl;
-  ss << "  AscendC::IndirectLoadSimtParams<IndirectLoadSimtCase> indirect_load_simt_params{"
-     << GetSimtPolicyParams(policy, tpipe) << "};" << std::endl;
+                          size_t rank, int64_t axis, std::stringstream &ss,
+                          const std::string &offset_type_override = std::string(),
+                          const std::string &name_suffix = std::string()) {
+  ss << "  using IndirectLoadSimtCase" << name_suffix << " = "
+     << GetSimtCaseTag(policy, rank, axis, offset_type_override) << ";" << std::endl;
+  ss << "  AscendC::IndirectLoadSimtParams<IndirectLoadSimtCase" << name_suffix << "> indirect_load_simt_params"
+     << name_suffix << "{" << GetSimtPolicyParams(policy, tpipe, offset_type_override) << "};" << std::endl;
 }
 
 af::Status GenerateSimtContextInitializer(
     const std::string &context_name, const std::vector<ascgen_utils::indirect_load::SimtGmTensorMetadata> &gm_tensors,
-    const TPipe &tpipe, const std::string &output_inner_size_expr, const std::string &idx_table_expr,
-    const std::string &idx_base_expr, const std::string &idx_row_stride_expr, std::stringstream &ss) {
+    const TPipe &tpipe, const std::string &output_inner_size_expr, const std::string &output_inner_dtype,
+    const std::string &idx_table_expr, const std::string &idx_base_expr, const std::string &idx_row_stride_expr,
+    const std::vector<std::string> &runtime_size_exprs, const std::string &offset_type, std::stringstream &ss) {
   ss << "  " << context_name << " context{";
   for (size_t i = 0UL; i < gm_tensors.size(); ++i) {
     const auto &gm_tensor = gm_tensors[i];
@@ -1260,7 +1851,49 @@ af::Status GenerateSimtContextInitializer(
     ss << (gm_tensors.empty() && output_inner_size_expr.empty() ? "" : ", ") << idx_table_expr << ", " << idx_base_expr
        << ", " << idx_row_stride_expr;
   }
+  // [SIMT 动态 shape 坐标分解] 运行期符号尺寸在此（kernel 作用域，t 可见）取 tiler 表达
+  // 式初始化，供静态方法体经 Context 读取。
+  for (size_t i = 0UL; i < runtime_size_exprs.size(); ++i) {
+    ss << (gm_tensors.empty() && output_inner_size_expr.empty() && idx_table_expr.empty() && i == 0UL ? "" : ", ")
+       << "static_cast<uint64_t>(" << runtime_size_exprs[i] << ")";
+  }
   ss << "};" << std::endl;
+  // [SIMT 动态 shape 坐标分解加速] 聚合初始化（magic/shift 尾部零值初始化）后逐
+  // 字段预算除法 magic（每 kernel 一次，几十 cycle），替代热循环逐元素软件除法。
+  for (size_t i = 0UL; i < runtime_size_exprs.size(); ++i) {
+    ss << "  AscendC::Internal::IndirectLoadGetUintDivMagicAndShift<" << offset_type << ">(context."
+       << SimtRuntimeSizeRegistry::MagicFieldName(i) << ", context." << SimtRuntimeSizeRegistry::ShiftFieldName(i)
+       << ", static_cast<" << offset_type << ">(context." << SimtRuntimeSizeRegistry::FieldName(i) << "));"
+       << std::endl;
+  }
+  // [后置 Reduce 行对齐写回加速] 行宽 magic/shift 每 kernel 预算一次：64 位套路供 u64 body，
+  // 32 位套路供 u32 body（行宽超出 32 位域时置 0 哨兵——u32 body 的偏移域本就不覆盖该情形）。
+  if (!output_inner_size_expr.empty()) {
+    // 行宽为 0 时整条写回不存在（actual_size 亦为 0），以 1 代除避免 0 除数；32 位 magic 仅在
+    // 行宽可无损落入 32 位域时预算（u32 body 的偏移域本就覆盖不到该情形）。
+    ss << "  const uint64_t output_inner_divisor = context.output_inner_size != 0U ? context.output_inner_size : 1U;"
+       << std::endl;
+    ss << "  AscendC::Internal::IndirectLoadGetUintDivMagicAndShift<uint64_t>(context.output_inner_div_magic, "
+          "context.output_inner_div_shift, output_inner_divisor);"
+       << std::endl;
+    ss << "  uint32_t output_inner_magic32 = 0U;" << std::endl;
+    ss << "  uint32_t output_inner_shift32 = 0U;" << std::endl;
+    ss << "  if ((output_inner_divisor >> 32U) == 0U) {" << std::endl;
+    ss << "    AscendC::Internal::IndirectLoadGetUintDivMagicAndShift<uint32_t>(output_inner_magic32, "
+          "output_inner_shift32, static_cast<uint32_t>(output_inner_divisor));"
+       << std::endl;
+    ss << "  }" << std::endl;
+    ss << "  context.output_inner_div_magic32 = static_cast<uint64_t>(output_inner_magic32);" << std::endl;
+    ss << "  context.output_inner_div_shift32 = static_cast<uint64_t>(output_inner_shift32);" << std::endl;
+    // 行尾补齐量每 kernel 预算一次：为 0 时写回索引退化为恒等 local_index（与静态常量路径
+    // 完全同构，逐元素零寻址开销），否则才走 magic 乘移除法。dtype 必填——缺省会让 pad
+    // 保持 0（fail-open 误选对齐实例），故在此显式断言而非静默跳过。
+    GE_ASSERT_TRUE(!output_inner_dtype.empty(),
+                   "IndirectLoad SIMT post Reduce row width requires the local target dtype.");
+    ss << "  context.output_inner_pad = static_cast<uint64_t>(KernelUtils::SizeAlign(static_cast<uint32_t>(context."
+          "output_inner_size), 32/sizeof("
+       << output_inner_dtype << "))) - context.output_inner_size;" << std::endl;
+  }
   return af::SUCCESS;
 }
 
@@ -1369,6 +2002,21 @@ af::Status ResolveSimtNodes(const std::vector<std::string> &node_names, const Si
   return af::SUCCESS;
 }
 
+// [strided GM 目标寻址] SimtOutputChainMetadata → SimtOutputChain 的纯字段转换：
+// ParseAttr（单 gather 链）与 fused 组 store 链共用，字段集中一处避免两份复制漂移
+// （nodes 需 node_map 上下文，由调用方自行解析）。
+SimtOutputChain MakeSimtOutputChain(const ascgen_utils::indirect_load::SimtOutputChainMetadata &metadata) {
+  SimtOutputChain chain;
+  chain.result_tensor_id = metadata.result_tensor_id;
+  chain.target_tensor_id = metadata.target_tensor_id;
+  chain.dtype = metadata.dtype;
+  chain.local_target = metadata.local_target;
+  chain.target_sizes = metadata.target_sizes;
+  chain.target_strides = metadata.target_strides;
+  chain.target_offset = metadata.target_offset;
+  return chain;
+}
+
 }  // namespace
 
 Status IndirectLoadRegApiCall::ParseAttr(const ascir::NodeView &node) {
@@ -1419,6 +2067,10 @@ Status IndirectLoadRegApiCall::ResolveSimtMetadata(const ascir::NodeView &node,
   index_nodes_.clear();
   output_nodes_.clear();
   output_chains_.clear();
+  // [P3-a] 双发判定缓存随重解析重置：与 output_chains_ 等解析态同生命周期——当前每
+  // 节点新建对象使缓存天然按任务隔离，此处兜底未来同一对象重解析（图改写）场景，
+  // 防缓存带着上一节点的答案。
+  dual_offset_body_ = -1;
   simt_index_loads_.clear();
   simt_output_loads_.clear();
   GE_ASSERT_TRUE(node->inputs.Size() == kIndirectLoadInputCount, "Invalid IndirectLoad SIMT input number:%zu.",
@@ -1449,26 +2101,87 @@ Status IndirectLoadRegApiCall::ResolveSimtMetadata(const ascir::NodeView &node,
                    "IndirectLoad SIMT output Load[%s] metadata is duplicated.", load.node_name.c_str());
   }
   for (const auto &chain_metadata : metadata.output_chains) {
-    SimtOutputChain chain;
+    SimtOutputChain chain = MakeSimtOutputChain(chain_metadata);
     GE_ASSERT_SUCCESS(ResolveSimtNodes(chain_metadata.node_names, node_map, chain.nodes));
-    chain.result_tensor_id = chain_metadata.result_tensor_id;
-    chain.target_tensor_id = chain_metadata.target_tensor_id;
-    chain.dtype = chain_metadata.dtype;
-    chain.local_target = chain_metadata.local_target;
     output_chains_.emplace_back(std::move(chain));
   }
   GE_ASSERT_TRUE(!output_chains_.empty(), "IndirectLoad SIMT output chains are empty.");
   const size_t local_target_count = static_cast<size_t>(std::count_if(
       output_chains_.begin(), output_chains_.end(), [](const SimtOutputChain &chain) { return chain.local_target; }));
   GE_ASSERT_TRUE(local_target_count <= 1UL, "IndirectLoad SIMT supports at most one local output target.");
-  GE_ASSERT_TRUE(has_post_reduce_ == (local_target_count == 1UL),
-                 "IndirectLoad SIMT post Reduce and local output target must appear together.");
+  // 与 schedule 侧 ValidateSimtOutputPlan 的放宽对齐：单 gather 的 post Reduce 与 local
+  // target 成对出现；多 gather 组员 value 直接写 UB 局部目标（归并/输出链为普通向量代码），
+  // 允许 local target 不伴随 post Reduce——双向等价断言会使组员（含 fused primary）在
+  // ParseAttr 阶段（ApiCall::Init 逐节点调用，先于 Generate 的成员跳过）断言失败。
+  GE_ASSERT_TRUE(!has_post_reduce_ || local_target_count == 1UL,
+                 "IndirectLoad SIMT post Reduce requires a local output target.");
   if (has_post_reduce_) {
     GE_ASSERT_TRUE(outputs.size() == kIndirectLoadOutputCount, "Invalid IndirectLoad SIMT output number:%zu.",
                    outputs.size());
     outputs[0].id = output_result_tensor_id_;
   }
   return af::SUCCESS;
+}
+
+bool IndirectLoadRegApiCall::SimtSupportsDualOffsetBody(bool prepass_active) const {
+  // 仅动态（uint64）形态双发：静态 shape 已由常量求值直接判 uint32，双发只会
+  // 产生一套冗余的同类型 body 与恒真的运行时判定。
+  if (GetSimtOffsetType(simt_policy_) != "uint64_t") {
+    return false;
+  }
+  // [post-Reduce 放开] post-reduce 形态的 actual_size/output_offset 是 value tensor
+  // 的全局元素偏移——真偏移上界 guard 的 output span 即 value tensor 偏移域，
+  // u32 截断由 guard 保证安全（检视风险点 1/2 已论证）。prepass 场景首版保守排除
+  // （tmp 索引表与两套 body 的宽度交互未单独评估，第二阶段处理）；判据复用
+  // CanUseSimtIndexPrepass 的结果（调用点传入），此处不重复推导。
+  if ((has_post_reduce_ && prepass_active) || template_id_ != ascir::TemplateId::kIndirectLoadSimt) {
+    return false;
+  }
+  if (simt_policy_.policy == ascgen_utils::indirect_load::SimtAddressPolicy::kEmbedding) {
+    // [kEmbedding 双发] rank2/axis0 整行分裂形态（GenerateSimtInvocation 的 embedding
+    // 行分裂分支同域）：u32 body 与静态字面量版本同构（IndirectLoadSimtEmbeddingPolicy
+    // 按 OffsetT 全模板化），动态 shape 下运行期 guard 判定偏移域。动态 embedding 图
+    // （如 inductor strides=[ks2,1] 前端视图）原先恒走 u64 寻址，地址运算与 LSU 逐元素
+    // 开销约为 u32 的 ~2.6 倍（实跑 127µs vs 静态同图 43µs），双发使其在偏移域可容纳时
+    // 恢复静态级吞吐。
+    // [P1·真偏移上界] 早期版本以「各视图元素总数」为 guard 上界并前置 input.kind==kDense
+    // （元素总数仅对 kDense 是偏移上界）；现已升级为物理跨度上界 Σ(size_i−1)×stride_i
+    // （见 GenerateSimtInvocation 的 [真偏移上界] 注释），对 padded 行距视图同样严格成
+    // 立，kDense 前置随之移除——padded 表按真实跨度现场判定，不再整体回落 u64。
+    // [P2b·多输出链放开] 早期 guard 以元素总数为上界时，slice-strided store 目标的
+    // 偏移不受元素总数约束，故对齐 kStrided 限制单输出链；guard 升级为物理跨度后，
+    // GenerateSimtInvocation 已把每条非 local GM 链的目标视图跨度 + base offset 逐链
+    // 计入上界（见其 output_chains_ 循环），多链偏移域与单链同法判定——限制随之放开。
+    // [post-Reduce 放开] post-reduce 候选的行分裂分支不触发（has_local_target 配对
+    // post Reduce，走 value tile 的 actual_size/output_offset 形态），u32 截断由
+    // output span 覆盖——kEmbedding 分类与 post-reduce 的链收集正交，非双发 u64
+    // 路径已被 SER 用例群实跑验证，u32 仅换寻址宽度。prepass 形态见函数头排除。
+    const size_t rank = logical_view_.input.sizes.size();
+    return rank == 2UL && axis_ == 0UL;
+  }
+  if (simt_policy_.policy != ascgen_utils::indirect_load::SimtAddressPolicy::kStrided) {
+    return false;
+  }
+  const size_t rank = logical_view_.input.sizes.size();
+  return rank == 3UL && axis_ == 1L && output_chains_.size() == 1UL;
+}
+
+// [双发判定唯一入口] 见头文件注释：缓存首答，定义侧与调用侧物理一致。首调用
+// 传参（use_prepass / prepass_plan 指针）即基准；后续调用即使 CanUseSimtIndexPrepass
+// 因图副本漂移返回不同值，仍以缓存为准（白定义 vs 编译失败的取舍）。
+bool IndirectLoadRegApiCall::DecideDualOffsetBody(bool prepass_active) const {
+  const bool current = SimtSupportsDualOffsetBody(prepass_active);
+  if (dual_offset_body_ < 0) {
+    dual_offset_body_ = current ? 1 : 0;
+  } else if ((dual_offset_body_ != 0) != current) {
+    // [P3-b 漂移可见] 缓存首答生效、两侧仍自洽，但底层判定已漂移（图副本改写/tmp 状态
+    // 时机差异）——产物可能多发一套 body（白定义）。host 侧打 WARN 留信号，避免静默退化
+    // 无从排查（本轮返工反复暴露的短板：能编译但行为退化时没有信号）。
+    GELOGW(
+        "[IndirectLoad] dual-issue judgement drift between definition and call site, node[%s] cached[%d] current[%d]",
+        node_name.c_str(), static_cast<int32_t>(dual_offset_body_), static_cast<int32_t>(current));
+  }
+  return dual_offset_body_ != 0;
 }
 
 Status IndirectLoadRegApiCall::GenerateFuncDefinition(const TPipe &tpipe, const Tiler &tiler,
@@ -1501,36 +2214,93 @@ Status IndirectLoadRegApiCall::GenerateFuncDefinition(const TPipe &tpipe, const 
   // A generated source file can contain several kernel variants for the same graph node
   // (for example, a SIMT variant and an NDDMA variant).  They share the evaluator type
   // name, so guard the definition while keeping every variant's invocation available.
-  ss << "#ifndef " << body_guard << std::endl;
-  ss << "#define " << body_guard << std::endl;
   // [SIMT index 闭包预计算] Index() 形态与调用点 pre-pass 发射共用同一位点。
   ascgen_utils::indirect_load::SimtIndexPrepassPlan prepass_plan;
   const bool use_prepass = CanUseSimtIndexPrepass(tpipe, prepass_plan);
+  // [SIMT 32 位双实例] 动态 shape 的偏移域在编译期无法证明 < 2^32（uint32 判定依
+  // 赖常量求值必失败），全链路退化为 uint64：AIV 上 64 位乘加/比较成本显著高于
+  // 32 位，与静态字面量版本（全 uint32）实测差数倍。此处对「偏移域运行时判定可
+  // 32 位」的形态同时发射 uint64/uint32 两套 body，调用点按实际尺寸选择（保守域：
+  // 各视图元素总数 <= INT32_MAX，覆盖元素偏移上界）。32 位 body 的坐标差分路径
+  // 与静态版同构（零除法），仅不可差分维的回退除法在宽类型上求值后截断。
+  const bool dual_offset_body = DecideDualOffsetBody(use_prepass);
+  const std::vector<std::string> body_offset_types =
+      dual_offset_body ? std::vector<std::string>{offset_type, "uint32_t"} : std::vector<std::string>{offset_type};
+  // [SIMT 动态 shape 坐标分解] 先空跑求值器收集静态方法体引用的运行期符号尺寸
+  // （t->ksN 不能内联进静态方法，须走 Context）；Context 结构体先于方法体发射，故收集
+  // 先行。prepass 行宽首注册（idx_inner_expr 带出复用）；正式发射以收集结果预填注册
+  // 表（同输入确定性，查找不新增条目）。Context 尺寸字段统一 64 位，32 位 body 引用
+  // 时显式截断（注册键为 tiler 渲染串，与类型无关，两套 body 字段引用一致）。
+  std::string idx_inner_expr;
+  const std::vector<std::string> runtime_size_exprs = CollectSimtRuntimeSizeExprs(
+      input_dtype, index_dtype, offset_type, tpipe, use_prepass, prepass_plan, idx_inner_expr);
+  // Context 由所有偏移宽度的 Body 共享，且同名节点可能在多个 impl 中重复发射。
+  // 独立保护 Context，不能只保护下方循环中的 Body 定义。
+  const std::string context_guard = kSimtContextGuardPrefix + valid_node_name;
+  ss << "#ifndef " << context_guard << std::endl;
+  ss << "#define " << context_guard << std::endl;
   GE_ASSERT_SUCCESS(GenerateSimtContextDefinition(context_name, simt_gm_tensors_,
                                                   UseRuntimeOutputInnerSize(has_post_reduce_, logical_view_),
-                                                  use_prepass, offset_type, ss));
-  ss << "struct " << body_name << " {" << std::endl;
-  ss << "  using Context = " << context_name << ";" << std::endl;
+                                                  use_prepass, offset_type, runtime_size_exprs, ss));
+  ss << "#endif" << std::endl;
   const size_t ub_output_count = static_cast<size_t>(std::count_if(
       output_chains_.begin(), output_chains_.end(), [](const SimtOutputChain &chain) { return chain.local_target; }));
-  ss << "  static constexpr uint32_t kGmOutputCount = " << output_chains_.size() - ub_output_count << "U;" << std::endl;
-  ss << "  static constexpr uint32_t kUbOutputCount = " << ub_output_count << "U;" << std::endl;
+  for (const std::string &body_offset_type : body_offset_types) {
+    const bool is_dual_u32 = dual_offset_body && body_offset_type == "uint32_t";
+    const std::string suffix = is_dual_u32 ? "_u32" : (dual_offset_body ? "_u64" : "");
+    ss << "#ifndef " << body_guard << suffix << std::endl;
+    ss << "#define " << body_guard << suffix << std::endl;
+    SimtRuntimeSizeRegistry runtime_sizes(runtime_size_exprs);
+    // [行对齐写回特化] 局部目标行宽为运行期符号时，「写回索引是否恒等于 local_index」
+    // 只能在 kernel 作用域判定（行尾补齐量 pad）。模板布尔参数把该判定提到调用点
+    // （每 tile 一次），body 内不再有逐元素分支——实测对齐形态下逐元素分支约 3.5us
+    // （14.7M 元素）。非运行期行宽的 body 恒以 true 实例化，参数不参与代码生成。
+    ss << "template <bool kAlignedLocalRow>" << std::endl;
+    ss << "struct " << body_name << suffix << " {" << std::endl;
+    ss << "  using Context = " << context_name << ";" << std::endl;
+    ss << "  static constexpr uint32_t kGmOutputCount = " << output_chains_.size() - ub_output_count << "U;"
+       << std::endl;
+    ss << "  static constexpr uint32_t kUbOutputCount = " << ub_output_count << "U;" << std::endl;
+    GE_ASSERT_SUCCESS(GenSimtIndexEvaluator(index_dtype, body_offset_type, index_result_tensor_id_, index_nodes_,
+                                            simt_index_loads_, logical_view_, tpipe, has_post_reduce_, use_prepass,
+                                            idx_inner_expr, runtime_sizes, ss));
+    if (simt_policy_.policy == ascgen_utils::indirect_load::SimtAddressPolicy::kEmbedding &&
+        CanGenerateAicoreIndexEvaluator(index_nodes_, simt_index_loads_)) {
+      GE_ASSERT_SUCCESS(GenAicoreIndexEvaluator(index_dtype, body_offset_type, index_result_tensor_id_, index_nodes_,
+                                                simt_index_loads_, logical_view_, tpipe, has_post_reduce_,
+                                                runtime_sizes, ss));
+    }
+    GE_ASSERT_SUCCESS(GenerateSimtOutputsEvaluator(input_dtype, body_offset_type, axis_, simt_value_tensor_id_,
+                                                   output_chains_, output_nodes_, simt_output_loads_, logical_view_,
+                                                   tpipe, has_post_reduce_, runtime_sizes, ss));
+    ss << "};" << std::endl;
+    ss << "#endif" << std::endl;
+  }
+  return af::SUCCESS;
+}
 
-  const std::string idx_inner_expr = use_prepass ? tpipe.tiler.Size(prepass_plan.inner_size) : "";
+std::vector<std::string> IndirectLoadRegApiCall::CollectSimtRuntimeSizeExprs(
+    const std::string &input_dtype, const std::string &index_dtype, const std::string &offset_type, const TPipe &tpipe,
+    bool use_prepass, const ascgen_utils::indirect_load::SimtIndexPrepassPlan &prepass_plan,
+    std::string &idx_inner_expr) const {
+  // 空跑三个求值器（与 GenerateFuncDefinition 正式发射同参同序）：静态方法体内的
+  // tiler 渲染经注册表收集为 Context 字段。输出写入临时流丢弃。
+  SimtRuntimeSizeRegistry runtime_sizes;
+  idx_inner_expr = use_prepass ? runtime_sizes.InlineOrContext(prepass_plan.inner_size, tpipe, offset_type) : "";
+  std::stringstream scratch;
   GE_ASSERT_SUCCESS(GenSimtIndexEvaluator(index_dtype, offset_type, index_result_tensor_id_, index_nodes_,
                                           simt_index_loads_, logical_view_, tpipe, has_post_reduce_, use_prepass,
-                                          idx_inner_expr, ss));
+                                          idx_inner_expr, runtime_sizes, scratch));
   if (simt_policy_.policy == ascgen_utils::indirect_load::SimtAddressPolicy::kEmbedding &&
       CanGenerateAicoreIndexEvaluator(index_nodes_, simt_index_loads_)) {
     GE_ASSERT_SUCCESS(GenAicoreIndexEvaluator(index_dtype, offset_type, index_result_tensor_id_, index_nodes_,
-                                              simt_index_loads_, logical_view_, tpipe, has_post_reduce_, ss));
+                                              simt_index_loads_, logical_view_, tpipe, has_post_reduce_, runtime_sizes,
+                                              scratch));
   }
-  GE_ASSERT_SUCCESS(GenerateSimtOutputsEvaluator(input_dtype, offset_type, simt_value_tensor_id_, output_chains_,
+  GE_ASSERT_SUCCESS(GenerateSimtOutputsEvaluator(input_dtype, offset_type, axis_, simt_value_tensor_id_, output_chains_,
                                                  output_nodes_, simt_output_loads_, logical_view_, tpipe,
-                                                 has_post_reduce_, ss));
-  ss << "};" << std::endl;
-  ss << "#endif" << std::endl;
-  return af::SUCCESS;
+                                                 has_post_reduce_, runtime_sizes, scratch));
+  return runtime_sizes.TakeEntries();
 }
 
 Status IndirectLoadRegApiCall::Generate(const TPipe &tpipe, const std::vector<ascir::AxisId> &current_axis,
@@ -1557,6 +2327,12 @@ Status IndirectLoadRegApiCall::Generate(const TPipe &tpipe, const std::vector<as
   if (template_id_ != ascir::TemplateId::kIndirectLoadSimt) {
     return ApiCall::Generate(tpipe, current_axis, result);
   }
+  // seq-V1（L2/L3）：fused primary 统一发射全组，携带 fused 代发标记的非 primary 成员跳过；
+  // L4（V2 多 evaluator）无该标记——各成员走标准单 gather invocation。
+  if (node != nullptr && ascgen_utils::indirect_load::IsSimtFusedMemberEmitted(node)) {
+    result = "// IndirectLoad SIMT group member (emitted by fused primary)\n";
+    return af::SUCCESS;
+  }
   GE_ASSERT_TRUE(inputs.size() == kIndirectLoadInputCount, "Invalid IndirectLoad SIMT input number:%zu.",
                  inputs.size());
   const Tensor *input_tensor = tpipe.GetTensor(inputs[ascgen_utils::indirect_load::kInputTensorIndex]->id);
@@ -1577,7 +2353,7 @@ Status IndirectLoadRegApiCall::GenerateSk(const TPipe &tpipe, const std::vector<
   const size_t axis_pos = static_cast<size_t>(axis_);
   const LogicalTensorInfo x_info(logical_view_.input);
   LogicalTensorInfo index_info;
-  GE_ASSERT_SUCCESS(BuildTensorWindowInfo(logical_view_.index, index, axis_pos, index_info));
+  GE_ASSERT_SUCCESS(BuildTensorWindowInfo(tpipe, logical_view_.index, index, axis_pos, index_info));
   std::string x_dtype_name;
   std::string index_dtype_name;
   GE_ASSERT_SUCCESS(Tensor::DtypeName(x.dtype, x_dtype_name));
@@ -1588,6 +2364,7 @@ Status IndirectLoadRegApiCall::GenerateSk(const TPipe &tpipe, const std::vector<
 
   std::stringstream ss;
   ss << "// IndirectLoad SK" << std::endl;
+  GE_ASSERT_SUCCESS(SetSemanticFeature(semantic::kSk));
   ss << "{" << std::endl;
   ss << "  AscendC::IndirectLoadSk<" << x_dtype_name << ", " << index_dtype_name << ", " << x_info.sizes.size() << ", "
      << axis_ << ">(" << std::endl;
@@ -1610,50 +2387,33 @@ Status IndirectLoadRegApiCall::GenerateSimd(const TPipe &tpipe, const std::vecto
   const size_t axis_pos = static_cast<size_t>(axis_);
   LogicalTensorInfo input_info;
   LogicalTensorInfo index_info;
-  GE_ASSERT_SUCCESS(BuildTensorWindowInfo(logical_view_.input, input, axis_pos, input_info));
-  GE_ASSERT_SUCCESS(BuildTensorWindowInfo(logical_view_.index, index, axis_pos, index_info));
+  GE_ASSERT_SUCCESS(BuildTensorWindowInfo(tpipe, logical_view_.input, input, axis_pos, input_info));
+  GE_ASSERT_SUCCESS(BuildTensorWindowInfo(tpipe, logical_view_.index, index, axis_pos, index_info));
   const auto tmp_iter = tmp_buf_id.find(-1L);
   if (simd_metadata_.fallback == ascgen_utils::indirect_load::SimdFallback::kStrided) {
     GE_ASSERT_TRUE(tmp_iter != tmp_buf_id.end(), "IndirectLoad SIMD requires an API-level tmp buffer.");
   }
   // [padded 视图兜底降级] codegen 期为最终视图（通用对齐已完成），不依赖 lowering
-  // metadata 序列化时的视图时机：输出 tensor 的向量化跨度（与 Tiler::TensorActualSize
-  // 同源）大于逻辑元素积（Π尾轴前有效宽）即视图被 pad——dense facade（RegGather
-  // RunReuse）线性稠密写出与 padded 视图布局冲突（index 按窗口线性读越过真实数据
-  // → 越界读表 AIC 341；strided 解释稠密数据 → 数值错乱），强制降级 strided facade
-  // （按视图 strides 逐行写，行内 pad 由 ReduceInit OptImpl 清中性值）。SIMD 模板
-  // 的 tmp 恒分配（CalcTmpBufSize 只判模板），降级无 tmp 缺口。
+  // metadata 序列化时的视图时机：输出或索引 tensor 的向量化跨度（与 Tiler::TensorActualSize
+  // 同源）无法静态证明等于逻辑元素积（Π尾轴前有效宽）即视图可能被 pad——dense facade
+  // （RegGather RunReuse）线性稠密读写与 padded 视图布局冲突（index 按窗口线性读越过
+  // 真实数据 → 越界读表 AIC 341；strided 解释稠密数据 → 数值错乱），强制降级 strided
+  // facade（按视图 strides 逐行寻址，行内 pad 由 ReduceInit OptImpl 清中性值）。SIMD
+  // 模板在内存规划期按相同最终视图判定 tmp 需求，可能降级时保留缓冲。
   {
     // codegen::Tensor 直接持有 axis/axis_size/axis_strides 与向量化视图字段，
-    // axis_size 即视图轴宽（Tiler::TensorActualSize 同源）。
-    af::Expression y_span = af::sym::kSymbolOne;
-    af::Expression y_product = af::sym::kSymbolOne;
-    bool y_view_ok = output.vectorized_axis.size() == output.vectorized_strides.size() &&
-                     !output.vectorized_axis.empty() && output.axis.size() == output.axis_size.size();
-    if (y_view_ok) {
-      for (size_t dim = 0UL; dim < output.vectorized_axis.size(); ++dim) {
-        const auto axis_it = std::find(output.axis.begin(), output.axis.end(), output.vectorized_axis[dim]);
-        if (axis_it == output.axis.end()) {
-          y_view_ok = false;
-          break;
-        }
-        const size_t axis_pos_y = static_cast<size_t>(std::distance(output.axis.begin(), axis_it));
-        const auto &y_stride = output.vectorized_strides[dim];
-        if (af::SymbolicUtils::StaticCheckEq(y_stride, af::sym::kSymbolZero) == af::TriBool::kTrue) {
-          continue;
-        }
-        y_span = y_span + (output.axis_size[axis_pos_y] - af::sym::kSymbolOne) * y_stride;
-        y_product = y_product * output.axis_size[axis_pos_y];
-      }
-    }
-    const bool y_padded = y_view_ok && output.vectorized_axis.size() > 1UL &&
-                          af::SymbolicUtils::StaticCheckGt(y_span, y_product) == af::TriBool::kTrue;
-    GELOGI("[IndirectLoad] SIMD fallback check: node[%s] span[%s] product[%s] padded[%d] fallback[%d].",
-           node_name.c_str(), y_span.Str().get(), y_product.Str().get(), static_cast<int>(y_padded),
+    // axis_size 即视图轴宽（Tiler::TensorActualSize 同源）。判定与 lowering 期同向
+    // 保守（物理跨度无法静态证明等于逻辑元素积即视为 padded），并覆盖索引视图。
+    const bool y_padded = ascgen_utils::indirect_load::MayHaveVectorizedPadding(
+        output.axis, output.axis_size, output.vectorized_axis, output.vectorized_strides);
+    const bool idx_padded = ascgen_utils::indirect_load::MayHaveVectorizedPadding(
+        index.axis, index.axis_size, index.vectorized_axis, index.vectorized_strides);
+    GELOGI("[IndirectLoad] SIMD fallback check: node[%s] out_padded[%d] index_padded[%d] fallback[%d].",
+           node_name.c_str(), static_cast<int>(y_padded), static_cast<int>(idx_padded),
            static_cast<int>(simd_metadata_.fallback));
-    if (y_padded && simd_metadata_.fallback != ascgen_utils::indirect_load::SimdFallback::kStrided) {
-      GELOGW("[IndirectLoad] SIMD dense fallback downgraded to strided: node[%s] padded view span[%s] > product[%s].",
-             node_name.c_str(), y_span.Str().get(), y_product.Str().get());
+    if ((y_padded || idx_padded) && simd_metadata_.fallback != ascgen_utils::indirect_load::SimdFallback::kStrided) {
+      GELOGW("[IndirectLoad] SIMD dense fallback downgraded to strided: node[%s] out_padded[%d] index_padded[%d].",
+             node_name.c_str(), static_cast<int>(y_padded), static_cast<int>(idx_padded));
       simd_metadata_.fallback = ascgen_utils::indirect_load::SimdFallback::kStrided;
       if (tmp_iter == tmp_buf_id.end()) {
         GE_ASSERT_TRUE(false, "IndirectLoad SIMD strided downgrade requires an API-level tmp buffer, node[%s].",
@@ -1673,6 +2433,20 @@ Status IndirectLoadRegApiCall::GenerateSimd(const TPipe &tpipe, const std::vecto
 
   std::stringstream ss;
   ss << "// IndirectLoad SIMD" << std::endl;
+  std::string simd_feature = semantic::kSimdPrefix;
+  switch (simd_metadata_.fallback) {
+    case ascgen_utils::indirect_load::SimdFallback::kGatherApi:
+      simd_feature += semantic::kGatherApi;
+      break;
+    case ascgen_utils::indirect_load::SimdFallback::kStrided:
+      simd_feature += semantic::kStrided;
+      break;
+    case ascgen_utils::indirect_load::SimdFallback::kRegisterGather:
+    default:
+      simd_feature += simd_metadata_.try_embedding ? semantic::kAdaptive : semantic::kRegisterGather;
+      break;
+  }
+  GE_ASSERT_SUCCESS(SetSemanticFeature(simd_feature));
   ss << "{" << std::endl;
   EmitSimdParams(tpipe, current_axis, input, output, input_info, index_info, logical_view_.output, simd_metadata_,
                  axis_pos, ss);
@@ -1694,12 +2468,16 @@ Status IndirectLoadRegApiCall::GenerateSimtInvocation(
   const std::string body_name = kSimtBodyNamePrefix + ascgen_utils::GenValidName(node_name);
   std::string actual_size_expr;
   std::string output_offset_expr;
-  if (has_post_reduce_) {
-    const auto local_chain = std::find_if(output_chains_.begin(), output_chains_.end(),
-                                          [](const SimtOutputChain &chain) { return chain.local_target; });
-    GE_ASSERT_TRUE(local_chain != output_chains_.end(), "IndirectLoad SIMT post Reduce local output is missing.");
-    const Tensor *local_target = tpipe.GetTensor(local_chain->target_tensor_id);
-    GE_ASSERT_NOTNULL(local_target, "IndirectLoad SIMT post Reduce local target is missing.");
+  // 局部目标（UB）：post Reduce 合成链（单 gather）或多 gather 组员的 value 直写链——
+  // 两者均按 value tensor 元素计数与 tile 偏移寻址（组员 value 即 IL 输出，同构复用）。
+  const auto local_chain_iter = std::find_if(output_chains_.begin(), output_chains_.end(),
+                                             [](const SimtOutputChain &chain) { return chain.local_target; });
+  const bool has_local_target = local_chain_iter != output_chains_.end();
+  if (has_local_target) {
+    GE_ASSERT_TRUE(has_post_reduce_ || local_chain_iter->target_tensor_id == simt_value_tensor_id_,
+                   "IndirectLoad SIMT local output must be the post Reduce chain or the group member value tensor.");
+    const Tensor *local_target = tpipe.GetTensor(local_chain_iter->target_tensor_id);
+    GE_ASSERT_NOTNULL(local_target, "IndirectLoad SIMT local target is missing.");
     const Tensor *value_tensor = tpipe.GetTensor(simt_value_tensor_id_);
     GE_ASSERT_NOTNULL(value_tensor, "IndirectLoad SIMT value tensor is missing.");
     // 后置 Reduce 的目标是 IndirectLoad value tensor，而 API 调用的输出会重定向到最终
@@ -1714,11 +2492,41 @@ Status IndirectLoadRegApiCall::GenerateSimtInvocation(
       ss << local_target_alloc;
     }
     af::Expression local_element_count;
-    GE_ASSERT_SUCCESS(CalcVectorizedElementCount(*value_tensor, local_element_count));
-    actual_size_expr = tpipe.tiler.ActualSize(local_element_count);
-    const std::string local_tile_size_expr = tpipe.tiler.Size(local_element_count);
-    output_offset_expr = "(static_cast<" + offset_type + ">(block_dim_offset) + static_cast<" + offset_type + ">(" +
-                         outer_tb_var + ")) * " + PromoteSizeExpr(local_tile_size_expr, offset_type);
+    // [组员调用形态与表达式同分支绑定] 判据与 codegen_kernel_loop 的提升判据同源
+    // （GetPostReduceConsumer，仅当前图）：无共享 Reduce 的组员（组路径 boundary=rank、
+    // 整空间合并轴）被提升为一次调用覆盖整核——对齐裸 gather 形态（block_dim_offset
+    // 单位=元素、actual_size=块元素数）；有共享 Reduce 的组员（boundary=first_reduce、
+    // outer=G/inner=R）不被提升、逐 tile 调用——(block_dim_offset + Tb) 单位=行，×tile
+    // 元素数为元素偏移。不叠加 metadata 的 has_post_reduce_（调度期快照，组员恒 false，
+    // 两份图副本存在漂移可能——以当前图的 GetPostReduceConsumer 为唯一权威判据，与
+    // codegen_kernel_loop:908-922 的提升条件、fused 分支的判定保持一致）。
+    const bool has_post_reduce_consumer =
+        node != nullptr && ascgen_utils::indirect_load::GetPostReduceConsumer(node) != nullptr;
+    // [判据漂移检测] 当前图的 GetPostReduceConsumer 是唯一权威判据，调度期 metadata 的
+    // has_post_reduce_ 理论上应与之同值（调度器与 codegen 看同一张结构图——分区
+    // (PartitionSkGraph 含 SK 段 SIMT 化) 与 workspace 化均发生在调度前，调度后仅
+    // ChangeStartingOutputToWorkspace 改图且不影响 IL→Reduce 可达性）。若不一致说明
+    // 上述前提被破坏（图副本结构漂移），打 WARNING 供排查，不改变行为。多 gather 组员
+    // 例外：成员计划收窄使 metadata.has_post_reduce_ 恒为 false（共享归并/输出链不进
+    // 组员 SIMT 计划，见 BuildSimtLoweringMetadata），与当前图判据必然不等——组员不参与
+    // 比较（形态判定本就以当前图判据为唯一权威），否则该 WARN 对全部共享 Reduce 组
+    // 必然误报，淹没真实漂移信号。
+    if (!ascgen_utils::indirect_load::IsSimtGroupMember(node) && has_post_reduce_ != has_post_reduce_consumer) {
+      GELOGW(
+          "[IndirectLoad] Post-reduce judgement drift between schedule and codegen, node[%s]: "
+          "metadata[%d] vs current graph[%d].",
+          node_name.c_str(), has_post_reduce_ ? 1 : 0, has_post_reduce_consumer ? 1 : 0);
+    }
+    if (!has_post_reduce_consumer) {
+      actual_size_expr = outer_tb_var + "_loop_size";
+      output_offset_expr = "static_cast<" + offset_type + ">(block_dim_offset)";
+    } else {
+      GE_ASSERT_SUCCESS(CalcVectorizedElementCount(*value_tensor, local_element_count));
+      actual_size_expr = tpipe.tiler.ActualSize(local_element_count);
+      const std::string local_tile_size_expr = tpipe.tiler.Size(local_element_count);
+      output_offset_expr = "(static_cast<" + offset_type + ">(block_dim_offset) + static_cast<" + offset_type + ">(" +
+                           outer_tb_var + ")) * " + PromoteSizeExpr(local_tile_size_expr, offset_type);
+    }
     if (prepass_plan != nullptr) {
       // [SIMT index 闭包预计算] 行/槽寻址参数与 Store 行布局一致；scratch 槽宽与
       // CalcTmpBufSize 的申请同源（Align(inner*4,32B)/4 == Align(inner,8)）。
@@ -1738,8 +2546,37 @@ Status IndirectLoadRegApiCall::GenerateSimtInvocation(
     actual_size_expr = outer_tb_var + "_loop_size";
     output_offset_expr = "static_cast<" + offset_type + ">(block_dim_offset)";
   }
-  if (!has_post_reduce_ && simt_policy_.policy == ascgen_utils::indirect_load::SimtAddressPolicy::kEmbedding &&
-      rank == 2UL && axis_ == 0L) {
+  // The fixed tile encodes elements per scheduling group. Public block
+  // offsets remain in outer-axis units; convert only at the SIMT call boundary.
+  ascgen_utils::indirect_load::TemplateAxes template_axes;
+  GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::GetTemplateAxes(node, template_axes));
+  int64_t group_size = 1L;
+  const auto tile = tpipe.tiler.axis_map.find(template_axes.tile_inner_axis);
+  if (tile != tpipe.tiler.axis_map.end()) {
+    int64_t fixed_size = 1L;
+    if (tile->second.size.GetConstValue(fixed_size) && fixed_size > 1L) {
+      group_size = fixed_size;
+    }
+  }
+  const bool grouped_direct_gm = !has_local_target && !has_post_reduce_ && group_size > 1L;
+  if (grouped_direct_gm) {
+    af::Expression total = af::sym::kSymbolOne;
+    for (const auto &size : logical_view_.output.sizes) {
+      total = total * size;
+    }
+    const std::string total_expr = PromoteSizeExpr(tpipe.tiler.Size(total), offset_type);
+    ss << "  const " << offset_type << " simt_element_offset = static_cast<" << offset_type << ">(block_dim_offset) * "
+       << group_size << "ULL;\n";
+    ss << "  const " << offset_type << " simt_block_elements = static_cast<" << offset_type << ">(" << outer_tb_var
+       << "_loop_size) * " << group_size << "ULL;\n";
+    ss << "  const " << offset_type << " simt_actual_elements = simt_element_offset < " << total_expr << " ? ("
+       << total_expr << " - simt_element_offset < simt_block_elements ? " << total_expr
+       << " - simt_element_offset : simt_block_elements) : 0U;\n";
+    actual_size_expr = "simt_actual_elements";
+    output_offset_expr = "simt_element_offset";
+  }
+  if (!grouped_direct_gm && !has_local_target && !has_post_reduce_ &&
+      simt_policy_.policy == ascgen_utils::indirect_load::SimtAddressPolicy::kEmbedding && rank == 2UL && axis_ == 0L) {
     const std::string row_count_expr = PromoteSizeExpr(tpipe.tiler.Size(logical_view_.output.sizes[0]), offset_type);
     const std::string inner_size_expr = PromoteSizeExpr(tpipe.tiler.Size(logical_view_.output.sizes[1]), offset_type);
     ss << "  const " << offset_type << " embedding_rows_per_block = (" << row_count_expr << " + static_cast<"
@@ -1752,27 +2589,108 @@ Status IndirectLoadRegApiCall::GenerateSimtInvocation(
     actual_size_expr = "embedding_actual_rows * (" + inner_size_expr + ")";
     output_offset_expr = "embedding_row_offset * (" + inner_size_expr + ")";
   }
-  EmitSimtPolicyParams(tpipe, simt_policy_, rank, axis_, ss);
-  ss << "  AscendC::IndirectLoadSimt<" << input_dtype << ", " << body_name << ", IndirectLoadSimtCase>(\n";
-  ss << "      input_ptr, " << body_name << "::OutputTargets{";
-  for (size_t i = 0UL; i < output_chains_.size(); ++i) {
-    const auto &chain = output_chains_[i];
-    std::string dtype;
-    GE_ASSERT_SUCCESS(Tensor::DtypeName(chain.dtype, dtype));
-    if (i != 0UL) {
-      ss << ", ";
+  // [后置 Reduce 行对齐写回特化] 局部目标行宽运行期化时，body 以模板布尔区分「写回索引
+  // 恒等（行宽已 32B 对齐）」与「magic 乘移重排」两套实现；调用点按 Context 预算的
+  // pad 选择实例，逐元素零判定。
+  const bool split_local_row_store = has_local_target && has_post_reduce_ && !logical_view_.output.sizes.empty() &&
+                                     UseRuntimeOutputInnerSize(has_post_reduce_, logical_view_);
+  std::string targets_fields;
+  GE_ASSERT_SUCCESS(BuildSimtOutputTargetFields(tpipe, output_chains_, targets_fields));
+  // 目标表达式与 body 名解耦预计算（GE_ASSERT_SUCCESS 宏含 return，不能放进 lambda）；
+  // 调用发射本身无断言，可复用 lambda。
+  const auto emit_simt_call = [&](const std::string &body_ref, const std::string &case_ref,
+                                  const std::string &params_ref, const std::string &offset_arg,
+                                  const std::string &indent) {
+    ss << indent << "AscendC::IndirectLoadSimt<" << input_dtype << ", " << body_ref << ", " << case_ref << ">(\n";
+    ss << indent << "    input_ptr, " << body_ref << "::OutputTargets{" << targets_fields << "}, context, "
+       << "static_cast<uint32_t>(" << actual_size_expr << "), " << offset_arg << ", " << params_ref << ");"
+       << std::endl;
+  };
+  const auto emit_simt_call_by_row_align = [&](const std::string &body_base, const std::string &case_ref,
+                                               const std::string &params_ref, const std::string &offset_arg,
+                                               const std::string &indent) {
+    if (!split_local_row_store) {
+      emit_simt_call(body_base + "<true>", case_ref, params_ref, offset_arg, indent);
+      return;
     }
-    if (chain.local_target) {
-      const Tensor *output_tensor = tpipe.GetTensor(chain.target_tensor_id);
-      GE_ASSERT_NOTNULL(output_tensor, "IndirectLoad SIMT local output tensor[%ld] is missing.",
-                        chain.target_tensor_id);
-      ss << "(__ubuf__ " << dtype << " *)" << output_tensor->name << ".GetPhyAddr()";
-    } else {
-      ss << "(__gm__ " << dtype << " *)" << kGlobalTensorNamePrefix << chain.target_tensor_id << ".GetPhyAddr()";
-    }
+    ss << indent << "if (context.output_inner_pad == 0U) {" << std::endl;
+    emit_simt_call(body_base + "<true>", case_ref, params_ref, offset_arg, indent + "  ");
+    ss << indent << "} else {" << std::endl;
+    emit_simt_call(body_base + "<false>", case_ref, params_ref, offset_arg, indent + "  ");
+    ss << indent << "}" << std::endl;
+  };
+  if (!DecideDualOffsetBody(prepass_plan != nullptr)) {
+    EmitSimtPolicyParams(tpipe, simt_policy_, rank, axis_, ss);
+    emit_simt_call_by_row_align(body_name, "IndirectLoadSimtCase", "indirect_load_simt_params", output_offset_expr,
+                                "  ");
+    return af::SUCCESS;
   }
-  ss << "}, context, static_cast<uint32_t>(" << actual_size_expr << "), ";
-  ss << output_offset_expr << ", indirect_load_simt_params);" << std::endl;
+  // [SIMT 32 位双实例] 运行时判定偏移域是否可 32 位；可行走 uint32 body（与静态字面
+  // 量版本同构的 32 位全链路），否则回退 uint64 body。两套 body 共享同一 Context（字段
+  // 64 位，32 位引用截断）。
+  // [真偏移上界] 上界取视图物理跨度 Σ(size_i−1)×stride_i 而非元素总数 Πsize_i：元素
+  // 总数仅在 stride[axis]==后缀稠密积（kDense）时等于偏移上界，padded 行距（如
+  // [ks3,160]/[256,1]）的 max_offset ≈ 1.6×总数，元素数过检不再蕴含偏移过检，u32 截断
+  // 会产出错误地址。物理跨度对 padded 视图同样严格成立（坐标 ∈ [0,size) 时偏移 ≤ 跨
+  // 度），因此双发不再要求 input kDense——padded 表按真实跨度现场判定。GM store 链的
+  // 目标视图（slice-strided 形态）与 base offset 同法计入。guard 表达式 emit 进设备侧
+  // kernel 体，每次 launch 求值一次（非每元素），乘加开销可忽略。设备侧 kernel 无日志
+  // 机制（OP_NAME 仅存在于 host tiling 上下文），guard 判负不发射诊断——量化观测由
+  // host 侧 CalcScore 日志（unified/fallback 形态）覆盖。
+  {
+    // [跨度上界依赖] Σ(size_i−1)×stride_i 仅在 stride 非负时是视图偏移上界；负 stride
+    // 在布局分类 ClassifyTensorDim 已被判 kIllegal、无法到达此处（kEmbedding 分类前置
+    // 的布局校验拒绝），本 lambda 依赖该不变量，不再重复检查。
+    const auto physical_span_bound = [](const std::vector<af::Expression> &sizes,
+                                        const std::vector<af::Expression> &strides) {
+      af::Expression bound = af::ops::Zero;
+      for (size_t dim = 0UL; dim < sizes.size(); ++dim) {
+        bound = bound + (sizes[dim] - af::sym::kSymbolOne) * strides[dim];
+      }
+      return bound;
+    };
+    // [guard 拼接] 收集条件 + join（与 fused 调用点同法）：不再用「尾追加 + substr 截断」
+    // 的手工分隔——substr 偏移与字面量长度耦合，曾出过 P0（-5 多删一位砍掉末项闭合
+    // 括号）。join 保证每对条件间恰好一个分隔符。
+    std::vector<std::string> guard_conds;
+    const auto views = std::vector<std::pair<const std::vector<af::Expression> *, const std::vector<af::Expression> *>>{
+        {&logical_view_.input.sizes, &logical_view_.input.strides},
+        {&logical_view_.index.sizes, &logical_view_.index.strides},
+        {&logical_view_.output.sizes, &logical_view_.output.strides}};
+    for (const auto &view : views) {
+      guard_conds.emplace_back(
+          "(static_cast<uint64_t>(" +
+          PromoteSizeExpr(tpipe.tiler.Size(physical_span_bound(*view.first, *view.second)), "uint64_t") +
+          ") <= 0x7FFFFFFFULL)");
+    }
+    for (const auto &chain : output_chains_) {
+      if (chain.local_target) {
+        continue;
+      }
+      const af::Expression chain_bound =
+          physical_span_bound(chain.target_sizes, chain.target_strides) + chain.target_offset;
+      guard_conds.emplace_back("(static_cast<uint64_t>(" + PromoteSizeExpr(tpipe.tiler.Size(chain_bound), "uint64_t") +
+                               ") <= 0x7FFFFFFFULL)");
+    }
+    std::string guard_text;
+    for (size_t cond_index = 0UL; cond_index < guard_conds.size(); ++cond_index) {
+      if (cond_index != 0UL) {
+        guard_text += " && ";
+      }
+      guard_text += guard_conds[cond_index];
+    }
+    ss << "  const bool indirect_load_simt_use_u32 = " << guard_text << ";" << std::endl;
+    EmitSimtPolicyParams(tpipe, simt_policy_, rank, axis_, ss, "uint64_t", "_u64");
+    EmitSimtPolicyParams(tpipe, simt_policy_, rank, axis_, ss, "uint32_t", "_u32");
+    const std::string u32_offset_arg = "static_cast<uint32_t>(" + output_offset_expr + ")";
+    ss << "  if (indirect_load_simt_use_u32) {" << std::endl;
+    emit_simt_call_by_row_align(body_name + "_u32", "IndirectLoadSimtCase_u32", "indirect_load_simt_params_u32",
+                                u32_offset_arg, "    ");
+    ss << "  } else {" << std::endl;
+    emit_simt_call_by_row_align(body_name + "_u64", "IndirectLoadSimtCase_u64", "indirect_load_simt_params_u64",
+                                u32_offset_arg, "    ");
+    ss << "  }" << std::endl;
+  }
   return af::SUCCESS;
 }
 
@@ -1830,6 +2748,43 @@ Status IndirectLoadRegApiCall::GenerateSimtLocalTargetAlloc(const TPipe &tpipe, 
   return af::SUCCESS;
 }
 
+// [fused 成员 value 输入张量解析] 成员 value 输入链为 Data→Load(kSimtInputBoundary)→IL
+// （或含 Transpose 的 kSimtInlineTransform 变换）：direct-GM 边界节点 skips_api_emit、
+// 不注册 tpipe 也不生成 api call——L4 单成员路径经 api-call 接线自然穿透到 GM 源（Data
+// 输出张量，经 input_nodes 注册），fused 路径直接读图视图上的 tensor_id 会查到未注册
+// 的边界节点张量。此处对齐接线约定：先按视图 id 查找，未命中则沿 skips_api_emit
+// 生产者链回溯到首个已注册张量（CompleteInputDataTensorAttrs 已把 Load 视图拷贝到
+// Data，语义等价）。
+// 仅穿透【单输入】节点——与生成器 CollectInputPaths"沿单输入链回溯"的物理视图语义
+// 一致：单输入父链唯一、无分支歧义（Load/Broadcast/Transpose 均单输入）。多输入
+// skips_api_emit 节点（Select/Mul 等）出现在 value 链上时，值不再是单一 GM 表，
+// fused 的单 GM 值表指针模型本不支持——此处必须返回 nullptr 保持显式失败，禁止沿
+// input 0 猜测分支把无关 Data 当值表（静默错码）。
+const Tensor *ResolveFusedMemberInputTensor(const TPipe &tpipe, const af::AscNodePtr &member) {
+  const auto member_inputs = member->inputs();
+  const ascir::TensorId view_tensor_id =
+      member_inputs[ascgen_utils::indirect_load::kInputTensorIndex]->attr.mem.tensor_id;
+  // 探测性回退用 HasTensor 静默查询——逐级穿透的预期 miss 不打 ERROR（健康路径
+  // 日志保持干净）；最终 GM 源仍用 GetTensor，真正缺失时 ERROR + 上游断言报错。
+  if (tpipe.HasTensor(view_tensor_id)) {
+    return tpipe.GetTensor(view_tensor_id);
+  }
+  af::AscNodePtr producer =
+      ascgen_utils::indirect_load::GetInputProducer(member, ascgen_utils::indirect_load::kInputTensorIndex);
+  while (producer != nullptr && !af::ops::IsOps<af::ascir_op::Data>(producer) &&
+         ascgen_utils::indirect_load::GetTemplateBehavior(producer).skips_api_emit &&
+         producer->inputs().size() == 1UL && !producer->outputs().empty()) {
+    if (tpipe.HasTensor(producer->outputs()[0]->attr.mem.tensor_id)) {
+      return tpipe.GetTensor(producer->outputs()[0]->attr.mem.tensor_id);
+    }
+    producer = ascgen_utils::indirect_load::GetInputProducer(producer, 0UL);
+  }
+  if (producer != nullptr && af::ops::IsOps<af::ascir_op::Data>(producer) && !producer->outputs().empty()) {
+    return tpipe.GetTensor(producer->outputs()[0]->attr.mem.tensor_id);
+  }
+  return nullptr;
+}
+
 Status IndirectLoadRegApiCall::GenerateSimt(const TPipe &tpipe, const std::vector<ascir::AxisId> &current_axis,
                                             const Tensor &input, std::string &result) const {
   GE_ASSERT_TRUE(logical_view_.input.kind != ascgen_utils::indirect_load::IndirectLoadLayoutKind::kUnsupported &&
@@ -1853,6 +2808,731 @@ Status IndirectLoadRegApiCall::GenerateSimt(const TPipe &tpipe, const std::vecto
   const bool use_prepass = CanUseSimtIndexPrepass(tpipe, prepass_plan);
   const std::string offset_type = GetSimtOffsetType(simt_policy_);
   std::stringstream ss;
+  const std::string simt_feature = std::string(semantic::kSimtPrefix) +
+                                   ascgen_utils::GetSimtSemanticRole(simt_policy_.policy) + semantic::kOffsetPrefix +
+                                   (offset_type == "uint32_t" ? "32" : "64");
+  GE_ASSERT_SUCCESS(SetSemanticFeature(simt_feature));
+  // [seq-V1] fused primary（六级降级阶梯 L2/L3，见设计文档）：单 evaluator 统一发射全组——
+  // 一个 VF_CALL（IndirectLoadSimtFused）启动线程块，每线程逐路串行 index 链求值 →
+  // AddressPolicy 寻址 → load。L2（寄存器归并）：归并树在 FusedEval 内以 N 个 value 为种子
+  // 经 EmitSimtEvaluatorNodes 按拓扑序折叠为标量表达式（任意 element-wise 算子，不可交换
+  // 算子按操作数序），结果直写 GM 输出链；L3（UB 归并）：各路 value 写各自 UB 局部目标
+  // （行对齐寻址），归并链由向量代码执行。相比 V2（N 个 VF_CALL + N 个 PipeBarrier）→
+  // 1 个 VF_CALL + 1 个 PipeBarrier。L4（V2）不进入本分支（无 fused primary 标记）。
+  if (node != nullptr && ascgen_utils::indirect_load::IsSimtFusedPrimary(node)) {
+    const auto member_names = ascgen_utils::indirect_load::GetSimtFusedMemberNames(node);
+    GE_ASSERT_TRUE(!member_names.empty(), "IndirectLoad SIMT fused primary has no members.");
+    const auto owner_graph = node->GetOwnerComputeGraph();
+    GE_ASSERT_NOTNULL(owner_graph, "IndirectLoad SIMT fused primary has no owner graph.");
+    const auto merge_info = ascgen_utils::indirect_load::GetSimtFusedMergeInfo(node);
+    const size_t member_count = member_names.size();
+    ss << "// IndirectLoad SIMT Fused (seq-V1: single evaluator, serial loads, " << member_count << " paths, "
+       << (merge_info.register_merge ? "register merge" : "UB merge") << ")\n";
+    ss << "{\n";
+    // Phase 1：收集全部成员数据（input 指针、index 链节点与负载元数据、地址策略、UB 目标）。
+    SimtGraphNodeMap node_map;
+    GE_ASSERT_SUCCESS(BuildSimtGraphNodeMap(node, node_map));
+    struct FusedMemberData {
+      const Tensor *input_tensor;
+      const Tensor *ub_target;
+      ascir::TensorId value_tensor_id;
+      ascir::TensorId index_result_tensor_id;
+      std::string dtype_name;
+      std::vector<af::AscNodePtr> index_nodes;
+      std::vector<ascgen_utils::indirect_load::SimtLoadMetadata> index_loads;
+      std::vector<ascgen_utils::indirect_load::SimtGmTensorMetadata> gm_tensors;
+      ascgen_utils::indirect_load::SimtPolicyMetadata policy;
+      ascgen_utils::indirect_load::TemplateLogicalView logical_view;
+      size_t rank;
+      int64_t axis;
+    };
+    std::vector<FusedMemberData> members;
+    members.reserve(member_count);
+    for (const std::string &member_name : member_names) {
+      const af::AscNodePtr member_node =
+          std::dynamic_pointer_cast<af::AscNode>(owner_graph->FindNode(member_name.c_str()));
+      GE_ASSERT_NOTNULL(member_node, "Fused group member[%s] not found.", member_name.c_str());
+      const auto member_inputs = member_node->inputs();
+      GE_ASSERT_TRUE(member_inputs.size() >= kIndirectLoadInputCount, "Member[%s] invalid input count.",
+                     member_name.c_str());
+      ascgen_utils::indirect_load::IndirectLoadLoweringMetadata meta;
+      GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::GetLoweringMetadata(member_node, meta));
+      FusedMemberData md;
+      md.input_tensor = ResolveFusedMemberInputTensor(tpipe, member_node);
+      GE_ASSERT_NOTNULL(md.input_tensor, "Member[%s] input tensor missing.", member_name.c_str());
+      GE_ASSERT_TRUE(!meta.simt.output_chains.empty() && meta.simt.output_chains[0].local_target,
+                     "Member[%s] has no local_target output chain.", member_name.c_str());
+      md.ub_target = tpipe.GetTensor(meta.simt.output_chains[0].target_tensor_id);
+      GE_ASSERT_NOTNULL(md.ub_target, "Member[%s] UB target tensor missing.", member_name.c_str());
+      md.value_tensor_id = meta.simt.value_tensor_id;
+      md.index_result_tensor_id = meta.simt.index_result_tensor_id;
+      Tensor::DtypeName(meta.simt.output_dtype, md.dtype_name);
+      md.index_loads = meta.simt.index_loads;
+      md.gm_tensors = meta.simt.gm_tensors;
+      md.policy = meta.simt.policy;
+      md.logical_view = meta.logical_view;
+      md.rank = meta.logical_view.input.sizes.size();
+      md.axis = meta.axis;
+      GE_ASSERT_SUCCESS(ResolveSimtNodes(meta.simt.index_node_names, node_map, md.index_nodes));
+      members.emplace_back(std::move(md));
+    }
+    // 归并树节点解析（仅 L2）。输出链 tensor id 与 side load 寻址分类均在当前图上重建——
+    // 节点名跨图副本稳定（唯一可信引用），视图/张量 id 在调度期与 codegen 期两份图副本间
+    // 会漂移（见 utils「漂移防护」注释），调度期存下的 id 不可直接消费。
+    std::vector<af::AscNodePtr> merge_nodes;
+    std::vector<ascgen_utils::indirect_load::SimtOutputChainMetadata> merge_chains;
+    SimtLoadMetadataMap merge_load_map;
+    std::vector<af::AscNodePtr> merge_side_loads;
+    std::vector<af::AscNodePtr> emission_nodes;
+    if (merge_info.register_merge) {
+      GE_ASSERT_SUCCESS(ResolveSimtNodes(merge_info.merge_node_names, node_map, merge_nodes));
+      // 输出链：Store 终端按名重解析，result/target tensor id 取当前图。
+      for (const std::string &store_name : merge_info.merge_store_names) {
+        const auto store_iter = node_map.find(store_name);
+        GE_ASSERT_TRUE(store_iter != node_map.end(), "Fused merge store terminal[%s] is missing.", store_name.c_str());
+        const auto store_inputs = store_iter->second->inputs();
+        GE_ASSERT_TRUE(!store_inputs.empty() && !store_iter->second->outputs().empty() &&
+                           store_iter->second->outputs()[0] != nullptr,
+                       "Fused merge store terminal[%s] has invalid inputs/outputs.", store_name.c_str());
+        ascgen_utils::indirect_load::SimtOutputChainMetadata chain;
+        chain.result_tensor_id = store_inputs[0]->attr.mem.tensor_id;
+        chain.target_tensor_id = store_iter->second->outputs()[0]->attr.mem.tensor_id;
+        chain.dtype = store_inputs[0]->attr.dtype;
+        chain.local_target = false;
+        // [strided GM 目标寻址] 补全 store 终端的目标视图元数据（与单 gather
+        // CollectSimtOutputChainBuilds 同构），供 Store 侧按目标 strides/offset 铺排。
+        const auto &store_target_attr = store_iter->second->outputs()[0]->attr;
+        chain.target_sizes = store_target_attr.repeats;
+        chain.target_strides = store_target_attr.strides;
+        af::Expression merge_store_offset = af::ops::Zero;
+        if (store_iter->second->attr.ir_attr != nullptr) {
+          (void)store_iter->second->attr.ir_attr->GetAttrValue("offset", merge_store_offset);
+        }
+        chain.target_offset = merge_store_offset;
+        // [检视意见·显性失败] 目标视图元数据缺失（空 target_sizes）或秩不一致
+        // （sizes/strides 不等长）时拒绝发射：BuildSimtStoreTargetOffsetExpr 对空/失配
+        // 视图静默回退 flat output_index——对 strided 目标即修复前的错位形态；跨度
+        // guard 按target_sizes.size() 索引 target_strides，失配是 host 侧越界。真实
+        // 流程该视图由 op-desc 先行填充（非空），缺失即上游异常——在首次消费处显性
+        // 暴露，而非静默错算或仅对双发降级。
+        GE_ASSERT_TRUE(!chain.target_sizes.empty() && chain.target_strides.size() == chain.target_sizes.size(),
+                       "IndirectLoad fused register-merge store[%s] target view metadata is missing or "
+                       "rank-inconsistent (sizes=%zu, strides=%zu).",
+                       store_name.c_str(), chain.target_sizes.size(), chain.target_strides.size());
+        merge_chains.emplace_back(std::move(chain));
+      }
+      // side GM load 发现 + 寻址分类（当前图，与调度期门控同一分类函数——非 GM load 的
+      // side input 在此出现即为两份图副本间的结构漂移，显式断言暴露而非静默错算）。
+      // merge_nodes 含 ③ side 链节点（merge_node_names 含两者），链上 Load 由同一遍历发现。
+      const auto is_merge_node = [&merge_info](const std::string &name) {
+        return std::find(merge_info.merge_node_names.begin(), merge_info.merge_node_names.end(), name) !=
+               merge_info.merge_node_names.end();
+      };
+      const auto is_member_node = [&member_names](const std::string &name) {
+        return std::find(member_names.begin(), member_names.end(), name) != member_names.end();
+      };
+      for (const af::AscNodePtr &merge_node : merge_nodes) {
+        for (const auto &in_node : merge_node->GetInDataNodes()) {
+          const auto producer = std::dynamic_pointer_cast<af::AscNode>(in_node);
+          if (producer == nullptr || is_merge_node(producer->GetName()) || is_member_node(producer->GetName()) ||
+              af::ops::IsOps<af::ascir_op::Scalar>(producer) || af::ops::IsOps<af::ascir_op::ScalarData>(producer) ||
+              af::ops::IsOps<af::ascir_op::Arange>(producer)) {
+            continue;
+          }
+          GE_ASSERT_TRUE(ascgen_utils::indirect_load::IsSimtDirectGmLoadNode(producer),
+                         "Fused merge side input[%s] is not a direct GM load (schedule/codegen drift).",
+                         producer->GetNamePtr());
+          if (std::find(merge_side_loads.begin(), merge_side_loads.end(), producer) != merge_side_loads.end()) {
+            continue;
+          }
+          merge_side_loads.emplace_back(producer);
+        }
+      }
+      for (const af::AscNodePtr &side_load : merge_side_loads) {
+        ascgen_utils::indirect_load::SimtLoadMetadata side_meta;
+        GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::BuildSimtMergeSideLoadMetadata(side_load, side_meta));
+        merge_load_map.emplace(side_meta.node_name, std::move(side_meta));
+      }
+      // 发射节点列表 = 归并树 + ③ side 链节点 + side load（①②③）+ 归并树内变换的
+      // 常量标量生产者（Scalar/ScalarData，含经 Broadcast 间接供给），按图拓扑序
+      // （GetDirectNode）排列——load/链节点/标量先于消费者，EmitSimtEvaluatorNodes 的
+      // values map 传播依赖此序（side load 与标量不在闭包名单内，缺席会使归并节点
+      // 输入无表达式）。Scalar 为编译期常量，经 EmitSimtScalarInput 内联；ScalarData
+      // 为运行期标量，evaluator 以 context.v_N 引用——发射集内的 ScalarData 统一在
+      // 下方 context_tensors 注册（与归并节点直接生产者路径合并去重），避免生成引用
+      // 未声明成员的 kernel。
+      const auto is_side_load = [&merge_side_loads](const std::string &name) {
+        return std::find_if(merge_side_loads.begin(), merge_side_loads.end(), [&name](const af::AscNodePtr &side_load) {
+                 return side_load->GetName() == name;
+               }) != merge_side_loads.end();
+      };
+      std::set<const af::AscNode *> emission_set;
+      for (const auto &graph_node : owner_graph->GetDirectNode()) {
+        const auto asc_node = std::dynamic_pointer_cast<af::AscNode>(graph_node);
+        if (asc_node != nullptr && (is_merge_node(asc_node->GetName()) || is_side_load(asc_node->GetName()))) {
+          emission_set.emplace(asc_node.get());
+        }
+      }
+      for (const auto &graph_node : owner_graph->GetDirectNode()) {
+        const auto asc_node = std::dynamic_pointer_cast<af::AscNode>(graph_node);
+        if (asc_node == nullptr || emission_set.count(asc_node.get()) != 0UL ||
+            !(af::ops::IsOps<af::ascir_op::Scalar>(asc_node) || af::ops::IsOps<af::ascir_op::ScalarData>(asc_node))) {
+          continue;
+        }
+        for (const auto &out_node : asc_node->GetOutDataNodes()) {
+          const auto consumer = std::dynamic_pointer_cast<af::AscNode>(out_node);
+          if (consumer != nullptr && emission_set.count(consumer.get()) != 0UL) {
+            emission_set.emplace(asc_node.get());
+            break;
+          }
+        }
+      }
+      for (const auto &graph_node : owner_graph->GetDirectNode()) {
+        const auto asc_node = std::dynamic_pointer_cast<af::AscNode>(graph_node);
+        if (asc_node != nullptr && emission_set.count(asc_node.get()) != 0UL) {
+          emission_nodes.emplace_back(asc_node);
+        }
+      }
+      GE_ASSERT_TRUE(!emission_nodes.empty(), "Fused merge emission node list is empty.");
+    }
+    // context 张量清单（成员序优先、归并树 side input 随后，去重）：index 链 GM load /
+    // ScalarData + 归并树 ScalarData side input。字段命名与单 gather Context 一致，
+    // EmitSimtEvaluatorNodes 的 context.gm_N / context.v_N 引用直接生效。
+    std::vector<ascgen_utils::indirect_load::SimtGmTensorMetadata> context_tensors;
+    const auto seen_context_tensor = [&context_tensors](ascir::TensorId tensor_id) {
+      return std::find_if(context_tensors.begin(), context_tensors.end(),
+                          [tensor_id](const ascgen_utils::indirect_load::SimtGmTensorMetadata &tensor) {
+                            return tensor.value_tensor_id == tensor_id;
+                          }) != context_tensors.end();
+    };
+    for (const FusedMemberData &member : members) {
+      for (const auto &gm_tensor : member.gm_tensors) {
+        if (!seen_context_tensor(gm_tensor.value_tensor_id)) {
+          context_tensors.emplace_back(gm_tensor);
+        }
+      }
+    }
+    if (merge_info.register_merge) {
+      for (const af::AscNodePtr &merge_node : merge_nodes) {
+        for (const auto &in_node : merge_node->GetInDataNodes()) {
+          const auto producer = std::dynamic_pointer_cast<af::AscNode>(in_node);
+          if (producer == nullptr || !af::ops::IsOps<af::ascir_op::ScalarData>(producer) ||
+              producer->outputs().empty() || producer->outputs()[0] == nullptr ||
+              seen_context_tensor(producer->outputs()[0]->attr.mem.tensor_id)) {
+            continue;
+          }
+          ascgen_utils::indirect_load::SimtGmTensorMetadata tensor;
+          tensor.value_tensor_id = producer->outputs()[0]->attr.mem.tensor_id;
+          tensor.gm_tensor_id = producer->outputs()[0]->attr.mem.tensor_id;
+          tensor.dtype = producer->outputs()[0]->attr.dtype;
+          tensor.is_scalar = true;
+          context_tensors.emplace_back(std::move(tensor));
+        }
+      }
+      // 发射集内的 ScalarData 统一注册（含经 Broadcast 间接供给的形态）——evaluator
+      // 以 context.v_N 引用其值，缺失字段会生成引用未声明成员的 kernel。与上方
+      // 直接生产者路径经 seen_context_tensor 合并去重。
+      for (const af::AscNodePtr &emission_node : emission_nodes) {
+        if (!af::ops::IsOps<af::ascir_op::ScalarData>(emission_node) || emission_node->outputs().empty() ||
+            emission_node->outputs()[0] == nullptr ||
+            seen_context_tensor(emission_node->outputs()[0]->attr.mem.tensor_id)) {
+          continue;
+        }
+        ascgen_utils::indirect_load::SimtGmTensorMetadata tensor;
+        tensor.value_tensor_id = emission_node->outputs()[0]->attr.mem.tensor_id;
+        tensor.gm_tensor_id = emission_node->outputs()[0]->attr.mem.tensor_id;
+        tensor.dtype = emission_node->outputs()[0]->attr.dtype;
+        tensor.is_scalar = true;
+        context_tensors.emplace_back(std::move(tensor));
+      }
+      // side GM load 的 context 张量（镜像单 gather AppendSimtGmTensorMetadata：Load 的
+      // gm 字段名取其输入 GM 张量 id，与 evaluator 表达式引用的输出 id 同源——direct GM
+      // 边界两 tensor 同一）。
+      for (const af::AscNodePtr &side_load : merge_side_loads) {
+        const auto output = side_load->outputs()[0];
+        GE_ASSERT_TRUE(output != nullptr && !side_load->inputs().empty(),
+                       "Fused merge side load[%s] has invalid inputs/outputs.", side_load->GetNamePtr());
+        if (seen_context_tensor(output->attr.mem.tensor_id)) {
+          continue;
+        }
+        ascgen_utils::indirect_load::SimtGmTensorMetadata tensor;
+        tensor.value_tensor_id = output->attr.mem.tensor_id;
+        tensor.gm_tensor_id = side_load->inputs()[0]->attr.mem.tensor_id;
+        tensor.dtype = output->attr.dtype;
+        tensor.is_scalar = false;
+        context_tensors.emplace_back(std::move(tensor));
+      }
+    }
+    // [SIMT 动态 shape 坐标分解] 空跑 FusedEval 内的 per-member index 与归并 side-load
+    // 坐标分解，收集运行期符号尺寸（t->ksN 不能内联进 FusedBody 静态方法，须经 FusedCtx
+    // 字段传入；FusedCtx 先于 FusedBody 发射，故收集先行；空跑输出丢弃，正式发射复用
+    // 同一注册表查找）。offset_type 只影响丢弃的引用串包装，不影响收集条目（键为 tiler
+    // 表达式），此处取首成员位宽。
+    // [strided GM 目标寻址] 转 codegen 侧链结构（BuildSimtStoreTargetOffsetExpr 消费；
+    // 空链（非 register_merge 形态）为空向量，不产生任何发射）。
+    std::vector<SimtOutputChain> merge_store_chains;
+    merge_store_chains.reserve(merge_chains.size());
+    for (const auto &merge_chain : merge_chains) {
+      merge_store_chains.emplace_back(MakeSimtOutputChain(merge_chain));
+    }
+    SimtRuntimeSizeRegistry fused_runtime_sizes;
+    {
+      const std::string collect_offset_type = GetSimtOffsetType(members.front().policy);
+      std::stringstream scratch;
+      SimtLoadIndexOffsetExpressions scratch_offsets;
+      for (size_t k = 0; k < member_count; ++k) {
+        SimtLoadMetadataMap load_map;
+        for (const auto &load : members[k].index_loads) {
+          load_map.emplace(load.node_name, load);
+        }
+        GE_ASSERT_SUCCESS(BuildSimtPerLoadIndexOffsetExpressions(
+            members[k].logical_view, members[k].index_nodes, load_map, tpipe, GetSimtOffsetType(members[k].policy),
+            "output_index", "index_offset", false, -1L, fused_runtime_sizes, scratch_offsets, scratch));
+        std::map<ascir::TensorId, std::string> scratch_values;
+        GE_ASSERT_SUCCESS(EmitSimtEvaluatorNodes(
+            members[k].index_nodes, load_map, &scratch_offsets, members[k].logical_view, "index_offset", "output_index",
+            tpipe, fused_runtime_sizes, GetSimtOffsetType(members[k].policy), scratch_values, scratch));
+      }
+      if (merge_info.register_merge) {
+        GE_ASSERT_SUCCESS(BuildSimtPerLoadIndexOffsetExpressions(
+            members.front().logical_view, emission_nodes, merge_load_map, tpipe, collect_offset_type, "output_index",
+            "output_index", false, -1L, fused_runtime_sizes, scratch_offsets, scratch));
+        std::map<ascir::TensorId, std::string> scratch_values;
+        for (size_t k = 0; k < member_count; ++k) {
+          scratch_values[members[k].value_tensor_id] = "value" + std::to_string(k);
+        }
+        GE_ASSERT_SUCCESS(EmitSimtEvaluatorNodes(emission_nodes, merge_load_map, &scratch_offsets,
+                                                 members.front().logical_view, "output_index", "output_index", tpipe,
+                                                 fused_runtime_sizes, collect_offset_type, scratch_values, scratch));
+        // [strided GM 目标寻址] 空跑 Store 目标偏移表达式：目标视图的运行期尺寸/步长符号
+        // 在此登记进 FusedCtx 注册表（正式发射按同一条目内联或引用 context 字段）。
+        std::map<std::pair<size_t, std::string>, std::string> scratch_store_coords;
+        for (size_t i = 0; i < merge_chains.size(); ++i) {
+          (void)BuildSimtStoreTargetOffsetExpr(merge_store_chains[i], members.front().logical_view, tpipe,
+                                               collect_offset_type, fused_runtime_sizes, scratch_store_coords, scratch);
+        }
+      }
+      if (!merge_info.register_merge && !members.front().logical_view.output.sizes.empty()) {
+        // [SIMT 动态 shape] L3 Store 行宽（output inner size）在 FusedBody 静态方法体内
+        // 消费：动态 shape 下是运行期符号尺寸（t->ksN，t 在静态方法作用域不可见），须经
+        // FusedCtx 的 rt_size_N 字段传入；FusedCtx 先于 FusedBody 发射，故先在此登记（空跑
+        // 输出丢弃，正式发射按 tiler 表达式命中同一条目）。静态 shape 为编译期常量，
+        // InlineOrContext 直接内联，不新增注册条目。
+        (void)fused_runtime_sizes.InlineOrContext(members.front().logical_view.output.sizes.back(), tpipe,
+                                                  collect_offset_type);
+      }
+    }
+    // Phase 2 前置：OffsetType 按成员策略位宽选优（全 uint32 → 32 位偏移）——FusedCtx 的
+    // rt_div magic/shift 字段类型与其一致，须先于结构体发射求出。
+    bool all_offset_uint32 = true;
+    for (const FusedMemberData &member : members) {
+      if (member.policy.offset_width != ascgen_utils::indirect_load::SimtOffsetWidth::kUint32) {
+        all_offset_uint32 = false;
+        break;
+      }
+    }
+    const std::string fused_offset_type = all_offset_uint32 ? "uint32_t" : "uint64_t";
+    // [组路径·fused 双发] 动态 shape（任一成员 u64）下 fused 全链路恒 u64 寻址：
+    // FusedEval 每元素经 context.policyK.GetAddress(output_index)——policy 按 CaseTag
+    // 的 OffsetT 模板化，宽度必须随 body 成套，否则 u64 算术滞留热循环。对齐单 gather
+    // 双发的门控（SimtSupportsDualOffsetBody 的 kEmbedding 分支）：全部成员 kEmbedding
+    // rank2/axis0。input 的 padded 行距由真偏移上界 guard 现场判定（见调用点
+    // [真偏移上界] 注释），不做 kDense 前置；多归并链同法放开（guard 逐链核 target
+    // 跨度，见调用点）。L2/L3 之外的成员策略（strided/recursive）混入时不放行，
+    // 维持 u64 单体。
+    bool fused_dual_eligible = !all_offset_uint32;
+    if (fused_dual_eligible) {
+      for (const FusedMemberData &member : members) {
+        if (member.policy.policy != ascgen_utils::indirect_load::SimtAddressPolicy::kEmbedding || member.rank != 2UL ||
+            member.axis != 0L) {
+          fused_dual_eligible = false;
+          break;
+        }
+      }
+    }
+    // [strided GM 目标寻址] 目标视图元数据的空/秩一致性在 merge_chains 构建处已显式
+    // 断言（register_merge 分支，见构建点注释）——此处不再需要"空则退 u64 单体"的
+    // 降级防御：guard 逐链计 target 跨度时元数据必已完备。
+    // [L3 调用形态与表达式同分支绑定] 判据与 codegen_kernel_loop 的提升判据同源
+    // （GetPostReduceConsumer）：无共享 Reduce 的 L3（组路径 boundary=rank、整空间合并轴、
+    // 恒提升）——一次调用覆盖整核，与 L2 同形态（block_dim_offset 单位=元素、actual_size=
+    // 块元素数，提升作用域内 <Tb>_loop_size 与 block_dim_offset 均已声明）；有共享 Reduce 的
+    // L3（boundary=first_reduce、outer=G/inner=R）不被提升、逐 tile 调用——
+    // (block_dim_offset + Tb) 单位=行，×tile 元素数（成员 value tensor 的向量化元素数）为
+    // 元素偏移，与单 gather post-Reduce 的 local-target 形态同构。
+    const bool fused_has_post_reduce_consumer =
+        node != nullptr && ascgen_utils::indirect_load::GetPostReduceConsumer(node) != nullptr;
+    // 与单路调用的漂移检测同口径：组员（含 fused primary）的 metadata.has_post_reduce_
+    // 被成员计划收窄恒置 false，不参与比较（见 GenerateSimtInvocation 处注释）。
+    if (!ascgen_utils::indirect_load::IsSimtGroupMember(node) && has_post_reduce_ != fused_has_post_reduce_consumer) {
+      GELOGW(
+          "[IndirectLoad] Fused post-reduce judgement drift between schedule and codegen, node[%s]: "
+          "metadata[%d] vs current graph[%d].",
+          node_name.c_str(), has_post_reduce_ ? 1 : 0, fused_has_post_reduce_consumer ? 1 : 0);
+    }
+    // [fused 双发变体] eligible 时同发射 u64/u32 两套（FusedCase/Ctx/Body/ftgt 全套带后缀，
+    // policy 与 GetAddress 的算术宽度随之），运行期 guard 现场选；否则按既有单宽度发射
+    // （suffix 空——非 eligible 形态的产物与历史逐字节一致）。fused_variant_size_offset
+    // 按变体序收集调用点表达式（actual_size, output_offset），下标 = 变体序。
+    std::vector<std::pair<std::string, std::string>> fused_variant_size_offset;
+    const std::vector<std::pair<std::string, std::string>> fused_variants =
+        fused_dual_eligible
+            ? std::vector<std::pair<std::string, std::string>>{{"uint64_t", "_u64"}, {"uint32_t", "_u32"}}
+            : std::vector<std::pair<std::string, std::string>>{{fused_offset_type, ""}};
+    for (const auto &fused_variant : fused_variants) {
+      const std::string &body_offset_type = fused_variant.first;
+      const std::string &body_suffix = fused_variant.second;
+      // Phase 2：FusedCtx——N 路 input 指针 + 逐成员策略参数（常量驻留）+ context 张量。
+      for (size_t k = 0UL; k < member_count; ++k) {
+        ss << "  using FusedCase" << body_suffix << k << " = "
+           << GetSimtCaseTag(members[k].policy, members[k].rank, members[k].axis, body_offset_type) << ";\n";
+      }
+      ss << "  struct FusedCtx" << body_suffix << " {\n";
+      for (size_t k = 0UL; k < member_count; ++k) {
+        ss << "    __gm__ " << members[k].dtype_name << " *in" << k << ";\n";
+        ss << "    AscendC::IndirectLoadSimtParams<FusedCase" << body_suffix << k << "> params" << k << ";\n";
+      }
+      for (const auto &gm_tensor : context_tensors) {
+        std::string dtype;
+        GE_ASSERT_SUCCESS(Tensor::DtypeName(gm_tensor.dtype, dtype));
+        if (gm_tensor.is_scalar) {
+          ss << "    " << dtype << " " << kSimtValueNamePrefix << gm_tensor.value_tensor_id << ";\n";
+        } else {
+          // 字段名按 value_tensor_id（Load 输出 id）——与单 gather Context 定义及 evaluator
+          // 引用（context.gm_<output id>）同源；初始化取值仍按 gm_tensor_id（Data 的内核
+          // 参数名 global_N）。两者在调度器为 Load 输出分配独立 id 后必然不同，不可混用。
+          ss << "    __gm__ " << dtype << " *" << kSimtGmFieldNamePrefix << gm_tensor.value_tensor_id << ";\n";
+        }
+      }
+      // [SIMT 动态 shape 坐标分解] FusedBody 静态方法体内的运行期符号尺寸（t->ksN）字段；
+      // 初始化序与下方 fctx 一致。
+      for (size_t i = 0UL; i < fused_runtime_sizes.Entries().size(); ++i) {
+        ss << "    uint64_t " << SimtRuntimeSizeRegistry::FieldName(i) << ";\n";
+      }
+      // [SIMT 动态 shape 坐标分解加速] 与 rt_size_N 一一配对的除法 magic/shift（热循环
+      // UintDiv 消费；聚合初始化尾部零值，下方逐字段预算覆盖）——与单 gather Context
+      // 的字段集对齐，此前缺失导致生成代码引用未声明成员。字段恒为 uint64：magic 按
+      // 64 位公式预算，32 位 body 的除法回退在宽类型上求值后截断（wide_type，见
+      // BuildSimtPerLoadIndexOffsetExpressions）——UintDiv 实参（宽类型被积元 +
+      // magic/shift）类型必须一致。
+      for (size_t i = 0UL; i < fused_runtime_sizes.Entries().size(); ++i) {
+        ss << "    uint64_t " << SimtRuntimeSizeRegistry::MagicFieldName(i) << ";\n";
+        ss << "    uint64_t " << SimtRuntimeSizeRegistry::ShiftFieldName(i) << ";\n";
+      }
+      // Policy 对象存入 FusedCtx（向量侧每 tile 构造一次，热循环内只读）。
+      for (size_t k = 0UL; k < member_count; ++k) {
+        ss << "    AscendC::Internal::IndirectLoadSimtCaseSelector<FusedCase" << body_suffix << k << ">::Policy policy"
+           << k << ";\n";
+      }
+      ss << "  };\n";
+      ss << "  FusedCtx" << body_suffix << " fctx" << body_suffix << " = {\n";
+      for (size_t k = 0UL; k < member_count; ++k) {
+        ss << "    (__gm__ " << members[k].dtype_name << " *)" << members[k].input_tensor->name << ".GetPhyAddr(),\n";
+        ss << "    {" << GetSimtPolicyParams(members[k].policy, tpipe, body_offset_type) << "},\n";
+      }
+      for (const auto &gm_tensor : context_tensors) {
+        std::string dtype;
+        GE_ASSERT_SUCCESS(Tensor::DtypeName(gm_tensor.dtype, dtype));
+        if (gm_tensor.is_scalar) {
+          const Tensor *scalar = tpipe.GetTensor(gm_tensor.value_tensor_id);
+          GE_ASSERT_NOTNULL(scalar, "IndirectLoad SIMT fused ScalarData tensor is missing.");
+          ss << "    " << scalar->name << ",\n";
+        } else {
+          ss << "    (__gm__ " << dtype << " *)" << kGlobalTensorNamePrefix << gm_tensor.gm_tensor_id
+             << ".GetPhyAddr(),\n";
+        }
+      }
+      // [SIMT 动态 shape 坐标分解] 本作用域（kernel 函数内，t 可见）取 tiler 表达式初始化；
+      // magic/shift 尾部零值初始化。
+      for (size_t i = 0UL; i < fused_runtime_sizes.Entries().size(); ++i) {
+        ss << "    static_cast<uint64_t>(" << fused_runtime_sizes.Entries()[i] << "),\n";
+      }
+      ss << "  };\n";
+      // [SIMT 动态 shape 坐标分解加速] 聚合初始化后逐字段预算除法 magic（每 kernel 一次，
+      // 几十 cycle），与单 gather GenerateSimtContextInitializer 的初始化序列一致（此处
+      // fctx 为局部变量，经字段引用改写）；magic/shift 恒按 64 位公式预算（字段类型同）。
+      for (size_t i = 0UL; i < fused_runtime_sizes.Entries().size(); ++i) {
+        ss << "  AscendC::Internal::IndirectLoadGetUintDivMagicAndShift<uint64_t>(fctx" << body_suffix << "."
+           << SimtRuntimeSizeRegistry::MagicFieldName(i) << ", fctx" << body_suffix << "."
+           << SimtRuntimeSizeRegistry::ShiftFieldName(i) << ", static_cast<uint64_t>(fctx" << body_suffix << "."
+           << SimtRuntimeSizeRegistry::FieldName(i) << "));\n";
+      }
+      // Policy 每 tile 构造一次，热循环内 FusedEval 只读。
+      for (size_t k = 0UL; k < member_count; ++k) {
+        ss << "  fctx" << body_suffix << ".policy" << k
+           << " = AscendC::Internal::IndirectLoadSimtCaseSelector<FusedCase" << body_suffix << k << ">::MakePolicy(fctx"
+           << body_suffix << ".params" << k << ");\n";
+      }
+      // Phase 3：FusedBody。线程档上限 = schedule 侧发射计划的单一真值源结果
+      // （merge_info.max_thread_tier，模型与 demand 见 PlanSimtEmission）与 offset 位宽
+      // 门槛取小。
+      // [单一真值源] 此处仅做平台上限裁剪，禁止重算 demand——重算（尤其用旧 sum 公式）
+      // 会把峰值模型提升的档位静默压回。
+      // [P2c] 该 min 在当前 demand 模型下无实际约束：IL 融合组的结构项下界为
+      // base 24 + 3N + max(addr, 3×chain) ≥ 33 > 32 ⟹ SimtFusedThreadTier ≤ 512 < 1024，
+      // 两个分支恒等——u32 变体拿不到 2048，是"解除 64 位门槛"的防御性语义而非性能收益，
+      // 勿在收益描述中引用。若未来 demand 模型细化使 tier 可达 2048，该门槛自动生效。
+      uint32_t max_thread_tier = merge_info.max_thread_tier;
+      if (body_offset_type != "uint32_t") {
+        max_thread_tier = std::min(max_thread_tier, 1024U);
+      }
+      ss << "  struct FusedBody" << body_suffix << " {\n";
+      ss << "    using OffsetType = " << body_offset_type << ";\n";
+      // FusedBody 是函数内局部类——C++ 禁止局部类静态数据成员，枚举常量合法且为编译期
+      // 常量（API 侧按 FusedBody::kMaxThreadTier 常量消费，语义等价）。
+      ss << "    enum : uint32_t { kMaxThreadTier = " << max_thread_tier << "U };\n";
+      // kUsesInputAxis 通过枚举下沉到 FusedBody（局部类禁止 static 数据成员）。
+      for (size_t k = 0; k < member_count; ++k) {
+        ss << "    enum : uint8_t { uses_input_axis" << k
+           << " = AscendC::Internal::IndirectLoadSimtCaseSelector<FusedCase" << body_suffix << k
+           << ">::Policy::kUsesInputAxis ? 1 : 0 };\n";
+      }
+      if (merge_info.register_merge) {
+        ss << "    struct OutputTargets {";
+        for (size_t i = 0; i < merge_chains.size(); ++i) {
+          std::string dtype;
+          GE_ASSERT_SUCCESS(Tensor::DtypeName(merge_chains[i].dtype, dtype));
+          ss << " __gm__ " << dtype << " *out" << i << ";";
+        }
+        ss << " };\n";
+        ss << "    struct OutputPack {";
+        for (size_t i = 0; i < merge_chains.size(); ++i) {
+          std::string dtype;
+          GE_ASSERT_SUCCESS(Tensor::DtypeName(merge_chains[i].dtype, dtype));
+          ss << " " << dtype << " out" << i << ";";
+        }
+        ss << " };\n";
+      } else {
+        ss << "    struct OutputTargets {";
+        for (size_t k = 0; k < member_count; ++k) {
+          ss << " __ubuf__ " << members[k].dtype_name << " *val" << k << ";";
+        }
+        ss << " };\n";
+        ss << "    struct OutputPack {";
+        for (size_t k = 0; k < member_count; ++k) {
+          ss << " " << members[k].dtype_name << " v" << k << ";";
+        }
+        ss << " };\n";
+      }
+      ss << "    __simt_callee__ __aicore__ inline static OutputPack FusedEval(OffsetType output_index, "
+            "const FusedCtx"
+         << body_suffix << "& context) {\n";
+      ss << "      OutputPack out;\n";
+      for (size_t k = 0; k < member_count; ++k) {
+        ss << "      " << members[k].dtype_name << " value" << k << ";\n";
+        ss << "      {\n";
+        ss << "        const auto addr" << k << " = context.policy" << k << ".GetAddress(output_index);\n";
+        ss << "        const OffsetType index_offset = static_cast<OffsetType>(addr" << k << ".index_offset);\n";
+        SimtLoadMetadataMap load_map;
+        for (const auto &load : members[k].index_loads) {
+          load_map.emplace(load.node_name, load);
+        }
+        std::map<ascir::TensorId, std::string> index_values;
+        SimtLoadIndexOffsetExpressions index_offsets;
+        GE_ASSERT_SUCCESS(BuildSimtPerLoadIndexOffsetExpressions(
+            members[k].logical_view, members[k].index_nodes, load_map, tpipe, body_offset_type, "output_index",
+            "index_offset", false, -1L, fused_runtime_sizes, index_offsets, ss));
+        GE_ASSERT_SUCCESS(EmitSimtEvaluatorNodes(members[k].index_nodes, load_map, &index_offsets,
+                                                 members[k].logical_view, "index_offset", "output_index", tpipe,
+                                                 fused_runtime_sizes, body_offset_type, index_values, ss));
+        const auto index_result = index_values.find(members[k].index_result_tensor_id);
+        GE_ASSERT_TRUE(index_result != index_values.end(), "Fused member[%zu] index result tensor has no scalar value.",
+                       k);
+        ss << "        const OffsetType idx" << k << " = static_cast<OffsetType>(" << index_result->second << ");\n";
+        ss << "        OffsetType input_offset" << k << " = static_cast<OffsetType>(addr" << k << ".input_base);\n";
+        ss << "        if constexpr (uses_input_axis" << k << ") {\n";
+        ss << "          input_offset" << k << " += idx" << k << " * static_cast<OffsetType>(context.policy" << k
+           << ".input_axis_stride);\n";
+        ss << "        }\n";
+        ss << "        value" << k << " = context.in" << k << "[input_offset" << k << "];\n";
+        ss << "      }\n";
+      }
+      if (merge_info.register_merge) {
+        // L2：N 个 value 为种子，发射列表（归并树 + side 链 + side load，图拓扑序）按序折叠
+        // （EmitSimtEvaluatorNodes：任意 element-wise 算子经各自 V2 标量表达式发射，操作数按
+        // 输入序——不可交换算子语义正确）。side GM load 经 use_logical_offset 坐标折叠寻址
+        // （BuildSimtPerLoadIndexOffsetExpressions，与单 gather Outputs() 同构——strided/行广播/
+        // 视图匹配 index 的 ② 形态由物理 view 承载正确寻址）。
+        std::map<ascir::TensorId, std::string> merge_values;
+        for (size_t k = 0; k < member_count; ++k) {
+          merge_values[members[k].value_tensor_id] = "value" + std::to_string(k);
+        }
+        SimtLoadIndexOffsetExpressions merge_offsets;
+        GE_ASSERT_SUCCESS(BuildSimtPerLoadIndexOffsetExpressions(
+            members.front().logical_view, emission_nodes, merge_load_map, tpipe, body_offset_type, "output_index",
+            "output_index", false, -1L, fused_runtime_sizes, merge_offsets, ss));
+        GE_ASSERT_SUCCESS(EmitSimtEvaluatorNodes(emission_nodes, merge_load_map, &merge_offsets,
+                                                 members.front().logical_view, "output_index", "output_index", tpipe,
+                                                 fused_runtime_sizes, body_offset_type, merge_values, ss));
+        for (size_t i = 0; i < merge_chains.size(); ++i) {
+          const auto chain_result = merge_values.find(merge_chains[i].result_tensor_id);
+          GE_ASSERT_TRUE(chain_result != merge_values.end(),
+                         "Fused merge chain[%zu] result tensor has no scalar value.", i);
+          ss << "      out.out" << i << " = " << chain_result->second << ";\n";
+        }
+      } else {
+        for (size_t k = 0; k < member_count; ++k) {
+          ss << "      out.v" << k << " = value" << k << ";\n";
+        }
+      }
+      ss << "      return out;\n";
+      ss << "    }\n";
+      ss << "    __simt_callee__ __aicore__ inline static void Store(const OutputTargets& t, OffsetType output_index, "
+            "OffsetType local_index, const FusedCtx"
+         << body_suffix << "& context, const OutputPack& o) {\n";
+      if (merge_info.register_merge) {
+        // [strided GM 目标寻址] 复用单 gather 的目标偏移表达式（BuildSimtStoreTargetOffsetExpr）：
+        // 稠密零偏移目标退化为 output_index（行为不变）；cat 等非连续输出视图（目标行距 !=
+        // 逻辑稠密行距）按目标 strides/offset 坐标分解铺排，修复 flat 连续写导致的
+        // 行号漂移（读写错位）。坐标表逐变体独立，store_coord_N 命名不跨变体冲突。
+        std::map<std::pair<size_t, std::string>, std::string> store_coordinates;
+        std::vector<std::string> merge_store_exprs(merge_chains.size());
+        for (size_t i = 0; i < merge_chains.size(); ++i) {
+          merge_store_exprs[i] =
+              BuildSimtStoreTargetOffsetExpr(merge_store_chains[i], members.front().logical_view, tpipe,
+                                             body_offset_type, fused_runtime_sizes, store_coordinates, ss);
+        }
+        for (size_t i = 0; i < merge_chains.size(); ++i) {
+          ss << "      t.out" << i << "[" << merge_store_exprs[i] << "] = o.out" << i << ";\n";
+        }
+      } else {
+        // L3：UB 局部目标行对齐寻址（与单 gather GenerateSimtOutputsEvaluator 的 local target
+        // Store 一致）。inner size 在 FusedBody 静态方法体内消费：静态 shape 为编译期常量
+        // 直接内联；动态 shape 下是运行期符号尺寸（t->ksN，t 在静态方法作用域不可见），经
+        // FusedCtx 的 rt_size_N 字段传入（登记见上方空跑段）。
+        std::string inner_size_expr;
+        if (!members.front().logical_view.output.sizes.empty()) {
+          inner_size_expr = fused_runtime_sizes.InlineOrContext(members.front().logical_view.output.sizes.back(), tpipe,
+                                                                body_offset_type);
+        }
+        for (size_t k = 0; k < member_count; ++k) {
+          if (inner_size_expr.empty()) {
+            ss << "      t.val" << k << "[local_index] = o.v" << k << ";\n";
+          } else {
+            const std::string row_stride =
+                "KernelUtils::SizeAlign(" + inner_size_expr + ", 32/sizeof(" + members[k].dtype_name + "))";
+            ss << "      t.val" << k << "[(local_index / (" << inner_size_expr << ")) * (" << row_stride
+               << ") + local_index % (" << inner_size_expr << ")] = o.v" << k << ";\n";
+          }
+        }
+      }
+      ss << "    }\n";
+      ss << "  };\n";
+      // Phase 4（变体循环内）：OutputTargets 初始化 + actual_size/output_offset（按变体宽度）。
+      // actual_size/output_offset 语义对齐单 gather：L2（GM 直出）= loop size 与 block 偏移；
+      // L3（UB 局部目标）= tile 元素计数与 tile 基址偏移（Store 仅用 local_index，基址供
+      // index 链 GM load 寻址）。
+      ss << "  FusedBody" << body_suffix << "::OutputTargets ftgt" << body_suffix << " = {";
+      if (merge_info.register_merge) {
+        for (size_t i = 0; i < merge_chains.size(); ++i) {
+          std::string dtype;
+          GE_ASSERT_SUCCESS(Tensor::DtypeName(merge_chains[i].dtype, dtype));
+          if (i != 0) {
+            ss << ", ";
+          }
+          ss << "(__gm__ " << dtype << " *)" << kGlobalTensorNamePrefix << merge_chains[i].target_tensor_id
+             << ".GetPhyAddr()";
+        }
+      } else {
+        for (size_t k = 0; k < member_count; ++k) {
+          if (k != 0) {
+            ss << ", ";
+          }
+          ss << "(__ubuf__ " << members[k].dtype_name << " *)" << members[k].ub_target->name << ".GetPhyAddr()";
+        }
+      }
+      ss << "};\n";
+      std::string fused_actual_size_expr;
+      std::string fused_output_offset_expr;
+      if (merge_info.register_merge || !fused_has_post_reduce_consumer) {
+        fused_actual_size_expr = outer_tb_var + "_loop_size";
+        fused_output_offset_expr = "static_cast<" + body_offset_type + ">(block_dim_offset)";
+      } else {
+        const Tensor *value_tensor = tpipe.GetTensor(members.front().value_tensor_id);
+        GE_ASSERT_NOTNULL(value_tensor, "IndirectLoad SIMT fused value tensor is missing.");
+        af::Expression local_element_count;
+        GE_ASSERT_SUCCESS(CalcVectorizedElementCount(*value_tensor, local_element_count));
+        const std::string local_tile_size_expr = tpipe.tiler.Size(local_element_count);
+        fused_actual_size_expr = tpipe.tiler.ActualSize(local_element_count);
+        fused_output_offset_expr = "(static_cast<" + body_offset_type + ">(block_dim_offset) + static_cast<" +
+                                   body_offset_type + ">(" + outer_tb_var + ")) * " +
+                                   PromoteSizeExpr(local_tile_size_expr, body_offset_type);
+      }
+      fused_variant_size_offset.emplace_back(fused_actual_size_expr, fused_output_offset_expr);
+    }
+    // 调用点（变体循环外）：单变体直接调用（产物与历史一致）；双变体按运行期 guard
+    // 现场选宽——[真偏移上界] 与单 gather 双发同法（物理跨度 Σ(size_i−1)×stride_i，
+    // 对 padded 视图同样严格成立）：逐成员 input/index + 共享 output 视图全量检查。
+    // GM store 链与 output 视图共享坐标空间（output_index 直写），output 跨度即覆盖；
+    // L3 UB 局部目标不经 GM 偏移。guard 表达式 emit 进设备侧 kernel 体，每次 launch
+    // 求值一次（非每元素），乘加开销可忽略；设备侧无日志机制，判负不发射诊断。
+    if (fused_dual_eligible) {
+      // [跨度上界依赖] 同单 gather physical_span_bound：依赖 ClassifyTensorDim 对负
+      // stride 已判 kIllegal、无法到达此处（上游布局校验拒绝），不再重复检查。
+      const auto fused_span_bound = [](const ascgen_utils::indirect_load::LogicalTensorView &view) {
+        af::Expression bound = af::ops::Zero;
+        for (size_t dim = 0UL; dim < view.sizes.size(); ++dim) {
+          bound = bound + (view.sizes[dim] - af::sym::kSymbolOne) * view.strides[dim];
+        }
+        return bound;
+      };
+      // [guard 拼接] 收集条件 + join：不再使用「前项尾分隔/后项头分隔」的手工拼接
+      // （历史 P0：成员循环尾缀 && 叠加归并链头缀 && 产生双 && ，链项与 output 项之间
+      // 缺运算符 )( ——UT 存在性断言拦不住）。逐项独立成串，join 保证每对条件间恰好
+      // 一个分隔符，无从产生悬空/重复。
+      std::vector<std::string> fused_conds;
+      for (size_t k = 0UL; k < member_count; ++k) {
+        fused_conds.emplace_back(
+            "(static_cast<uint64_t>(" +
+            PromoteSizeExpr(tpipe.tiler.Size(fused_span_bound(members[k].logical_view.input)), "uint64_t") +
+            ") <= 0x7FFFFFFFULL)");
+        fused_conds.emplace_back(
+            "(static_cast<uint64_t>(" +
+            PromoteSizeExpr(tpipe.tiler.Size(fused_span_bound(members[k].logical_view.index)), "uint64_t") +
+            ") <= 0x7FFFFFFFULL)");
+      }
+      if (merge_info.register_merge) {
+        // [P2b·多归并链放开] 与单 gather 同法：L2 直写按 output_index 寻址
+        // （t.outN[output_index]，既有假设 target 视图与 output 共享坐标空间），
+        // output 跨度覆盖之外再逐链核 target 视图跨度——防御性对齐单 gather 的
+        // per-chain guard，覆盖 slice-strided 目标偏移不受视图跨度约束的形态。
+        for (const auto &merge_chain : merge_chains) {
+          af::Expression chain_bound = merge_chain.target_offset;
+          for (size_t dim = 0UL; dim < merge_chain.target_sizes.size(); ++dim) {
+            chain_bound =
+                chain_bound + (merge_chain.target_sizes[dim] - af::sym::kSymbolOne) * merge_chain.target_strides[dim];
+          }
+          fused_conds.emplace_back("(static_cast<uint64_t>(" +
+                                   PromoteSizeExpr(tpipe.tiler.Size(chain_bound), "uint64_t") + ") <= 0x7FFFFFFFULL)");
+        }
+      }
+      fused_conds.emplace_back(
+          "(static_cast<uint64_t>(" +
+          PromoteSizeExpr(tpipe.tiler.Size(fused_span_bound(members.front().logical_view.output)), "uint64_t") +
+          ") <= 0x7FFFFFFFULL)");
+      std::string fused_guard_text;
+      for (size_t cond_index = 0UL; cond_index < fused_conds.size(); ++cond_index) {
+        if (cond_index != 0UL) {
+          fused_guard_text += " && ";
+        }
+        fused_guard_text += fused_conds[cond_index];
+      }
+      ss << "  const bool indirect_load_simt_fused_use_u32 = " << fused_guard_text << ";\n";
+      ss << "  if (indirect_load_simt_fused_use_u32) {\n";
+      ss << "    AscendC::IndirectLoadSimtFused<FusedBody_u32>(ftgt_u32, fctx_u32, static_cast<uint32_t>("
+         << fused_variant_size_offset[1UL].first << "), " << fused_variant_size_offset[1UL].second << ");\n";
+      ss << "  } else {\n";
+      ss << "    AscendC::IndirectLoadSimtFused<FusedBody_u64>(ftgt_u64, fctx_u64, static_cast<uint32_t>("
+         << fused_variant_size_offset[0UL].first << "), " << fused_variant_size_offset[0UL].second << ");\n";
+      ss << "  }\n";
+    } else {
+      ss << "  AscendC::IndirectLoadSimtFused<FusedBody>(ftgt, fctx, static_cast<uint32_t>("
+         << fused_variant_size_offset.front().first << "), " << fused_variant_size_offset.front().second << ");\n";
+    }
+    ss << "}\n";
+    result = ss.str();
+    return af::SUCCESS;
+  }
   ss << "// IndirectLoad SIMT" << std::endl;
   ss << "{" << std::endl;
   ss << "  __gm__ " << input_dtype << " *input_ptr = (__gm__ " << input_dtype << " *)" << input << ".GetPhyAddr();"
@@ -1884,8 +3564,26 @@ Status IndirectLoadRegApiCall::GenerateSimt(const TPipe &tpipe, const std::vecto
     idx_row_stride_expr =
         PromoteSizeExpr(tpipe.tiler.Size(af::sym::Align(prepass_plan.inner_size, 32U / dtype_size)), offset_type);
   }
+  // [SIMT 动态 shape 坐标分解] 与 GenerateFuncDefinition 同参同序重算（纯函数性输入，
+  // 两处结果一致），Context 初始化在本作用域（kernel 函数内，t 可见）取 tiler 表达式。
+  std::vector<std::string> runtime_size_exprs;
+  {
+    std::string index_dtype;
+    GE_ASSERT_SUCCESS(Tensor::DtypeName(index_dtype_, index_dtype));
+    std::string collect_idx_inner;
+    runtime_size_exprs = CollectSimtRuntimeSizeExprs(input_dtype, index_dtype, offset_type, tpipe, use_prepass,
+                                                     prepass_plan, collect_idx_inner);
+  }
+  std::string output_inner_dtype;
+  if (!output_inner_size_expr.empty()) {
+    const auto local_chain = std::find_if(output_chains_.begin(), output_chains_.end(),
+                                          [](const SimtOutputChain &chain) { return chain.local_target; });
+    GE_ASSERT_TRUE(local_chain != output_chains_.end(), "IndirectLoad SIMT post Reduce local output is missing.");
+    GE_ASSERT_SUCCESS(Tensor::DtypeName(local_chain->dtype, output_inner_dtype));
+  }
   GE_ASSERT_SUCCESS(GenerateSimtContextInitializer(context_name, simt_gm_tensors_, tpipe, output_inner_size_expr,
-                                                   idx_table_expr, idx_base_expr, idx_row_stride_expr, ss));
+                                                   output_inner_dtype, idx_table_expr, idx_base_expr,
+                                                   idx_row_stride_expr, runtime_size_exprs, offset_type, ss));
   GE_ASSERT_SUCCESS(
       GenerateSimtInvocation(tpipe, input_dtype, outer_tb_var, use_prepass ? &prepass_plan : nullptr, ss));
   ss << "}" << std::endl;

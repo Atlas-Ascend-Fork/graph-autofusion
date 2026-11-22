@@ -160,6 +160,14 @@ SuperKernelBaseNode *SuperKernelGraph::GetNodeById(uint64_t nodeId) const {
   return nullptr;
 }
 
+uint64_t SuperKernelGraph::AllocateSyntheticNodeId() {
+  if (maxNodeId_ >= INVALID_TASK_ID - 1U) {
+    SK_LOGE("Failed to allocate synthetic node ID: node ID space exhausted, maxNodeId=%lu", maxNodeId_);
+    return INVALID_TASK_ID;
+  }
+  return ++maxNodeId_;
+}
+
 bool SuperKernelGraph::AddNode(std::unique_ptr<SuperKernelBaseNode> node) {
   uint64_t nodeId = node->GetNodeId();
   uint64_t eventId = node->GetEventId();
@@ -208,13 +216,14 @@ bool SuperKernelGraph::AddNode(std::unique_ptr<SuperKernelBaseNode> node) {
     return false;
   }
   graphMap[nodeId] = std::move(node);
+  maxNodeId_ = std::max(maxNodeId_, nodeId);
   return true;
 }
 
 bool SuperKernelGraph::AddMemoryAssociateWrite(uint64_t eventId, SuperKernelBaseNode *node) {
   auto &memoryInfo = memoryToNodes[eventId];
   uint64_t nodeId = node->GetNodeId();
-  if (memoryInfo.writeNodeIdList.find(nodeId) != memoryInfo.waitNodeIdList.end()) {
+  if (memoryInfo.writeNodeIdList.find(nodeId) != memoryInfo.writeNodeIdList.end()) {
     // Get the node information for duplicate memory write node binding
     SuperKernelBaseNode *existingNode = GetNodeById(nodeId);
     SK_LOGE("memory event 0x%lx already associated with this node, cannot reassociate!", eventId);
@@ -1008,18 +1017,6 @@ bool SuperKernelGraph::InitSKGraph() {
     return false;
   }
 
-  SK_LOGI("Total nodes added: %zu, total streams: %zu", graphMap.size(), streams.size());
-  SK_LOGI("Starting UpdateNodeScopeBitFlags");
-  if (!UpdateNodeScopeBitFlags()) {
-    SK_LOGE("Failed to update node scope bit flags: scope begin and end nodes are not matched");
-    return false;
-  }
-  SK_LOGI("UpdateNodeScopeBitFlags completed");
-
-  SK_LOGI("Starting ParseOriginalScopes");
-  ParseOriginalScopes();
-  SK_LOGI("ParseOriginalScopes completed");
-
   SK_LOGI("Starting PostProcessMemoryNode");
   bool flag = PostProcessMemoryNode();
   SK_LOGI("PostProcessMemoryNode completed");
@@ -1034,6 +1031,18 @@ bool SuperKernelGraph::InitSKGraph() {
   SK_LOGI("Starting AddEventAssociate");
   AddEventAssociate();
   SK_LOGI("AddEventAssociate completed");
+
+  SK_LOGI("Total nodes added: %zu, total streams: %zu", graphMap.size(), streams.size());
+  SK_LOGI("Starting UpdateNodeScopeBitFlags");
+  if (!UpdateNodeScopeBitFlags()) {
+    SK_LOGE("Failed to update node scope bit flags: scope begin and end nodes are not matched");
+    return false;
+  }
+  SK_LOGI("UpdateNodeScopeBitFlags completed");
+
+  SK_LOGI("Starting ParseOriginalScopes");
+  ParseOriginalScopes();
+  SK_LOGI("ParseOriginalScopes completed");
 
   SK_LOGI("Successfully initialized SuperKernel graph with %zu nodes and %zu streams", graphMap.size(), streams.size());
 
@@ -1128,12 +1137,15 @@ bool SuperKernelGraph::InitStreamsFromModelRI(std::vector<uint32_t> &streamTaskN
  * @return false Processing failed
  */
 bool SuperKernelGraph::ProcessAllStreamsAndTasks(const std::vector<uint32_t> &streamTaskNums) {
+  const uint32_t streamNum = static_cast<uint32_t>(streams.size());
+  headNodes.assign(streamNum, INVALID_TASK_ID);
+  tailNodes.assign(streamNum, INVALID_TASK_ID);
+  nodeSizeInStream.assign(streamNum, 0);
   if (streamTaskNums.empty()) {
     SK_LOGI("No tasks found in model runtime image, skip processing streams and tasks");
     return true;
   }
 
-  const uint32_t streamNum = static_cast<uint32_t>(streams.size());
   uint32_t maxTaskNum = *std::max_element(streamTaskNums.begin(), streamTaskNums.end());
   auto tasks = std::make_unique<aclmdlRITask[]>(maxTaskNum);
 
@@ -1144,15 +1156,25 @@ bool SuperKernelGraph::ProcessAllStreamsAndTasks(const std::vector<uint32_t> &st
       SK_LOGE("Failed to get tasks in stream %u, ret=%d", streamIdx, ret);
       return false;
     }
-    nodeSizeInStream.emplace_back(taskNum);
     SK_LOGI("Stream %u has %u tasks", streamIdx, taskNum);
 
     uint64_t preNodeId = INVALID_TASK_ID;
     for (uint32_t taskIdx = 0; taskIdx < taskNum; ++taskIdx) {
+      uint32_t isEnabled = 0;
+      ret = aclmdlRITaskGetEnabled(tasks[taskIdx], &isEnabled);
+      if (ret != ACL_SUCCESS) {
+        SK_LOGE("Failed to get enabled status for task %u in stream %u, ret=%d", taskIdx, streamIdx, ret);
+        return false;
+      }
+      if (isEnabled == 0) {
+        SK_LOGD("Skip disabled task %u in stream %u", taskIdx, streamIdx);
+        continue;
+      }
       if (!ProcessSingleTask(tasks[taskIdx], streamIdx, taskIdx, preNodeId)) {
         SK_LOGE("Failed to process task %u in stream %u", taskIdx, streamIdx);
         return false;
       }
+      ++nodeSizeInStream[streamIdx];
     }
   }
   return true;
@@ -1204,7 +1226,7 @@ bool SuperKernelGraph::ProcessSingleTask(aclmdlRITask &task, uint32_t streamIdx,
     return false;
   }
 
-  UpdateNodeRelations(nodeId, streamIdx, taskIdx, preNodeId);
+  UpdateNodeRelations(nodeId, streamIdx, preNodeId);
   return true;
 }
 
@@ -1241,23 +1263,22 @@ void SuperKernelGraph::RegisterFusibleScope(const std::unique_ptr<SuperKernelBas
  * @brief Update node relationships
  *
  * Updates the graph structure by:
- * 1. Adding the node to headNodes if it's the first task in the stream
+ * 1. Setting the stream's head node if it's the first enabled task in the stream
  * 2. Setting the next node ID for the previous node
  * 3. Updating preNodeId to current node ID
  *
  * @param nodeId Current node ID
  * @param streamIdx Stream index
- * @param taskIdx Task index within the stream
  * @param preNodeId Previous node ID (updated to current node ID)
  */
-void SuperKernelGraph::UpdateNodeRelations(uint64_t nodeId, uint32_t streamIdx, uint32_t taskIdx, uint64_t &preNodeId) {
-  if (taskIdx == 0) {
-    headNodes.push_back(nodeId);
+void SuperKernelGraph::UpdateNodeRelations(uint64_t nodeId, uint32_t streamIdx, uint64_t &preNodeId) {
+  if (preNodeId == INVALID_TASK_ID) {
+    headNodes[streamIdx] = nodeId;
     SK_LOGI("Stream %u: Added head node %lu", streamIdx, nodeId);
-  }
-  if (preNodeId != INVALID_TASK_ID) {
+  } else {
     graphMap[preNodeId]->SetNextNodeId(nodeId);
   }
+  tailNodes[streamIdx] = nodeId;
   preNodeId = nodeId;
 }
 

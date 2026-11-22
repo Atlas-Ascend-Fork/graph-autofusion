@@ -31,6 +31,11 @@ class AscIrCodegenV2 : public AscIrCodegen {
     return 1U;
   }
 
+  virtual std::vector<std::vector<ge::DataType>> GetOutputConversionPath(const AscNode &node) {
+    (void)node;
+    return {};
+  }
+
   virtual bool IsSimtScalarSupported(const AscNode &node) const {
     (void)node;
     return false;

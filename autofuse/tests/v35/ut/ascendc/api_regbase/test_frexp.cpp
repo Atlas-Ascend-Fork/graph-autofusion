@@ -75,7 +75,7 @@ class TestApiFrexp : public testing::Test {
     std::vector<int32_t> exponent_exp_list;
 
     AddTestPoint(src_list, mantissa_exp_list, exponent_exp_list, 0.0f, 0.0f, 0);
-    AddTestPoint(src_list, mantissa_exp_list, exponent_exp_list, -0.0f, 0.0f, 0);
+    AddTestPoint(src_list, mantissa_exp_list, exponent_exp_list, -0.0f, -0.0f, 0);
     AddTestPoint(src_list, mantissa_exp_list, exponent_exp_list, 1.0f, 0.5f, 1);
     AddTestPoint(src_list, mantissa_exp_list, exponent_exp_list, 2.0f, 0.5f, 2);
     AddTestPoint(src_list, mantissa_exp_list, exponent_exp_list, 3.0f, 0.75f, 2);
@@ -125,7 +125,8 @@ class TestApiFrexp : public testing::Test {
       } else if (std::isinf(mantissa_exp[i])) {
         match = mantissa[i] == mantissa_exp[i];
       } else if (mantissa_exp[i] == 0.0f) {
-        match = (mantissa[i] == 0.0f) && (exponent[i] == exponent_exp[i]);
+        match = (mantissa[i] == 0.0f) && (std::signbit(mantissa[i]) == std::signbit(mantissa_exp[i])) &&
+                (exponent[i] == exponent_exp[i]);
       } else {
         match = (std::abs(mantissa[i] - mantissa_exp[i]) <= 1e-6) && (exponent[i] == exponent_exp[i]);
       }

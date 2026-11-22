@@ -218,7 +218,7 @@ TEST_F(UTTEST_GENERAL_SOLVER_GEN_02, test_map_varval) {
   expect_codes += solver_->GetUIntVars(indent);
   expect_codes += "    OP_LOGD(OP_NAME, \"The output of the solver for tilingCaseId Case0 is:\");\n";
   expect_codes += "    tiling_data.set_x0(static_cast<uint64_t>(x0));\n";
-  expect_codes += "    OP_LOGD(OP_NAME, \"x0 = %u\", tiling_data.get_x0());\n";
+  expect_codes += "    OP_LOGD(OP_NAME, \"x0 = %llu\", static_cast<unsigned long long>(tiling_data.get_x0()));\n";
   expect_codes += "}\n";
   expect_codes += "\n";
 

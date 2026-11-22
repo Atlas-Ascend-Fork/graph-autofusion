@@ -1,3 +1,11 @@
+# Copyright (c) 2026 Huawei Technologies Co., Ltd.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+
 set (CMAKE_CXX_FLAGS "-D_GLIBCXX_USE_CXX11_ABI=0 -D_FORTIFY_SOURCE=2 -fPIC -fstack-protector-all -Wl,-z,relro,-z,now,-z,noexecstack")
 set (CMAKE_C_FLAGS   "-D_GLIBCXX_USE_CXX11_ABI=0 -D_FORTIFY_SOURCE=2 -fPIC -fstack-protector-all -Wl,-z,relro,-z,now,-z,noexecstack")
 
@@ -19,7 +27,8 @@ file(GLOB SOURCES
         ${TC_DIR}/ffn/*.cpp
         ${TC_DIR}/att_st_test/att_test.cpp
         ${TC_DIR}/test_expr/*.cpp
-        ${TC_DIR}/solver_pass_gen/axes_reorder_solver_gen/*.cpp
+        ${TC_DIR}/source_mirror/generator/solver_pass_gen/axes_reorder_solver_gen/*.cpp
+        ${TC_DIR}/source_mirror/generator/test_inductor_topn_trial.cpp
         ${TC_DIR}/solver_pass_gen/general_solver_gen/*.cpp
         ${TC_DIR}/solver_pass/general_solver/*.cpp
         ${TC_DIR}/solver_pass_manager/*.cpp
@@ -32,7 +41,6 @@ file(GLOB SOURCES
         ${TC_DIR}/test_log/*.cpp
         ${TC_DIR}/add_layer_norm/test_add_layer_norm.cpp
         ${TC_DIR}/add_layer_norm/add_layer_norm.cpp
-        ${TC_DIR}/concat/*.cpp
         ${TC_DIR}/reduce_split_penalty/*.cpp
         ${TC_DIR}/e2e_st_test/*.cpp
         ${TC_DIR}/profiler_e2e/*.cpp
@@ -42,6 +50,8 @@ file(GLOB SOURCES
 
 add_executable(att_st
         ${SOURCES}
+        ${TC_DIR}/source_mirror/gen_model_info_content/test_tiling_r_reorder.cpp
+        ${TC_DIR}/scenario/concat/test_concat.cpp
 )
 target_link_directories(att_st PRIVATE ${ASCEND_INSTALL_LIB_PATH})
 target_include_directories(att_st BEFORE PRIVATE
@@ -82,6 +92,11 @@ target_compile_options(att_st PRIVATE
         -fpermissive
         )
 target_compile_definitions(att_st PRIVATE ASCEND_INSTALL_PATH="${ASCEND_INSTALL_PATH}")
+target_compile_definitions(att_st PRIVATE TILING_DATA_DIR="${TC_DIR}/scenario/tiling_data")
+target_compile_definitions(att_st PRIVATE
+        ATT_ST_CXX_COMPILER="${CMAKE_CXX_COMPILER}"
+        ATT_ST_CXX_STANDARD=${CMAKE_CXX_STANDARD}
+        )
 
 target_link_options(att_st PRIVATE
         -rdynamic
@@ -95,6 +110,7 @@ target_link_libraries(att_st
         Boost::boost
         atrace
         att
+        att_axes_solver_resources
         asc_slog_stub
         autofuse_runtime_stub
         aihac_ir
@@ -114,3 +130,12 @@ add_dependencies(att_st ascir_builtin_ops)
 
 add_test(NAME att_st COMMAND att_st --gtest_output=xml:${CMAKE_INSTALL_PREFIX}/report/st/att_st.xml)
 set_tests_properties(att_st PROPERTIES LABELS "st;att_st")
+
+# The split Program has no graph producer yet. Exercise its host contract in
+# the codegen phase of the E2E ST job, which publishes ST coverage.
+file(GLOB ATT_PROGRAM_TEST_SOURCES CONFIGURE_DEPENDS "${CODE_ROOT_DIR}/tests/common/att/program/*.cpp")
+add_executable(att_program_st ${ATT_PROGRAM_TEST_SOURCES})
+target_link_libraries(att_program_st PRIVATE att GTest::gtest GTest::gtest_main)
+add_test(NAME att_program_st COMMAND att_program_st
+    --gtest_output=xml:${CMAKE_INSTALL_PREFIX}/report/st/att_program_st.xml)
+set_tests_properties(att_program_st PROPERTIES LABELS "st;codegen_e2e_st_test1;att_program_st")

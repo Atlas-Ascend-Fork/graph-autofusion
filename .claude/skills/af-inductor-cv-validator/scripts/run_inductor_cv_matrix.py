@@ -1756,14 +1756,15 @@ def extract_modes_from_kernel(case_dir: Path) -> dict[str, int | None]:
     try:
         import ctypes
 
+        # 布局必须与 codegen 生成的 autofuse_tiling_data.h 保持一致：
+        # block_dim/tiling_key 已收窄为 uint16_t，workspace* 为 uint64_t，
+        # 且 corenum/hbm_size 已删除。
         class AutofuseTilingData(ctypes.Structure):
             _fields_ = [
-                ("block_dim", ctypes.c_uint32),
-                ("corenum", ctypes.c_uint32),
+                ("block_dim", ctypes.c_uint16),
+                ("tiling_key", ctypes.c_uint16),
                 ("ub_size", ctypes.c_uint32),
-                ("hbm_size", ctypes.c_uint32),
-                ("workspace0", ctypes.c_uint32),
-                ("tiling_key", ctypes.c_uint32),
+                ("workspace0", ctypes.c_uint64),
                 ("a0a1t_size", ctypes.c_uint32),
                 ("a0a1Tb_size", ctypes.c_uint32),
                 ("q0_size", ctypes.c_uint32),
@@ -1776,32 +1777,63 @@ def extract_modes_from_kernel(case_dir: Path) -> dict[str, int | None]:
                 ("ub_mode", ctypes.c_uint8),
                 ("cv_aic_num", ctypes.c_uint8),
                 ("cv_aiv_num", ctypes.c_uint8),
-                ("cv_vec_wss", ctypes.c_uint32),
+                # 生成侧为 uint64_t，mix_mode 因此位于 offset 16。
+                ("cv_vec_wss", ctypes.c_uint64),
                 ("mix_mode", ctypes.c_uint8),
             ]
 
-        class CVAutofuseTilingData(ctypes.Structure):
+        # 生成侧前缀：union（tiling_data/cube_tiling_key/cv_tiling_data）后依次为
+        # stage_size_name、cube_ub_stage_size、cube_m_stage_size，
+        # matmul_tiling_data 以 alignas(8) 起始，故前缀固定 80 字节。
+        class CVTilingDataPrefix(ctypes.Structure):
             _fields_ = [
                 ("tiling_data", AutofuseTilingData),
                 ("cube_tiling_key", ctypes.c_uint64),
                 ("cv_tiling_data", CVTilingData),
                 ("stage_size_name", ctypes.c_uint32),
                 ("cube_ub_stage_size", ctypes.c_uint32),
-                ("matmul_tiling_data", ctypes.c_uint8 * (1024 * 1024)),
+                ("cube_m_stage_size", ctypes.c_uint32),
             ]
+
+        prefix_size = ctypes.sizeof(CVTilingDataPrefix)
+
+        def make_tiling_struct(total_size: int) -> type[ctypes.Structure] | None:
+            # matmul_tiling_data 长度取决于生成侧 MATMUL_TILING_DATA_STORAGE_SIZE，
+            # 随 CANN 版本变化；按 GetTilingDataSize() 的真实总长动态补齐，
+            # 并用 uint64 元素保证 8 字节对齐，避免越界写。
+            matmul_bytes = total_size - prefix_size
+            if matmul_bytes <= 0 or matmul_bytes % 8 != 0:
+                return None
+
+            class CVAutofuseTilingData(ctypes.Structure):
+                _fields_ = CVTilingDataPrefix._fields_ + [
+                    ("matmul_tiling_data", ctypes.c_uint64 * (matmul_bytes // 8)),
+                ]
+
+            return CVAutofuseTilingData
 
         for kernel in case_dir.glob("**/kernel.so"):
             with contextlib.suppress(Exception):
                 lib = ctypes.CDLL(str(kernel))
+                get_tiling_size = getattr(lib, "GetTilingDataSize", None)
+                if callable(get_tiling_size):
+                    get_tiling_size.restype = ctypes.c_size_t
+                    tiling_size = int(get_tiling_size())
+                else:
+                    tiling_size = 0
+                tiling_struct = make_tiling_struct(tiling_size)
+                if tiling_struct is None:
+                    # 生成头布局与脚本静态布局不一致时跳过，避免按错误偏移读取
+                    continue
                 fn = lib.AutofuseTiling
                 fn.argtypes = [
-                    ctypes.POINTER(CVAutofuseTilingData),
+                    ctypes.POINTER(tiling_struct),
                     ctypes.POINTER(ctypes.c_uint32),
                     ctypes.POINTER(ctypes.c_uint32),
                     ctypes.c_void_p,
                 ]
                 fn.restype = ctypes.c_int64
-                tiling_data = CVAutofuseTilingData()
+                tiling_data = tiling_struct()
                 workspace_size = ctypes.c_uint32()
                 block_dim = ctypes.c_uint32()
                 if (
@@ -1813,9 +1845,14 @@ def extract_modes_from_kernel(case_dir: Path) -> dict[str, int | None]:
                     )
                     == 0
                 ):
+                    fusion_mode = int(tiling_data.cv_tiling_data.fusion_mode)
+                    ub_mode = int(tiling_data.cv_tiling_data.ub_mode)
+                    if fusion_mode not in (0, 1) or ub_mode not in (0, 1):
+                        # 偏移不一致时读到非法值，跳过而不是返回错误模式
+                        continue
                     return {
-                        "fusion_mode": int(tiling_data.cv_tiling_data.fusion_mode),
-                        "ub_mode": int(tiling_data.cv_tiling_data.ub_mode),
+                        "fusion_mode": fusion_mode,
+                        "ub_mode": ub_mode,
                         "mix_mode": int(tiling_data.cv_tiling_data.mix_mode),
                     }
     except Exception:  # noqa: BLE001

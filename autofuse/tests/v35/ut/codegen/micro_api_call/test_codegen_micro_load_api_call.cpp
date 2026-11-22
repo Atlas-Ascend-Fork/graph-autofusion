@@ -26,6 +26,98 @@ using namespace af::ops;
 using namespace af::ascir_op;
 using namespace codegen;
 
+TEST(CodegenKernel, LoadMicroApiCall_CvNBroadcastAndUnpack) {
+  af::AscGraph graph("cv_output_broadcast_load");
+  const auto m = graph.CreateAxis("m", af::Symbol(128));
+  const auto n = graph.CreateAxis("n", af::Symbol(256));
+  Data data("data", graph);
+  Load load_op("load");
+  Store store_op("store");
+  graph.AddNode(load_op);
+  graph.AddNode(store_op);
+  load_op.x = data.y;
+  store_op.x = load_op.y;
+  auto load = graph.FindNode("load");
+  auto store = graph.FindNode("store");
+  for (const auto &node : {load, store}) {
+    node->attr.sched.axis = {m.id, n.id};
+    node->attr.api.type = af::ApiType::kAPITypeCompute;
+    auto &attr = node->outputs[0].attr;
+    attr.axis = {m.id, n.id};
+    attr.repeats = {af::Symbol(128), af::Symbol(256)};
+    attr.strides = {af::Symbol(1), af::Symbol(0)};
+    attr.vectorized_axis = {m.id, n.id};
+    attr.vectorized_strides = {af::Symbol(16), af::Symbol(0)};
+    attr.dtype = af::DT_FLOAT16;
+    attr.mem.position = af::Position::kPositionVecIn;
+    attr.mem.alloc_type = af::AllocType::kAllocTypeQueue;
+    attr.opt.merge_scope = af::kIdNone;
+  }
+  load->outputs[0].attr.mem.tensor_id = 0;
+  load->outputs[0].attr.que.id = 0;
+  store->outputs[0].attr.mem.tensor_id = 1;
+  store->outputs[0].attr.que.id = 1;
+
+  Tiler tiler;
+  tiler.AddAxis(m);
+  tiler.AddAxis(n);
+  TPipe tpipe("tpipe", tiler);
+  ASSERT_EQ(tpipe.CollectQues(graph), af::SUCCESS);
+  ASSERT_EQ(tpipe.AddTensor(load->outputs[0]), af::SUCCESS);
+  tpipe.cv_fusion_type = ascir::CubeTemplateType::kUBFuse;
+  std::string reg_name = "load_reg";
+  MicroApiTensor reg(store->outputs[0], reg_name);
+  TensorManager tensor_mgr;
+  ASSERT_EQ(tensor_mgr.AddTensor(reg), af::SUCCESS);
+  MicroLoadApiCall call("Load");
+  ASSERT_EQ(call.Init(load), af::SUCCESS);
+  call.AddInput(0, codegen::TensorType::UB_TENSOR);
+  call.AddOutput(1);
+  CallParam params = {"p_reg", "cv_m * curAlignN"};
+  params.max_dtype_size = "float";
+  std::string result;
+
+  // A half scalar must be splatted before unpacking for float computation.
+  ASSERT_EQ(call.Generate(tensor_mgr, tpipe, params, result), af::SUCCESS);
+  EXPECT_NE(result.find("LoadAlign<half, AscendC::MicroAPI::LoadDist::DIST_BRC_B16>"), std::string::npos);
+  EXPECT_NE(result.find("UnPack<uint32_t, uint16_t>"), std::string::npos);
+  EXPECT_EQ(result.find("DIST_UNPACK_B16"), std::string::npos);
+  EXPECT_LT(result.find("LoadAlign<half"), result.find("UnPack<uint32_t, uint16_t>"));
+
+  params.max_dtype_size = "half";
+  ASSERT_EQ(call.Generate(tensor_mgr, tpipe, params, result), af::SUCCESS);
+  EXPECT_NE(result.find("DIST_BRC_B16"), std::string::npos);
+  EXPECT_EQ(result.find("UnPack<"), std::string::npos);
+  params.max_dtype_size = "float";
+
+  auto source = tpipe.GetTensor(0);
+  ASSERT_NE(source, nullptr);
+  source->vectorized_strides = {af::Symbol(256), af::Symbol(1)};
+  // Reusing the call for a dense input must not retain its BRC distribution.
+  ASSERT_EQ(call.Generate(tensor_mgr, tpipe, params, result), af::SUCCESS);
+  EXPECT_NE(result.find("DIST_UNPACK_B16"), std::string::npos);
+  EXPECT_EQ(result.find("DIST_BRC"), std::string::npos);
+  EXPECT_EQ(result.find("UnPack<"), std::string::npos);
+
+  source->vectorized_strides = {af::Symbol(0), af::Symbol(0)};
+  source->axis_size[0] = af::Symbol(1);
+  // M=1 still needs to splat its single value along N.
+  ASSERT_EQ(call.Generate(tensor_mgr, tpipe, params, result), af::SUCCESS);
+  EXPECT_NE(result.find("DIST_BRC_B16"), std::string::npos);
+
+  source->vectorized_strides.clear();
+  ASSERT_EQ(call.Generate(tensor_mgr, tpipe, params, result), af::SUCCESS);
+  EXPECT_NE(result.find("DIST_UNPACK_B16"), std::string::npos);
+  EXPECT_EQ(result.find("DIST_BRC"), std::string::npos);
+
+  source->vectorized_strides = {af::Symbol(16), af::Symbol(0)};
+  tpipe.cv_fusion_type = ascir::CubeTemplateType::kDefault;
+  // This change does not enable implicit broadcast in the non-CV path.
+  ASSERT_EQ(call.Generate(tensor_mgr, tpipe, params, result), af::SUCCESS);
+  EXPECT_NE(result.find("DIST_UNPACK_B16"), std::string::npos);
+  EXPECT_EQ(result.find("DIST_BRC"), std::string::npos);
+}
+
 TEST(CodegenKernel, LoadMicroApiCall_Load) {
   af::AscGraph graph("test_graph");
 
@@ -403,6 +495,100 @@ TEST(CodegenKernel, LoadMicroApiCall_Load_Cast_in8_out32) {
   call_0.Generate(tensor_mng, tpipe, cp, result);
   EXPECT_EQ(result, std::string{"AscendC::MicroAPI::LoadAlign<int8_t, "
                                 "AscendC::MicroAPI::LoadDist::DIST_UNPACK4_B8>(vreg_0, local_0 + offset);\n"});
+}
+
+TEST(CodegenKernel, LoadMicroApiCall_Load_Cast_bool_max_bool) {
+  af::AscGraph graph("test_graph");
+
+  auto s0 = graph.CreateSizeVar("s0");
+  auto s1 = graph.CreateSizeVar("s1");
+  auto z0 = graph.CreateAxis("z0", s0);
+  auto z1 = graph.CreateAxis("z1", s1);
+
+  Data x_op("x", graph);
+  Load load_op("load");
+  af::ascir_op::Cast cast_op("cast");
+  graph.AddNode(load_op);
+  graph.AddNode(cast_op);
+
+  load_op.x = x_op.y;
+  load_op.attr.sched.axis = {z0.id, z1.id};
+  *load_op.y.axis = {z0.id, z1.id};
+  *load_op.y.repeats = {s0, s1};
+  *load_op.y.strides = {s1, One};
+  cast_op.x = load_op.y;
+  *cast_op.y.axis = {z0.id, z1.id};
+  *cast_op.y.repeats = {s0, s1};
+  *cast_op.y.strides = {s1, One};
+
+  auto x = graph.FindNode("x");
+  x->outputs[0].attr.dtype = af::DT_BOOL;
+  x->outputs[0].attr.mem.tensor_id = 0;
+  x->outputs[0].attr.mem.alloc_type = af::AllocType::kAllocTypeQueue;
+
+  auto load = graph.FindNode("load");
+  load->attr.api.compute_type = af::ComputeType::kComputeLoad;
+  load->attr.api.type = af::ApiType::kAPITypeCompute;
+  load->attr.api.unit = af::ComputeUnit::kUnitMTE2;
+  load->attr.sched.loop_axis = z0.id;
+  load->outputs[0].attr.vectorized_axis = {z1.id};
+  load->outputs[0].attr.vectorized_strides = {One};
+  load->outputs[0].attr.dtype = af::DT_BOOL;
+  load->outputs[0].attr.mem.position = af::Position::kPositionVecIn;
+  load->outputs[0].attr.mem.tensor_id = 0;
+  load->outputs[0].attr.mem.position = af::Position::kPositionVecIn;
+  load->outputs[0].attr.mem.alloc_type = af::AllocType::kAllocTypeQueue;
+  load->outputs[0].attr.que.id = 1;
+  load->outputs[0].attr.opt.merge_scope = af::kIdNone;
+
+  auto cast = graph.FindNode("cast");
+  cast->attr.api.compute_type = af::ComputeType::kComputeElewise;
+  cast->attr.api.type = af::ApiType::kAPITypeCompute;
+  cast->attr.api.unit = af::ComputeUnit::kUnitVector;
+  cast->attr.sched.loop_axis = z0.id;
+  cast->outputs[0].attr.vectorized_axis = {z1.id};
+  cast->outputs[0].attr.vectorized_strides = {One};
+  cast->outputs[0].attr.dtype = af::DT_INT8;
+  cast->outputs[0].attr.mem.position = af::Position::kPositionVecOut;
+  cast->outputs[0].attr.mem.tensor_id = 1;
+  cast->outputs[0].attr.mem.alloc_type = af::AllocType::kAllocTypeQueue;
+  cast->outputs[0].attr.que.id = 2;
+  cast->outputs[0].attr.opt.merge_scope = af::kIdNone;
+
+  codegen::Tiler tiler;
+  codegen::TPipe tpipe("tpipe", tiler);
+  tpipe.AddTensor(load->outputs[0]);
+
+  tiler.AddAxis(z0);
+  tiler.AddAxis(z1);
+  tiler.AddSizeVar(af::SizeVar(s0));
+  tiler.AddSizeVar(af::SizeVar(s1));
+  std::vector<af::AxisId> current_axis;
+  current_axis.push_back(z0.id);
+
+  codegen::ApiTensor x1;
+  x1.id = load->inputs[0].attr.mem.tensor_id;
+  codegen::ApiTensor y1;
+  y1.id = load->outputs[0].attr.mem.tensor_id;
+
+  codegen::CallParam cp = {"p_reg", "offset"};
+  auto tensor_load = load->GetName() + "_" + load->GetOpDesc()->GetOutputNameByIndex(0);
+  MicroApiTensor tensor(load->outputs[0], tensor_load);
+  auto tensor_cast = cast->GetName() + "_" + cast->GetOpDesc()->GetOutputNameByIndex(0);
+  MicroApiTensor tensor1(cast->outputs[0], tensor_cast);
+
+  TensorManager tensor_mng;
+  tensor_mng.AddTensor(tensor);
+  tensor_mng.AddTensor(tensor1);
+  codegen::MicroLoadApiCall call_0("Load");
+  EXPECT_EQ(call_0.Init(load), 0);
+  call_0.AddInput(x1.id);
+  call_0.AddOutput(y1.id);
+
+  std::string result;
+  cp.max_dtype_size = "bool";
+  call_0.Generate(tensor_mng, tpipe, cp, result);
+  EXPECT_EQ(result, std::string{"AscendC::MicroAPI::LoadAlign(vreg_0, local_0 + offset);\n"});
 }
 
 TEST(CodegenKernel, LoadMicroApiCall_Load_Cast_in32_out64) {

@@ -11,7 +11,9 @@
 #ifndef __COMMON_UTILS_H__
 #define __COMMON_UTILS_H__
 
+#include <set>
 #include <string>
+#include <vector>
 #include "graph/symbolizer/symbolic.h"
 #include "ge_common_af/ge_api_types_af.h"
 #include "graph/ascendc_ir/ascendc_ir_core/ascendc_ir.h"
@@ -19,10 +21,122 @@
 #include "ascir.h"
 #include "schedule_result.h"
 #include "symbolizer/symbolic_utils.h"
+#include "final_tiling_selection_snapshot.h"
 
 namespace ascgen_utils {
+namespace indirect_load {
+enum class SimtAddressPolicy : int64_t;
+}
+
 const string INVALID_TILING = "invalid_tiling";
 constexpr int32_t NOT_SUPPORT_BRC_INLINE = -1;
+
+// [统一打分组绑定] 任务生成侧在 CalcScore 内引用本组 tiling data 子结构的占位符。
+// ATT 发射 CalcScore（GenCalcScore——model_info.score_func 逐候选竞标路径）时按本
+// 模型 schedule_group_ident 替换为 tiling_data.<item_prefix>_tiling_data：绑定与
+// 候选序/组序的位置无关；若异常通路未替换，占位符是未声明标识符，tiling 代码
+// 编译期即失败（显性暴露，不静默错读他组形状）。
+inline constexpr char kGroupTilingDataPlaceholder[] = "__AUTOFUSE_GROUP_TILING_DATA__";
+
+// [统一打分组绑定·替换] 将 score 函数文本中的占位符替换为真实组子结构路径。
+// group_prefix = schedule_group_ident.GetItemPrefix()（如 "graph0_result2_g1"），
+// 替换结果 = tiling_data.<group_prefix>_tiling_data。多次出现全部替换。
+// 提取为独立函数供 GenCalcScore 调用与 UT 直测（不依赖 ATT 夹具）。
+inline void SubstituteGroupTilingDataPlaceholder(std::string &score_func, const std::string &group_prefix) {
+  const std::string placeholder = kGroupTilingDataPlaceholder;
+  const std::string group_binding = group_prefix + "_tiling_data";
+  size_t pos = score_func.find(placeholder);
+  while (pos != std::string::npos) {
+    score_func.replace(pos, placeholder.size(), group_binding);
+    pos = score_func.find(placeholder, pos + group_binding.size());
+  }
+}
+
+// Semantic vocabulary is defined here; selection sites record these tokens, not display formats.
+namespace template_semantic {
+inline constexpr char kPointwise[] = "Pointwise";
+inline constexpr char kReduce[] = "Reduce";
+inline constexpr char kConcat[] = "Concat";
+inline constexpr char kSplit[] = "Split";
+inline constexpr char kTranspose[] = "Transpose";
+inline constexpr char kBroadcast[] = "Broadcast";
+inline constexpr char kIndirectLoad[] = "IndirectLoad";
+inline constexpr char kIndirectLoadPrefix[] = "IndirectLoad/";
+inline constexpr char kIndirectLoadMixed[] = "IndirectLoad/Mixed";
+inline constexpr char kBroadcastPrefix[] = "Broadcast.";
+inline constexpr char kReducePrefix[] = "Reduce/";
+inline constexpr char kCommon[] = "Common";
+inline constexpr char kUb[] = "UB";
+inline constexpr char kGm[] = "GM";
+inline constexpr char kSimd[] = "SIMD";
+inline constexpr char kSimt[] = "SIMT";
+inline constexpr char kLoad[] = "Load";
+inline constexpr char kSlice[] = "Slice";
+inline constexpr char kCast[] = "Cast";
+inline constexpr char kOffset32[] = "Offset32";
+inline constexpr char kOffset64[] = "Offset64";
+inline constexpr char kNddma[] = "NDDMA";
+inline constexpr char kNddmaSlice[] = "NDDMA.Slice";
+inline constexpr char kNddmaTranspose[] = "NDDMA.Transpose";
+inline constexpr char kNddmaBroadcast[] = "NDDMA.Broadcast";
+inline constexpr char kNddmaCast[] = "NDDMA.Cast";
+inline constexpr char kLoadToNddma[] = "LoadToNDDMA";
+inline constexpr char kBroadcastFold[] = "BroadcastFold";
+inline constexpr char kOutputReuse[] = "OutputReuse";
+inline constexpr char kPointwiseRecompute[] = "Pointwise/Recompute";
+inline constexpr char kReduceCommon[] = "Reduce/Common";
+inline constexpr char kReduceAllLoad[] = "Reduce/AllLoad";
+inline constexpr char kReduceRCore[] = "Reduce/RCore";
+inline constexpr char kReducePhase1[] = "Reduce/RCore/Phase1";
+inline constexpr char kReducePhase2[] = "Reduce/RCore/Phase2";
+inline constexpr char kConcatOffsetStore[] = "Concat/GM/OffsetStore";
+inline constexpr char kSplitOffsetLoad[] = "Split/GM/OffsetLoad";
+inline constexpr char kTransposeFold[] = "Transpose/Load/Fold";
+inline constexpr char kUbOneAxis[] = "UB/OneAxis";
+inline constexpr char kUbAllAligned[] = "UB/AllAligned";
+inline constexpr char kUbByGather[] = "UB/ByGather";
+inline constexpr char kUbPadded[] = "UB/Padded";
+inline constexpr char kUbAdaptive[] = "UB/Adaptive";
+inline constexpr char kUbExtendAdaptive[] = "UB/Extend/Adaptive";
+inline constexpr char kUbExtendCopy[] = "UB/Extend/Copy";
+inline constexpr char kUbExtendGather[] = "UB/Extend/Gather";
+inline constexpr char kUbExtendScatter[] = "UB/Extend/Scatter";
+inline constexpr char kUbExtendMixed[] = "UB/Extend/Mixed";
+inline constexpr char kBroadcastScalar[] = "Broadcast.Scalar";
+inline constexpr char kBroadcastTail[] = "Broadcast.Tail";
+inline constexpr char kBroadcastNonTail[] = "Broadcast.NonTail";
+inline constexpr char kCommonBroadcastRowAdaptive[] = "Broadcast.RowViewAdaptive";
+inline constexpr char kSoftmaxAr[] = "Softmax/AR";
+inline constexpr char kAr[] = "AR";
+inline constexpr char kRa[] = "RA";
+inline constexpr char kReuseSrc[] = "ReuseSrc";
+inline constexpr char kNoReuseSrc[] = "NoReuseSrc";
+inline constexpr char kMultiRound[] = "MultiRound";
+inline constexpr char kInner[] = "Inner";
+inline constexpr char kTotalSuffix[] = "/Total";
+inline constexpr char kSimdPrefix[] = "SIMD/";
+inline constexpr char kSimtPrefix[] = "SIMT/";
+inline constexpr char kOffsetPrefix[] = "/Offset";
+inline constexpr char kSk[] = "SK";
+inline constexpr char kAdaptive[] = "Adaptive";
+inline constexpr char kEmbedding[] = "Embedding";
+inline constexpr char kGatherApi[] = "GatherAPI";
+inline constexpr char kInline[] = "Inline";
+inline constexpr char kMultiCitation[] = "MultiCitation";
+inline constexpr char kNorm[] = "Norm";
+inline constexpr char kPhase1[] = "Phase1";
+inline constexpr char kPhase2[] = "Phase2";
+inline constexpr char kReorder[] = "Reorder";
+inline constexpr char kRegisterGather[] = "RegisterGather";
+inline constexpr char kRecursive[] = "Recursive";
+inline constexpr char kStaticInner[] = "StaticInner";
+inline constexpr char kStaticPowerOfTwo[] = "StaticPowerOfTwo";
+inline constexpr char kStrided[] = "Strided";
+inline constexpr char kStructuredMagic[] = "StructuredMagic";
+inline constexpr const char *kRoles[] = {kAdaptive,  kEmbedding,   kGatherApi,        kInline,  kMultiCitation,
+                                         kNorm,      kPhase1,      kPhase2,           kReorder, kRegisterGather,
+                                         kRecursive, kStaticInner, kStaticPowerOfTwo, kStrided, kStructuredMagic};
+}  // namespace template_semantic
 
 const std::string kKernelTaskTypeAIVOnly = "KERNEL_TYPE_AIV_ONLY";
 const std::string kKernelTaskTypeMixAIVOneZero = "KERNEL_TYPE_MIX_AIV_1_0";
@@ -46,6 +160,8 @@ const std::string kExtendConv2D = "ExtendConv2D";
 const std::string kExtendConv2DBias = "ExtendConv2DBias";
 const std::string kExtendConv2DScale = "ExtendConv2DScale";
 const std::string kExtendConv2DBiasScale = "ExtendConv2DBiasScale";
+
+constexpr int64_t kAvoidTensorApiOffset = 0x80;
 
 struct MatMulAttr {
   int64_t transpose_x1{0};
@@ -143,6 +259,17 @@ struct MergeBrcAxisParams {
 std::string CamelToLowerSneak(const std::string &str);
 std::string SubStringReplace(std::string &ori, const std::string &from, const std::string &to);
 std::string GenValidName(const std::string &t_name);
+std::string NormalizeTemplateSemanticName(const std::string &name);
+const char *GetSimtSemanticRole(indirect_load::SimtAddressPolicy policy);
+std::string MakeTemplateSemanticName(const std::string &family, const std::string &strategy = "",
+                                     const std::string &role = "", const std::vector<std::string> &api_features = {},
+                                     const std::vector<std::string> &transforms = {});
+std::string GetTemplateSemanticName(const af::AscGraph &graph, const std::string &strategy = "");
+std::string RefineTemplateSemanticName(const std::string &base_name, const af::AscGraph &graph);
+af::Status SetTemplateSemanticNameForGraph(const af::AscGraph &graph, const std::string &semantic_name);
+af::Status SetTemplateSemanticRole(const af::AscNodePtr &node, const std::string &role);
+af::Status SetTemplateSemanticTransform(const af::AscNodePtr &node, const std::string &transform);
+std::string GetTemplateSemanticTransform(const af::AscNode &node);
 bool GetRealPath(const std::string &file_path, std::string &real_file_path);
 bool IsEmptyTensorSence(const ascir::FusedScheduledResult &fused_schedule_result);
 
@@ -190,6 +317,7 @@ std::vector<ascir::TensorId> GetWorkspaceTensorIdListInOneGraph(
 
 af::Status GetApiTilingTypeName(const ascir::NodeView &node, std::string &type_name);
 af::Status GetApiTilingFieldName(const ascir::NodeView &node, std::string &field_name);
+std::string GenApiTilingValueFingerprint(const ascir::NodeView &node);
 void GetApiExtractDupSet(const ascir::ImplGraph &graph,
                          std::set<std::pair<std::string, std::string>> &pre_api_extract_dup, uint32_t &total_blk_num);
 int32_t CalcReservedTmpBufSizeForAscGraph(const ascir::ImplGraph &graph);
@@ -209,9 +337,16 @@ bool IsDataCopyAxisContinuous(const af::Expression &cur_gm_stride, const af::Exp
 // was introduced may only have origin_vars; keep that as a compatibility
 // fallback for legacy callers and unit fixtures.
 const std::vector<af::Expression> &GetFrontendShapeVars(const ascir::FusedScheduledResult &fused_schedule_result);
+// Collect the dynamic (non-constant) frontend ABI symbols. Tiling data fields whose name is in this
+// set carry shape values and must use int64_t, matching the host AutofuseTiling parameters.
+void CollectDynamicSizeVarNames(const ascir::FusedScheduledResult &fused_schedule_result,
+                                std::set<std::string> &dynamic_size_var_names);
 // Return the frontend static-shape judgment for the external ABI.  Internal
 // tiling-data generation must continue to use IsStaticSchedResult().
 bool IsFrontendStaticSchedResult(const ascir::FusedScheduledResult &fused_schedule_result);
+inline bool UseCvNRowBatch(const ascir::FusedScheduledResult &result) {
+  return ascir::HasCvBroadcast(result) && !ascir::HasCvMBroadcast(result);
+}
 af::Status ScalarValuePreProcess(const std::string &ori_value, const std::string &dtype,
                                  std::string &after_pre_pro_value);
 void MergeBrcAxisRepeats(const std::vector<af::Expression> &input0_repeats,  // 输入0的vector_repeats, 带广播
@@ -265,6 +400,12 @@ inline bool ExpressEq(const af::Expression &e1, const af::Expression &e2) {
 af::ExecuteCondition GetNodeExecCondition(const af::NodePtr &node);
 bool IsNodeCacheable(const af::NodePtr &node);
 bool IsSingleGroup(const ascir::FusedScheduledResult &fused_schedule_result);
+// 计算注册式TilingKey扁平展开的分支总数是否在limit内(各result内group选择数连乘积之和,
+// 带防溢出); count回填实际总数, 超限或溢出时返回false
+bool TryCalcTilingKeyCount(const ascir::FusedScheduledResult &fused_schedule_result, uint64_t limit, uint64_t &count);
+// 注册式TilingKey分支数是否在固定上限(kMaxRegTilingKeyCount=512)内, 超限的result应
+// 回落运行时tiling_data解析分发, 防止TILING_KEY_IS笛卡尔积分支链生成超大kernel
+bool IsTilingKeyCountWithinLimit(const ascir::FusedScheduledResult &fused_schedule_result);
 bool CanUseTilingKey(const ascir::FusedScheduledResult &fused_schedule_result);
 bool IsJustCubeFixpip(const ascir::FusedScheduledResult &fused_schedule_result);
 bool IsCubeFusedScheduled(const ascir::FusedScheduledResult &fused_schedule_result);
@@ -282,8 +423,10 @@ bool IsSatetyResultType(const ascir::ScheduledResult &sched_result);
 af::Status GetCubeOutputTypeSize(const ascir::NodeView &node, uint32_t &length);
 af::Status GetCubeInputNum(const ascir::NodeView &node, uint32_t &num);
 af::Status CreateCVFusionResult(ascir::FusedScheduledResult &elemwise_schedule_result);
+af::Status CreateCVFusionResult(ascir::FusedScheduledResult &elemwise_schedule_result, bool allow_fragment_padding);
 af::Status CreateCVFusionCommonResult(ascir::FusedScheduledResult &elemwise_schedule_result);
 af::Status ProcessCubeFusionResultDynamic(ascir::FusedScheduledResult &fused_result);
+af::Status ProcessCubeFusionResultDynamic(ascir::FusedScheduledResult &fused_result, bool allow_fragment_padding);
 bool IsCVFusionUBGraph(const ascir::ImplGraph &impl_graph, ascir::CubeTemplateType cv_fusion_type);
 af::Status FilterCVFusionUBResult(ascir::FusedScheduledResult &ub_schedule_result);
 af::Status FilterCVFusionCommonResult(ascir::FusedScheduledResult &common_schedule_result);
@@ -296,6 +439,17 @@ bool IsConv2DTypeWithOffsetW(const ascir::ImplGraph &impl_graph);
 bool IsConv2DTypeWithScale0(const ascir::ImplGraph &impl_graph);
 af::Status GetCubeInfo(const ascir::FusedScheduledResult &fused_schedule_result, bool &is_batch, bool &is_conv,
                        std::string &input_type, std::string &output_type);
+af::Status GetCubeInfo(const ascir::FusedScheduledResult &fused_schedule_result, bool &is_batch, bool &is_conv,
+                       std::string &input_type, std::string &output_type, MatMulAttr &matmul_attr);
+
+// Inductor CV rtLaunch 分派入口开关：launch_decouple 为 pyautofuse codegen_bin 入口的
+// 前端决策，本谓词限定 Inductor CV 场景（排除 conv2d 且 GetCubeInfo 可解析）；关闭时
+// 生成物与 legacy 完全一致。is_batch 供分派入口区分两套位域解码。
+bool IsLaunchDecoupleCvVariantEnabled(const ascir::FusedScheduledResult &fused_schedule_result, bool &is_batch,
+                                      bool launch_decouple);
+
+// SIMT dcache 保留区扣除后的动态 UB（无保留区返回 -1，消费方跳过设置）。
+int64_t CalcDynamicUbSize(const ascir::FusedScheduledResult &fused_schedule_result);
 }  // namespace ascgen_utils
 
 #endif

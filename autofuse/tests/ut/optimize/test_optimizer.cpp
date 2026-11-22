@@ -13,6 +13,8 @@
 #include <ascendc_ir.h>
 #include <array>
 #include <map>
+#include <regex>
+#include <set>
 #include "ascir.h"
 #include <ascir_ops.h>
 #include <ascir_utils.h>
@@ -36,6 +38,7 @@
 #include "ascgraph_info_complete.h"
 #include "schedule_result.h"
 #include "attribute_group/attr_group_shape_env.h"
+#include "autoschedule/autoschedule.h"
 #include "autoschedule/tiling_group.h"
 #include "expression/testcase/source_stub.h"
 #include "util/mem_utils.h"
@@ -46,6 +49,7 @@
 #include "optimize/graph_pass/pass_utils.h"
 #include "common/autofuse_backend_spec_api.h"
 #include "autoschedule/alignment_handler.h"
+#include "../../common/att/soc_perf_test_config.h"
 #include "../../v35/ut/optimize/runtime_stub.h"
 
 using namespace af;
@@ -501,7 +505,9 @@ TEST_F(TestOptimizer, V2ArangeStoreOptimizeProducesSingletonVectorFunc) {
 
 TEST_F(TestOptimizer, V2HighRankArangeOptimizeAndCodegenOuterFor) {
   SetUpV2RuntimeStub();
-  ge::PlatformContext::GetInstance().SetPlatform("3510");
+  ASSERT_EQ(
+      att::soc_perf_test::SetSocPerfTestPlatform(att::soc_perf_test::kV35AltNpuArch, att::soc_perf_test::kSocEmpty),
+      af::SUCCESS);
   af::AscGraph graph("high_rank_arange_pipeline");
   std::vector<af::Expression> sizes;
   std::vector<af::AxisId> axes;
@@ -729,7 +735,9 @@ class Int64ArangeConsumerCodegenTest : public TestOptimizer,
 
 TEST_P(Int64ArangeConsumerCodegenTest, GeneratesInt64ConsumerWithoutNarrowing) {
   SetUpV2RuntimeStub();
-  ge::PlatformContext::GetInstance().SetPlatform("3510");
+  ASSERT_EQ(
+      att::soc_perf_test::SetSocPerfTestPlatform(att::soc_perf_test::kV35AltNpuArch, att::soc_perf_test::kSocEmpty),
+      af::SUCCESS);
   const auto &test_case = GetParam();
   auto graph = CreateArangeConsumerGraph("int64_consumer", test_case.consumer, af::ops::One, af::DT_INT64);
   ::ascir::FusedScheduledResult scheduled;
@@ -778,7 +786,9 @@ INSTANTIATE_TEST_SUITE_P(
 
 TEST_F(TestOptimizer, V2ScalarVectorFuncPreservesRootScalarThroughCodegen) {
   SetUpV2RuntimeStub();
-  ge::PlatformContext::GetInstance().SetPlatform("3510");
+  ASSERT_EQ(
+      att::soc_perf_test::SetSocPerfTestPlatform(att::soc_perf_test::kV35AltNpuArch, att::soc_perf_test::kSocEmpty),
+      af::SUCCESS);
   af::AscGraph graph("scalar_vf_regression");
   const auto size = graph.CreateSizeVar("size");
   const auto axis = graph.CreateAxis("axis", size);
@@ -2018,9 +2028,9 @@ TEST_F(TestOptimizer, optimize_with_fused_ascbacked) {
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups.size(), 1UL);
   EXPECT_EQ(fused_scheduled_result.fused_graph_name.GetString(), fused_graph->GetName());
   ASSERT_EQ(fused_scheduled_result.origin_vars.size(), 3UL);
-  EXPECT_EQ(std::string(fused_scheduled_result.origin_vars[0].Serialize().get()), "s0");
-  EXPECT_EQ(std::string(fused_scheduled_result.origin_vars[1].Serialize().get()), "s1");
-  EXPECT_EQ(std::string(fused_scheduled_result.origin_vars[2].Serialize().get()), "s999");
+  EXPECT_EQ(std::string(fused_scheduled_result.origin_vars[0].Str().get()), "s0");
+  EXPECT_EQ(std::string(fused_scheduled_result.origin_vars[1].Str().get()), "s1");
+  EXPECT_EQ(std::string(fused_scheduled_result.origin_vars[2].Str().get()), "s999");
   ASSERT_EQ(fused_scheduled_result.input_nodes.size(), 3UL);
   ASSERT_EQ(fused_scheduled_result.output_nodes.size(), 2UL);
   ASSERT_EQ(fused_scheduled_result.workspace_nodes.size(), 2UL);
@@ -2641,6 +2651,35 @@ TEST_F(TestOptimizer, ReduceTaskGenerate) {
   EXPECT_EQ(generator.Generate(graph, graphs, score_functions), 0);
 }
 
+TEST_F(TestOptimizer, TemplateSemanticNamesSurviveOptimize) {
+  af::AscGraph graph("ReduceGraph");
+  ConstructReduceGraphWithMultiOutputs(graph);
+  optimize::AscGraphInfoComplete::CompleteApiInfo(graph);
+
+  ::ascir::FusedScheduledResult fused_schedule_result;
+  ASSERT_EQ(optimizer.Optimize(graph, fused_schedule_result), 0);
+
+  std::set<std::string> semantic_names;
+  for (const auto &scheduled_results : fused_schedule_result.node_idx_to_scheduled_results) {
+    for (const auto &scheduled_result : scheduled_results) {
+      semantic_names.insert(scheduled_result.semantic_name);
+    }
+  }
+  EXPECT_NE(semantic_names.find("Reduce/Common"), semantic_names.end());
+  EXPECT_NE(semantic_names.find("Reduce/AllLoad"), semantic_names.end());
+  for (const auto &scheduled_results : fused_schedule_result.node_idx_to_scheduled_results) {
+    for (const auto &scheduled_result : scheduled_results) {
+      for (const auto &schedule_group : scheduled_result.schedule_groups) {
+        for (const auto &impl_graph : schedule_group.impl_graphs) {
+          semantic_names.insert(::ascgen_utils::GetTemplateSemanticName(impl_graph));
+        }
+      }
+    }
+  }
+  EXPECT_NE(semantic_names.find("Reduce/RCore/Phase1"), semantic_names.end());
+  EXPECT_NE(semantic_names.find("Reduce/RCore/Phase2"), semantic_names.end());
+}
+
 static af::AscGraph CreateContinuousAxisGraph(bool with_indirect_load) {
   af::AscGraph graph(with_indirect_load ? "ContinuousAxisWithIndirectLoad" : "ContinuousAxisControl");
   auto s0 = graph.CreateSizeVar("s0");
@@ -2914,14 +2953,60 @@ TEST_F(TestOptimizer, TailAxisSliceDoNotMerge) {
   EXPECT_EQ(new_axis[1]->size, s3);
 }
 
-TEST_F(TestOptimizer, MergeAxesGather) {
-  af::AscGraph graph("LoadAbsStore");
+void ExpectOnlyMergedAxis(af::AscGraph &graph, const size_t merged_index, const af::Expression &merged_size) {
+  const auto axes = graph.GetAllAxis();
+  ASSERT_EQ(axes.size(), merged_index + 1UL);
+  for (size_t i = 0UL; i < axes.size(); ++i) {
+    EXPECT_EQ(axes[i]->type, i == merged_index ? af::Axis::Type::kAxisTypeMerged : af::Axis::Type::kAxisTypeOriginal);
+  }
+  EXPECT_EQ(axes[merged_index]->size, merged_size);
+}
+
+void ExpectNoMergedAxis(af::AscGraph &graph, const size_t expected_count) {
+  const auto axes = graph.GetAllAxis();
+  ASSERT_EQ(axes.size(), expected_count);
+  for (const auto &axis : axes) {
+    EXPECT_NE(axis->type, af::Axis::Type::kAxisTypeMerged) << "axis[" << axis->name << "] should stay original";
+  }
+}
+
+void AddGatherAbsStoreOutput(af::AscGraph &graph, af::ascir_op::Gather &gather, const std::vector<af::AxisId> &axes,
+                             const std::vector<af::Expression> &repeats, const std::vector<af::Expression> &strides) {
+  af::ascir_op::Abs abs("abs");
+  graph.AddNode(abs);
+  abs.x = gather.y;
+  abs.attr.api.compute_type = af::ComputeType::kComputeElewise;
+  abs.attr.sched.axis = axes;
+  abs.y.dtype = gather.y.dtype;
+  *abs.y.axis = axes;
+  *abs.y.repeats = repeats;
+  *abs.y.strides = strides;
+
+  af::ascir_op::Store store("store");
+  graph.AddNode(store);
+  store.x = abs.y;
+  store.attr.api.compute_type = af::ComputeType::kComputeStore;
+  store.attr.sched.axis = axes;
+  store.y.dtype = gather.y.dtype;
+  *store.y.axis = axes;
+  *store.y.repeats = repeats;
+  *store.y.strides = strides;
+
+  af::ascir_op::Output y("y");
+  graph.AddNode(y);
+  y.x = store.y;
+  y.attr.api.compute_type = af::ComputeType::kComputeInvalid;
+  y.attr.api.type = af::ApiType::kAPITypeBuffer;
+  y.y.dtype = gather.y.dtype;
+  y.ir_attr.SetIndex(0);
+}
+
+af::Expression BuildGatherMultiDimIndexGraph(af::AscGraph &graph) {
   auto s0 = graph.CreateSizeVar("s0");
   auto s1 = graph.CreateSizeVar("s1");
   auto s2 = graph.CreateSizeVar("s2");
   auto s3 = graph.CreateSizeVar("s3");
   auto s4 = graph.CreateSizeVar("s4");
-
   auto z0 = graph.CreateAxis("z0", s0);
   auto z1 = graph.CreateAxis("z1", s1);
   auto z2 = graph.CreateAxis("z2", s2);
@@ -2932,72 +3017,85 @@ TEST_F(TestOptimizer, MergeAxesGather) {
   data0.y.dtype = ge::DT_FLOAT;
   data0.attr.api.compute_type = af::ComputeType::kComputeInvalid;
   data0.attr.api.type = af::ApiType::kAPITypeBuffer;
-  data0.ir_attr.SetIndex(0);
   data0.attr.sched.axis = {z0.id, z1.id, z2.id};
   *data0.y.axis = {z0.id, z1.id, z2.id};
   *data0.y.repeats = {s0, s1, s2};
   *data0.y.strides = {s1 * s2, s2, One};
 
   af::ascir_op::Data data1("data1", graph);
-  data1.y.dtype = ge::DT_FLOAT;
+  data1.y.dtype = ge::DT_INT32;
   data1.attr.api.compute_type = af::ComputeType::kComputeInvalid;
   data1.attr.api.type = af::ApiType::kAPITypeBuffer;
-  data1.ir_attr.SetIndex(1);
   data1.attr.sched.axis = {z3.id, z4.id};
   *data1.y.axis = {z3.id, z4.id};
   *data1.y.repeats = {s3, s4};
   *data1.y.strides = {s4, One};
 
   af::ascir_op::Gather gather("gather");
-  gather.attr.api.compute_type = af::ComputeType::kComputeGather;
+  graph.AddNode(gather);
   gather.x1 = data0.y;
   gather.x2 = data1.y;
+  gather.attr.api.compute_type = af::ComputeType::kComputeGather;
   gather.ir_attr.SetAxis(2);
   gather.attr.sched.axis = {z0.id, z1.id, z3.id, z4.id};
   gather.y.dtype = ge::DT_FLOAT;
   *gather.y.axis = {z0.id, z1.id, z3.id, z4.id};
   *gather.y.repeats = {s0, s1, s3, s4};
   *gather.y.strides = {s1 * s3 * s4, s3 * s4, s4, One};
-
-  af::ascir_op::Abs abs("abs");
-  abs.attr.api.compute_type = af::ComputeType::kComputeElewise;
-  abs.x = gather.y;
-  abs.attr.sched.axis = {z0.id, z1.id, z3.id, z4.id};
-  abs.y.dtype = ge::DT_FLOAT;
-  *abs.y.axis = {z0.id, z1.id, z3.id, z4.id};
-  *abs.y.repeats = {s0, s1, s3, s4};
-  *abs.y.strides = {s1 * s3 * s4, s3 * s4, s4, One};
-
-  af::ascir_op::Store store("store");
-  store.attr.api.compute_type = af::ComputeType::kComputeElewise;
-  store.x = abs.y;
-  store.attr.sched.axis = {z0.id, z1.id, z3.id, z4.id};
-  store.y.dtype = ge::DT_FLOAT;
-  *store.y.axis = {z0.id, z1.id, z3.id, z4.id};
-  *store.y.repeats = {s0, s1, s3, s4};
-  *store.y.strides = {s1 * s3 * s4, s3 * s4, s4, One};
-
-  af::ascir_op::Output y("y");
-  y.attr.api.compute_type = af::ComputeType::kComputeInvalid;
-  y.attr.api.type = af::ApiType::kAPITypeBuffer;
-  y.x = store.y;
-  y.attr.api.type = af::ApiType::kAPITypeBuffer;
-  y.y.dtype = ge::DT_FLOAT;
-  y.ir_attr.SetIndex(0);
-
-  ASSERT_EQ(optimizer.MergeContinuousAxis(graph), 0);
-
-  auto new_axis = graph.GetAllAxis();
-  EXPECT_EQ(new_axis[5]->size, s0 * s1);
-  EXPECT_EQ(new_axis[6]->size, s3 * s4);
+  AddGatherAbsStoreOutput(graph, gather, {z0.id, z1.id, z3.id, z4.id}, {s0, s1, s3, s4},
+                          {s1 * s3 * s4, s3 * s4, s4, One});
+  return s0 * s1;
 }
 
-TEST_F(TestOptimizer, MergeAxesGatherOnlyOneDim) {
-  af::AscGraph graph("LoadAbsStore");
+void BuildGatherOneDimParamsAxis0Graph(af::AscGraph &graph) {
   auto s0 = graph.CreateSizeVar("s0");
   auto s1 = graph.CreateSizeVar("s1");
   auto s2 = graph.CreateSizeVar("s2");
+  auto s3 = graph.CreateSizeVar("s3");
+  auto s4 = graph.CreateSizeVar("s4");
+  auto z0 = graph.CreateAxis("z0", s0);
+  auto z1 = graph.CreateAxis("z1", s1);
+  auto z2 = graph.CreateAxis("z2", s2);
+  auto z3 = graph.CreateAxis("z3", s3);
+  auto z4 = graph.CreateAxis("z4", s4);
 
+  af::ascir_op::Data data0("data0", graph);
+  data0.y.dtype = ge::DT_FLOAT;
+  data0.attr.api.compute_type = af::ComputeType::kComputeInvalid;
+  data0.attr.api.type = af::ApiType::kAPITypeBuffer;
+  data0.attr.sched.axis = {z0.id};
+  *data0.y.axis = {z0.id};
+  *data0.y.repeats = {s0};
+  *data0.y.strides = {One};
+
+  af::ascir_op::Data data1("data1", graph);
+  data1.y.dtype = ge::DT_INT32;
+  data1.attr.api.compute_type = af::ComputeType::kComputeInvalid;
+  data1.attr.api.type = af::ApiType::kAPITypeBuffer;
+  data1.attr.sched.axis = {z1.id, z2.id, z3.id, z4.id};
+  *data1.y.axis = {z1.id, z2.id, z3.id, z4.id};
+  *data1.y.repeats = {s1, s2, s3, s4};
+  *data1.y.strides = {s2 * s3 * s4 * af::Symbol(2), s3 * s4 * af::Symbol(2), s4, One};
+
+  af::ascir_op::Gather gather("gather");
+  graph.AddNode(gather);
+  gather.x1 = data0.y;
+  gather.x2 = data1.y;
+  gather.attr.api.compute_type = af::ComputeType::kComputeGather;
+  gather.ir_attr.SetAxis(0);
+  gather.attr.sched.axis = {z1.id, z2.id, z3.id, z4.id};
+  gather.y.dtype = ge::DT_FLOAT;
+  *gather.y.axis = {z1.id, z2.id, z3.id, z4.id};
+  *gather.y.repeats = {s1, s2, s3, s4};
+  *gather.y.strides = {s2 * s3 * s4 * af::Symbol(2), s3 * s4 * af::Symbol(2), s4, One};
+  AddGatherAbsStoreOutput(graph, gather, {z1.id, z2.id, z3.id, z4.id}, {s1, s2, s3, s4},
+                          {s2 * s3 * s4 * af::Symbol(2), s3 * s4 * af::Symbol(2), s4, One});
+}
+
+void BuildGatherSingleDimIndexGraph(af::AscGraph &graph) {
+  auto s0 = graph.CreateSizeVar("s0");
+  auto s1 = graph.CreateSizeVar("s1");
+  auto s2 = graph.CreateSizeVar("s2");
   auto z0 = graph.CreateAxis("z0", s0);
   auto z1 = graph.CreateAxis("z1", s1);
   auto z2 = graph.CreateAxis("z2", s2);
@@ -3023,50 +3121,72 @@ TEST_F(TestOptimizer, MergeAxesGatherOnlyOneDim) {
   *data1.y.strides = {s2, One};
 
   af::ascir_op::Gather gather("gather");
-  gather.attr.api.compute_type = af::ComputeType::kComputeGather;
+  graph.AddNode(gather);
   gather.x1 = data0.y;
   gather.x2 = data1.y;
+  gather.attr.api.compute_type = af::ComputeType::kComputeGather;
   gather.ir_attr.SetAxis(2);
   gather.attr.sched.axis = {z1.id, z2.id};
   gather.y.dtype = ge::DT_FLOAT;
   *gather.y.axis = {z1.id, z2.id};
   *gather.y.repeats = {s1, s2};
   *gather.y.strides = {s2, One};
+  AddGatherAbsStoreOutput(graph, gather, {z1.id, z2.id}, {s1, s2}, {s2, One});
+}
 
-  af::ascir_op::Abs abs("abs");
-  abs.attr.api.compute_type = af::ComputeType::kComputeElewise;
-  abs.x = gather.y;
-  abs.attr.sched.axis = {z1.id, z2.id};
-  abs.y.dtype = ge::DT_FLOAT;
-  *abs.y.axis = {z1.id, z2.id};
-  *abs.y.repeats = {s1, s2};
-  *abs.y.strides = {s2, One};
-
-  af::ascir_op::Store store("store");
-  store.attr.api.compute_type = af::ComputeType::kComputeElewise;
-  store.x = abs.y;
-  store.attr.sched.axis = {z1.id, z2.id};
-  store.y.dtype = ge::DT_FLOAT;
-  *store.y.axis = {z1.id, z2.id};
-  *store.y.repeats = {s1, s2};
-  *store.y.strides = {s2, One};
-
-  af::ascir_op::Output y("y");
-  y.attr.api.compute_type = af::ComputeType::kComputeInvalid;
-  y.attr.api.type = af::ApiType::kAPITypeBuffer;
-  y.x = store.y;
-  y.attr.api.type = af::ApiType::kAPITypeBuffer;
-  y.y.dtype = ge::DT_FLOAT;
-  y.ir_attr.SetIndex(0);
+TEST_F(TestOptimizer, MergeAxesGather) {
+  af::AscGraph graph("LoadAbsStore");
+  const auto merged_size = BuildGatherMultiDimIndexGraph(graph);
+  ASSERT_EQ(optimizer.MergeContinuousAxis(graph), 0);
+  ExpectOnlyMergedAxis(graph, 5UL, merged_size);
+}
+TEST_F(TestOptimizer, MergeAxesGatherOnlyOneDim) {
+  af::AscGraph graph("LoadAbsStore");
+  BuildGatherSingleDimIndexGraph(graph);
+  ASSERT_EQ(optimizer.MergeContinuousAxis(graph), 0);
+  ExpectNoMergedAxis(graph, 3UL);
+}
+// 910B 回归：二维动态索引 gather 合轴后，调度器的 TILE_IN 轴必须只挂单一原始轴。
+// host tiling data 生成要求 inner 轴可追溯到唯一原始轴，TILE_IN 挂在 MERGED 轴上会
+// 触发 GenTilingData 断言，融合算子编译失败（afError）。
+TEST_F(TestOptimizer, GatherMultiDimIndexKeepsTileInnerOnOriginalAxis) {
+  af::AscGraph graph("GatherMultiDimIndex");
+  BuildGatherMultiDimIndexGraph(graph);
 
   ASSERT_EQ(optimizer.MergeContinuousAxis(graph), 0);
 
-  auto new_axis = graph.GetAllAxis();
-  EXPECT_EQ(new_axis[3]->size, s1 * s2);
-}
+  std::vector<optimize::autoschedule::AutoScheduleOutput> results;
+  optimize::autoschedule::AutoSchedule schedule(graph, results);
+  ASSERT_EQ(schedule.DoAutoSchedule(), af::SUCCESS);
+  ASSERT_FALSE(results.empty());
 
+  size_t tile_inner_count = 0UL;
+  for (auto &result : results) {
+    for (const auto &axis : result.scheduled_graph.GetAllAxis()) {
+      if (axis == nullptr || axis->type != af::Axis::Type::kAxisTypeTileInner) {
+        continue;
+      }
+      ++tile_inner_count;
+      ASSERT_EQ(axis->from.size(), 1UL) << "TILE_IN axis[" << axis->name << "] has multi from_axis";
+      const af::Axis *parent = result.scheduled_graph.FindAxis(axis->from.front());
+      ASSERT_NE(parent, nullptr) << "TILE_IN axis[" << axis->name << "] parent not found";
+      EXPECT_EQ(parent->type, af::Axis::Type::kAxisTypeOriginal)
+          << "TILE_IN axis[" << axis->name << "] must attach to an ORIGINAL axis";
+    }
+  }
+  EXPECT_GT(tile_inner_count, 0UL);
+}
+// 910B 回归：1 维 params 且 gather axis==0 的图会走 GenTilingCase 通用分支（不跳过
+// y_group 首轴），任何 MERGED 轴都可能被切为 TILE_IN，因此 gather 图在此形态下不应合轴。
+TEST_F(TestOptimizer, MergeAxesGatherOneDimParamsAxis0DoesNotMerge) {
+  af::AscGraph graph("GatherOneDimParamsAxis0");
+  BuildGatherOneDimParamsAxis0Graph(graph);
+  ASSERT_EQ(optimizer.MergeContinuousAxis(graph), 0);
+  ExpectNoMergedAxis(graph, 5UL);
+}
 TEST_F(TestOptimizer, CompleteGatherApiInfoSetsDcacheSize) {
   constexpr int64_t kSimtDcacheSize = 40 * 1024;
+  ge::PlatformContext::GetInstance().SetPlatform("3510");
   af::AscGraph graph("GatherDcacheGraph");
 
   af::ascir_op::Data data0("data0", graph);
@@ -3099,6 +3219,7 @@ TEST_F(TestOptimizer, CompleteGatherApiInfoSetsDcacheSize) {
 
 TEST_F(TestOptimizer, CompleteExpm1ApiInfoSetsDcacheSize) {
   constexpr int64_t kSimtDcacheSize = 40 * 1024;
+  ge::PlatformContext::GetInstance().SetPlatform("3510");
   af::AscGraph graph("Expm1DcacheGraph");
 
   af::ascir_op::Data data("data", graph);
@@ -3120,6 +3241,91 @@ TEST_F(TestOptimizer, CompleteExpm1ApiInfoSetsDcacheSize) {
 
   ASSERT_EQ(optimize::AscGraphInfoComplete::CompleteApiInfo(graph), af::SUCCESS);
   EXPECT_EQ(::ascir::GetDcacheSize(*expm1_node), kSimtDcacheSize);
+}
+
+// dav-2201（A3）上 Expm1/FloorDiv 等走非 SIMT 实现，不应打 SIMT d-cache 标记，
+// 否则 kernel 启动语句第二参数为数字，A3 设备编译把该位置按 void* 解释导致编译失败
+TEST_F(TestOptimizer, CompleteApiInfoSkipsDcacheSizeOnV1Platform) {
+  ge::PlatformContext::GetInstance().SetPlatform("2201");
+  af::AscGraph graph("V1DcacheGraph");
+
+  af::ascir_op::Data data("data", graph);
+  data.y.dtype = ge::DT_BF16;
+  data.ir_attr.SetIndex(0);
+
+  af::ascir_op::Data scalar("scalar", graph);
+  scalar.y.dtype = ge::DT_INT64;
+  scalar.ir_attr.SetIndex(1);
+
+  af::ascir_op::Expm1 expm1("expm1");
+  expm1.x = data.y;
+  expm1.y.dtype = ge::DT_BF16;
+
+  af::ascir_op::FloorDiv floor_div("floor_div");
+  floor_div.x1 = scalar.y;
+  floor_div.x2 = scalar.y;
+  floor_div.y.dtype = ge::DT_INT64;
+
+  af::ascir_op::Output output("output");
+  output.x = floor_div.y;
+  output.y.dtype = ge::DT_INT64;
+  output.ir_attr.SetIndex(0);
+
+  auto expm1_node = graph.FindNode("expm1");
+  ASSERT_NE(expm1_node, nullptr);
+  auto floor_div_node = graph.FindNode("floor_div");
+  ASSERT_NE(floor_div_node, nullptr);
+
+  ASSERT_EQ(optimize::AscGraphInfoComplete::CompleteApiInfo(graph), af::SUCCESS);
+  EXPECT_EQ(::ascir::GetDcacheSize(*expm1_node), 0);
+  EXPECT_EQ(::ascir::GetDcacheSize(*floor_div_node), 0);
+}
+
+TEST_F(TestOptimizer, CompleteFloorDivApiInfoSetsDcacheSizeOnlyForInt64) {
+  constexpr int64_t kSimtDcacheSize = 40 * 1024;
+  ge::PlatformContext::GetInstance().SetPlatform("3510");
+
+  af::AscGraph int64_graph("FloorDivInt64DcacheGraph");
+  af::ascir_op::Data x1("x1", int64_graph);
+  x1.y.dtype = ge::DT_INT64;
+  x1.ir_attr.SetIndex(0);
+  af::ascir_op::Data x2("x2", int64_graph);
+  x2.y.dtype = ge::DT_INT64;
+  x2.ir_attr.SetIndex(1);
+  af::ascir_op::FloorDiv int64_floor_div("floor_div");
+  int64_floor_div.x1 = x1.y;
+  int64_floor_div.x2 = x2.y;
+  int64_floor_div.y.dtype = ge::DT_INT64;
+  af::ascir_op::Output int64_output("output");
+  int64_output.x = int64_floor_div.y;
+  int64_output.y.dtype = ge::DT_INT64;
+  int64_output.ir_attr.SetIndex(0);
+
+  auto int64_node = int64_graph.FindNode("floor_div");
+  ASSERT_NE(int64_node, nullptr);
+  ASSERT_EQ(optimize::AscGraphInfoComplete::CompleteApiInfo(int64_graph), af::SUCCESS);
+  EXPECT_EQ(::ascir::GetDcacheSize(*int64_node), kSimtDcacheSize);
+
+  af::AscGraph int32_graph("FloorDivInt32DcacheGraph");
+  af::ascir_op::Data y1("y1", int32_graph);
+  y1.y.dtype = ge::DT_INT32;
+  y1.ir_attr.SetIndex(0);
+  af::ascir_op::Data y2("y2", int32_graph);
+  y2.y.dtype = ge::DT_INT32;
+  y2.ir_attr.SetIndex(1);
+  af::ascir_op::FloorDiv int32_floor_div("floor_div");
+  int32_floor_div.x1 = y1.y;
+  int32_floor_div.x2 = y2.y;
+  int32_floor_div.y.dtype = ge::DT_INT32;
+  af::ascir_op::Output int32_output("output");
+  int32_output.x = int32_floor_div.y;
+  int32_output.y.dtype = ge::DT_INT32;
+  int32_output.ir_attr.SetIndex(0);
+
+  auto int32_node = int32_graph.FindNode("floor_div");
+  ASSERT_NE(int32_node, nullptr);
+  ASSERT_EQ(optimize::AscGraphInfoComplete::CompleteApiInfo(int32_graph), af::SUCCESS);
+  EXPECT_EQ(::ascir::GetDcacheSize(*int32_node), 0);
 }
 
 TEST_F(TestOptimizer, MergeAxesReduce) {
@@ -7405,7 +7611,11 @@ TEST_F(TestOptimizer, ReducePartition) {
   ::ascir::FusedScheduledResult fused_scheduled_result;
   EXPECT_EQ(optimizer.Optimize(graph, fused_scheduled_result), 0);
   EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results.size(), 1);
-  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 1);
+  // 通用模板 1 + R 轴分核模板 1 (phase_1 各 tiling case 装入同一 group 作为多 impl) + 全载模板 1
+  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 3);
+  // R 轴分核结果: phase_1 group + phase_2 groups, phase_1 的两种 tiling case 全部在同一 group 内
+  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][1].schedule_groups.size(), 3);
+  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][1].schedule_groups[0].impl_graphs.size(), 2);
 }
 
 TEST_F(TestOptimizer, ReducePartitionLoad) {
@@ -7508,7 +7718,8 @@ TEST_F(TestOptimizer, ReducePartitionLoad) {
   ::ascir::FusedScheduledResult fused_scheduled_result;
   EXPECT_EQ(optimizer.Optimize(graph, fused_scheduled_result), 0);
   EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results.size(), 1);
-  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 2);
+  // 通用模板 1 + R 轴分核模板 1 + 全载模板 1
+  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 3);
 }
 
 TEST_F(TestOptimizer, ReducePartition3) {
@@ -7589,9 +7800,11 @@ TEST_F(TestOptimizer, ReducePartition3) {
   ::ascir::FusedScheduledResult fused_scheduled_result;
   EXPECT_EQ(optimizer.Optimize(graph, fused_scheduled_result), 0);
   EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results.size(), 1);
+  // 通用模板 1 + R 轴分核模板 1 + 全载模板 1
   EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 3);
   EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups.size(), 1);
   EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][1].schedule_groups.size(), 2);
+  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][2].schedule_groups.size(), 1);
 
   auto impl_graph_phase1 = fused_scheduled_result.node_idx_to_scheduled_results[0][1].schedule_groups[0].impl_graphs[0];
   auto impl_graph_phase2 = fused_scheduled_result.node_idx_to_scheduled_results[0][1].schedule_groups[1].impl_graphs[0];
@@ -7687,9 +7900,11 @@ TEST_F(TestOptimizer, ReducePartition4) {
   ::ascir::FusedScheduledResult fused_scheduled_result;
   EXPECT_EQ(optimizer.Optimize(graph, fused_scheduled_result), 0);
   EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results.size(), 1);
+  // 通用模板 1 + R 轴分核模板 1 + 全载模板 1
   EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 3);
   EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups.size(), 2);
   EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][1].schedule_groups.size(), 3);
+  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][2].schedule_groups.size(), 1);
 
   auto impl_graph_phase1 = fused_scheduled_result.node_idx_to_scheduled_results[0][1].schedule_groups[0].impl_graphs[0];
   auto impl_graph_phase2 = fused_scheduled_result.node_idx_to_scheduled_results[0][1].schedule_groups[1].impl_graphs[0];
@@ -7773,9 +7988,11 @@ TEST_F(TestOptimizer, ReduceRMulticore) {
   ::ascir::FusedScheduledResult fused_scheduled_result;
   EXPECT_EQ(optimizer.Optimize(graph, fused_scheduled_result), 0);
   EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results.size(), 1);
+  // 通用模板 1 + R 轴分核模板 1 + 全载模板 1
   EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 3);
   EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups.size(), 1);
   EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][1].schedule_groups.size(), 2);
+  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][2].schedule_groups.size(), 1);
 
   auto impl_graph_phase1 = fused_scheduled_result.node_idx_to_scheduled_results[0][1].schedule_groups[0].impl_graphs[0];
   auto impl_graph_phase2 = fused_scheduled_result.node_idx_to_scheduled_results[0][1].schedule_groups[1].impl_graphs[0];
@@ -7783,6 +8000,105 @@ TEST_F(TestOptimizer, ReduceRMulticore) {
   auto phase2_workspace1 = impl_graph_phase2.FindNode("reduce_r_multicore_0_r_multicore_phase_2_graph_workspace");
   ASSERT_NE(phase1_workspace, nullptr);
   ASSERT_NE(phase2_workspace1, nullptr);
+}
+
+// 两条互不连通的 reduce 链构成多 reduce 图: 多 reduce + 多 R 轴逐 case 展开会造成模板数随链数
+// 乘性爆炸, 在生成阶段即被 ShouldForceAllLoad 拦截强制走 AllLoad 路径。校验拦截后不产生任何
+// r_multicore phase 图, 且图中各 (result, group, impl) 槽位不共享同一图对象、索引后缀不累积
+TEST_F(TestOptimizer, ReduceRMulticoreMultiRAxisSkipRCorePhase1) {
+  auto graph =
+      af::testing::AscGraphBuilder("reduce_two_first_stage")
+          .Loops({af::testing::Sym("s0"), af::testing::Sym("s1"), af::testing::Sym("s2"), af::testing::Sym("s3")})
+          .Data("data0", 0)
+          .Load("load0", "data0")
+          .Abs("abs0", "load0")
+          .Max("max0", "abs0", {0, 2})
+          .Store("store0", "max0")
+          .Output("output0", "store0", 0)
+          .Data("data1", 1)
+          .Load("load1", "data1")
+          .Abs("abs1", "load1")
+          .Max("max1", "abs1", {0, 2})
+          .Store("store1", "max1")
+          .Output("output1", "store1", 1)
+          .Build();
+  ::ascir::FusedScheduledResult fused_scheduled_result;
+  EXPECT_EQ(optimizer.Optimize(graph, fused_scheduled_result), af::SUCCESS);
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results.size(), 1UL);
+  const auto &results = fused_scheduled_result.node_idx_to_scheduled_results[0];
+  ASSERT_FALSE(results.empty());
+
+  std::map<const void *, std::string> slot_to_name;
+  size_t second_chain_phase1_count = 0UL;
+  const std::regex accumulated_suffix("_S[0-9]+G[0-9]+C[0-9]+_S[0-9]+G[0-9]+C[0-9]+");
+  for (size_t r = 0UL; r < results.size(); ++r) {
+    for (const auto &schedule_group : results[r].schedule_groups) {
+      for (const auto &impl_graph : schedule_group.impl_graphs) {
+        const std::string name = impl_graph.GetName();
+        EXPECT_FALSE(std::regex_search(name, accumulated_suffix)) << "graph [" << name << "] has accumulated index";
+        const auto compute_graph = af::AscGraphUtils::GetComputeGraph(impl_graph);
+        ASSERT_NE(compute_graph, nullptr);
+        const auto ret = slot_to_name.emplace(compute_graph.get(), name);
+        EXPECT_TRUE(ret.second) << "graph [" << name << "] is shared with slot of [" << ret.first->second << "]";
+        if ((name.rfind("reduce_two_first_stage_1_", 0UL) == 0UL) &&
+            (name.find("r_multicore_phase_1_graph") != std::string::npos)) {
+          ++second_chain_phase1_count;
+        }
+      }
+    }
+  }
+  // 保证用例非空转: 双 reduce 链 + Max 对 {0,2} 两根轴归约属"多 reduce + 多 R 轴", 在生成阶段被
+  // 拦截强制走 AllLoad, 不应产生任何 r_multicore phase_1 图; 图槽位不共享/索引不累积的不变式仍然成立
+  EXPECT_EQ(second_chain_phase1_count, 0UL);
+}
+
+// 单条 reduce 链, Max 对 {0,2} 两根轴归约: 属"单 reduce 多 R 轴", 生成阶段放行进入 R-core 模板,
+// 但 phase-1 各 tiling case 切分结构不同(var relation 不一致), AppendReduceFirstStageGroup 应回退
+// 既有逐 case 展开流程: 每个 tiling case 展开为独立 result(自身 phase_1 group 仅 1 个 impl),
+// 而非装入同一 group 作为多 impl。同时校验展开后图槽位不共享、索引后缀不累积
+TEST_F(TestOptimizer, ReduceRMulticoreSingleReduceMultiRAxisFallbackExpandPhase1) {
+  auto graph =
+      af::testing::AscGraphBuilder("reduce_single_first_stage")
+          .Loops({af::testing::Sym("s0"), af::testing::Sym("s1"), af::testing::Sym("s2"), af::testing::Sym("s3")})
+          .Data("data0", 0)
+          .Load("load0", "data0")
+          .Abs("abs0", "load0")
+          .Max("max0", "abs0", {0, 2})
+          .Store("store0", "max0")
+          .Output("output0", "store0", 0)
+          .Build();
+  ::ascir::FusedScheduledResult fused_scheduled_result;
+  EXPECT_EQ(optimizer.Optimize(graph, fused_scheduled_result), af::SUCCESS);
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results.size(), 1UL);
+  const auto &results = fused_scheduled_result.node_idx_to_scheduled_results[0];
+  ASSERT_FALSE(results.empty());
+
+  std::map<const void *, std::string> slot_to_name;
+  const std::regex accumulated_suffix("_S[0-9]+G[0-9]+C[0-9]+_S[0-9]+G[0-9]+C[0-9]+");
+  size_t rcore_result_count = 0UL;
+  for (size_t r = 0UL; r < results.size(); ++r) {
+    bool has_phase1 = false;
+    for (const auto &schedule_group : results[r].schedule_groups) {
+      for (const auto &impl_graph : schedule_group.impl_graphs) {
+        const std::string name = impl_graph.GetName();
+        EXPECT_FALSE(std::regex_search(name, accumulated_suffix)) << "graph [" << name << "] has accumulated index";
+        const auto compute_graph = af::AscGraphUtils::GetComputeGraph(impl_graph);
+        ASSERT_NE(compute_graph, nullptr);
+        const auto ret = slot_to_name.emplace(compute_graph.get(), name);
+        EXPECT_TRUE(ret.second) << "graph [" << name << "] is shared with slot of [" << ret.first->second << "]";
+        if (name.find("r_multicore_phase_1_graph") != std::string::npos) {
+          has_phase1 = true;
+        }
+      }
+    }
+    if (has_phase1) {
+      ++rcore_result_count;
+      // 逐 case 展开: 该 result 的 phase_1 group 仅含当前 case 的 1 个 impl
+      ASSERT_EQ(results[r].schedule_groups[0].impl_graphs.size(), 1UL);
+    }
+  }
+  // 单 reduce 多 R 轴存在多个 phase_1 tiling case, 应回退展开为多个 result 而非打包为 1 个
+  EXPECT_GT(rcore_result_count, 1UL);
 }
 
 TEST_F(TestOptimizer, ReducePartitionScalar) {
@@ -7868,7 +8184,8 @@ TEST_F(TestOptimizer, ReducePartitionScalar) {
   ::ascir::FusedScheduledResult fused_scheduled_result;
   EXPECT_EQ(optimizer.Optimize(graph, fused_scheduled_result), 0);
   EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results.size(), 1);
-  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 1);
+  // 通用模板 1 + R 轴分核模板 1 (phase_1 各 tiling case 装入同一 group 作为多 impl) + 全载模板 1
+  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 3);
 }
 
 TEST_F(TestOptimizer, ReduceAllLoad) {
@@ -7967,7 +8284,8 @@ TEST_F(TestOptimizer, ReduceAllLoad) {
   ::ascir::FusedScheduledResult fused_scheduled_result;
   EXPECT_EQ(optimizer.Optimize(graph, fused_scheduled_result), 0);
   EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results.size(), 1);
-  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 2);
+  // 通用模板 1 + R 轴分核模板 1 (双 reduce 分组各 phase_1 case 装入同一 group 作为多 impl) + 全载模板 1
+  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 3);
 }
 
 /**
@@ -8460,14 +8778,110 @@ TEST_F(TestOptimizer, BrcCacheReuseOtherMem) {
   ::ascir::FusedScheduledResult fused_scheduled_result;
   EXPECT_EQ(optimizer.Optimize(graph, fused_scheduled_result), af::SUCCESS);
   EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results.size(), 1);
-  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 1);
-  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups.size(), 1);
-  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs.size(), 3);
-  const auto &impl_graphs = fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs;
+  // 后移 pass 将 brc3 的多轴扩展拆为单轴链, exp2->brc3 成为首轴 Brc 候选: ws 候选(打正分)与
+  // fallback 候选(空打分)共存于 scheduled results, tiling 期打分竞争
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 2);
+  // ws 候选: 断边选点将 exp2->brc3 切分, 生产/消费两个调度组, abs2/exp2 位于生产侧单 impl 子图
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups.size(), 2);
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs.size(), 1);
+  EXPECT_NE(
+      fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs[0].FindNode("exp2"),
+      nullptr);
+  // fallback 候选: 原 1 组 3 impl 结构, abs2/exp2 缓存不复用语义在该结构上验证
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][1].schedule_groups.size(), 1);
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0][1].schedule_groups[0].impl_graphs.size(), 3);
+  const auto &impl_graphs = fused_scheduled_result.node_idx_to_scheduled_results[0][1].schedule_groups[0].impl_graphs;
   const auto &impl_graph = impl_graphs[2];
   auto abs2_result = impl_graph.FindNode("abs2");
   auto exp2_result = impl_graph.FindNode("exp2");
   EXPECT_NE(abs2_result->outputs[0].attr.buf.id, exp2_result->outputs[0].attr.buf.id);
+}
+
+// PR2920 动态打分字段保活: 生产侧 load0/abs0/ws_store 视图 [1,s1,s2] 的 z2 维全零步长(z1 稠密
+// 不触发全 0 守卫), 调度期 RemoveAllZeroStrideLoopAxis 删除 z2 轴后 s2 失去生产侧全部表达式引用,
+// 被 size var 重建裁剪; 而打分函数按调度前归属硬编码引用 graph0_result0_g0_tiling_data.s2——修复前
+// g0 子结构体缺 s2 字段, host tiling 侧编译报 no member 's2'。修复将打分绑定符号并入对应组
+// runtime_shape_vars, 保证结构体字段存在(ProcessMultiGroup)且运行期值被填充(TilingSetShapeDim)。
+TEST_F(TestOptimizer, BroadcastWorkspaceDynamicScoreKeepsPrunedShapeVar) {
+  af::AscGraph graph("brc_ws_dynamic_score_keep");
+  const af::Expression s0 = af::Symbol("s0");
+  const af::Expression s1 = af::Symbol("s1");
+  const af::Expression s2 = af::Symbol("s2");
+  auto z0 = graph.CreateAxis("z0", s0);
+  auto z1 = graph.CreateAxis("z1", s1);
+  auto z2 = graph.CreateAxis("z2", s2);
+
+  Data x0("x0", graph);
+  x0.ir_attr.SetIndex(0);
+  x0.y.dtype = af::DT_FLOAT16;
+
+  Load load0("load0");
+  load0.x = x0.y;
+  load0.attr.sched.axis = {z0.id, z1.id, z2.id};
+  *load0.y.axis = {z0.id, z1.id, z2.id};
+  *load0.y.repeats = {af::sym::kSymbolOne, s1, s2};
+  *load0.y.strides = {af::sym::kSymbolZero, af::sym::kSymbolOne, af::sym::kSymbolZero};
+  load0.y.dtype = af::DT_FLOAT16;
+
+  Abs abs0("abs0");
+  abs0.x = load0.y;
+  abs0.attr.sched.axis = {z0.id, z1.id, z2.id};
+  *abs0.y.axis = {z0.id, z1.id, z2.id};
+  *abs0.y.repeats = {af::sym::kSymbolOne, s1, s2};
+  *abs0.y.strides = {af::sym::kSymbolZero, af::sym::kSymbolOne, af::sym::kSymbolZero};
+  abs0.y.dtype = af::DT_FLOAT16;
+
+  Broadcast brc0("brc0");
+  brc0.x = abs0.y;
+  brc0.attr.sched.axis = {z0.id, z1.id, z2.id};
+  *brc0.y.axis = {z0.id, z1.id, z2.id};
+  *brc0.y.repeats = {s0, s1, s2};
+  *brc0.y.strides = {s1 * s2, s2, af::sym::kSymbolOne};
+  brc0.y.dtype = af::DT_FLOAT16;
+
+  Store store0("store0");
+  store0.x = brc0.y;
+  store0.attr.sched.axis = {z0.id, z1.id, z2.id};
+  *store0.y.axis = {z0.id, z1.id, z2.id};
+  *store0.y.repeats = {s0, s1, s2};
+  *store0.y.strides = {s1 * s2, s2, af::sym::kSymbolOne};
+  store0.y.dtype = af::DT_FLOAT16;
+
+  Output y0("y0");
+  y0.x = store0.y;
+  y0.ir_attr.SetIndex(0);
+
+  ::ascir::FusedScheduledResult fused_scheduled_result;
+  ASSERT_EQ(optimizer.Optimize(graph, fused_scheduled_result), af::SUCCESS);
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results.size(), 1UL);
+  // ws 候选恒为 result0, 默认模板为 result1
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 2UL);
+  const auto &ws_result = fused_scheduled_result.node_idx_to_scheduled_results[0][0];
+  ASSERT_EQ(ws_result.schedule_groups.size(), 2UL);
+  // 动态打分: 非首轴乘积 s1*s2, s1/s2 按调度前归属均绑定生产侧 g0
+  const std::string score_func(ws_result.score_func.GetString());
+  EXPECT_NE(score_func.find("tiling_data.graph0_result0_g0_tiling_data.s1"), std::string::npos) << score_func;
+  EXPECT_NE(score_func.find("tiling_data.graph0_result0_g0_tiling_data.s2"), std::string::npos) << score_func;
+  // 回归断言: s2 虽在调度后失去生产侧表达式引用, 仍须保活于 g0 的 runtime_shape_vars
+  const auto &runtime_shape_vars = ws_result.schedule_groups[0].runtime_shape_vars;
+  auto keep_it = std::find_if(runtime_shape_vars.begin(), runtime_shape_vars.end(),
+                              [](const af::Expression &var) { return std::string(var.Str().get()) == "s2"; });
+  EXPECT_NE(keep_it, runtime_shape_vars.end()) << "score-referenced var s2 pruned by scheduler";
+
+  // codegen 全链: g0 子结构体发射 s2 字段, host tiling 代码填充运行期值
+  codegen::CodegenResult generated;
+  const std::map<std::string, std::string> shape_info = {{"s0", "4"}, {"s1", "4096"}, {"s2", "16"}};
+  ASSERT_EQ(codegen::Codegen(codegen::CodegenOptions{}).Generate(shape_info, fused_scheduled_result, generated),
+            af::SUCCESS);
+  const std::string &tiling_data = generated.tiling_data;
+  const std::string g0_struct_begin = "BEGIN_TILING_DATA_DEF_T(AscGraph0ScheduleResult0G0TilingData)";
+  const auto g0_begin = tiling_data.find(g0_struct_begin);
+  ASSERT_NE(g0_begin, std::string::npos) << tiling_data;
+  const auto g0_end = tiling_data.find("BEGIN_TILING_DATA_DEF_T(", g0_begin + g0_struct_begin.size());
+  const std::string g0_struct_block =
+      tiling_data.substr(g0_begin, (g0_end == std::string::npos ? tiling_data.size() : g0_end) - g0_begin);
+  EXPECT_NE(g0_struct_block.find("TILING_DATA_FIELD_DEF_T(int64_t, s2);"), std::string::npos) << g0_struct_block;
+  EXPECT_NE(generated.tiling.find("graph0_result0_g0_tiling_data.set_s2(s2)"), std::string::npos) << generated.tiling;
 }
 
 TEST_F(TestOptimizer, SliceSliceConcatD) {

@@ -707,16 +707,39 @@ inline __aicore__ void VRegGather(__local_mem__ T1 *y_addr, __local_mem__ T1 *x_
   }
 }
 template <typename T1, typename T2, bool negative_index_support>
-inline __aicore__ void GatherExtendVReg(int32_t offset, AscendC::LocalTensor<uint8_t> &tmp_buf,
+inline __aicore__ bool GatherExtendVReg(int32_t offset, AscendC::LocalTensor<uint8_t> &tmp_buf,
                                         uint32_t gather_dim_size, const AscendC::LocalTensor<T1> &yLocal,
                                         const AscendC::GlobalTensor<T1> &src1, const AscendC::GlobalTensor<T2> &src2,
                                         int32_t cols, uint32_t tmp_buf_size) {
+  using indiceType = typename IndexTypeGet<T1>::type;
+  constexpr uint32_t vf_len = AscendC::GetVecLen() / sizeof(indiceType);
+  const uint64_t param_bytes = static_cast<uint64_t>(gather_dim_size) * sizeof(T1);
+  const uint64_t indice_offset =
+      (param_bytes + AscendC::ONE_BLK_SIZE - 1) / AscendC::ONE_BLK_SIZE * AscendC::ONE_BLK_SIZE;
+  if (indice_offset >= tmp_buf_size) {
+    return false;
+  }
+  uint32_t remaining_bytes = tmp_buf_size - indice_offset;
+  uint32_t bytes_per_index = sizeof(T2);
+  if constexpr (sizeof(T2) == sizeof(int64_t)) {
+    // Reserve the int32 conversion buffer and its worst-case 64-byte alignment gap.
+    if (remaining_bytes < INT64_OFFSET) {
+      return false;
+    }
+    remaining_bytes -= INT64_OFFSET - 1;
+    bytes_per_index += sizeof(int32_t);
+  }
+  // LoadIndices reads a full register, including on the final masked iteration.
+  // Full-register chunks also keep every output chunk aligned for vector stores.
+  const uint32_t max_out_cols = remaining_bytes / bytes_per_index / vf_len * vf_len;
+  if (max_out_cols == 0) {
+    return false;
+  }
+
   LocalTensor<T1> xLocal;
   xLocal = tmp_buf[0].template ReinterpretCast<T1>();
 
   LocalTensor<T2> indicesLocal;
-  int32_t st_offset = gather_dim_size * sizeof(T1);
-  int32_t indice_offset = st_offset + (32 - st_offset % 32);
   indicesLocal = tmp_buf[indice_offset].template ReinterpretCast<T2>();
 
   LocalTensor<int32_t> tmpLocal;
@@ -735,18 +758,6 @@ inline __aicore__ void GatherExtendVReg(int32_t offset, AscendC::LocalTensor<uin
   AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(event_id_v_to_mte2_0);
   AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(event_id_v_to_mte2_0);
   AscendC::DataCopyPad(xLocal, src1, param_src, param_src_pad);
-  int32_t max_out_cols;
-  uint32_t limit_size = tmp_buf_size - gather_dim_size * sizeof(T1);
-  uint32_t limit_nums = limit_size / sizeof(T2);
-  if constexpr (sizeof(T2) == sizeof(int64_t)) {
-    limit_nums /= 2;
-  }
-  if (limit_nums < 300) {
-    max_out_cols = limit_nums;
-  } else {
-    int32_t copy_offset = 32 / sizeof(T1);
-    max_out_cols = copy_offset * (limit_nums / copy_offset);
-  }
   int64_t out_loop_num = (cols + max_out_cols - 1) / max_out_cols;
   int32_t tail_out_cols = cols - (out_loop_num - 1) * max_out_cols;
   __local_mem__ T1 *y_addr = (__local_mem__ T1 *)yLocal.GetPhyAddr();
@@ -765,20 +776,14 @@ inline __aicore__ void GatherExtendVReg(int32_t offset, AscendC::LocalTensor<uin
 
     __local_mem__ int32_t *indice_addr;
 
-    using indiceType = typename IndexTypeGet<T1>::type;
-
-    constexpr static uint32_t VECTOR_LENGTH = AscendC::GetVecLen();
-    constexpr static uint32_t SIZE_OF_DTYPE = sizeof(float);
-    constexpr static uint32_t ELEMENT_PER_VECTOR_LENGTH = VECTOR_LENGTH / SIZE_OF_DTYPE;
     uint32_t num_per_loop = cur_out_cols;
-    constexpr int16_t vf_len = VECTOR_LENGTH / sizeof(indiceType);
     uint16_t vf_loop_num = (num_per_loop + vf_len - 1) / vf_len;
     int32_t dim_size = gather_dim_size;
     AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(event_id_mte2_to_v);
     AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(event_id_mte2_to_v);
     if constexpr (sizeof(T2) == sizeof(int64_t)) {
       int32_t base_offset = indice_offset + num_per_loop * sizeof(T2);
-      int32_t tmp_offset = base_offset + (INT64_OFFSET - base_offset % INT64_OFFSET);
+      int32_t tmp_offset = (base_offset + INT64_OFFSET - 1) / INT64_OFFSET * INT64_OFFSET;
       tmpLocal = tmp_buf[tmp_offset].template ReinterpretCast<int32_t>();
       Cast(tmpLocal, indicesLocal, AscendC::RoundMode::CAST_NONE, cur_out_cols);
       if constexpr (negative_index_support) {
@@ -796,6 +801,7 @@ inline __aicore__ void GatherExtendVReg(int32_t offset, AscendC::LocalTensor<uin
     AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(event_id_v_to_mte2);
     AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(event_id_v_to_mte2);
   }
+  return true;
 }
 /***********************************************************************************************************************************************************************************/
 
@@ -898,9 +904,8 @@ inline __aicore__ void GatherExtend(AscendC::LocalTensor<T1> &dst, const AscendC
                                     DECLARE_VECTORIZED_AXIS_PARAMS_SIMD(8)) {
   {
     bool run_later = (VECTORIZED_AXIS_SIZE == 1 && param_size <= 30000 && param_axis_size == 1 && tmp_buf_size > 8192);
-    if (run_later) {
-      GatherExtendVReg<T1, T2, negative_index_support>(offset, tmp_buf, param_size, dst, src1, src2[offset],
-                                                       ub_actual_size, tmp_buf_size);
+    if (run_later && GatherExtendVReg<T1, T2, negative_index_support>(offset, tmp_buf, param_size, dst, src1,
+                                                                      src2[offset], ub_actual_size, tmp_buf_size)) {
       return;
     }
   }

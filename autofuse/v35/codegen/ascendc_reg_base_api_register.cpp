@@ -261,6 +261,9 @@ Register::Register() {
   const std::string kAscendcI1eRegBaseStr = {
 #include "i1e_reg_base.h"
   };
+  const std::string kAscendcI1RegBaseStr = {
+#include "i1_reg_base.h"
+  };
   const std::string kAscendcBesselJ0RegBaseStr = {
 #include "bessel_j0_reg_base.h"
   };
@@ -315,11 +318,17 @@ Register::Register() {
   const std::string kAscendcNextAfterRegBaseStr = {
 #include "next_after_reg_base.h"
   };
+  const std::string kAscendcBucketizeRegBaseStr = {
+#include "bucketize_reg_base.h"
+  };
   const std::string kAscendcPolyGammaRegBaseStr = {
 #include "polygamma_reg_base.h"
   };
   const std::string kAscendcRandomRegBaseStr = {
 #include "random_reg_base.h"
+  };
+  const std::string kAscendcRandIntRegBaseStr = {
+#include "randint_reg_base.h"
   };
   const std::string kAscendcSignBitRegBaseStr = {
 #include "signbit_reg_base.h"
@@ -414,6 +423,9 @@ Register::Register() {
   const std::string kAscendcRoundRegBaseStr = {
 #include "round_reg_base.h"
   };
+  const std::string kAscendcShiftRegBaseStr = {
+#include "shift_reg_base.h"
+  };
   const std::string kAscendcCeilRegBaseStr = {
 #include "ceil_reg_base.h"
   };
@@ -425,6 +437,24 @@ Register::Register() {
   };
   const std::string kAscendcMulRegBaseStr = {
 #include "mul_reg_base.h"
+  };
+  const std::string kAscendcArgmaxRegBaseStr = {
+#include "argmax_reg_base.h"
+  };
+  const std::string kAscendcArgminRegBaseStr = {
+#include "argmin_reg_base.h"
+  };
+  const std::string kAscendcArgReduceRegBaseStr = {
+#include "arg_reduce_reg_base.h"
+  };
+  const std::string kAscendcArgReduceCommonRegBaseStr = {
+#include "arg_reduce_common_reg_base.h"
+  };
+  const std::string kAscendcArgReduceCoreRegBaseStr = {
+#include "arg_reduce_core_reg_base.h"
+  };
+  const std::string kAscendcArgReduceMergeRegBaseStr = {
+#include "arg_reduce_merge_reg_base.h"
   };
   std::unordered_map<std::string, std::string> api_to_file{
       {"cast_reg_base.h", kAscendcCastRegStr},
@@ -480,6 +510,7 @@ Register::Register() {
       {"i0_reg_base.h", kAscendcI0RegBaseStr},
       {"i0e_reg_base.h", kAscendcI0eRegBaseStr},
       {"i1e_reg_base.h", kAscendcI1eRegBaseStr},
+      {"i1_reg_base.h", kAscendcI1RegBaseStr},
       {"bessel_j_utils_reg_base.h", kAscendcBesselJUtilsRegBaseStr},
       {"bessel_j0_reg_base.h", kAscendcBesselJ0RegBaseStr},
       {"bessel_j1_reg_base.h", kAscendcBesselJ1RegBaseStr},
@@ -499,8 +530,10 @@ Register::Register() {
       {"ndtri_reg_base.h", kAscendcNdtriRegBaseStr},
       {"log_ndtr_reg_base.h", kAscendcLogNdtrRegBaseStr},
       {"next_after_reg_base.h", kAscendcNextAfterRegBaseStr},
+      {"bucketize_reg_base.h", kAscendcBucketizeRegBaseStr},
       {"polygamma_reg_base.h", kAscendcPolyGammaRegBaseStr},
       {"random_reg_base.h", kAscendcRandomRegBaseStr},
+      {"randint_reg_base.h", kAscendcRandIntRegBaseStr},
       {"signbit_reg_base.h", kAscendcSignBitRegBaseStr},
       {"frexp_reg_base.h", kAscendcFrexpRegBaseStr},
       {"shifted_chebyshev_polynomial_utils_reg_base.h", kAscendcShiftedChebyshevPolynomialUtilsRegBaseStr},
@@ -531,11 +564,18 @@ Register::Register() {
       {"rsqrt_reg_base.h", kAscendcRsqrtRegBaseStr},
       {"sqrt_reg_base.h", kAscendcSqrtRegBaseStr},
       {"round_reg_base.h", kAscendcRoundRegBaseStr},
+      {"shift_reg_base.h", kAscendcShiftRegBaseStr},
       {"reciprocal_reg_base.h", kAscendcReciprocalRegBaseStr},
       {"ceil_reg_base.h", kAscendcCeilRegBaseStr},
       {"acosh_reg_base.h", kAscendcAcoshRegBaseStr},
       {"cosh_reg_base.h", kAscendcCoshRegBaseStr},
       {"mul_reg_base.h", kAscendcMulRegBaseStr},
+      {"argmin_reg_base.h", kAscendcArgminRegBaseStr},
+      {"arg_reduce_reg_base.h", kAscendcArgReduceRegBaseStr},
+      {"arg_reduce_common_reg_base.h", kAscendcArgReduceCommonRegBaseStr},
+      {"arg_reduce_core_reg_base.h", kAscendcArgReduceCoreRegBaseStr},
+      {"arg_reduce_merge_reg_base.h", kAscendcArgReduceMergeRegBaseStr},
+      {"argmax_reg_base.h", kAscendcArgmaxRegBaseStr},
   };
 
   AscendCApiRegistry::GetInstance().RegisterApi(api_to_file);

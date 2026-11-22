@@ -200,6 +200,15 @@ af::Status CodegenApiParam::Register(af::AscNodePtr node, CodegenApiParamPtr api
   return af::SUCCESS;
 }
 
+CodegenApiParamPtr CodegenApiParam::TryGetNodeApiParam(const af::AscNodePtr &node) {
+  if (node == nullptr || node->GetOpDesc() == nullptr) {
+    return nullptr;
+  }
+  CodegenApiParamPtr api_param = nullptr;
+  api_param = node->GetOpDesc()->TryGetExtAttr(kCodegenApiParam, api_param);
+  return api_param;
+}
+
 CodegenApiParamPtr CodegenApiParam::GetNodeApiParam(af::AscNodePtr node) {
   auto op_desc = node->GetOpDesc();
   GE_ASSERT_NOTNULL(op_desc);

@@ -87,9 +87,17 @@ TEST_F(TestBackendInductorTopnE2e, EmptyTensorInductorTilingShouldSkipPerfEvalua
   graph_attr->axis[store->outputs[0].attr.axis[0]]->size = af::Symbol(0);
 
   codegen::Codegen codegen(codegen::CodegenOptions{});
-  const auto tiling_files = codegen.GenerateTilingForInductor(fused_schedule_result);
-  const auto &tiling = tiling_files.at(codegen::kTilingDefAndConstIdentify);
+  codegen::CodegenResult result;
+  ASSERT_EQ(codegen.GenerateForInductor(fused_schedule_result, result), 0);
+  const auto &tiling = result.tiling;
   EXPECT_NE(tiling.find("return DBL_MAX;"), std::string::npos);
   EXPECT_EQ(tiling.find("optiling::GetPerf"), std::string::npos);
+
+  std::fstream empty_tiling_data_file(EMPTY_TILING_DEF_FILE, std::ios::out);
+  std::fstream empty_host_file(EMPTY_HOST_CODE_FILE, std::ios::out);
+  ASSERT_TRUE(empty_tiling_data_file.is_open());
+  ASSERT_TRUE(empty_host_file.is_open());
+  empty_tiling_data_file << result.tiling_data;
+  empty_host_file << result.tiling;
 }
 }  // namespace

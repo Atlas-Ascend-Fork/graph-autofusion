@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -35,6 +36,8 @@ constexpr char kTemplateTileInnerAxisAttr[] = "af.internal.indirect_load.tile_in
 constexpr char kTemplateVectorizedAxesAttr[] = "af.internal.indirect_load.vectorized_axes";
 constexpr char kTemplateSyntheticOuterAttr[] = "af.internal.indirect_load.synthetic_outer";
 constexpr char kImplementationAttr[] = "af.internal.indirect_load.implementation";
+constexpr char kSimdInputInnerAxisHintAttr[] = "af.internal.indirect_load.simd_input_inner_axis";
+constexpr char kSimtGroupMemberAttr[] = "af.internal.indirect_load.simt_group_member";
 bool IsValidLogicalTensorView(const LogicalTensorView &view) {
   return !view.axis_ids.empty() && view.axis_ids.size() == view.sizes.size() &&
          view.axis_ids.size() == view.strides.size();
@@ -88,6 +91,63 @@ bool TryClassifyDynamicShapeLayout(const LogicalTensorView &logical, IndirectLoa
     }
     layout.kind = IndirectLoadLayoutKind::kZeroStrideCompact;
     return true;
+  }
+  // 无零 stride 的动态视图与静态流程使用同一符号连续性判据证明 dense：证明成立时
+  // dense facade（RegisterGather/GatherApi）的 kernel 参数全部为运行时表达式，
+  // 动态 shape 可安全使用向量化 Gather；证明不成立（维间存在不可排除的物理间隙）
+  // 时保持 kStrided，由 codegen 运行时推导 offsets。
+  physical_span = af::sym::kSymbolOne;
+  bool has_physical_gap = false;
+  for (size_t index = logical.sizes.size(); index > 0UL; --index) {
+    const size_t dim = index - 1UL;
+    if (af::SymbolicUtils::StaticCheckLt(logical.strides[dim], physical_span) != af::TriBool::kFalse) {
+      layout.kind = IndirectLoadLayoutKind::kStrided;
+      return true;
+    }
+    has_physical_gap =
+        has_physical_gap || af::SymbolicUtils::StaticCheckEq(logical.strides[dim], physical_span) != af::TriBool::kTrue;
+    physical_span = physical_span + (logical.sizes[dim] - af::sym::kSymbolOne) * logical.strides[dim];
+  }
+  layout.kind = has_physical_gap ? IndirectLoadLayoutKind::kStrided : IndirectLoadLayoutKind::kDense;
+  return true;
+}
+
+// 转置稠密视图检测：存在轴排列使行主序稠密链精确衔接（每层 stride 等于已覆盖跨度）
+// 时，视图物理非重叠且完整覆盖底层数据，仅逻辑轴序非行主序，判 kStrided（与动态
+// 分支对动态形状统一判 kStrided 的语义一致；kDense 要求轴序与物理序一致，不适用）。
+// 链按 stride 值唯一吸收：歧义只会出现在重叠视图（链必断，正确拒绝）；退化轴
+// （size==1）单元素，任意位置入链。stride 互质的混洗（如 [2,3] strides=[3,2]）
+// 每维跨步、不在倍数链内，维持拒绝。
+bool TryClassifyTransposedDenseLayout(const LogicalTensorView &logical, IndirectLoadTensorLayout &layout) {
+  const size_t rank = logical.sizes.size();
+  std::vector<bool> used(rank, false);
+  af::Expression expected = af::sym::kSymbolOne;
+  for (;;) {
+    // 非退化轴优先入链并推进已覆盖跨度；退化轴随后扫尾（不改变链）。
+    bool progressed = false;
+    for (size_t dim = 0UL; dim < rank; ++dim) {
+      if (used[dim] || af::SymbolicUtils::StaticCheckEq(logical.sizes[dim], af::ops::One) == af::TriBool::kTrue) {
+        continue;
+      }
+      if (af::SymbolicUtils::StaticCheckEq(logical.strides[dim], expected) != af::TriBool::kTrue) {
+        continue;
+      }
+      used[dim] = true;
+      expected = af::sym::Mul(expected, logical.sizes[dim]);
+      progressed = true;
+    }
+    if (!progressed) {
+      break;
+    }
+  }
+  for (size_t dim = 0UL; dim < rank; ++dim) {
+    if (used[dim] || af::SymbolicUtils::StaticCheckEq(logical.sizes[dim], af::ops::One) != af::TriBool::kTrue) {
+      continue;
+    }
+    used[dim] = true;  // 退化轴（size==1）单元素，任意正 stride 均非重叠。
+  }
+  if (!std::all_of(used.begin(), used.end(), [](bool dim_used) { return dim_used; })) {
+    return false;
   }
   layout.kind = IndirectLoadLayoutKind::kStrided;
   return true;
@@ -182,7 +242,7 @@ PostReduceChain FindPostReduceChain(const af::AscNodePtr &node) {
 
   af::AscNodePtr reduce;
   for (size_t index = 0UL; index < pending.size(); ++index) {
-    const auto &current = pending[index];
+    const auto current = pending[index];
     if (current->attr.api.compute_type == af::ComputeType::kComputeReduce) {
       if (reduce == nullptr) {
         reduce = current;
@@ -268,6 +328,52 @@ af::AscNodePtr GetPostReduceInputProducer(const af::AscNodePtr &node) {
   return FindPostReduceChain(node).input_producer;
 }
 
+af::AscNodePtr GetSimtPostReduceLocalProducer(const af::AscNodePtr &node) {
+  const auto chain = FindPostReduceChain(node);
+  const auto reduce = chain.reduce;
+  const auto input_producer = chain.input_producer;
+  if (reduce == nullptr) {
+    return nullptr;
+  }
+  // Materialize the shared pre-reduction value when the normalization tail
+  // consumes it as well. A scalar evaluator cannot expose intermediate values
+  // through the single UB target reserved for the reduction input.
+  std::unordered_set<const af::AscNode *> tail;
+  std::vector<af::AscNodePtr> tail_nodes{reduce};
+  for (size_t i = 0UL; i < tail_nodes.size(); ++i) {
+    const auto current = tail_nodes[i];
+    if (!tail.emplace(current.get()).second) {
+      continue;
+    }
+    for (const auto &out : current->GetOutDataNodes()) {
+      const auto next = std::dynamic_pointer_cast<af::AscNode>(out);
+      if (next != nullptr) {
+        tail_nodes.emplace_back(next);
+      }
+    }
+  }
+  auto local_producer = input_producer;
+  auto boundary = input_producer;
+  while (boundary != nullptr && boundary != node) {
+    for (const auto &out : boundary->GetOutDataNodes()) {
+      const auto consumer = std::dynamic_pointer_cast<af::AscNode>(out);
+      if (consumer != nullptr && consumer != reduce && tail.count(consumer.get()) != 0UL) {
+        local_producer = boundary;
+      }
+    }
+    const auto producer = GetInputProducer(boundary, 0UL);
+    bool same_producer = producer != nullptr;
+    for (size_t i = 1UL; i < boundary->inputs.Size() && same_producer; ++i) {
+      same_producer = GetInputProducer(boundary, i) == producer;
+    }
+    if (!same_producer) {
+      break;
+    }
+    boundary = producer;
+  }
+  return local_producer;
+}
+
 bool ShouldSkipTpipeTensorCollection(const af::AscNodePtr &node) {
   const TemplateBehavior behavior = GetTemplateBehavior(node);
   const af::AscNodePtr consumer = GetOnlyOutputConsumer(node);
@@ -289,11 +395,20 @@ bool ShouldSkipTpipeTensorCollection(const af::AscNodePtr &node) {
       if (candidate == nullptr || !af::ops::IsOps<af::ascir_op::IndirectLoad>(candidate)) {
         continue;
       }
-      const auto post_reduce_producer = GetPostReduceInputProducer(candidate);
+      const auto post_reduce_producer = GetSimtPostReduceLocalProducer(candidate);
       if (post_reduce_producer != nullptr && post_reduce_producer->GetName() == node->GetName()) {
         return false;
       }
     }
+  }
+  // 豁免3：SIMT 组成员（kSimtOp + 组员标记）的输出即成员 value 的 UB 局部目标——
+  // 调度期已按真实 UB buffer/queue 分配（与同 buffer 其他租户共用，不新增分配），
+  // fused GenerateSimt 按 target_tensor_id 从 tpipe 取该张量，L3 归并链的扇出向量
+  // 代码亦经 tpipe 解析输入，必须收集。kSimtOp + post-Reduce 形态已由 GetTemplateBehavior
+  // 清 skip 覆盖（组路径无 post-Reduce 时依赖本豁免）；单 gather IL 无组员标记不受影响。
+  if (af::ops::IsOps<af::ascir_op::IndirectLoad>(node) && GetTemplateRole(node) == TemplateRole::kSimtOp &&
+      IsSimtGroupMember(node)) {
+    return false;
   }
   return true;
 }
@@ -449,6 +564,20 @@ bool IsContiguousSuffixImpl(const LogicalTensorView &view, size_t axis_index, bo
   return true;
 }
 
+// [动态 shape 步长正性·稠密等式证据] gather 轴步长的正性判定：优先独立证明 stride > 0；
+// 证不出时接受「轴步长 == 后缀稠密积」的等式证据（由调用点的连续性链复证）。shape 维度
+// 语义非负，等式成立时负步长不可达；步长为 0 仅当某后缀 size 为 0（空轴），该后缀迭代
+// 空间为空、行寻址不实例化，运行语义自守恒。动态 sizevar 无正性公理，StaticCheckGt 恒为
+// kUnknown——历史上一票否决 embedding_like / IsSimdEmbeddingAccess，使动态 embedding 图
+// （前端产出符号步长视图，如 strides=[ks2, 1]）整体失去 SIMT 结构化通道（同图静态可得
+// 行向量化 kernel，动态退化为逐元素标量）；静态图 Gt(0) 通常直接可证，行为不变。等式
+// 不可证时维持保守拒绝；负步长/非正 size 由布局分类 ClassifyTensorDim 上游已判
+// kIllegal、无法到达此处，不依赖本函数兜底。
+bool IsAxisStrideProvablyPositive(const af::Expression &axis_stride, const af::Expression &dense_stride) {
+  return af::SymbolicUtils::StaticCheckGt(axis_stride, af::sym::kSymbolZero) == af::TriBool::kTrue ||
+         af::SymbolicUtils::StaticCheckEq(axis_stride, dense_stride) == af::TriBool::kTrue;
+}
+
 bool IsContiguousSuffix(const LogicalTensorView &view, size_t axis_index) {
   bool has_payload = false;
   af::Expression axis_stride;
@@ -511,6 +640,11 @@ bool IsPayloadInvariantView(const af::AscTensorAttr &source_attr, const LogicalT
 
 bool IsIndexPayloadInvariantFromSources(const af::AscNodePtr &indirect_load, const LogicalTensorView &input,
                                         const LogicalTensorView &index, size_t axis_index) {
+  // A converged index requires at least one payload axis after the gather axis.
+  // With an axis-last gather, an empty suffix would otherwise vacuously pass the invariant check.
+  if (axis_index + 1UL >= index.axis_ids.size()) {
+    return false;
+  }
   const af::AscNodePtr root = GetInputProducer(indirect_load, kIndexTensorIndex);
   if (root == nullptr) {
     return false;
@@ -590,7 +724,7 @@ bool IsSimdEmbeddingAccess(const TemplateLogicalView &logical_view, const Indire
       return false;
     }
   }
-  return af::SymbolicUtils::StaticCheckGt(input.strides[axis], af::sym::kSymbolZero) == af::TriBool::kTrue;
+  return IsAxisStrideProvablyPositive(input.strides[axis], input_axis_stride);
 }
 }  // namespace
 
@@ -632,8 +766,15 @@ af::Status AnalyzeIndirectLoadAccess(const af::AscNodePtr &node, const TemplateL
   // dense even when their values repeat along a payload axis).
   const bool index_has_zero_stride_on_inner_axes = HasZeroStrideOnInputPayload(input, index, axis_index) ||
                                                    IsIndexPayloadInvariantFromSources(node, input, index, axis_index);
+  bool input_suffix_has_payload = false;
+  af::Expression input_axis_dense_stride;
+  IsContiguousSuffixImpl(input, axis_index, true, input_suffix_has_payload, input_axis_dense_stride);
+  // [动态 shape 正性证据] Gt(stride, 0) 不可证时以「轴步长 == 后缀稠密积」等式为正性
+  // 替代证据（见 IsAxisStrideProvablyPositive 注释）：静态图 Gt(0) 通常直接可证、行为
+  // 不变；动态符号步长（inductor 前端 strides=[ks2, 1] 形态）由 Eq(stride, dense) 解锁
+  // embedding_like，恢复 SIMT 结构化通道。
   const bool input_axis_stride_is_positive =
-      af::SymbolicUtils::StaticCheckGt(input.strides[axis_index], af::sym::kSymbolZero) == af::TriBool::kTrue;
+      IsAxisStrideProvablyPositive(input.strides[axis_index], input_axis_dense_stride);
   // An Embedding-like access must have a non-empty payload suffix after the
   // gather axis.  Without this guard, a last-axis gather vacuously satisfies
   // the zero-stride/contiguous-payload checks and is misclassified as
@@ -642,9 +783,6 @@ af::Status AnalyzeIndirectLoadAccess(const af::AscNodePtr &node, const TemplateL
   // zero-stride (broadcast), the payload-invariance proof is vacuous and the
   // index may legitimately vary along the inner axes, which the Embedding
   // address policy cannot express.
-  bool input_suffix_has_payload = false;
-  af::Expression input_axis_dense_stride;
-  IsContiguousSuffixImpl(input, axis_index, true, input_suffix_has_payload, input_axis_dense_stride);
   const bool has_payload_suffix = axis_index + 1UL < rank && input_suffix_has_payload;
   const bool embedding_like = has_payload_suffix && index_has_zero_stride_on_inner_axes &&
                               IsContiguousPayloadSuffix(input, axis_index) && IsContiguousSuffix(output, axis_index) &&
@@ -725,7 +863,11 @@ af::Status CollectSimtLoweringBackwardNodes(const af::AscNodePtr &root, const af
     if (current == nullptr || current == indirect_load || !nodes.emplace(current.get()).second) {
       continue;
     }
-    if (IsSimtDirectGmBoundary(current) || af::ops::IsOps<af::ascir_op::Scalar>(current) ||
+    // Nddma 无论是否带 SIMT direct-GM 角色，本质都是 GM 搬运节点，标量求值器不能展开其内部：
+    // 复合 Norm 普通调度侧输入经 NddmaTemplate 合并 Load→Broadcast 后即为无角色的队列搬运
+    // Nddma，越过它会走到 Data 图输入端子。Data 按定义无生产者，同样是合法的 walk 终止边界。
+    if (IsSimtDirectGmBoundary(current) || af::ops::IsOps<af::ascir_op::Nddma>(current) ||
+        af::ops::IsOps<af::ascir_op::Data>(current) || af::ops::IsOps<af::ascir_op::Scalar>(current) ||
         af::ops::IsOps<af::ascir_op::ScalarData>(current) || af::ops::IsOps<af::ascir_op::Arange>(current)) {
       continue;
     }
@@ -797,6 +939,14 @@ af::Status CollectSimtOutputChainBuilds(const NodePath &graph_nodes, const af::A
     chain.metadata.result_tensor_id = producer->outputs()[producer_output_index]->attr.mem.tensor_id;
     chain.metadata.target_tensor_id = node->outputs()[0]->attr.mem.tensor_id;
     chain.metadata.dtype = producer->outputs()[producer_output_index]->attr.dtype;
+    const auto &target_attr = node->outputs()[0]->attr;
+    chain.metadata.target_sizes = target_attr.repeats;
+    chain.metadata.target_strides = target_attr.strides;
+    af::Expression store_offset = af::ops::Zero;
+    if (node->attr.ir_attr != nullptr) {
+      (void)node->attr.ir_attr->GetAttrValue("offset", store_offset);
+    }
+    chain.metadata.target_offset = store_offset;
     chains.emplace_back(std::move(chain));
   }
   return af::SUCCESS;
@@ -946,6 +1096,45 @@ bool CanUseUint32Offsets(const LogicalTensorView &input, const LogicalTensorView
          index_max <= limit && TryGetMaxElementOffset(output, output_max) && output_max <= limit;
 }
 
+// Decomposed store addressing only engages when the target view mirrors the logical output view
+// (rank and sizes equal); every other target view keeps legacy linear addressing (offset +
+// output_index), whose extent the dense logical output view already bounds. Merged (ApplyMerge)
+// or split store views therefore only need the static offset check, while mirroring views must
+// prove their full static span fits the offset width.
+bool StoreTargetsFitUint32(const std::vector<SimtOutputChainMetadata> &chains, const LogicalTensorView &output) {
+  const uint64_t limit = std::numeric_limits<uint32_t>::max();
+  uint64_t output_max = 0U;
+  if (!TryGetMaxElementOffset(output, output_max)) {
+    return false;
+  }
+  for (const SimtOutputChainMetadata &chain : chains) {
+    if (chain.local_target) {
+      continue;
+    }
+    int64_t offset = 0L;
+    if (!chain.target_offset.GetConstValue(offset) || offset < 0L) {
+      return false;
+    }
+    uint64_t span = static_cast<uint64_t>(offset);
+    if (span > limit) {
+      return false;
+    }
+    if (chain.target_sizes.size() != output.sizes.size() || chain.target_strides.size() != output.sizes.size() ||
+        chain.target_sizes != output.sizes) {
+      if (output_max + span > limit) {
+        return false;
+      }
+      continue;
+    }
+    for (size_t dim = 0UL; dim < chain.target_sizes.size(); ++dim) {
+      if (!TryAccumulateStaticOffset(chain.target_sizes[dim], chain.target_strides[dim], span) || span > limit) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
 bool CanUseUint32Divisors(const LogicalTensorView &index) {
   for (const af::Expression &size_expr : index.sizes) {
     int64_t size = 0L;
@@ -1025,8 +1214,8 @@ void AppendRuntimeParams(std::vector<af::Expression> &target, const std::vector<
 }
 
 af::Status BuildSimtPolicyMetadata(const TemplateLogicalView &logical_view, const NodePath &index_nodes, size_t axis,
-                                   bool embedding_structured, bool &mixed_index_views, SimtPolicyMetadata &metadata,
-                                   LogicalTensorView &policy_index_view) {
+                                   bool embedding_structured, bool &mixed_index_views, bool store_targets_fit_uint32,
+                                   SimtPolicyMetadata &metadata, LogicalTensorView &policy_index_view) {
   const size_t rank = logical_view.input.sizes.size();
   GE_ASSERT_TRUE(rank < 64UL, "IndirectLoad SIMT rank must be smaller than 64.");
   LogicalTensorView input = logical_view.input;
@@ -1078,8 +1267,8 @@ af::Status BuildSimtPolicyMetadata(const TemplateLogicalView &logical_view, cons
       (metadata.policy != SimtAddressPolicy::kRecursive && metadata.policy != SimtAddressPolicy::kStrided &&
        metadata.policy != SimtAddressPolicy::kEmbedding) ||
       CanUseUint32Divisors(index);
-  if (CanUseUint32Offsets(input, index, output) && structured_magic_supported && static_inner_magic_supported &&
-      general_magic_supported) {
+  if (CanUseUint32Offsets(input, index, output) && store_targets_fit_uint32 && structured_magic_supported &&
+      static_inner_magic_supported && general_magic_supported) {
     metadata.offset_width = SimtOffsetWidth::kUint32;
   }
   switch (metadata.policy) {
@@ -1101,7 +1290,13 @@ af::Status BuildSimtPolicyMetadata(const TemplateLogicalView &logical_view, cons
       AppendRuntimeParams(metadata.runtime_params, input.strides);
       break;
     case SimtAddressPolicy::kStrided:
-      AppendRuntimeParams(metadata.runtime_params, index.sizes);
+      // [多路融合参数坍缩修复] 分解除数必须取 IL 自身输出尺寸（output_index 的坐标
+      // 空间），不能取 index 视图尺寸——单路 IL 两者恒等无差异；多路融合共享
+      // broadcast index 时，非 primary 成员的 index 视图可能解析为 raw Load 窗口
+      // （如 [1,1,5]）而非 broadcast 输出（如 [88,4752,5]），导致分解坍缩
+      // → 所有元素恒读 input[0,idx,0,0] → 常向量（静默精度错误）。
+      // kEmbedding/kRecursive 不改：其 index 视图语义就是输出坐标（单路恒等）。
+      AppendRuntimeParams(metadata.runtime_params, output.sizes);
       AppendRuntimeParams(metadata.runtime_params, input.strides);
       AppendRuntimeParams(metadata.runtime_params, index.strides);
       break;
@@ -1134,9 +1329,11 @@ af::Status ValidateSimtOutputPlan(const SimtLoweringMetadata &metadata) {
       static_cast<size_t>(std::count_if(metadata.output_chains.begin(), metadata.output_chains.end(),
                                         [](const SimtOutputChainMetadata &chain) { return chain.local_target; }));
   GE_ASSERT_TRUE(local_target_count <= 1UL, "IndirectLoad SIMT supports at most one local output target.");
-  GE_ASSERT_TRUE(metadata.has_post_reduce == (local_target_count == 1UL),
-                 "IndirectLoad SIMT post Reduce and local output target must appear together.");
-  if (local_target_count == 1UL) {
+  // 单 gather：post Reduce 与 local target 必须成对出现；多 gather 组员：value 直接写 UB 局部
+  // 目标（归并/输出链为普通向量代码），允许 local target 不伴随 post Reduce。
+  GE_ASSERT_TRUE(!metadata.has_post_reduce || local_target_count == 1UL,
+                 "IndirectLoad SIMT post Reduce requires a local output target.");
+  if (metadata.has_post_reduce) {
     const auto &local_chain = metadata.output_chains.back();
     GE_ASSERT_TRUE(local_chain.local_target && local_chain.result_tensor_id == metadata.output_result_tensor_id &&
                        local_chain.target_tensor_id == metadata.output_result_tensor_id &&
@@ -1150,7 +1347,10 @@ af::Status BuildSimtLoweringMetadata(const af::AscNodePtr &indirect_load, Indire
   NodePath graph_nodes;
   GE_ASSERT_SUCCESS(GetStableGraphNodes(indirect_load, graph_nodes));
   auto &simt = metadata.simt;
-  const af::AscNodePtr post_reduce = GetPostReduceConsumer(indirect_load);
+  // 多 gather 组员：SIMT 计划仅含本路 index 链与 input 读取；共享归并/输出链不进入计划
+  // （普通向量代码在全部组员 invocation 之后执行），value 直接写 UB 局部目标。
+  const bool is_group_member = IsSimtGroupMember(indirect_load);
+  const af::AscNodePtr post_reduce = is_group_member ? nullptr : GetPostReduceConsumer(indirect_load);
   simt.has_post_reduce = post_reduce != nullptr;
   const auto inputs = indirect_load->inputs();
   GE_ASSERT_TRUE(inputs.size() == 2UL, "Invalid IndirectLoad SIMT input number:%zu.", inputs.size());
@@ -1165,15 +1365,21 @@ af::Status BuildSimtLoweringMetadata(const af::AscNodePtr &indirect_load, Indire
   NodeSet output_set;
   af::AscNodePtr output_root;
   if (simt.has_post_reduce) {
-    output_root = GetPostReduceInputProducer(indirect_load);
+    output_root = GetSimtPostReduceLocalProducer(indirect_load);
     GE_ASSERT_NOTNULL(output_root, "IndirectLoad post Reduce input has no producer.");
     GE_ASSERT_SUCCESS(CollectSimtLoweringBackwardNodes(output_root, indirect_load, output_set));
   }
 
   std::vector<SimtOutputChainBuild> chain_builds;
-  GE_ASSERT_SUCCESS(CollectSimtOutputChainBuilds(graph_nodes, indirect_load, chain_builds));
-  GE_ASSERT_SUCCESS(
-      CollectSimtIndexChainStoreBuilds(graph_nodes, index_root, simt.index_result_tensor_id, chain_builds));
+  if (is_group_member) {
+    // 组员：仅收 index 生产链尾部的外部 store 链（per-IL，无共享）；不收集 IL 前向输出链。
+    GE_ASSERT_SUCCESS(
+        CollectSimtIndexChainStoreBuilds(graph_nodes, index_root, simt.index_result_tensor_id, chain_builds));
+  } else {
+    GE_ASSERT_SUCCESS(CollectSimtOutputChainBuilds(graph_nodes, indirect_load, chain_builds));
+    GE_ASSERT_SUCCESS(
+        CollectSimtIndexChainStoreBuilds(graph_nodes, index_root, simt.index_result_tensor_id, chain_builds));
+  }
   std::vector<bool> keep_chain(chain_builds.size(), true);
   for (size_t chain_index = 0UL; chain_index < chain_builds.size(); ++chain_index) {
     const bool contains_reduce =
@@ -1225,8 +1431,27 @@ af::Status BuildSimtLoweringMetadata(const af::AscNodePtr &indirect_load, Indire
     GE_ASSERT_TRUE(!output_root->outputs().empty(), "IndirectLoad post Reduce input producer has no output.");
     simt.output_result_tensor_id = output_root->outputs()[0]->attr.mem.tensor_id;
     simt.output_dtype = output_root->outputs()[0]->attr.dtype;
-    simt.output_chains.push_back(
-        {simt.output_node_names, simt.output_result_tensor_id, simt.output_result_tensor_id, simt.output_dtype, true});
+    simt.output_chains.push_back({simt.output_node_names,
+                                  simt.output_result_tensor_id,
+                                  simt.output_result_tensor_id,
+                                  simt.output_dtype,
+                                  true,
+                                  {},
+                                  {},
+                                  af::ops::Zero});
+  } else if (is_group_member) {
+    // 组员输出 = value 直写 UB 局部目标：空变换链，evaluator 的 value 种子直接落 target
+    // （与 post Reduce 合成链同构，见 GenerateSimtOutputsEvaluator 的 values[value_tensor_id]）。
+    simt.output_result_tensor_id = simt.value_tensor_id;
+    simt.output_dtype = indirect_load->outputs()[0]->attr.dtype;
+    simt.output_chains.push_back({std::vector<std::string>{},
+                                  simt.value_tensor_id,
+                                  simt.value_tensor_id,
+                                  simt.output_dtype,
+                                  true,
+                                  {},
+                                  {},
+                                  af::ops::Zero});
   } else {
     GE_ASSERT_TRUE(!simt.output_chains.empty(), "IndirectLoad SIMT output chains are empty.");
     if (simt.output_chains.size() == 1UL) {
@@ -1256,10 +1481,11 @@ af::Status BuildSimtLoweringMetadata(const af::AscNodePtr &indirect_load, Indire
   }
 
   bool mixed_index_views = false;
+  const bool store_targets_fit_uint32 = StoreTargetsFitUint32(simt.output_chains, metadata.logical_view.output);
   LogicalTensorView policy_index_view;
   GE_ASSERT_SUCCESS(BuildSimtPolicyMetadata(metadata.logical_view, index_nodes, static_cast<size_t>(metadata.axis),
                                             metadata.access_info.can_use_simt_structured, mixed_index_views,
-                                            simt.policy, policy_index_view));
+                                            store_targets_fit_uint32, simt.policy, policy_index_view));
   for (const auto &node : index_load_nodes) {
     const LogicalTensorView current_view = GetNodeOutputView(node);
     SimtLoadMetadata load_meta;
@@ -1330,6 +1556,45 @@ bool IsIndexSourceConverged(const af::AscNodePtr &indirect_load) {
          IsIndexPayloadInvariantFromSources(indirect_load, input, index, axis_index);
 }
 
+namespace {
+// 单个 tensor 视图是否将被通用对齐 pad: 与 MayHaveVectorizedPadding 同门槛
+// （vectorized 视图至少两轴才有行间 padding 可言），尾轴宽度按 dtype 对齐 32B 块
+// （ONE_BLK_SIZE同源）有余，即对齐后将引入行间空洞（对齐公式与Tiler::TensorActualSize 的
+// 尾轴 pad 同源。只判静态可证的非对齐：动态shape不动评分，codegen 兜底降级（GenerateSimd padded视图检查）仍兜底正确性
+bool PredictTensorTailPadding(const af::AscTensorAttr &attr) {
+  if (attr.axis.size() != attr.repeats.size() || attr.vectorized_axis.size() != attr.vectorized_strides.size() ||
+      attr.vectorized_axis.size() <= 1UL) {
+    return false;
+  }
+  if (af::SymbolicUtils::StaticCheckEq(attr.vectorized_strides.back(), af::sym::kSymbolZero) == af::TriBool::kTrue) {
+    return false;
+  }
+  const auto axis_it = std::find(attr.axis.begin(), attr.axis.end(), attr.vectorized_axis.back());
+  if (axis_it == attr.axis.end()) {
+    return false;
+  }
+  const size_t axis_pos = static_cast<size_t>(std::distance(attr.axis.begin(), axis_it));
+  int64_t tail_size = 0L;
+  if (!attr.repeats[axis_pos].GetConstValue(tail_size) || tail_size <= 1L) {
+    return false;
+  }
+  const int64_t dtype_size = static_cast<int64_t>(af::GetSizeByDataType(attr.dtype));
+  constexpr int64_t kAlignBlkBytes = 32L;
+  const int64_t blk_elems = kAlignBlkBytes / dtype_size;
+  return blk_elems > 0L && tail_size % blk_elems != 0L;
+}
+}  // namespace
+
+bool PredictSimdAlignmentPadding(const af::AscNodePtr &node) {
+  if (node == nullptr || node->outputs().empty() || node->inputs().size() <= kIndexTensorIndex) {
+    return false;
+  }
+  // 与 FinalizeLoweringMetadata pre-check 的两视图对称：输出 + 索引（变位宽生产者
+  // （cast）产生的索引缓冲同样会被通用对齐 pad）。
+  return PredictTensorTailPadding(node->outputs()[0]->attr) ||
+         PredictTensorTailPadding(node->inputs()[kIndexTensorIndex]->attr);
+}
+
 af::Status FinalizeLoweringMetadata(const af::AscNodePtr &node, bool &is_supported) {
   is_supported = false;
   GE_ASSERT_NOTNULL(node);
@@ -1347,45 +1612,30 @@ af::Status FinalizeLoweringMetadata(const af::AscNodePtr &node, bool &is_support
   Implementation implementation;
   GE_ASSERT_SUCCESS(GetImplementation(node, implementation));
   if (template_id == ::ascir::TemplateId::kIndirectLoadSimd) {
-    // [padded 输出窗口强制 strided] 通用对齐把输出视图尾轴 pad 到对齐块（如 [32行,
-    // 4有效+4空洞] 的行 stride 8）时，dense facade（RegGather）线性稠密写出与视图
-    // 布局不符——下游（Reduce 按 first×行跨度读取、VF 按视图 strides 访问）会把
-    // 稠密数据按 strided 行解释，数值错乱。strided facade 按输出视图 strides 逐行
-    // 写出，与 padded 视图自洽；行内 pad 区由 ReduceInit 的 OptImpl（inner_r 非对齐
-    // 路径）清中性值。判定：输出视图物理跨度（Σ(size-1)*stride+1）大于逻辑元素积
-    // （Πsize）即存在 pad。
-    // [padded 判定源] 必须用输出 tensor 的 vectorized_strides（通用对齐改写的向量化
-    // 视图，Tiler::TensorActualSize 的 actual_size 公式同源）而非 logical_view 的
-    // strides（图原生视图，可能仍为稠密 (4,1)，而对齐已把 vectorized_strides 改写
-    // 为 (8,1)——生产 gather+sum 即此：判定读 logical 层会漏判）。
+    // [padded 视图强制 strided] 通用对齐把视图尾轴 pad 到对齐块（如 [32行, 4有效+4空洞]
+    // 的行 stride 8）时，dense facade（RegGather）线性稠密读写与视图布局不符——输出侧稠密
+    // 写出被下游按 strided 行解释（数值错乱），索引侧按紧凑布局连续读越过真实数据（越界
+    // 读表 AIC 341）。strided facade 按视图 strides 逐行寻址，与 padded 视图自洽。输出与
+    // 索引两视图都判：变位宽生产者（cast）产生的索引缓冲同样会被通用对齐 pad。
+    // [padded 判定源] 必须用 tensor 的 vectorized_strides（通用对齐改写的向量化视图，
+    // Tiler::TensorActualSize 的 actual_size 公式同源）而非 logical_view 的 strides
+    // （图原生视图，可能仍为稠密 (4,1)，而对齐已把 vectorized_strides 改写为 (8,1)——
+    // 生产 gather+sum 即此：判定读 logical 层会漏判）。
+    // [判定方向保守] 物理跨度（Σ(size-1)*stride+1）无法静态证明等于逻辑元素积（Πsize）
+    // 即视为存在 pad——动态 shape 下对齐取整表达式（Ceiling(Rational..)）通常无法证明相等，
+    // 误判只降级 strided（正确性保持），漏判则产生越界。
     const auto &simd_out_attr = node->outputs()[0]->attr;
-    af::Expression out_span = af::sym::kSymbolOne;
-    af::Expression out_product = af::sym::kSymbolOne;
-    bool out_view_valid = simd_out_attr.vectorized_axis.size() == simd_out_attr.vectorized_strides.size() &&
-                          !simd_out_attr.vectorized_axis.empty();
-    if (out_view_valid) {
-      for (size_t dim = 0UL; dim < simd_out_attr.vectorized_axis.size(); ++dim) {
-        const auto axis_it =
-            std::find(simd_out_attr.axis.begin(), simd_out_attr.axis.end(), simd_out_attr.vectorized_axis[dim]);
-        if (axis_it == simd_out_attr.axis.end()) {
-          out_view_valid = false;
-          break;
-        }
-        const size_t axis_pos = static_cast<size_t>(std::distance(simd_out_attr.axis.begin(), axis_it));
-        const auto &vec_stride = simd_out_attr.vectorized_strides[dim];
-        if (af::SymbolicUtils::StaticCheckEq(vec_stride, af::sym::kSymbolZero) == af::TriBool::kTrue) {
-          continue;
-        }
-        out_span = out_span + (simd_out_attr.repeats[axis_pos] - af::sym::kSymbolOne) * vec_stride;
-        out_product = out_product * simd_out_attr.repeats[axis_pos];
-      }
-    }
-    const bool out_padded = out_view_valid && simd_out_attr.vectorized_axis.size() > 1UL &&
-                            af::SymbolicUtils::StaticCheckGt(out_span, out_product) == af::TriBool::kTrue;
-    GELOGI("[IndirectLoad] SIMD fallback pre-check at lowering: node[%s] span[%s] product[%s] padded[%d].",
-           node->GetNamePtr(), out_span.Str().get(), out_product.Str().get(), static_cast<int>(out_padded));
+    const bool out_padded = MayHaveVectorizedPadding(simd_out_attr.axis, simd_out_attr.repeats,
+                                                     simd_out_attr.vectorized_axis, simd_out_attr.vectorized_strides);
+    const auto &simd_index_attr = node->inputs()[kIndexTensorIndex]->attr;
+    const bool index_padded =
+        MayHaveVectorizedPadding(simd_index_attr.axis, simd_index_attr.repeats, simd_index_attr.vectorized_axis,
+                                 simd_index_attr.vectorized_strides);
+    GELOGI("[IndirectLoad] SIMD fallback pre-check at lowering: node[%s] out_padded[%d] index_padded[%d].",
+           node->GetNamePtr(), static_cast<int>(out_padded), static_cast<int>(index_padded));
     const bool strided = metadata.logical_view.input.kind != IndirectLoadLayoutKind::kDense ||
-                         metadata.logical_view.index.kind != IndirectLoadLayoutKind::kDense || out_padded;
+                         metadata.logical_view.index.kind != IndirectLoadLayoutKind::kDense || out_padded ||
+                         index_padded;
     metadata.simd.fallback = strided                                        ? SimdFallback::kStrided
                              : implementation == Implementation::kGatherApi ? SimdFallback::kGatherApi
                                                                             : SimdFallback::kRegisterGather;
@@ -1471,6 +1721,8 @@ af::Status ClassifyIndirectLoadLayout(const LogicalTensorView &logical, Indirect
       continue;
     }
     if (af::SymbolicUtils::StaticCheckLt(logical.strides[dim], physical_span) != af::TriBool::kFalse) {
+      // 行主序单调性证明失败，尝试按转置稠密（倍数链）证明非重叠；证不出维持 kUnsupported。
+      static_cast<void>(TryClassifyTransposedDenseLayout(logical, layout));
       return af::SUCCESS;
     }
     has_physical_gap =
@@ -1502,6 +1754,51 @@ af::Status ValidateIndirectLoadOutputLayout(const LogicalTensorView &output) {
                    "IndirectLoad output must use a dense contiguous layout.");
     expected_stride = af::sym::Mul(expected_stride, output.sizes[dim]);
   }
+  return af::SUCCESS;
+}
+
+// Classifies the layout of an IndirectLoad output Store target.  The supported
+// non-dense form mirrors a ConcatKernel slice view: a contiguous suffix starting
+// at the innermost dim, arbitrary positive static strides on the prefix dims, and
+// a provably non-negative static offset.
+// Every stride (including dims skipped below) must be provably positive.
+af::Status ClassifyIndirectLoadStoreTarget(const std::vector<af::Expression> &sizes,
+                                           const std::vector<af::Expression> &strides, const af::Expression &offset,
+                                           IndirectLoadStoreKind &kind) {
+  GE_ASSERT_TRUE(!sizes.empty() && sizes.size() == strides.size(),
+                 "IndirectLoad store target rank is invalid, sizes:%zu, strides:%zu.", sizes.size(), strides.size());
+  kind = IndirectLoadStoreKind::kUnsupported;
+  if (af::SymbolicUtils::StaticCheckGe(offset, af::sym::kSymbolZero) != af::TriBool::kTrue) {
+    return af::SUCCESS;
+  }
+  for (const af::Expression &stride : strides) {
+    if (af::SymbolicUtils::StaticCheckGt(stride, af::sym::kSymbolZero) != af::TriBool::kTrue) {
+      return af::SUCCESS;
+    }
+  }
+  af::Expression expected_stride = af::sym::kSymbolOne;
+  bool has_contiguous_suffix = false;
+  for (size_t index = sizes.size(); index > 0UL; --index) {
+    const size_t dim = index - 1UL;
+    if (af::SymbolicUtils::StaticCheckEq(sizes[dim], af::sym::kSymbolOne) == af::TriBool::kTrue) {
+      continue;
+    }
+    if (!has_contiguous_suffix) {
+      if (af::SymbolicUtils::StaticCheckEq(strides[dim], expected_stride) != af::TriBool::kTrue) {
+        return af::SUCCESS;
+      }
+      has_contiguous_suffix = true;
+      expected_stride = af::sym::Mul(expected_stride, sizes[dim]);
+      continue;
+    }
+    if (af::SymbolicUtils::StaticCheckEq(strides[dim], expected_stride) == af::TriBool::kTrue) {
+      expected_stride = af::sym::Mul(expected_stride, sizes[dim]);
+      continue;
+    }
+    kind = IndirectLoadStoreKind::kSliceStrided;
+    return af::SUCCESS;
+  }
+  kind = IndirectLoadStoreKind::kDense;
   return af::SUCCESS;
 }
 
@@ -1555,6 +1852,152 @@ af::AscNodePtr FindIndirectLoadNode(const af::AscGraph &graph) {
   return nodes.empty() ? nullptr : nodes.front();
 }
 
+std::vector<af::AscNodePtr> GetAllIndirectLoadNodes(const af::AscGraph &graph) {
+  return CollectIndirectLoadNodes(graph);
+}
+
+af::Status SetSimdInputInnerAxis(const af::AscNodePtr &node, af::AxisId axis) {
+  GE_ASSERT_NOTNULL(node);
+  const auto op_desc = node->GetOpDesc();
+  GE_ASSERT_NOTNULL(op_desc);
+  GE_ASSERT_TRUE(op_desc->SetExtAttr(kSimdInputInnerAxisHintAttr, static_cast<int64_t>(axis)),
+                 "Set IndirectLoad SIMD input inner axis hint failed, node = %s", node->GetNamePtr());
+  return af::SUCCESS;
+}
+
+af::AxisId GetSimdInputInnerAxis(const af::AscNodePtr &node) {
+  if (node == nullptr || node->GetOpDesc() == nullptr) {
+    return af::kIdNone;
+  }
+  return node->GetOpDesc()->TryGetExtAttr(kSimdInputInnerAxisHintAttr, static_cast<int64_t>(af::kIdNone));
+}
+
+constexpr char kSimdIndexInnerAxisHintAttr[] = "af.internal.indirect_load.simd_index_inner_axis";
+
+af::Status SetSimdIndexInnerAxis(const af::AscNodePtr &node, af::AxisId axis) {
+  GE_ASSERT_NOTNULL(node);
+  const auto op_desc = node->GetOpDesc();
+  GE_ASSERT_NOTNULL(op_desc);
+  GE_ASSERT_TRUE(op_desc->SetExtAttr(kSimdIndexInnerAxisHintAttr, static_cast<int64_t>(axis)),
+                 "Set IndirectLoad SIMD index inner axis hint failed, node = %s", node->GetNamePtr());
+  return af::SUCCESS;
+}
+
+af::AxisId GetSimdIndexInnerAxis(const af::AscNodePtr &node) {
+  if (node == nullptr || node->GetOpDesc() == nullptr) {
+    return af::kIdNone;
+  }
+  return node->GetOpDesc()->TryGetExtAttr(kSimdIndexInnerAxisHintAttr, static_cast<int64_t>(af::kIdNone));
+}
+
+af::Status SetSimtGroupMember(const af::AscNodePtr &node) {
+  GE_ASSERT_NOTNULL(node);
+  const auto op_desc = node->GetOpDesc();
+  GE_ASSERT_NOTNULL(op_desc);
+  GE_ASSERT_TRUE(op_desc->SetExtAttr(kSimtGroupMemberAttr, true),
+                 "Set IndirectLoad SIMT group member flag failed, node = %s", node->GetNamePtr());
+  return af::SUCCESS;
+}
+
+bool IsSimtGroupMember(const af::AscNodePtr &node) {
+  if (node == nullptr || node->GetOpDesc() == nullptr) {
+    return false;
+  }
+  return node->GetOpDesc()->TryGetExtAttr(kSimtGroupMemberAttr, false);
+}
+
+constexpr char kSimtFusedPrimaryAttr[] = "af.internal.indirect_load.simt_fused_primary";
+constexpr char kSimtFusedMembersAttr[] = "af.internal.indirect_load.simt_fused_members";
+
+af::Status SetSimtFusedPrimary(const af::AscNodePtr &node, const std::vector<std::string> &member_names) {
+  GE_ASSERT_NOTNULL(node);
+  const auto op_desc = node->GetOpDesc();
+  GE_ASSERT_NOTNULL(op_desc);
+  GE_ASSERT_TRUE(op_desc->SetExtAttr(kSimtFusedPrimaryAttr, true),
+                 "Set IndirectLoad SIMT fused primary flag failed, node = %s", node->GetNamePtr());
+  GE_ASSERT_TRUE(op_desc->SetExtAttr(kSimtFusedMembersAttr, member_names),
+                 "Set IndirectLoad SIMT fused member names failed, node = %s", node->GetNamePtr());
+  return af::SUCCESS;
+}
+
+bool IsSimtFusedPrimary(const af::AscNodePtr &node) {
+  if (node == nullptr || node->GetOpDesc() == nullptr) {
+    return false;
+  }
+  return node->GetOpDesc()->TryGetExtAttr(kSimtFusedPrimaryAttr, false);
+}
+
+std::vector<std::string> GetSimtFusedMemberNames(const af::AscNodePtr &node) {
+  if (node == nullptr || node->GetOpDesc() == nullptr) {
+    return {};
+  }
+  return node->GetOpDesc()->TryGetExtAttr(kSimtFusedMembersAttr, std::vector<std::string>{});
+}
+
+constexpr char kSimtFusedMergeInfoAttr[] = "af.internal.indirect_load.simt_fused_merge_info";
+
+af::Status SetSimtFusedMergeInfo(const af::AscNodePtr &node, const SimtFusedMergeInfo &info) {
+  GE_ASSERT_NOTNULL(node);
+  const auto op_desc = node->GetOpDesc();
+  GE_ASSERT_NOTNULL(op_desc);
+  GE_ASSERT_TRUE(op_desc->SetExtAttr(kSimtFusedMergeInfoAttr, info),
+                 "Set IndirectLoad SIMT fused merge info failed, node = %s", node->GetNamePtr());
+  return af::SUCCESS;
+}
+
+SimtFusedMergeInfo GetSimtFusedMergeInfo(const af::AscNodePtr &node) {
+  if (node == nullptr || node->GetOpDesc() == nullptr) {
+    return {};
+  }
+  return node->GetOpDesc()->TryGetExtAttr(kSimtFusedMergeInfoAttr, SimtFusedMergeInfo{});
+}
+
+constexpr char kSimtFusedMemberEmittedAttr[] = "af.internal.indirect_load.simt_fused_member_emitted";
+
+af::Status SetSimtFusedMemberEmitted(const af::AscNodePtr &node) {
+  GE_ASSERT_NOTNULL(node);
+  const auto op_desc = node->GetOpDesc();
+  GE_ASSERT_NOTNULL(op_desc);
+  GE_ASSERT_TRUE(op_desc->SetExtAttr(kSimtFusedMemberEmittedAttr, true),
+                 "Set IndirectLoad SIMT fused member emitted flag failed, node = %s", node->GetNamePtr());
+  return af::SUCCESS;
+}
+
+bool IsSimtFusedMemberEmitted(const af::AscNodePtr &node) {
+  if (node == nullptr || node->GetOpDesc() == nullptr) {
+    return false;
+  }
+  return node->GetOpDesc()->TryGetExtAttr(kSimtFusedMemberEmittedAttr, false);
+}
+
+bool IsSimtDirectGmLoadNode(const af::AscNodePtr &node) {
+  return IsSimtDirectGmBoundary(node);
+}
+
+af::Status BuildSimtMergeSideLoadMetadata(const af::AscNodePtr &load, SimtLoadMetadata &metadata) {
+  metadata = SimtLoadMetadata{};
+  GE_ASSERT_NOTNULL(load);
+  GE_ASSERT_TRUE(!load->outputs().empty() && load->outputs()[0] != nullptr,
+                 "IndirectLoad SIMT merge side load[%s] has no output.", load->GetNamePtr());
+  // 与单 gather 输出侧 load 同构的分类（kZeroOffset / kOutputOffset）。视图匹配成员 index
+  // load 的 ② 形态无需特判：use_logical_offset 恒为 true，寻址按自身物理视图从 output_index
+  // 坐标折叠——分类值在折叠路径下不被消费（单 gather 输出侧 load 同此），不存在 N 路
+  // index_offset 歧义。
+  if (SimtLoadUsesZeroOffset(load)) {
+    metadata.address_source = SimtLoadAddressSource::kZeroOffset;
+  } else {
+    metadata.address_source = SimtLoadAddressSource::kOutputOffset;
+  }
+  metadata.node_name = load->GetName();
+  // 输出侧 load 恒走逻辑偏移坐标折叠（与单 gather 输出侧一致）：物理 view 承载 strided/
+  // 行广播/② 形态的正确寻址，行广播标记读改写前写入的节点 attr（跨漂移稳定）。
+  metadata.use_logical_offset = true;
+  metadata.physical_view = GetNodeOutputView(load);
+  metadata.original_view = metadata.physical_view;
+  metadata.is_row_broadcast = ascir::IsRowBroadcastLoad(*load);
+  return af::SUCCESS;
+}
+
 af::Status ValidateSingleIndirectLoadNode(const af::AscGraph &graph, af::AscNodePtr &node) {
   node = nullptr;
   const auto nodes = CollectIndirectLoadNodes(graph);
@@ -1580,6 +2023,12 @@ bool GetPrebuiltYTilingCase(const af::AscGraph &graph, af::AxisId &tile_id,
   }
 
   const TemplateAxes axes = ReadTemplateAxes(indirect_load);
+  if (axes.outer_axis == af::kIdNone) {
+    // 模板候选全部被拒时节点无模板标注：节点存在不等于模板接管，此时不存在可预建
+    // 的 tile 轴。返回 false 让调用方走通用 tiling case 生成，避免 kIdNone 毒化
+    // PruneTilingCase 的轴查找（axis_id:-1 断言）。
+    return false;
+  }
   tile_id = axes.outer_axis;
   const auto all_axes = graph.GetAllAxis();
   if (axes.tile_outer_axis >= 0L && static_cast<size_t>(axes.tile_outer_axis) < all_axes.size()) {
@@ -2264,6 +2713,483 @@ af::Status BuildSimtIndexPrepassPlan(const af::AscNode &indirect_load, SimtIndex
   plan.eligible = true;
   GELOGI("[IndirectLoad] SIMT index prepass is eligible for node[%s]: chain[%zu], fp32 slots[%zu], masks[%zu].",
          indirect_load_ptr->GetNamePtr(), chain.size(), plan.four_byte_slot_count, plan.mask_slot_count);
+  return af::SUCCESS;
+}
+
+// [归并链 DAG 宽度] 链求值任意瞬间一个线程必须同时持有的链内新产生临时数（forward
+// 节点的输出值）。硬约束：不含成员 value（已在峰值模型 3N 常驻项内，重复计入会
+// 双重计算，链形会误得 W=N）；不用最长路径当宽度（那是延迟，链形最长路径=N 而 W=1）；
+// 位置序不信任图插入序（GetAllNodes 无拓扑保证——消费者先于生产者插入会使事件错位、
+// 宽度被低估，恰为 spill 风险方向），改对前向闭包子图做 Kahn 拓扑排序，就绪集按
+// GetAllNodes 序取最小（确定性，宽度可复现）。生命周期 = 节点算出至其最后一个前向
+// 闭包内消费者，消费即释放；域外消费者（Store/Reduce/终端）不缩短生命周期（活到
+// 链尾）；同一位置先释放后生产（事件净和体现）。事件按输出数计（每个输出张量一个
+// 活跃值——上界语义；forward 闭包为 elementwise 单输出，计数与单值一致）。
+uint64_t ComputeMergeChainWidth(const af::AscGraph &graph, const std::vector<af::AscNodePtr> &forward_nodes,
+                                const std::vector<af::AscNodePtr> &members) {
+  std::unordered_set<const af::AscNode *> member_set;
+  for (const af::AscNodePtr &member : members) {
+    member_set.emplace(member.get());
+  }
+  std::unordered_set<const af::AscNode *> forward_set;
+  for (const af::AscNodePtr &node : forward_nodes) {
+    forward_set.emplace(node.get());
+  }
+  if (forward_set.empty()) {
+    return 0UL;
+  }
+  // 图内稳定序（仅作 Kahn 就绪集的确定性 tie-break，不承担拓扑保证）。
+  std::unordered_map<const af::AscNode *, size_t> graph_order;
+  size_t order_index = 0UL;
+  for (const auto &graph_node : graph.GetAllNodes()) {
+    if (graph_node != nullptr) {
+      graph_order.emplace(graph_node.get(), order_index++);
+    }
+  }
+  const auto order_of = [&graph_order](const af::AscNode *node) {
+    const auto iter = graph_order.find(node);
+    return iter != graph_order.end() ? iter->second : SIZE_MAX;
+  };
+  // 前向内部邻接与入度（成员/域外输入为边界源，不计入度）。
+  std::unordered_map<const af::AscNode *, std::vector<const af::AscNode *>> consumers;
+  std::unordered_map<const af::AscNode *, size_t> in_degree;
+  for (const af::AscNodePtr &node : forward_nodes) {
+    in_degree.emplace(node.get(), 0UL);
+  }
+  for (const af::AscNodePtr &node : forward_nodes) {
+    for (const auto &out_node : node->GetOutDataNodes()) {
+      const auto consumer = std::dynamic_pointer_cast<af::AscNode>(out_node);
+      if (consumer == nullptr || forward_set.count(consumer.get()) == 0UL) {
+        continue;
+      }
+      consumers[node.get()].emplace_back(consumer.get());
+      ++in_degree[consumer.get()];
+    }
+  }
+  // Kahn：就绪集按 (graph_order, 节点指针) 有序，弹出最小——拓扑序确定可复现。
+  std::set<std::pair<size_t, const af::AscNode *>> ready;
+  for (const af::AscNodePtr &node : forward_nodes) {
+    if (in_degree[node.get()] == 0UL) {
+      ready.emplace(order_of(node.get()), node.get());
+    }
+  }
+  std::vector<af::AscNode *> ordered;
+  ordered.reserve(forward_nodes.size());
+  std::unordered_map<const af::AscNode *, size_t> pos;
+  while (!ready.empty()) {
+    af::AscNode *current = const_cast<af::AscNode *>(ready.begin()->second);
+    ready.erase(ready.begin());
+    pos.emplace(current, ordered.size());
+    ordered.emplace_back(current);
+    const auto consumer_iter = consumers.find(current);
+    if (consumer_iter == consumers.end()) {
+      continue;
+    }
+    for (const af::AscNode *consumer : consumer_iter->second) {
+      if (--in_degree[consumer] == 0UL) {
+        ready.emplace(order_of(consumer), consumer);
+      }
+    }
+  }
+  const size_t node_count = ordered.size();
+  // 前向闭包为无环子图（成员输出的前向 DAG），全部节点必被排序；防御性校验。
+  if (node_count != forward_set.size()) {
+    return static_cast<uint64_t>(forward_set.size());
+  }
+  std::vector<int64_t> events(node_count + 1U, 0);
+  for (size_t index = 0UL; index < node_count; ++index) {
+    af::AscNode *node = ordered[index];
+    const size_t output_count = node->outputs().size();
+    size_t last = node_count;  // 无前向闭包内消费者：活到链尾
+    bool has_forward_consumer = false;
+    for (const auto &out_node : node->GetOutDataNodes()) {
+      const auto consumer = std::dynamic_pointer_cast<af::AscNode>(out_node);
+      if (consumer == nullptr || member_set.count(consumer.get()) != 0UL || pos.find(consumer.get()) == pos.end()) {
+        continue;
+      }
+      const size_t consumer_pos = pos.at(consumer.get());
+      if (!has_forward_consumer) {
+        last = consumer_pos;
+        has_forward_consumer = true;
+      } else {
+        last = std::max(last, consumer_pos);
+      }
+    }
+    events[index] += static_cast<int64_t>(output_count);
+    events[last] -= static_cast<int64_t>(output_count);
+  }
+  int64_t live = 0;
+  int64_t width = 0;
+  for (size_t index = 0UL; index < node_count; ++index) {
+    live += events[index];
+    width = std::max(width, live);
+  }
+  return static_cast<uint64_t>(width);
+}
+
+// [组共享轴等价化] 覆盖检查：从 schedule.cpp 的 sched_has_all_members 抽出，调度器与
+// 候选生成期共用同一判据，避免两处独立实现漂移。节点的 sched.axis 需包含 merged_axis.from
+// 的全部成员轴，否则模板轴折叠（ApplySchedAxisMerge 的连续性断言）不适用于该节点。
+// merged_axis_id 为 kIdNone 或 merged_axis 无 from（非合并轴）时恒真。
+bool GroupAxesCoverable(af::AscGraph &graph, const af::AscNodePtr &node, ascir::AxisId merged_axis_id) {
+  if (merged_axis_id == af::kIdNone) {
+    return true;
+  }
+  const auto merged_axis = graph.FindAxis(merged_axis_id);
+  if (merged_axis == nullptr || merged_axis->from.empty()) {
+    return true;
+  }
+  for (const auto member : merged_axis->from) {
+    if (std::find(node->attr.sched.axis.begin(), node->attr.sched.axis.end(), member) == node->attr.sched.axis.end()) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// [组共享轴等价化] 等价判定：两个成员 IL 的输出视图在同一 dim 上的轴是否指向同一索引
+// 空间（可归一）。判据：视图位置相同 + 轴 size 符号相等 + 视图 repeats/strides 相等。
+// 被改写节点（IL）的输出是新分配 buffer，替换轴不改变地址，天然满足安全前提。
+// [组共享轴等价化] 表达式等价判定：先 StaticCheckEq（同符号/同值/静态可判不等），kUnknown
+// 时退化为序列化串比较。机制澄清：CreateSizeVar(name) 每次调用都新建 SizeVar 对象（不做
+// 按名复用）；同名恒等由符号引擎保证——StaticCheckEq 经 Eq(a.Simplify(), b.Simplify())
+// 按符号名判等，同名即 kTrue，不会进入串比较分支。串比较覆盖的是"静态不可判但序列化结构
+// 相同"的表达式（不同对象构成的等价运算树）；两个真正不同维度的符号名不同 → 静态判不等
+// 或串不同 → 拒绝。前提"同一图内同名符号同值"是前端建轴约定，无代码级校验——若未来前端
+// 允许同名不同值，此处需改为比较 SizeVar 绑定而非串。静态可判不等（kFalse）在串比较之前
+// 短路——值确实不同的不会因串相似误判。
+bool AreExpressionsEquivalent(const af::Expression &a, const af::Expression &b) {
+  const af::TriBool check = af::SymbolicUtils::StaticCheckEq(a, b);
+  if (check == af::TriBool::kTrue) {
+    return true;
+  }
+  if (check == af::TriBool::kFalse) {
+    return false;
+  }
+  const auto a_str = a.Str();
+  const auto b_str = b.Str();
+  return a_str != nullptr && b_str != nullptr && std::string(a_str.get()) == std::string(b_str.get());
+}
+
+bool AreAxesEquivalentInView(af::AscGraph &graph, const af::AscNodePtr &a, ascir::AxisId axis_a,
+                             const af::AscNodePtr &b, ascir::AxisId axis_b) {
+  if (a == nullptr || b == nullptr || a->outputs().empty() || b->outputs().empty()) {
+    return false;
+  }
+  const auto &a_attr = a->outputs()[0]->attr;
+  const auto &b_attr = b->outputs()[0]->attr;
+  const auto a_iter = std::find(a_attr.axis.begin(), a_attr.axis.end(), axis_a);
+  const auto b_iter = std::find(b_attr.axis.begin(), b_attr.axis.end(), axis_b);
+  if (a_iter == a_attr.axis.end() || b_iter == b_attr.axis.end()) {
+    return false;
+  }
+  const auto a_pos = static_cast<size_t>(std::distance(a_attr.axis.begin(), a_iter));
+  const auto b_pos = static_cast<size_t>(std::distance(b_attr.axis.begin(), b_iter));
+  if (a_pos != b_pos) {
+    return false;
+  }
+  if (a_pos >= a_attr.repeats.size() || a_pos >= a_attr.strides.size() || b_pos >= b_attr.repeats.size() ||
+      b_pos >= b_attr.strides.size()) {
+    return false;
+  }
+  const auto *a_axis = graph.FindAxis(axis_a);
+  const auto *b_axis = graph.FindAxis(axis_b);
+  if (a_axis == nullptr || b_axis == nullptr) {
+    return false;
+  }
+  if (!AreExpressionsEquivalent(a_axis->size, b_axis->size)) {
+    return false;
+  }
+  if (!AreExpressionsEquivalent(a_attr.repeats[a_pos], b_attr.repeats[b_pos])) {
+    return false;
+  }
+  if (!AreExpressionsEquivalent(a_attr.strides[a_pos], b_attr.strides[b_pos])) {
+    return false;
+  }
+  return true;
+}
+
+// [组共享轴等价化] 分核/分 tile 类型轴判定：携带切分语义，不可与普通轴互相归一。按
+// 轴类型判定——split_pair_other_id 的创建默认值为 0 而非 kIdNone，普通轴同样携带
+// 非 kIdNone 值，不能作为 split 轴判据（会把全部普通维误判成 split 轴而恒跳过）。
+bool IsSplitTypeAxis(const af::Axis &axis) {
+  return axis.type == af::Axis::kAxisTypeTileOuter || axis.type == af::Axis::kAxisTypeTileInner ||
+         axis.type == af::Axis::kAxisTypeBlockOuter || axis.type == af::Axis::kAxisTypeBlockInner;
+}
+
+// [组共享轴等价化] 主入口：逐 dim 分等价类，同类但 id 不同时新建组共享轴并替换。
+// 失败（非等价、rank 不匹配、split 类型轴、轴缺失）时 is_legal=false，由调用方拒绝
+// 候选；拒绝路径不触碰任何成员视图（原子性：等价判定与逐成员预检全部通过后才替换）。
+// 仅处理输出 rank 内的原始维：primary 复合轴（from 非空）跳过——合法前端结构，由
+// NormalizeSimtAxesForGroupTemplate 统一构建；成员复合轴可替换（视图寻址语义在
+// repeats/strides，id 替换即归一化；成员视图需以组共享轴接入模板 from 覆盖链——成员
+// 不参与模板轴构建，与 primary 是角色差异而非判据单侧）。split 类型轴（分核/分 tile）
+// 双侧统一拒绝：携带切分语义，替换丢语义、跳过会把切分轴留给模板轴合并吞并。
+af::Status NormalizeMemberAxes(af::AscGraph &graph, const std::vector<af::AscNodePtr> &members, bool &is_legal,
+                               std::unordered_map<ascir::AxisId, ascir::AxisId> *old_to_group) {
+  is_legal = true;
+  if (members.size() < 2UL) {
+    return af::SUCCESS;
+  }
+  const auto &primary_attr = members.front()->outputs()[0]->attr;
+  const size_t rank = primary_attr.axis.size();
+  for (size_t dim = 0UL; dim < rank; ++dim) {
+    std::vector<ascir::AxisId> dim_axes(members.size(), af::kIdNone);
+    for (size_t index = 0UL; index < members.size(); ++index) {
+      const auto &attr = members[index]->outputs()[0]->attr;
+      if (dim >= attr.axis.size()) {
+        is_legal = false;
+        GELOGI("[IndirectLoad] Reject: member[%s] output rank[%zu] < dim[%zu].", members[index]->GetNamePtr(),
+               attr.axis.size(), dim);
+        return af::SUCCESS;
+      }
+      dim_axes[index] = attr.axis[dim];
+    }
+    bool all_same = true;
+    for (size_t index = 1UL; index < dim_axes.size(); ++index) {
+      if (dim_axes[index] != dim_axes[0]) {
+        all_same = false;
+        break;
+      }
+    }
+    if (all_same) {
+      continue;
+    }
+    for (size_t index = 1UL; index < members.size(); ++index) {
+      if (!AreAxesEquivalentInView(graph, members.front(), dim_axes[0], members[index], dim_axes[index])) {
+        is_legal = false;
+        const auto *pa = graph.FindAxis(dim_axes[0]);
+        const auto *pb = graph.FindAxis(dim_axes[index]);
+        GELOGI(
+            "[IndirectLoad] Reject: dim[%zu] axis mismatch: primary axis[%ld, size=%s] vs member[%s] "
+            "axis[%ld, size=%s].",
+            dim, dim_axes[0], pa != nullptr ? pa->size.Str().get() : "?", members[index]->GetNamePtr(), dim_axes[index],
+            pb != nullptr ? pb->size.Str().get() : "?");
+        return af::SUCCESS;
+      }
+    }
+    const auto *primary_axis = graph.FindAxis(dim_axes[0]);
+    if (primary_axis == nullptr) {
+      is_legal = false;
+      GELOGI("[IndirectLoad] Reject: primary axis[%ld] at dim[%zu] not found.", dim_axes[0], dim);
+      return af::SUCCESS;
+    }
+    // [split 类型轴双侧统一拒绝] 分核/分 tile 轴携带切分语义：不可替换（丢失切分语义），
+    // 也不可静默跳过（会把切分轴留给模板轴合并吞并）。候选生成期轴系应为原始轴空间，
+    // 出现 split 类型即为异常图态——primary 与成员同口径确定性拒绝，由其余候选/回退承接。
+    if (IsSplitTypeAxis(*primary_axis)) {
+      is_legal = false;
+      GELOGI("[IndirectLoad] Reject: primary axis[%ld] at dim[%zu] is a split axis.", dim_axes[0], dim);
+      return af::SUCCESS;
+    }
+    if (!primary_axis->from.empty()) {
+      continue;  // 复合轴：合法前端结构，由 NormalizeSimtAxesForGroupTemplate 统一构建
+    }
+    // [原子性预检] 等价判定（上方）与逐成员存在性/split 类型核验全部通过后才进入替换：
+    // 拒绝路径不触碰任何成员视图（候选图为独立副本，原子拒绝保证结果可复现）。
+    for (size_t index = 0UL; index < members.size(); ++index) {
+      const auto *member_axis = graph.FindAxis(dim_axes[index]);
+      if (member_axis == nullptr) {
+        is_legal = false;
+        GELOGI("[IndirectLoad] Reject: member[%s] axis[%ld] at dim[%zu] not found.", members[index]->GetNamePtr(),
+               dim_axes[index], dim);
+        return af::SUCCESS;
+      }
+      if (IsSplitTypeAxis(*member_axis)) {
+        is_legal = false;
+        GELOGI("[IndirectLoad] Reject: member[%s] axis[%ld] at dim[%zu] is a split axis, not normalizable.",
+               members[index]->GetNamePtr(), dim_axes[index], dim);
+        return af::SUCCESS;
+      }
+    }
+    const std::string group_name = members.front()->GetName() + "_group_" + std::to_string(dim);
+    auto &group_axis = graph.CreateAxis(group_name, primary_axis->size);
+    for (size_t index = 0UL; index < members.size(); ++index) {
+      const auto *member_axis = graph.FindAxis(dim_axes[index]);
+      if (member_axis == nullptr || !graph.TryApplyAxisReplace(members[index], *member_axis, group_axis)) {
+        is_legal = false;
+        GELOGI(
+            "[IndirectLoad] Reject: axis replace failed for member[%s] at dim[%zu] "
+            "(axis[%ld] not found in node view).",
+            members[index]->GetNamePtr(), dim, dim_axes[index]);
+        return af::SUCCESS;
+      }
+      if (old_to_group != nullptr) {
+        (*old_to_group)[dim_axes[index]] = group_axis.id;
+      }
+    }
+    GELOGI("[IndirectLoad] Normalized group axis[%ld, name=%s] at dim[%zu] (was %ld..%ld).", group_axis.id,
+           group_name.c_str(), dim, dim_axes[0], dim_axes.back());
+  }
+  // [别名语义说明] ASCIR 中节点的 inputs[i].attr 是对生产者 outputs[j].attr 的引用
+  // （AscTensor::attr 为非拥有引用 + AscNodeInputs::operator[] 每次重新 Init），轴替换
+  // 后消费者输入视图自动同步。消费者自身的 output view 的轴系改写由后续模板轴合并
+  // （调度器 ApplyIndirectNodeAxes → ApplyIndirectLoadTemplateMerge）完成，此处不做
+  // input ⊆ output 前置检查——归一化时点消费者的输出视图尚未被模板轴合并改写，
+  // 检查必然失败（组轴 ∈ 输入视图但 ∉ 原始输出视图）。不变量由 codegen 的
+  // ValidateShapeConsistencyWithSingleOutput 在模板轴合并完成后校验。
+  return af::SUCCESS;
+}
+
+af::Status PropagateGroupAxes(af::AscGraph &graph, const std::vector<af::AscNodePtr> &members,
+                              const std::unordered_map<ascir::AxisId, ascir::AxisId> &old_to_group, bool &is_legal) {
+  is_legal = true;
+  if (old_to_group.empty() || members.empty()) {
+    return af::SUCCESS;
+  }
+  // 成员归一化后的合法轴集合（组共享轴 + 未替换的共享轴）。
+  std::unordered_set<ascir::AxisId> member_axis_ids;
+  for (const af::AscNodePtr &member : members) {
+    for (const auto *tensor : member->outputs()) {
+      if (tensor != nullptr) {
+        member_axis_ids.insert(tensor->attr.axis.begin(), tensor->attr.axis.end());
+      }
+    }
+  }
+  // 成员前向闭包（BFS：链/Store/Reduce 终端，成员为边界不重入）。
+  std::vector<af::AscNodePtr> closure;
+  std::unordered_set<const af::AscNode *> visited;
+  for (const af::AscNodePtr &member : members) {
+    (void)visited.emplace(member.get());
+  }
+  for (const af::AscNodePtr &member : members) {
+    for (const auto &out_node : member->GetOutDataNodes()) {
+      const auto consumer = std::dynamic_pointer_cast<af::AscNode>(out_node);
+      if (consumer != nullptr && visited.emplace(consumer.get()).second) {
+        closure.emplace_back(consumer);
+      }
+    }
+  }
+  for (size_t cursor = 0UL; cursor < closure.size(); ++cursor) {
+    for (const auto &out_node : closure[cursor]->GetOutDataNodes()) {
+      const auto consumer = std::dynamic_pointer_cast<af::AscNode>(out_node);
+      if (consumer != nullptr && visited.emplace(consumer.get()).second) {
+        closure.emplace_back(consumer);
+      }
+    }
+  }
+  // [输入侧闭包] 链的生产者不在前向闭包内（side 链/side load 是链的输入而非消费者），
+  // 但链节点进 tiling group 后它们的旧轴 id 同样会并进 y_group——从链节点（含终端）
+  // 的输入向后追溯：遇成员/数据源（Data/常量 Scalar）为边界，其余生产者（side load、
+  // side 链节点）纳入同一套"映射 → 等价归并 → 广播豁免 → 真新维度拒绝"。
+  const auto is_backward_boundary = [&members](const af::AscNodePtr &node) {
+    if (node == nullptr || af::ops::IsOps<af::ascir_op::Data>(node) || af::ops::IsOps<af::ascir_op::Scalar>(node) ||
+        af::ops::IsOps<af::ascir_op::ScalarData>(node) || af::ops::IsOps<af::ascir_op::Arange>(node)) {
+      return true;
+    }
+    return std::any_of(members.begin(), members.end(),
+                       [&node](const af::AscNodePtr &member) { return node.get() == member.get(); });
+  };
+  for (size_t cursor = 0UL; cursor < closure.size(); ++cursor) {
+    for (const auto &in_node : closure[cursor]->GetInDataNodes()) {
+      const auto producer = std::dynamic_pointer_cast<af::AscNode>(in_node);
+      if (producer == nullptr || is_backward_boundary(producer)) {
+        continue;
+      }
+      if (visited.emplace(producer.get()).second) {
+        closure.emplace_back(producer);
+      }
+    }
+  }
+  // 核心闭包边界：成员前向 + 输入侧追溯到此为止——之后的节点属扩展区（见下方）。
+  const size_t core_closure_size = closure.size();
+  // [输入侧闭包的下游完备性] 被迁移的生产者（side 链/side load）可能同时被闭包外的
+  // 节点消费：其输入视图（非拥有引用）自动跟随生产者输出视图的新轴，但其自身输出
+  // 视图仍持旧 id → 同节点 input ⊄ output（ValidateInputTensorLoopAxis 失败）。从
+  // 全部闭包节点再做一轮前向扩展（含 backward 节点的组外消费者，传递至终端），
+  // 对扩展节点同样迁移被映射/等价的轴——其私有轴空间（非成员、非映射、非等价、
+  // 非广播）不拒绝：组外流自有轴系不在本组一致性管辖内，仅保证与被迁移张量的
+  // 视图衔接一致。
+  for (size_t cursor = 0UL; cursor < closure.size(); ++cursor) {
+    for (const auto &out_node : closure[cursor]->GetOutDataNodes()) {
+      const auto consumer = std::dynamic_pointer_cast<af::AscNode>(out_node);
+      if (consumer != nullptr && visited.emplace(consumer.get()).second) {
+        closure.emplace_back(consumer);
+      }
+    }
+  }
+  // [计划 + 全量校验]（原子性：任一真新维度即拒绝且不改图）。核心闭包（成员前向 +
+  // 输入侧追溯）执行全量规则；扩展区（输入侧节点的组外下游）仅迁移被映射/等价的轴，
+  // 其私有轴空间不拒绝——组外流自有轴系不在本组一致性管辖内，仅保证与被迁移张量的
+  // 视图衔接一致（input ⊆ output 不变量）。
+  struct ReplacePlan {
+    af::AscNodePtr node;
+    ascir::AxisId from;
+    ascir::AxisId to;
+  };
+  std::vector<ReplacePlan> plan;
+  const auto &primary_attr = members.front()->outputs()[0]->attr;
+  for (size_t cursor = 0UL; cursor < closure.size(); ++cursor) {
+    const af::AscNodePtr &node = closure[cursor];
+    const bool expansion_zone = cursor >= core_closure_size;
+    for (const auto *tensor : node->outputs()) {
+      if (tensor == nullptr) {
+        continue;
+      }
+      const auto &attr = tensor->attr;
+      for (size_t dim = 0UL; dim < attr.axis.size(); ++dim) {
+        const ascir::AxisId axis_id = attr.axis[dim];
+        const auto mapped = old_to_group.find(axis_id);
+        if (mapped != old_to_group.end()) {
+          plan.push_back({node, axis_id, mapped->second});
+          continue;
+        }
+        if (member_axis_ids.count(axis_id) != 0UL) {
+          continue;
+        }
+        // 广播轴豁免：size=1 或该维 stride=0（不参与切分与一致性检查）。
+        const auto *axis = graph.FindAxis(axis_id);
+        const bool size_one =
+            axis != nullptr && af::SymbolicUtils::StaticCheckEq(axis->size, af::sym::kSymbolOne) == af::TriBool::kTrue;
+        const bool stride_zero =
+            dim < attr.strides.size() &&
+            af::SymbolicUtils::StaticCheckEq(attr.strides[dim], af::sym::kSymbolZero) == af::TriBool::kTrue;
+        if (size_one || stride_zero) {
+          continue;
+        }
+        // 等价轴归并：与成员同维轴同 size 且视图 repeats/strides 等价 → 替换为成员轴。
+        if (dim < primary_attr.axis.size() && dim < primary_attr.repeats.size() && dim < primary_attr.strides.size() &&
+            dim < attr.repeats.size() && dim < attr.strides.size()) {
+          const auto *member_axis = graph.FindAxis(primary_attr.axis[dim]);
+          if (axis != nullptr && member_axis != nullptr && AreExpressionsEquivalent(axis->size, member_axis->size) &&
+              AreExpressionsEquivalent(attr.repeats[dim], primary_attr.repeats[dim]) &&
+              AreExpressionsEquivalent(attr.strides[dim], primary_attr.strides[dim])) {
+            plan.push_back({node, axis_id, primary_attr.axis[dim]});
+            continue;
+          }
+        }
+        // 扩展区私有轴：保留不迁移、不拒绝（见上方注释）。
+        if (expansion_zone) {
+          continue;
+        }
+        // 真新维度：不在映射/成员集合/广播豁免/等价归并内——拒绝候选（链上加维会改
+        // 变 y_group 枚举，[k,R] 窗口失配；rank 级加维已被 BuildPostReduceLayout 的
+        // rank 断言在 tiling 前拦下）。
+        is_legal = false;
+        GELOGI("[IndirectLoad] Reject: closure node[%s] carries true new axis[%ld] at dim[%zu].", node->GetNamePtr(),
+               axis_id, dim);
+        return af::SUCCESS;
+      }
+    }
+  }
+  // 统一执行：TryApplyAxisReplace 覆盖 sched.axis + 输出视图轴；vectorized_axis 另行
+  // 替换（其元素是轴 id 列表，TryApplyAxisReplace 不触碰）。幂等：重复执行时旧 id 已
+  // 消失，计划为空即 no-op。轴存在性在计划阶段已被创建方保证（组轴由 CreateAxis 新建、
+  // 成员轴来自成员视图），此处缺轴属不可达的图状态破坏——硬断言而非拒绝，保住"失败
+  // 不改图"的原子性承诺（执行中途拒绝会留下半改写图）。
+  for (const ReplacePlan &entry : plan) {
+    const auto *from_axis = graph.FindAxis(entry.from);
+    const auto *to_axis = graph.FindAxis(entry.to);
+    GE_ASSERT_TRUE(from_axis != nullptr && to_axis != nullptr, "IndirectLoad propagate axis[%ld->%ld] not found.",
+                   entry.from, entry.to);
+    (void)graph.TryApplyAxisReplace(entry.node, *from_axis, *to_axis);
+    for (auto *tensor : entry.node->outputs()) {
+      if (tensor != nullptr) {
+        std::replace(tensor->attr.vectorized_axis.begin(), tensor->attr.vectorized_axis.end(), entry.from, entry.to);
+      }
+    }
+  }
+  GELOGI("[IndirectLoad] Propagated group axes to %zu closure nodes (%zu replacements).", closure.size(), plan.size());
   return af::SUCCESS;
 }
 

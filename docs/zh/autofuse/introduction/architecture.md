@@ -137,5 +137,5 @@ graph-autofusion/
 
 ## 相关资料
 
-- [AutoFuse 概述](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/latest/programug/graphdevg/docs/zh/user_guides/graph_dev/autofuse/overview.md)
-- [Autofuse 简介与快速上手](../../../../autofuse/README.md)
+- [AutoFuse 概述（官网资料）](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/latest/programug/graphdevg/docs/zh/user_guides/graph_dev/autofuse/overview.md)
+- [Autofuse 组件说明（含多类型算子融合用例）](../../../../autofuse/README.md)

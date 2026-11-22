@@ -45,6 +45,7 @@ struct TilingCodeGenConfig {
   double ub_threshold{0.2};
   double corenum_threshold{0.4};
   bool cache_enabled_at_compile_time{false};  // 编译态缓存开关（默认关闭）
+  bool enable_tiling_segment_cache{false};    // 动态shape分段缓存开关（att_accuracy_level=0时开启）
   ge::ForceTilingCaseResult force_tiling_case;
   int64_t force_schedule_result{-1L};
   std::string force_template_op_name;
@@ -62,6 +63,7 @@ struct TilingCodeGenConfig {
        << ", enable_multicore_ub_tradeoff(" << enable_multicore_ub_tradeoff << ")"
        << ", enable_autofuse_pgo(" << enable_autofuse_pgo << ")"
        << ", enable_score_func(" << enable_score_func << ")"
+       << ", enable_tiling_segment_cache(" << enable_tiling_segment_cache << ")"
        << ", force_schedule_result(" << force_schedule_result << ")"
        << ", force_tiling_case(" << force_tiling_case.Debug() << ")"
        << "]";

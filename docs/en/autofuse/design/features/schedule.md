@@ -269,6 +269,18 @@ For a computation graph, there may be multiple implementation methods. Taking ta
 <img src="../../figures/schedule_graph_rewrite_template.png" alt="Graph rewrite template" style="width: 35%; max-width: 800px;">
 </div>
 
+<a id="template-semantic-propagation"></a>
+
+## Semantic Propagation for New Templates
+
+New templates and changes affecting implementation categories must follow the [Codegen semantic naming requirements](codegen.md#template-semantic-naming). Schedule records actual scheduling outcomes; it must not infer features that only final Codegen API selection can establish.
+
+- Set `ScheduleTask.semantic_name` at the actual generator/strategy selection point and propagate it to `ScheduledResult.semantic_name`. Reuse existing graph tags for required roles and transformations.
+- Apply a role only to the affected logical group. A graph-level parent strategy must not overwrite group responsibilities such as `Phase1`, `Phase2`, or `Norm`. Groups may have different names; a graph need not have one uniform name.
+- Record a transform only after the graph or data-movement transformation succeeds. Failure must not contaminate the original graph or other candidates. Preserve corresponding tags through copying/derivation and reflect the final outcome after fallback.
+- Preserve complete graph/result/group/key/subcase/template ownership. Restore the current logical identity after reuse; neither a local `group_id` nor a physical primary uniquely identifies it. Commit candidate-private selection state with the final tiling data.
+- State category or inheritance rationale and information sources in the PR. Reuse existing tests for affected selection, copying, failure, fallback, and multiple-group/reuse boundaries; adapt final API features under the Codegen requirements.
+
 ## Related Links
 
 - Back to [AutoFuse Architecture Introduction](../../introduction/architecture.md)

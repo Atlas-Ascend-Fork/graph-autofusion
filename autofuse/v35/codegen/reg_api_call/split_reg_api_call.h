@@ -58,6 +58,7 @@ class SplitRegApiCall : public ApiCall {
   static Status InitializeTiling(size_t split_dim, const vector<std::reference_wrapper<const Tensor>> &outputs,
                                  const Tensor &x, SplitTiling &tiling);
   static bool IsAllAligned(SplitTiling &tiling);
+  static std::string GetSemanticFeature(const SplitTiling &tiling);
   static void GenSplitTilingForAllAligned(SplitTiling &tiling, const Tiler &tiler, std::stringstream &ss);
   static void GenSrcTensors(const std::vector<std::reference_wrapper<const Tensor>> &outputs,
                             const std::string &dtype_name, std::stringstream &ss);

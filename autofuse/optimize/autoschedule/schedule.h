@@ -52,13 +52,15 @@ class Scheduler {
   explicit Scheduler(ascir::ImplGraph &graph, AxisGroup axes_group, TilingCase &tiling_case,
                      bool is_last_axis_reduce = false,
                      optimize::ReduceTemplateType reduce_template = optimize::ReduceTemplateType::kDefault,
-                     ascir::CubeTemplateType cube_template = ascir::CubeTemplateType::kDefault)
+                     ascir::CubeTemplateType cube_template = ascir::CubeTemplateType::kDefault,
+                     bool enable_workspace_alignment = false)
       : graph_(graph),
         axes_group_(std::move(axes_group)),
         tiling_case_(tiling_case),
         is_last_axis_reduce_(is_last_axis_reduce),
         reduce_template_(reduce_template),
         cube_template_(cube_template),
+        enable_workspace_alignment_(enable_workspace_alignment),
         graph_cache_(graph) {};
 
   Status DoScheduler();
@@ -83,6 +85,10 @@ class Scheduler {
   void RemoveDuplicatedAxisFromGroup();
   Status InitIndirectLoadScheduleCase();
   Status ApplyIndirectLoadNodeAxes(const af::AscNodePtr &node, bool &skip_main_tiling) const;
+  // 可求解 tile（通用 TileSplit 产物）返回 TileInner 轴 id；固定 tile 返回 kIdNone。
+  ascir::AxisId GetSolvedTileInnerAxis() const;
+  // ApplyTiling 后将可求解 TileInner 并入输入侧 pre 节点的向量化窗口（多行 staging）。
+  Status FoldSolvedTileInnerIntoPreWindow(const af::AscNodePtr &node) const;
   Status SynchronizeTransposeInputSchedAxis();
   Status ModifyStoreAfterReduce(ascir::NodeView &node, ascir::AxisId reduce_block_id);
   Status ApplyBlockSplitToNode(ascir::NodeView &node, bool is_store_after_reduce);
@@ -115,6 +121,7 @@ class Scheduler {
   bool is_last_axis_reduce_;
   optimize::ReduceTemplateType reduce_template_;
   ascir::CubeTemplateType cube_template_;
+  bool enable_workspace_alignment_;
   IndirectLoadInfo indirect_load_info_;
   GraphPropertiesCache graph_cache_;  // 图属性缓存，避免重复遍历
 };

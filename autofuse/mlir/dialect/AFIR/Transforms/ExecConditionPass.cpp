@@ -1,0 +1,448 @@
+/**
+ * Copyright (c) 2026 Huawei Technologies Co., Ltd.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ */
+
+//===- ExecConditionPass.cpp - Turn sched.exec_condition into scf.if ------===//
+//
+// `afir.sched` 的 `exec_condition` 说的是一个算子的缓存复用周期：值在周期内不变，周期
+// 起点算一次、其余迭代直接读上一次留在 UB 里的结果。这个 pass 把那句话变成循环体里的一个
+// `scf.if`，谓词由 `materializeExecConditionGuard` 按轴关系建。
+//
+// 为什么不在循环生成里一起做：那时算子之间还是 SSA 相连的（`afir.broadcast` 直接吃
+// `afir.load` 的结果），把生产者挪进一个 region 就要靠 `scf.if` 的返回值把它带出来，而
+// 目的地形态下那个值本来就等于 `outs` 操作数——多一层 yield 是纯噪声。资源物化
+// （`afir-memory-allocate`）之后，队列成员之间已经由 `EnQue` / `DeQue` 断开，剩下的结果
+// 要么没人用、要么可以直接换成它 tie 的那个 destination。
+//
+// 为什么排在同步之后：被跳过的只有算子本身，`AllocTensor` / `EnQue` / `DeQue` /
+// `FreeTensor` 与流水屏障每趟照常生成——缓冲是单 slot（可缓存的张量上游给的是 `buf_num = 1`），
+// 地址每趟相同，所以跳过一趟写入之后读到的正是上一趟的结果。这与 legacy 的
+// `Loop::GenerateBody` 逐字一致：那边的 `if` 也只包住 `call->Generate`，生命周期与同步都在
+// 外面。把守卫加在同步之前会让同步算法看到一条有条件的边，那是另一件事。
+//
+//===----------------------------------------------------------------------===//
+
+#include "dialect/AFIR/Transforms/AFIRPasses.h"
+
+#include "dialect/AFIR/Analysis/TransferPlan.h"
+#include "dialect/AFIR/Analysis/ComputeExtent.h"
+#include "dialect/AFIR/Support/SymbolicExpressionDetail.h"
+#include "dialect/AFIR/IR/AFIR.h"
+#include "support/CapabilityShortfall.h"
+
+#include <tuple>
+
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/SmallVector.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/IR/Builders.h"
+#include "mlir/IR/IRMapping.h"
+#include "llvm/ADT/SetVector.h"
+#include "mlir/IR/BuiltinOps.h"
+#include "mlir/Pass/Pass.h"
+
+using namespace mlir;
+
+namespace mlir::afir {
+namespace {
+
+constexpr unsigned kVisitedOperationInlineCapacity = 16;
+
+ExecCondition getExecCondition(Operation *op) {
+  auto sched = op->getAttrOfType<ScheduleAttr>(kSchedAttrName);
+  return sched ? sched.getExecCondition() : ExecCondition::NoCache;
+}
+
+// A Reduce cache is valid only while all upstream Load addresses are unchanged.
+// Record logical source axes while SSA still connects Load/Cast/Broadcast. Queue
+// allocation later replaces those edges with independent alloc/dequeue values.
+LogicalResult collectCacheSourceAxes(Operation *op, llvm::SetVector<int64_t> &axes,
+                                     llvm::SmallPtrSetImpl<Operation *> &visited) {
+  if (!visited.insert(op).second) {
+    return success();
+  }
+  if (isa<LoadOp>(op)) {
+    FailureOr<TensorDescAttr> desc = getLocalDescriptor(op, TransferPlanSide::Automatic);
+    if (failed(desc) || desc->getAxis().size() != desc->getStrides().size()) {
+      return failure();
+    }
+    for (auto [axis, stride] : llvm::zip_equal(desc->getAxis(), desc->getStrides())) {
+      if (!llvm::is_contained(desc->getVectorizedAxis(), axis) &&
+          proveEqual(stride, ExprAttr::get(op->getContext(), StringAttr::get(op->getContext(), "0"))) !=
+              detail::TruthValue::True) {
+        axes.insert(axis);
+      }
+    }
+    return success();
+  }
+  if (op->hasAttr(kReductionDomainAttrName) || isa<MaxOp, MinOp, SumOp, MeanOp, ProdOp, AnyOp, AllOp>(op)) {
+    // A reduction accumulator is not a pure function of the current input tile.
+    return failure();
+  }
+  FailureOr<OperandPartition> partition = getOperandPartition(op);
+  if (failed(partition) || partition->inputCount == 0) {
+    return failure();
+  }
+  for (Value input : partition->inputs(op)) {
+    if (isa_and_nonnull<arith::ConstantOp>(input.getDefiningOp())) {
+      continue;
+    }
+    Operation *producer = input.getDefiningOp();
+    if (!producer || failed(collectCacheSourceAxes(producer, axes, visited))) {
+      return failure();
+    }
+  }
+  return success();
+}
+
+struct AFIRCacheDependencyPass : public PassWrapper<AFIRCacheDependencyPass, OperationPass<ModuleOp>> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(AFIRCacheDependencyPass)
+  StringRef getArgument() const final {
+    return "afir-cache-dependencies";
+  }
+  StringRef getDescription() const final {
+    return "Analyze Reduce cache inputs before resource materialization";
+  }
+  void runOnOperation() override {
+    for (func::FuncOp func : getOperation().getOps<func::FuncOp>()) {
+      bool hasReduce = false;
+      func.walk([&](Operation *op) {
+        hasReduce |=
+            op->hasAttr(kReductionDomainAttrName) || isa<MaxOp, MinOp, SumOp, MeanOp, ProdOp, AnyOp, AllOp>(op);
+      });
+      if (!hasReduce) {
+        continue;
+      }
+      func.walk([&](Operation *op) {
+        if (!isAfirOperation(op) || isInsideVectorFunc(op) || getExecCondition(op) == ExecCondition::NoCache) {
+          return;
+        }
+        llvm::SetVector<int64_t> axes;
+        llvm::SmallPtrSet<Operation *, kVisitedOperationInlineCapacity> visited;
+        if (failed(collectCacheSourceAxes(op, axes, visited))) {
+          // Unknown/stateful input: execute every iteration instead of guessing
+          // an invariant. This does not change any resource or sync lifetime.
+          axes.clear();
+          axes.insert(op->getAttrOfType<ScheduleAttr>(kSchedAttrName).getLoopAxis());
+        }
+        op->setAttr(kCacheRefreshAxesAttrName, DenseI64ArrayAttr::get(op->getContext(), axes.getArrayRef()));
+      });
+    }
+  }
+};
+
+// Re-evaluate an axis projection at the previous iteration. LoopGenerate already
+// defines the authoritative merged/split-axis arithmetic, including block phase.
+// Reusing that projection avoids inferring a period from unrelated vector axes.
+FailureOr<Value> previousAxisValue(Value value, scf::ForOp loop, OpBuilder &builder, IRMapping &mapping) {
+  if (mapping.contains(value)) {
+    return mapping.lookup(value);
+  }
+  Operation *def = value.getDefiningOp();
+  if (!def || !loop->isAncestor(def)) {
+    return value;
+  }
+  SmallVector<Value> operands;
+  bool changed = false;
+  for (Value operand : def->getOperands()) {
+    FailureOr<Value> previous = previousAxisValue(operand, loop, builder, mapping);
+    if (failed(previous)) {
+      return failure();
+    }
+    changed |= *previous != operand;
+    operands.push_back(*previous);
+  }
+  if (!changed) {
+    return value;
+  }
+  if (def->getName().getDialectNamespace() != "arith" || def->getNumRegions() != 0) {
+    return failure();
+  }
+  for (auto [oldValue, newValue] : llvm::zip_equal(def->getOperands(), operands)) {
+    mapping.map(oldValue, newValue);
+  }
+  Operation *cloned = builder.clone(*def, mapping);
+  cloned->removeAttr(kAxisBindingAttrName);
+  return mapping.lookup(value);
+}
+
+FailureOr<Value> materializeReduceCacheGuard(Operation *op, scf::ForOp loop, DenseI64ArrayAttr axes,
+                                             OpBuilder &builder) {
+  Location loc = op->getLoc();
+  Value index = loop.getInductionVar();
+  Value first = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, index, loop.getLowerBound());
+  if (axes.empty()) {
+    return first;
+  }
+  // Keep the first-iteration projection in range as well: no negative division
+  // or remainder is required when the loop starts at zero.
+  Value previous = builder.create<arith::SubIOp>(loc, index, loop.getStep());
+  previous = builder.create<arith::SelectOp>(loc, first, index, previous);
+  IRMapping mapping;
+  mapping.map(index, previous);
+  Value guard = first;
+  auto func = op->getParentOfType<func::FuncOp>();
+  for (int64_t axis : axes.asArrayRef()) {
+    Value current;
+    for (Operation *parent = op->getParentOp(); parent; parent = parent->getParentOp()) {
+      auto enclosing = dyn_cast<scf::ForOp>(parent);
+      if (enclosing && hasAxisBinding(enclosing, axis, AxisValueRole::Loop)) {
+        current = enclosing.getInductionVar();
+        break;
+      }
+    }
+    if (!current) {
+      current = findAxisValue(func, op, axis, AxisValueRole::AxisIndex);
+    }
+    if (!current) {
+      return failure();
+    }
+    FailureOr<Value> before = previousAxisValue(current, loop, builder, mapping);
+    if (failed(before)) {
+      return failure();
+    }
+    if (*before != current) {
+      Value changed = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne, current, *before);
+      guard = builder.create<arith::OrIOp>(loc, guard, changed);
+    }
+  }
+  return guard;
+}
+
+// 守卫谓词放在循环体开头，一个 (循环, 取值) 只生成一份——legacy 那边也是每个循环一个
+// `bool`，而这个 pass 之后没有 CSE，逐个算子各生成一份就会在生成的 kernel 里留下重复的标量
+// 算术。
+class GuardCache {
+ public:
+  FailureOr<Value> get(Operation *op, const TransferPlan &plan, ExecCondition condition, scf::ForOp loop) {
+    Key key = makeKey(plan, condition, loop);
+    auto existing = cached.find(key);
+    if (existing != cached.end()) {
+      return existing->second;
+    }
+    Block &body = *loop.getBody();
+    OpBuilder builder(&body, body.begin());
+    FailureOr<Value> guard = materializeExecConditionGuard(op, builder, plan, condition);
+    if (failed(guard)) {
+      return failure();
+    }
+    cached.try_emplace(key, *guard);
+    return guard;
+  }
+
+ private:
+  // 键里**必须**带上谓词真正依赖的那几根轴。只写 `(循环, 取值)` 的版本会让同一循环内第二个
+  // 算子直接拿到第一个算子的谓词，而 fused 那一支的谓词是按算子自己的
+  // `blockOuterAxis` / `loopAxis` / `tileOuterAxis` 建的（`materializeExecConditionGuard`），
+  // 两个算子的周期可以不同——`tileOuterAxis` 取的是算子自己 tile 最外那根向量化轴的配对轴。
+  // 复用于是有两种表现，都不可接受：周期不同的算子按别人的周期缓存；轴解析不出来的算子
+  // 「拒收还是放过」取决于遍历顺序（单独出现时报告能力不足，跟在一个解析得出的算子后面就被
+  // 静默放过）。键带上轴之后，不一致的算子走到 `materializeExecConditionGuard`，该拒的在
+  // 那里拒。
+  // `origin` 那一支的谓词只有「本核第一趟」一项，与这三根轴无关，所以它的键把三根轴归零：
+  // 同一循环内仍然只发一份。新增取值默认落到「依赖轴」那一侧——宁可多发一份谓词。
+  using Key = std::tuple<Operation *, unsigned, int64_t, int64_t, int64_t>;
+
+  static Key makeKey(const TransferPlan &plan, ExecCondition condition, scf::ForOp loop) {
+    const bool axisDependent = condition != ExecCondition::CacheBlockSplitOriginBroadcastAxis;
+    return Key{loop.getOperation(), static_cast<unsigned>(condition), axisDependent ? plan.blockOuterAxis : -1,
+               axisDependent ? plan.loopAxis : -1, axisDependent ? plan.tileOuterAxis : -1};
+  }
+
+  llvm::DenseMap<Key, Value> cached;
+};
+
+// 结果换成它 tie 的 destination。目的地形态下两者是同一块存储（`getTiedDestination` 的
+// 注释），所以这不是近似：换完之后算子的结果无人使用，可以整条挪进一个无返回值的
+// `scf.if`。tie 不上又确实有使用者的形态**报错而不是放过**——放过的表现是 region 外用到
+// region 内定义的值，那是 IR 校验失败，位置离这里已经很远。
+LogicalResult detachResults(Operation *op) {
+  for (Value result : op->getResults()) {
+    if (result.use_empty()) {
+      continue;
+    }
+    Value destination = getTiedDestination(result);
+    if (!destination) {
+      // 这一条不是能力不足：目的地形态下结果与 destination 是同一块存储，tie 不上又
+      // 有使用者说明两者已经漂移，回落会把它藏起来。标签按此订正（原先写的是
+      // `UnsupportedOperation`，那会让人以为换张图就行）。
+      return op->emitError(
+          "InvalidBinding: cached operation result is still in use but not tied to a destination operand; "
+          "exec_condition cannot be lowered to a predicated region");
+    }
+    result.replaceAllUsesWith(destination);
+  }
+  return success();
+}
+
+// 被守卫算子写的那块存储要满足两条，不满足一律拒收。
+// **单 slot。** 守卫跳过的只有算子本身，`AllocTensor` / `EnQue` / `DeQue` / `FreeTensor`
+// 每趟照发（见文件头）。单 slot 时地址每趟相同，跳过一趟写入之后读到的正是上一趟的结果；
+// 多 slot 队列每趟轮转，跳过之后读到的是**两趟之前**的数据，静默产生错误结果。文件头把
+// `buf_num = 1` 写成上游的不变量，而上游那条规则本身带例外——
+// `optimize/buffer_allocate/buf_que_allocator.cpp` 对 VecOut 位置是
+// `is_node_cached && !is_reusable` 才给 1。所以这里查，不假设。
+// `slot_count == -1` 是「没设这个字段」（TBuf 等），那种缓冲不轮转，按单 slot 看。
+// **不在 GM。** 缓存说的是「片上那块结果在一个周期内不变」。写 GM 的算子被包起来之后，
+// 输出只在周期起点写出去，其余 tile 根本没落盘。上游不会这么标
+// （`MarkNodesCacheableBottomUp` 走到 Load 就截断），legacy 也不按算子类别区分
+// （`enable_cache` 只看 `IsValidCacheCondition`），所以这是一条未校验的输入约束。
+// 判据写在存储空间上而不是算子类型上：`afir.store` 之外还有别的写 GM 的算子。
+LogicalResult checkGuardableDestinations(Operation *op, ExecCondition condition) {
+  FailureOr<OperandPartition> partition = getOperandPartition(op);
+  if (failed(partition) || partition->destinationCount == 0) {
+    return emitCapabilityShortfall(op) << "MissingInformation: exec_condition " << stringifyExecCondition(condition)
+                                       << " needs a destination operand whose storage the guard can be checked "
+                                          "against, which this operation does not expose";
+  }
+  for (Value destination : partition->destinations(op)) {
+    BufferDescAttr buffer = getBufferDescAttr(destination);
+    if (!buffer || !buffer.getSpace()) {
+      return emitCapabilityShortfall(op) << "MissingInformation: the destination of a cached operation carries no "
+                                            "buffer descriptor, so the guard's reuse assumption cannot be checked";
+    }
+    if (buffer.getSpace().getValue() == Space::GM) {
+      return emitCapabilityShortfall(op)
+             << "UnsupportedOperation: exec_condition " << stringifyExecCondition(condition)
+             << " caches an on-chip result; a destination in gm would only be written at cycle starts";
+    }
+    // `slot_count` 未设（`-1`）时才退到 `queue_depth` 判「轮转数」：
+    // `ResourceIds.cpp:isCanonicalQueueResource` 判定「是不是队列」时
+    // `slot_count != -1 || queue_depth != -1` 两者都看，说明一块缓冲可能只设了
+    // `queue_depth` 就已经是队列、会按它轮转（`CanonicalResources.cpp` 建
+    // `ascendc::QueueType` 用的正是 `queue_depth`）。但本仓既有语料里 `slot_count` 一旦
+    // 设过就是权威值（如 `slot_count = 1, queue_depth = 2` 这个常见组合，`slot_count`
+    // 为 1 代表调度上该资源不轮转），不能被 `queue_depth` 覆盖，否则现有的全部正向用例
+    // 都会被误拒。
+    const int64_t slotCount = buffer.getSlotCount() != -1 ? buffer.getSlotCount() : buffer.getQueueDepth();
+    if (slotCount > 1) {
+      return emitCapabilityShortfall(op) << "UnsupportedOperation: exec_condition " << stringifyExecCondition(condition)
+                                         << " needs a single-slot buffer, got " << slotCount
+                                         << " slots; a skipped iteration would read the slot written two iterations "
+                                            "back instead of the cached one";
+    }
+  }
+  return success();
+}
+
+LogicalResult guardOperation(Operation *op, ExecCondition condition, GuardCache &guards) {
+  FailureOr<TransferPlan> plan = buildTransferPlan(op);
+  if (failed(plan) || plan->kind != TransferPlanKind::Scheduled) {
+    return emitCapabilityShortfall(op) << "UnsupportedOperation: exec_condition " << stringifyExecCondition(condition)
+                                       << " needs a block/tile split schedule, which this operation lacks";
+  }
+  scf::ForOp loop;
+  for (Operation *parent = op->getParentOp(); parent != nullptr; parent = parent->getParentOp()) {
+    if (auto candidate = dyn_cast<scf::ForOp>(parent)) {
+      if (hasAxisBinding(candidate, plan->loopAxis, AxisValueRole::Loop)) {
+        loop = candidate;
+        break;
+      }
+    }
+  }
+  if (!loop) {
+    return emitCapabilityShortfall(op) << "UnsupportedOperation: exec_condition " << stringifyExecCondition(condition)
+                                       << " requires an enclosing loop on axis " << plan->loopAxis
+                                       << ", which loop generation did not materialize";
+  }
+  // 谓词之前先查存储：这两条不满足时发出去的 kernel 会静默产生错误结果，而谓词本身建得出来。
+  if (failed(checkGuardableDestinations(op, condition))) {
+    return failure();
+  }
+  OpBuilder guardBuilder(op);
+  auto refreshAxes = op->getAttrOfType<DenseI64ArrayAttr>(kCacheRefreshAxesAttrName);
+  FailureOr<Value> guard = refreshAxes ? materializeReduceCacheGuard(op, loop, refreshAxes, guardBuilder)
+                                       : guards.get(op, *plan, condition, loop);
+  op->removeAttr(kCacheRefreshAxesAttrName);
+  if (failed(guard)) {
+    return emitCapabilityShortfall(op) << "UnsupportedOperation: cannot build the cache guard for exec_condition "
+                                       << stringifyExecCondition(condition);
+  }
+  if (failed(detachResults(op))) {
+    return failure();
+  }
+  OpBuilder builder(op);
+  auto ifOp = builder.create<scf::IfOp>(op->getLoc(), *guard, /*withElseRegion=*/false);
+  Block *thenBlock = ifOp.thenBlock();
+  op->moveBefore(thenBlock, thenBlock->begin());
+  return success();
+}
+
+LogicalResult runOnFunction(func::FuncOp func) {
+  SmallVector<std::pair<Operation *, ExecCondition>> pending;
+  func.walk([&](Operation *op) {
+    if (!isAfirOperation(op)) {
+      return;
+    }
+    // region 内不插缓存守卫。 `afir.vector_func` 的 region 是一段在寄存器里算完的
+    // 数据流，守卫要包的是整段（算子自己带着它从子图首节点继承来的 `exec_condition`），
+    // 往里插等于在 `__VEC_SCOPE__` 里生成 tile 级的守卫算子。
+    if (isInsideVectorFunc(op)) {
+      return;
+    }
+    ExecCondition condition = getExecCondition(op);
+    if (condition != ExecCondition::NoCache) {
+      pending.emplace_back(op, condition);
+    }
+  });
+  GuardCache guards;
+  for (auto [op, condition] : pending) {
+    if (failed(guardOperation(op, condition, guards))) {
+      return failure();
+    }
+  }
+  return success();
+}
+
+struct AFIRExecConditionPass : public PassWrapper<AFIRExecConditionPass, OperationPass<ModuleOp>> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(AFIRExecConditionPass)
+
+  StringRef getArgument() const final {
+    return "afir-exec-condition";
+  }
+
+  StringRef getDescription() const final {
+    return "Wrap operations carrying a cache exec_condition in the scf.if that gates their reuse cycle";
+  }
+
+  void getDependentDialects(DialectRegistry &registry) const override {
+    registry.insert<AFIRDialect, arith::ArithDialect, func::FuncDialect, scf::SCFDialect>();
+  }
+
+  void runOnOperation() override {
+    for (func::FuncOp func : getOperation().getOps<func::FuncOp>()) {
+      if (func.isExternal()) {
+        continue;
+      }
+      if (failed(runOnFunction(func))) {
+        signalPassFailure();
+        return;
+      }
+    }
+  }
+};
+
+}  // namespace
+
+std::unique_ptr<Pass> createAFIRCacheDependencyPass() {
+  return std::make_unique<AFIRCacheDependencyPass>();
+}
+
+std::unique_ptr<Pass> createAFIRExecConditionPass() {
+  return std::make_unique<AFIRExecConditionPass>();
+}
+
+void registerAFIRExecConditionPass() {
+  PassRegistration<AFIRCacheDependencyPass>();
+  PassRegistration<AFIRExecConditionPass>();
+}
+
+}  // namespace mlir::afir

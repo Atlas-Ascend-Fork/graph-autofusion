@@ -58,7 +58,16 @@ inline constexpr char kNeedCheckBoundAttr[] = "need_check_bound";
 inline constexpr char kMaxAttr[] = "max";
 inline constexpr char kAlphaAttr[] = "alpha";
 inline constexpr char kNAttr[] = "n";
+inline constexpr char kRightAttr[] = "right";
 inline constexpr char kErrorMsgAttr[] = "error_msg";
+inline constexpr char kMsgAttr[] = "msg";
+inline constexpr char kAsmAttr[] = "asm_str";
+inline constexpr char kContaintsAttr[] = "containts";
+inline constexpr char kIsPureAttr[] = "ispure";
+inline constexpr char kPacketAttr[] = "packet";
+inline constexpr char kDtypesAttr[] = "dtypes";
+inline constexpr char kCombineFnAttr[] = "combine_fn";
+inline constexpr char kStoreNameAttr[] = "value_name";
 struct DTypeEntry {
   const char *py_name{nullptr};
   int64_t dtype_value{-1};
@@ -886,24 +895,9 @@ class OpsOperator {
         return -1;
       }
     }
-    // Ascir only need start node to pass graph as in_param
-    if (ops_type.input_defs.empty()) {
-      PY_ASSERT_NOTNULL(graph_object);
-      if (PyObject_IsInstance(graph_object, ge::PtrToPtr<PyTypeObject, PyObject>(&pyascir::HintGraph::type)) != 0) {
-        auto graph = ge::PtrToPtr<PyObject, pyascir::HintGraph::Object>(graph_object);
-        PY_ASSERT_NOTNULL(graph->graph, "The input param graph is nullptr.");
-        graph->graph->AddNode(*op);
-      } else if (PyObject_IsInstance(graph_object, ge::PtrToPtr<PyTypeObject, PyObject>(&pyascir::FusedGraph::type)) !=
-                 0) {
-        auto graph = ge::PtrToPtr<PyObject, pyascir::FusedGraph::Object>(graph_object);
-        PY_ASSERT_NOTNULL(graph->graph, "The input param graph is nullptr.");
-        auto node = graph->graph->AddNode(af::OpDescUtils::GetOpDescFromOperator(*op));
-        af::NodeUtilsEx::SetNodeToOperator(*op, node);
-      } else {
-        PyErr_SetString(PyExc_TypeError, "The start node requires the graph to be passed in as an input parameter.");
-        delete op;
-        return -1;
-      }
+    if (!AttachStartNodeToGraph(ops_type, graph_object, op)) {
+      delete op;
+      return -1;
     }
     auto self = ge::PtrToPtr<PyObject, Object>(self_pyobject);
     self->op_base.name = PyUnicode_FromString(name_ptr);
@@ -923,17 +917,61 @@ class OpsOperator {
       }
       return 0;
     }
+    if (!SetupFixedOutputs(self, op, ops_type, name_ptr, op_type.GetString())) {
+      delete op;
+      self->op = nullptr;
+      self->op_base.op = nullptr;
+      self->attr = Py_None;
+      return -1;
+    }
+    return 0;
+  }
+
+  static bool IsStartNode(const OpsOperatorTypeObject &ops_type) {
+    return ops_type.input_defs.empty() ||
+           std::all_of(ops_type.input_defs.begin(), ops_type.input_defs.end(),
+                       [](const auto &input_def) { return input_def.second == af::kIrInputOptional; });
+  }
+
+  static bool AttachStartNodeToGraph(const OpsOperatorTypeObject &ops_type, PyObject *graph_object, OpType *op) {
+    if (!IsStartNode(ops_type)) {
+      return true;
+    }
+    PY_ASSERT_NOTNULL(graph_object);
+    const auto is_hint_graph =
+        PyObject_IsInstance(graph_object, ge::PtrToPtr<PyTypeObject, PyObject>(&pyascir::HintGraph::type));
+    if (is_hint_graph != 0) {
+      auto graph = ge::PtrToPtr<PyObject, pyascir::HintGraph::Object>(graph_object);
+      PY_ASSERT_NOTNULL(graph->graph, "The input param graph is nullptr.");
+      graph->graph->AddNode(*op);
+      return true;
+    }
+    const auto is_fused_graph =
+        PyObject_IsInstance(graph_object, ge::PtrToPtr<PyTypeObject, PyObject>(&pyascir::FusedGraph::type));
+    if (is_fused_graph != 0) {
+      auto graph = ge::PtrToPtr<PyObject, pyascir::FusedGraph::Object>(graph_object);
+      PY_ASSERT_NOTNULL(graph->graph, "The input param graph is nullptr.");
+      auto node = graph->graph->AddNode(af::OpDescUtils::GetOpDescFromOperator(*op));
+      af::NodeUtilsEx::SetNodeToOperator(*op, node);
+      return true;
+    }
+    PyErr_SetString(PyExc_TypeError, "The start node requires the graph to be passed in as an input parameter.");
+    return false;
+  }
+
+  static bool SetupFixedOutputs(Object *self, OpType *op, const OpsOperatorTypeObject &ops_type, const char *name,
+                                const char *op_type) {
     for (size_t i = 0UL; i < op->GetOutputsSize(); ++i) {
       PY_ASSERT(i < ops_type.output_defs.size());
       PY_ASSERT(ops_type.output_defs[i].second != af::kIrOutputDynamic,
-                "Op %s's %s output idx %zu is dynamic but is not inited", name_ptr, op_type.GetString(), i);
+                "Op %s's %s output idx %zu is dynamic but is not inited", name, op_type, i);
       auto attr_group = af::AscTensorAttr::GetTensorAttrPtr(op, i);
       PY_ASSERT_NOTNULL(attr_group);
       auto output = OpsOperatorOutput::FromOp(i, op, *attr_group);
       PY_ASSERT_NOTNULL(output);
       self->input_outputs[self->input_output_num++] = output;
     }
-    return 0;
+    return true;
   }
 
   static OpsOperatorTypeObject CreateTypeObject() {
@@ -1291,10 +1329,38 @@ DEFINE_IR_ATTR_ACCESSORS(ChebyshevPolynomialV, AscChebyshevPolynomialVIrAttrDef,
                          PyLong_FromLong, PyLong_AsLong, SetN, GetN)
 DEFINE_IR_ATTR_ACCESSORS(ChebyshevPolynomialW, AscChebyshevPolynomialWIrAttrDef, kNAttr, int64_t, PyLong_Check,
                          PyLong_FromLong, PyLong_AsLong, SetN, GetN)
+DEFINE_IR_ATTR_ACCESSORS(Bucketize, AscBucketizeIrAttrDef, kRightAttr, bool, PyBool_Check, PyBool_FromLong,
+                         PyObject_IsTrue, SetRight, GetRight)
 DEFINE_IR_ATTR_ACCESSORS(
     Unsupported, AscUnsupportedIrAttrDef, kErrorMsgAttr, std::string, PyUnicode_Check,
     [](const std::string &str) { return PyUnicode_FromString(str.c_str()); }, PyUnicode_AsUTF8, SetError_msg,
     GetError_msg)
+DEFINE_IR_ATTR_ACCESSORS(
+    DeviceAssertAsync, AscDeviceAssertAsyncIrAttrDef, kMsgAttr, std::string, PyUnicode_Check,
+    [](const std::string &str) { return PyUnicode_FromString(str.c_str()); }, PyUnicode_AsUTF8, SetMsg, GetMsg)
+DEFINE_IR_ATTR_ACCESSORS(
+    InlineAsmElementwise, AscInlineAsmElementwiseIrAttrDef, kAsmAttr, std::string, PyUnicode_Check,
+    [](const std::string &str) { return PyUnicode_FromString(str.c_str()); }, PyUnicode_AsUTF8, SetAsm_str, GetAsm_str)
+DEFINE_IR_ATTR_ACCESSORS(
+    InlineAsmElementwise, AscInlineAsmElementwiseIrAttrDef, kContaintsAttr, std::string, PyUnicode_Check,
+    [](const std::string &str) { return PyUnicode_FromString(str.c_str()); }, PyUnicode_AsUTF8, SetContaints,
+    GetContaints)
+DEFINE_IR_ATTR_ACCESSORS(InlineAsmElementwise, AscInlineAsmElementwiseIrAttrDef, kIsPureAttr, bool, PyBool_Check,
+                         PyBool_FromLong, PyObject_IsTrue, SetIspure, GetIspure)
+DEFINE_IR_ATTR_ACCESSORS(InlineAsmElementwise, AscInlineAsmElementwiseIrAttrDef, kPacketAttr, int64_t, PyLong_Check,
+                         PyLong_FromLong, PyLong_AsLong, SetPacket, GetPacket)
+DEFINE_IR_ATTR_ACCESSORS(
+    Scan, AscScanIrAttrDef, kDtypesAttr, std::string, PyUnicode_Check,
+    [](const std::string &str) { return PyUnicode_FromString(str.c_str()); }, PyUnicode_AsUTF8, SetDtypes, GetDtypes)
+DEFINE_IR_ATTR_ACCESSORS(
+    Scan, AscScanIrAttrDef, kCombineFnAttr, std::string, PyUnicode_Check,
+    [](const std::string &str) { return PyUnicode_FromString(str.c_str()); }, PyUnicode_AsUTF8, SetCombine_fn,
+    GetCombine_fn)
+DEFINE_IR_ATTR_ACCESSORS(
+    StoreReduction, AscStoreReductionIrAttrDef, kStoreNameAttr, std::string, PyUnicode_Check,
+    [](const std::string &str) { return PyUnicode_FromString(str.c_str()); }, PyUnicode_AsUTF8, SetValue_name,
+    GetValue_name)
+DEFINE_IR_EXPR_ATTR_ACCESSORS(StoreReduction, AscStoreReductionIrAttrDef, kOffsetAttr, SetOffset, GetOffset)
 
 template <>
 PyObject *OpsOperatorIrAttr<af::ascir_op::IndirectLoad, kMaxAttr>::_getter(PyObject *self, void *closure) {
@@ -1334,7 +1400,7 @@ template <>
 int OpsOperatorIrAttr<af::ascir_op::Load, kOffsetAttr>::_setter(PyObject *self, PyObject *value, void *closure) {
   (void)closure;
   auto v = SizeExpr::AsSizeExpr(value);
-  if ((!v.IsValid()) || (v.Serialize().get() == nullptr)) {
+  if ((!v.IsValid()) || (v.Str().get() == nullptr)) {
     return -1;
   }
   auto *attr = GetValidatedIrAttr<af::ascir_op::Load, af::ascir_op::Load::AscLoadIrAttrDef>(self, "AscLoadIrAttrDef");
@@ -1357,7 +1423,7 @@ template <>
 int OpsOperatorIrAttr<af::ascir_op::Store, kOffsetAttr>::_setter(PyObject *self, PyObject *value, void *closure) {
   (void)closure;
   auto v = SizeExpr::AsSizeExpr(value);
-  if ((!v.IsValid()) || (v.Serialize().get() == nullptr)) {
+  if ((!v.IsValid()) || (v.Str().get() == nullptr)) {
     return -1;
   }
   auto *attr =
@@ -1419,7 +1485,13 @@ const std::map<std::string, typename IrAttr<OpType>::handler> IrAttr<OpType>::at
     {"ChebyshevPolynomialU", AutoRegAttrHandle<af::ascir_op::ChebyshevPolynomialU, kNAttr>::RegHandle},
     {"ChebyshevPolynomialV", AutoRegAttrHandle<af::ascir_op::ChebyshevPolynomialV, kNAttr>::RegHandle},
     {"ChebyshevPolynomialW", AutoRegAttrHandle<af::ascir_op::ChebyshevPolynomialW, kNAttr>::RegHandle},
+    {"Bucketize", AutoRegAttrHandle<af::ascir_op::Bucketize, kRightAttr>::RegHandle},
     {"Unsupported", AutoRegAttrHandle<af::ascir_op::Unsupported, kErrorMsgAttr>::RegHandle},
+    {"DeviceAssertAsync", AutoRegAttrHandle<af::ascir_op::DeviceAssertAsync, kMsgAttr>::RegHandle},
+    {"InlineAsmElementwise", AutoRegAttrHandle<af::ascir_op::InlineAsmElementwise, kAsmAttr, kContaintsAttr,
+                                               kIsPureAttr, kPacketAttr>::RegHandle},
+    {"Scan", AutoRegAttrHandle<af::ascir_op::Scan, kDtypesAttr, kCombineFnAttr>::RegHandle},
+    {"StoreReduction", AutoRegAttrHandle<af::ascir_op::StoreReduction, kStoreNameAttr, kOffsetAttr>::RegHandle},
 };
 PyTypeObject &OpsOperatorTypeObject::GetPyType() {
   return pytype;
@@ -1566,6 +1638,8 @@ PyMethodDef UtilsMethods[] = {
      "report durations"},
     {"set_platform", reinterpret_cast<PyCFunction>(pyascir::UtilsSetPlatform), METH_VARARGS,
      "set platform for platform context"},
+    {"requires_full_soc_version", reinterpret_cast<PyCFunction>(pyascir::UtilsRequiresFullSocVersion), METH_VARARGS,
+     "check whether npu arch requires full soc version"},
     {NULL}};
 
 PyMethodDef AscirMethods[] = {{"Max", SizeExprMax, METH_VARARGS, "Return the maximum of two SizeExpr values"},

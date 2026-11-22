@@ -11,7 +11,7 @@ The test library is not installed and does not link real device kernels or Runti
 
 | Directory | Responsibility |
 | --- | --- |
-| `ut/` | Unit tests for internal classes and functions using gtest/mockcpp, including seven shared model fixture tests |
+| `ut/` | Unit tests for internal classes and functions using gtest/mockcpp, including shared model fixture tests |
 | `st/` | Cross-module tests through four public APIs, including only public API and test dependency headers |
 | `depends/` | The `super_kernel_aot_stub` shared library, Runtime/ACL stubs, and external RI model fixtures |
 | `cmake/` | Shared test options, execution helpers, and coverage scripts |
@@ -43,6 +43,10 @@ Fixture UT covers query capacity and state preservation, model isolation and par
 ownership, metadata isolation for identical names with different kernel types, deep copying of
 parameters, non-kernel parameter copying, the compiler metadata byte protocol, and compatibility
 with opaque device addresses used by existing UT.
+Argument adaptation UT covers JSON output for HOST_BUFFER, DEVICE_BUFFER, and ARRAY, rejection
+of zero and unknown argsType values without legacy fallback, and separation of Copy backups
+from the original argument form. The updated-graph ST verifies HOST_BUFFER contents, size,
+and JSON output after Set, Update, and Get for the SK entry kernel.
 
 Profiling and SIMT scenarios run in separate processes to isolate production singletons.
 Child processes exit normally to verify recorder cleanup and write coverage data. A 15-second
@@ -109,11 +113,33 @@ headers, construct internal `SkGraph` objects, or call internal optimizers inste
 Express new Runtime behavior as external API contracts in `depends/`, add fixture UT, and then
 verify production flows with ST. Fixtures manage handle validity, parameter ownership, and
 observable state; they must not duplicate fusion algorithms to calculate expected results.
-`SetParams` saves copies of host parameters, configuration attributes, and opInfo. Function
-metadata remains stable within the process so production binary-cache references stay valid.
+Kernel parameters in the model fixture are selected by `argsType`; `AddKernel` defaults to
+DEVICE_BUFFER. `aclmdlRITaskGetParams` returns the recorded argument form. The test contract
+for `aclmdlRITaskSetParams` is:
+
+- HOST_BUFFER: deep-copy host arguments and the placeholder table, keeping the host cache
+  separate from simulated loaded device data.
+- DEVICE_BUFFER: retain the caller's address and size; the caller keeps the memory valid.
+- ARRAY: record the array pointer only. The caller keeps the array and its elements valid;
+  the fixture does not simulate deep copying or packing based on kernel parameter metadata.
+- Zero and unknown `argsType` values are not valid model-fixture Set inputs. The fixture does
+  not implement Runtime's legacy Set compatibility path.
+
+Configuration attributes and opInfo are still copied. The `rtModelTaskCopyArgsDeviceBuffer`
+stub backs up registered loaded argument contents; the model owns these backups until destruction.
+Existing opaque-device-address UT retains its original stub behavior, which does not represent
+real D2D copies. These stubs simulate neither device execution nor placeholder address patching
+and do not replace Runtime integration tests. Function metadata remains stable within the
+process so production binary-cache references stay valid.
 `KernelSpec` describes kernel types, ratios, and compiler capabilities. `SetKernelBindings`
 overrides external binary bindings and must be called before Optimize first consumes that binary.
 `AddTask` accepts only non-kernel tasks; callers must keep referenced external addresses valid.
+The model fixture's `aclmdlRITaskGetEnabled` queries the disabled state of registered tasks;
+task enumeration retains disabled tasks. `Model::SetTaskEnabled` only constructs re-enabled
+test inputs and does not imply that a corresponding public Runtime API exists.
+These tests verify SK's adaptation to future queries that return actual task states; they do
+not imply that the placeholder implementation in Runtime PR 6257 can already report disabled tasks.
+
 The model fixture supports AIC/AIV/MIX metadata, record/wait/reset events, and memory wait/write.
 Tests run serially; fixtures do not provide general device simulation or concurrent Runtime state.
 
@@ -141,8 +167,6 @@ For undefined `testing::*` symbols, check that the gtest core library is linked.
 assertions, check model destruction versus stub reset ordering. Task types, disabled states,
 parameter update counts, and synchronization addresses in assertions help identify rewriting differences.
 
-Two production problem reproductions are retained: when a mixed pipeline's final task declares
-both wait/set capabilities, early-start may create synchronization without an associated node
-and fail; when a single kernel exceeds the device core limit, scope splitting may not terminate.
-The latter test, `DISABLED_RuntimeCoreLimitKeepsOversizedKernelOutsideFusion`, is disabled by default
-and must not be counted as passing. Do not enable it in regular runs before fixing production code.
+One production problem reproduction is retained: when a single kernel exceeds the device core limit,
+scope splitting may not terminate. The test `DISABLED_RuntimeCoreLimitKeepsOversizedKernelOutsideFusion`
+is disabled by default and must not be counted as passing. Do not enable it in regular runs before fixing production code.

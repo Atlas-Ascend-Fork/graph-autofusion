@@ -172,7 +172,7 @@ class SubkernelResult(KernelResult):
         self._output_addr = value
 
     def workspaces_size(self) -> List[int]:
-            return self._json_data["workspace"]["size"]
+        return self._json_data["workspace"]["size"]
 
     # Set the input and output names through set_input and set_output so that the reuse relation
     # can be obtained for SuperKernel. For example, for A->B the output of A is the input of B,
@@ -320,7 +320,7 @@ def compile_subkernel(ctx: SkCompileContext):
         output_count=1
     )
 
-    return [is_inf_op, pows_op]
+    return [pows_op, is_inf_op]
 
 
 def compile_superkernel(ctx: SkCompileContext, sub_kernels: list[KernelResult]):

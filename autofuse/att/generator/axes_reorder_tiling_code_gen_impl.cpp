@@ -9,6 +9,7 @@
  */
 
 #include "axes_reorder_tiling_code_gen_impl.h"
+#include "axes_solver_resources.h"
 #include "args_manager.h"
 #include "solver_pass_manager.h"
 #include "common/checker.h"
@@ -16,6 +17,7 @@
 #include <vector>
 #include "base/model_info.h"
 #include "att_utils.h"
+#include "autofuse_config/auto_fuse_config.h"
 
 namespace att {
 namespace {
@@ -69,10 +71,17 @@ size_t GetGroupNumAndSetToSolver(const ModelInfo &model_info,
 }
 }  // namespace
 
-void AxesReorderTilingCodeGenImpl::ConfigureSolverPassManagerCommon(SolverPassManager &solver_pass_manager) {
+bool TilingCodeGenImpl::IsMulticoreUBTradeoffEnabled(const ModelInfo &model_info) const {
+  return config_.enable_multicore_ub_tradeoff ||
+         (model_info.enable_matmul_m_common_tradeoff &&
+          !AutoFuseConfig::GetAttStrategyConfig().set_env_enable_multicore_ub_tradeoff);
+}
+
+void AxesReorderTilingCodeGenImpl::ConfigureSolverPassManagerCommon(SolverPassManager &solver_pass_manager,
+                                                                    const ModelInfo &model_info) {
   solver_pass_manager.SetUBThreshold(config_.ub_threshold);
   solver_pass_manager.SetCoreNumThreshold(config_.corenum_threshold);
-  solver_pass_manager.SetEnableMulticoreUBTradeoff(config_.enable_multicore_ub_tradeoff);
+  solver_pass_manager.SetEnableMulticoreUBTradeoff(IsMulticoreUBTradeoffEnabled(model_info));
   solver_pass_manager.SetEnableAutofusePGO(config_.enable_autofuse_pgo);
   solver_pass_manager.SetAutofusePGOStepMax(config_.pgo_step_max);
   solver_pass_manager.SetVariableReplace(config_.do_variable_replace);
@@ -87,7 +96,6 @@ af::Status AxesReorderTilingCodeGenImpl::GenSolverBaseClass() {
   const bool is_enable_equal_order_tiling = IsAnyModelEnableEqualOrderTiling(tiling_model_info_);
   if (is_enable_equal_order_tiling) {
     RequireTranslationUnitSystemHeader("limits");
-    RequireTranslationUnitSystemHeader("map");
   }
   std::string basic_solvers_head = SolverPassManager::GenAxesReorderBaseClassesHead(is_enable_equal_order_tiling);
   AddAtomicHeaderLine(autofuse::GeneratedHeaderId::kSolver, basic_solvers_head);
@@ -106,7 +114,7 @@ af::Status AxesReorderTilingCodeGenImpl::GenSolverTiling(const ModelInfo &model_
   ArgsManager args_manager(model_info);
   SolverPassManager solver_pass_manager(args_manager, {args_manager.GetTilingCaseId(), model_info.sub_case_tag},
                                         config_.tiling_data_type_name);
-  ConfigureSolverPassManagerCommon(solver_pass_manager);
+  ConfigureSolverPassManagerCommon(solver_pass_manager, model_info);
   solver_pass_manager.SetReservedUbSize(model_info.reserved_ub_size);
 
   // 获取同一ScheduleResult中的Group个数并设置到SolverPassManager
@@ -123,7 +131,7 @@ af::Status AxesReorderTilingCodeGenImpl::GenDoTiling(const ModelInfo &model_info
   ArgsManager args_manager(model_info);
   SolverPassManager solver_pass_manager(args_manager, {args_manager.GetTilingCaseId(), model_info.sub_case_tag},
                                         config_.tiling_data_type_name);
-  ConfigureSolverPassManagerCommon(solver_pass_manager);
+  ConfigureSolverPassManagerCommon(solver_pass_manager, model_info);
 
   // 获取同一ScheduleResult中的Group个数并设置到SolverPassManager
   GetGroupNumAndSetToSolver(model_info, schedule_result_group_nums_, solver_pass_manager);
@@ -139,11 +147,11 @@ af::Status AxesReorderTilingCodeGenImpl::GenDoTiling(const ModelInfo &model_info
 
 af::Status AxesReorderTilingCodeGenImpl::GenToolFuncs() {
   GE_ASSERT_SUCCESS(TilingCodeGenImpl::GenToolFuncs(), "GenToolFuncs failed!");
-  tiling_func_.AddLine("inline int64_t CeilDiv(int64_t a, int64_t b)");
-  tiling_func_.AddLine("{");
-  tiling_func_.AddLine("    int64_t res = a / b;");
-  tiling_func_.AddLine("    return (res * b == a) ? res : (res + 1);");
-  tiling_func_.AddLine("}");
+  std::istringstream source(axes_resource::kAxesCeilDiv);
+  std::string line;
+  while (std::getline(source, line)) {
+    tiling_func_.AddLine(line);
+  }
   GE_ASSERT_SUCCESS(TilingCodeGenImpl::GenStructCopyDef(), "Generate struct copy.");
   GE_ASSERT_SUCCESS(TilingCodeGenImpl::GenCacheHashMapDef(), "Generate cache hash map.");
   return af::SUCCESS;

@@ -9,6 +9,7 @@
  */
 
 #include "dtype_consistency.h"
+#include "v35/ascir/ascir_codegen_v2.h"
 #include "ascir_ops.h"
 #include "ascir_ops_utils.h"
 #include "common_utils.h"
@@ -120,7 +121,12 @@ Status DtypeConsistency::CollectDtypeRequirements(af::AscGraph &graph,
     auto codegen_impl = ascgen_utils::GetAscIrCodegenImpl(node->GetType());
     GE_ASSERT_NOTNULL(codegen_impl, "Cannot find impl for ir type:[%s].", node->GetTypePtr());
     auto [input_dtypes, output_dtypes] = codegen_impl->GetConversionDtype(*node);
-    requirements.push_back({node, input_dtypes, output_dtypes});
+    auto *codegen_impl_v2 = dynamic_cast<af::ascir::AscIrCodegenV2 *>(codegen_impl.get());
+    std::vector<std::vector<af::DataType>> output_cast_paths;
+    if (codegen_impl_v2 != nullptr) {
+      output_cast_paths = codegen_impl_v2->GetOutputConversionPath(*node);
+    }
+    requirements.push_back({node, input_dtypes, output_dtypes, output_cast_paths});
   }
   return af::SUCCESS;
 }
@@ -129,6 +135,7 @@ Status DtypeConsistency::ApplyDtypeConversions(af::AscGraph &graph,
                                                const std::vector<NodeDtypeRequirement> &requirements) {
   for (const auto &req : requirements) {
     GE_CHK_STATUS_RET(ProcessOutputDtype(req), "Failed to process output dtype");
+    GE_CHK_STATUS_RET(ProcessOutputCastPath(graph, req), "Failed to process output cast path");
     GE_CHK_STATUS_RET(ProcessInputDtype(graph, req), "Failed to process input dtype for node %s.",
                       req.node->GetNamePtr());
   }
@@ -144,6 +151,57 @@ Status DtypeConsistency::ProcessOutputDtype(const NodeDtypeRequirement &req) {
              ge::TypeUtils::DataTypeToSerialString(req.node->outputs[i].attr.dtype).c_str(),
              ge::TypeUtils::DataTypeToSerialString(req.output_dtypes[i]).c_str());
       req.node->outputs[i].attr.dtype = req.output_dtypes[i];
+    }
+  }
+  return af::SUCCESS;
+}
+
+// Insert each ASCIR codegen output cast path as consecutive Cast nodes when direct conversion cannot preserve
+// semantics.
+Status DtypeConsistency::ProcessOutputCastPath(af::AscGraph &graph, const NodeDtypeRequirement &req) {
+  GE_ASSERT_TRUE(req.output_cast_paths.size() <= req.node->outputs().size());
+  for (size_t output_idx = 0UL; output_idx < req.output_cast_paths.size(); ++output_idx) {
+    const auto &cast_path = req.output_cast_paths[output_idx];
+    if (cast_path.empty()) {
+      continue;
+    }
+
+    auto src_out_anchor = req.node->GetOutDataAnchor(static_cast<int32_t>(output_idx));
+    GE_ASSERT_NOTNULL(src_out_anchor);
+    auto src_node = std::dynamic_pointer_cast<af::AscNode>(src_out_anchor->GetOwnerNode());
+    GE_ASSERT_NOTNULL(src_node);
+
+    for (size_t cast_idx = 0UL; cast_idx < cast_path.size(); ++cast_idx) {
+      const size_t src_output_idx = static_cast<size_t>(src_out_anchor->GetIdx());
+      auto src_dtype = src_node->outputs[src_output_idx].attr.dtype;
+      auto dst_dtype = cast_path[cast_idx];
+      std::vector<af::DataType> cast_input_dtypes = {src_dtype};
+      std::vector<af::DataType> cast_output_dtypes = {dst_dtype};
+      GE_ASSERT_TRUE(ScheduleUtils::CallAscirInferDataType<af::ascir_op::Cast>(cast_input_dtypes, cast_output_dtypes) ==
+                         af::SUCCESS,
+                     "Node [%s] output [%zu] unsupported cast path from [%s] to [%s].", req.node->GetNamePtr(),
+                     output_idx, ge::TypeUtils::DataTypeToSerialString(src_dtype).c_str(),
+                     ge::TypeUtils::DataTypeToSerialString(dst_dtype).c_str());
+
+      const auto peer_in_anchor_range = src_out_anchor->GetPeerInDataAnchors();
+      const std::vector<af::InDataAnchorPtr> peer_in_anchors(peer_in_anchor_range.begin(), peer_in_anchor_range.end());
+      if (peer_in_anchors.empty()) {
+        GELOGD("Node [%s] output [%zu] has no consumer, skip output cast path.", req.node->GetNamePtr(), output_idx);
+        break;
+      }
+
+      std::string cast_name = std::string(src_node->GetName()) + "_cast_to_" +
+                              ge::TypeUtils::DataTypeToSerialString(dst_dtype) + "_" + std::to_string(cast_idx);
+      Cast cast_node(cast_name.c_str());
+      auto cast_node_ptr = graph.AddNode(cast_node);
+      GE_ASSERT_NOTNULL(cast_node_ptr);
+      cast_node_ptr->outputs[0].attr = src_node->outputs[src_output_idx].attr;
+      cast_node_ptr->outputs[0].attr.dtype = dst_dtype;
+      GE_ASSERT_SUCCESS(af::AscGraphUtils::InsertNodeAfter(src_out_anchor, peer_in_anchors, cast_node_ptr));
+
+      src_node = cast_node_ptr;
+      src_out_anchor = cast_node_ptr->GetOutDataAnchor(0);
+      GE_ASSERT_NOTNULL(src_out_anchor);
     }
   }
   return af::SUCCESS;

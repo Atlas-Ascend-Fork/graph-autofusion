@@ -11,12 +11,15 @@
 #ifndef __INDIRECT_LOAD_UTILS_H__
 #define __INDIRECT_LOAD_UTILS_H__
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 #include "ascir.h"
+#include "ascir_ops_utils.h"
 #include "graph/ascendc_ir/ascendc_ir_core/ascendc_ir.h"
 #include "graph/symbolizer/symbolic_utils.h"
 
@@ -81,15 +84,69 @@ enum class IndirectLoadLayoutKind : int64_t {
   kUnsupported = 3,
 };
 
+enum class IndirectLoadStoreKind : int64_t {
+  kDense = 0,
+  kSliceStrided = 1,
+  kUnsupported = 2,
+};
+
 struct IndirectLoadTensorLayout : LogicalTensorView {
   IndirectLoadLayoutKind kind = IndirectLoadLayoutKind::kUnsupported;
   std::vector<af::Expression> physical_repeats;
 };
 
+// 判定向量化视图是否可能带行间物理 padding：物理跨度（Σ(size-1)*stride+1）无法静态证明
+// 等于逻辑元素积（Πsize）即视为存在。通用对齐把尾轴 pad 到对齐块时跨度含取整结构，动态
+// shape 下通常不可证明相等；变位宽生产者（如 cast）的输出缓冲同样会被 pad。保守误判只会
+// 把 SIMD 降级到布局参数完备的 strided facade 或改按物理步长寻址，漏判则使 dense 消费者按
+// 紧凑布局读写带 padding 的缓冲产生越界。视图信息缺失、视图轴不在张量轴列表或仅单轴
+// （无行间 padding 可言）时不判，维持既有行为。
+template <typename AxisIdRange, typename SizeRange, typename StrideRange>
+inline bool MayHaveVectorizedPadding(const AxisIdRange &axis, const SizeRange &sizes,
+                                     const AxisIdRange &vectorized_axis, const StrideRange &vectorized_strides) {
+  if (axis.size() != sizes.size() || vectorized_axis.size() != vectorized_strides.size() ||
+      vectorized_axis.size() <= 1UL) {
+    return false;
+  }
+  af::Expression span = af::sym::kSymbolOne;
+  af::Expression product = af::sym::kSymbolOne;
+  for (size_t dim = 0UL; dim < vectorized_axis.size(); ++dim) {
+    const auto axis_it = std::find(axis.begin(), axis.end(), vectorized_axis[dim]);
+    if (axis_it == axis.end()) {
+      return false;
+    }
+    const size_t axis_pos = static_cast<size_t>(std::distance(axis.begin(), axis_it));
+    const auto &stride = vectorized_strides[dim];
+    if (af::SymbolicUtils::StaticCheckEq(stride, af::sym::kSymbolZero) == af::TriBool::kTrue) {
+      continue;
+    }
+    span = span + (sizes[axis_pos] - af::sym::kSymbolOne) * stride;
+    product = product * sizes[axis_pos];
+  }
+  return af::SymbolicUtils::StaticCheckEq(span, product) != af::TriBool::kTrue;
+}
+
+// 调度期预测：通用对齐发生在调度之后，FinalizeLoweringMetadata 序列化时
+// vectorized_strides 仍为图原生稠密视图（pre-check 漏判 out_padded[0]），而codegen期
+// 尾轴已被对齐 pad->dense facade 强制降级 strided。本函数按 dtype 对齐
+// 32B 块有余“静态预测对齐后的padded视图，供调度评分提前感知降级（与lowring/codegen
+// 两期检查同向保守）。动态shape或尾轴宽度为1，维持既有评分。
+bool PredictSimdAlignmentPadding(const af::AscNodePtr &node);
+
 struct TemplateLogicalView {
   IndirectLoadTensorLayout input;
   IndirectLoadTensorLayout index;
   LogicalTensorView output;
+  // SK 窗口复用语义：单次 API 调用驻留的 outer 行数（固定 tile 尺寸，即 tile_inner 尺寸，
+  // 不含每核串行循环次数）。仅当全量驻留 tmp 估算超出平台 UB 或 shape 动态不可判定时记录
+  // （避免 SK 被 StaticUbTemplateFilter 误淘汰）。注意 Expression 默认构造为合法的空名符号，
+  // IsValid 恒真，不能作为"未设置"哨兵；未设置判定以 window_iter_axes 为空为准（填充时两者
+  // 原子设置），此时消费方按全量 outer 积兜底，与历史行为逐字节等价。
+  af::Expression window_outer_count;
+  // SK 窗口迭代轴（tile_outer 轴 ID），同时是窗口语义的"已设置"哨兵。窗口循环串行复用同一块
+  // tmp，静态估算需跳过该轴及其派生的 block 切分轴（外/内均只承载循环计数）；为空表示无窗口
+  // 复用语义。
+  std::vector<af::AxisId> window_iter_axes;
 };
 
 struct IndirectLoadAccessInfo {
@@ -137,6 +194,99 @@ enum class SimtOffsetWidth : int64_t {
   kUint64,
 };
 
+// [SIMT 融合寄存器压力模型] 位宽感知常数与档位映射（调度期 L4 门控/线程档封顶与
+// codegen 位宽漂移防护共用）。64 位基准为既有保守值（行为不变）；全成员 uint32 时
+// fused body 选 32 位 OffsetType（codegen 判定），改用 32 位细化常数（fused 成员
+// 上限与线程档均放宽）。取值依据、推导与档位配额表见设计文档「寄存器压力模型」。
+constexpr uint64_t kSimtFusedRegisterBase64 = 24U;
+constexpr uint64_t kSimtFusedRegisterPerMember64 = 18U;
+constexpr uint64_t kSimtFusedRegisterPerSideLoad64 = 5U;
+constexpr uint64_t kSimtFusedRegisterPerChainNode = 3U;  // 混合宽度，两档共用
+constexpr uint64_t kSimtFusedRegisterBase32 = 23U;
+constexpr uint64_t kSimtFusedRegisterPerMember32 = 10U;
+constexpr uint64_t kSimtFusedRegisterPerSideLoad32 = 4U;
+// 最低档配额：超过即 fused 发射不可行（降级 L4/V2）。
+constexpr uint64_t kSimtFusedMinTierQuota = 127U;
+
+// [配额可行性·唯一判据] 带 5% 安全边际（防低估 spill；方向向上，禁止折算系数——见
+// 设计文档标定策略）。调度期门控（PlanSimtEmission）与生成期预检
+// （IsGroupSimtL4UbDoomed）必须共用本判据，禁止各自取整/位宽基准漂移——判据分裂会
+// 产生"预检放行、计划拒绝"的错配窗口（候选生成后才在 tiling 期被淘汰）。
+constexpr bool SimtFusedQuotaFeasible(const uint64_t demand) {
+  return demand * 105U <= kSimtFusedMinTierQuota * 100U;
+}
+
+// 位宽感知寄存器需求：all_offset_uint32 用 32 位细化常数，否则 64 位基准。
+inline uint64_t SimtFusedRegisterDemand(const bool all_offset_uint32, const uint64_t member_count,
+                                        const uint64_t side_load_count, const uint64_t chain_node_count) {
+  if (all_offset_uint32) {
+    return kSimtFusedRegisterBase32 + kSimtFusedRegisterPerMember32 * member_count +
+           kSimtFusedRegisterPerSideLoad32 * side_load_count + kSimtFusedRegisterPerChainNode * chain_node_count;
+  }
+  return kSimtFusedRegisterBase64 + kSimtFusedRegisterPerMember64 * member_count +
+         kSimtFusedRegisterPerSideLoad64 * side_load_count + kSimtFusedRegisterPerChainNode * chain_node_count;
+}
+
+// [SIMT 融合峰值寄存器压力模型] 唯一决定源开关：默认 peak（按 liveness 峰值计，消除
+// "每成员瞬态按 N 线性累加"的虚高）；sum 模型仅作现场应急回退与 CI 对拍（回退只切本
+// 常量，决策流程不变）。禁止 gate 用 sum、tier 用 peak 之类的混用（详见设计文档
+// 「寄存器压力模型」单一真值源一节）。
+constexpr bool kUsePeakModel = true;
+
+// 峰值模型常数（估计值，以 UT 锁相对关系、ST/性能用例反标绝对值）：
+// - P_member×N：发射顺序产物（Eval 以 N 元组 OutputPack 整体返回，进链前 N 路全活），
+//   其中仅 value 硬常驻，基址/policy 引用为循环不变量——3N 是上界非物理下界；
+// - 瞬时项（单成员寻址 / 链内活跃临时）互斥取大：寻址峰值与链求值不同时达到。
+constexpr uint64_t kSimtPeakBase64 = 24U;  // FusedCtx 局部体 + magic/shift + OutputPack 固定开销
+constexpr uint64_t kSimtPeakBase32 = 23U;
+constexpr uint64_t kSimtPeakPerMemberPersist = 3U;  // value + 成员基址/policy 引用
+constexpr uint64_t kSimtPeakPerSideLoad = 2U;       // side GM 指针（循环不变量）
+constexpr uint64_t kSimtPeakMemberAddr64 = 6U;      // 单成员 addr/idx/offset/索引表达式临时
+constexpr uint64_t kSimtPeakMemberAddr32 = 5U;
+constexpr uint64_t kSimtPeakPerChainNode = 3U;  // 链内每个活跃临时（2 入 1 出）
+
+// L2（寄存器归并）峰值：常驻相加 + 瞬时取大。E_side 为 side 闭包节点数（就地求值、与
+// 主干链临时重叠，相加），W_forward 为归并链 DAG 宽度（链内同时活跃临时数，不含成员
+// value——已在 3N 常驻项内，重复计入会双重计算）。
+inline uint64_t SimtPeakRegisterDemand(const bool all_offset_uint32, const uint64_t member_count,
+                                       const uint64_t side_load_count, const uint64_t side_chain_count,
+                                       const uint64_t forward_chain_width) {
+  const uint64_t base = all_offset_uint32 ? kSimtPeakBase32 : kSimtPeakBase64;
+  const uint64_t member_addr = all_offset_uint32 ? kSimtPeakMemberAddr32 : kSimtPeakMemberAddr64;
+  const uint64_t transient = std::max(member_addr, kSimtPeakPerChainNode * (side_chain_count + forward_chain_width));
+  return base + kSimtPeakPerMemberPersist * member_count + kSimtPeakPerSideLoad * side_load_count + transient;
+}
+
+// L3（UB 归并）峰值：evaluator 只算裸 load，side 与归并链由 VF/normal 消费，不计——
+// 仅常驻项 + 单成员寻址瞬态。
+inline uint64_t SimtPeakRegisterDemandL3(const bool all_offset_uint32, const uint64_t member_count) {
+  const uint64_t base = all_offset_uint32 ? kSimtPeakBase32 : kSimtPeakBase64;
+  const uint64_t member_addr = all_offset_uint32 ? kSimtPeakMemberAddr32 : kSimtPeakMemberAddr64;
+  return base + kSimtPeakPerMemberPersist * member_count + member_addr;
+}
+
+// [归并链 DAG 宽度] 链求值任意瞬间一个线程必须同时持有的链内新产生临时数（forward
+// 节点输出；不含成员 value 与 side 输入）。生命周期 = 算出至最后一个 forward 内消费者，
+// 消费即释放；无 forward 消费者（终端 Store/Reduce/域外消费）活到链尾。位置序取图拓扑
+// 序（保证哈希序不参与计算，宽度可复现）；同一位置先释放后生产（事件净和体现）。
+// 语义示意与算例见设计文档「DAG 宽度 W 的计算」：链形恒为 1、成对树 N/2。
+uint64_t ComputeMergeChainWidth(const af::AscGraph &graph, const std::vector<af::AscNodePtr> &forward_nodes,
+                                const std::vector<af::AscNodePtr> &members);
+
+// 线程档映射：需求可容纳的最高档。
+inline uint32_t SimtFusedThreadTier(const uint64_t register_demand) {
+  if (register_demand <= 16U) {
+    return 2048U;
+  }
+  if (register_demand <= 32U) {
+    return 1024U;
+  }
+  if (register_demand <= 64U) {
+    return 512U;
+  }
+  return 256U;
+}
+
 enum class SimtLoadAddressSource : int64_t {
   kZeroOffset,
   kOutputOffset,
@@ -182,6 +332,9 @@ struct SimtOutputChainMetadata {
   ascir::TensorId target_tensor_id = af::kIdNone;
   af::DataType dtype = af::DT_UNDEFINED;
   bool local_target = false;
+  std::vector<af::Expression> target_sizes;
+  std::vector<af::Expression> target_strides;
+  af::Expression target_offset{af::ops::Zero};
 };
 
 struct SimtLoweringMetadata {
@@ -317,10 +470,50 @@ struct IndirectLoadLoweringMetadata {
   SimtLoweringMetadata simt;
 };
 
+// SIMD 模板仅 strided 降级时消费 API 级 offsets tmp，dense 形态走寄存器寻址。
+// 供 CalcTmpBufSize 决定是否分配；信息缺失保守保留（漏判踩断言，误判白分配）。
+inline bool SimdOffsetsTmpRequired(const af::AscNode &node) {
+  const auto op_desc = node.GetOpDesc();
+  if (op_desc == nullptr) {
+    return true;
+  }
+  auto node_inputs = node.inputs;
+  if (static_cast<size_t>(node_inputs.Size()) <= kIndexTensorIndex) {
+    return true;
+  }
+  auto node_outputs = node.outputs;
+  if (node_outputs().empty()) {
+    return true;
+  }
+  // metadata 缺失/非法：两期结论可能漂移，保守保留。
+  const auto metadata = op_desc->TryGetExtAttr(kLoweringMetadataAttr, IndirectLoadLoweringMetadata{});
+  if (metadata.version != 1U || metadata.axis < 0L || metadata.outer_axis == af::kIdNone ||
+      metadata.simd.fallback == SimdFallback::kStrided) {
+    return true;
+  }
+  // 防御 metadata 过期：当前视图非 dense 即保留。
+  const auto logical_view = op_desc->TryGetExtAttr(kTemplateLogicalViewAttr, TemplateLogicalView{});
+  if (logical_view.input.kind != IndirectLoadLayoutKind::kDense ||
+      logical_view.index.kind != IndirectLoadLayoutKind::kDense) {
+    return true;
+  }
+  // 与 GenerateSimd 兜底降级同判据：输出与索引两视图都判。
+  const auto &output_attr = node_outputs[0].attr;
+  if (MayHaveVectorizedPadding(output_attr.axis, output_attr.repeats, output_attr.vectorized_axis,
+                               output_attr.vectorized_strides)) {
+    return true;
+  }
+  const auto &index_attr = node_inputs[kIndexTensorIndex].attr;
+  return MayHaveVectorizedPadding(index_attr.axis, index_attr.repeats, index_attr.vectorized_axis,
+                                  index_attr.vectorized_strides);
+}
+
 TemplateBehavior GetTemplateBehavior(const af::AscNodePtr &node);
 TemplateRole GetTemplateRole(const af::AscNodePtr &node);
 af::AscNodePtr GetPostReduceConsumer(const af::AscNodePtr &node);
 af::AscNodePtr GetPostReduceInputProducer(const af::AscNodePtr &node);
+// Returns the SIMT/normal materialization boundary, which may precede the Reduce input.
+af::AscNodePtr GetSimtPostReduceLocalProducer(const af::AscNodePtr &node);
 // Returns the terminal tensor ID of a chain whose API emission is skipped.
 ascir::TensorId FindSkippedChainResultTensor(const af::AscNodePtr &root);
 bool ShouldSkipTpipeTensorCollection(const af::AscNodePtr &node);
@@ -352,13 +545,111 @@ af::Status ValidateIndirectLoadOutputLayout(const LogicalTensorView &output);
 // 调度会把普通节点视图 merge/split 到模板轴空间（如 outer 被拆为
 // [s3*s4*s5/Tb, Tb]），符号级全等比较会漏判这类等价视图。
 bool IsDenseEquivalentView(const LogicalTensorView &load_view, const LogicalTensorView &output_view);
+af::Status ClassifyIndirectLoadStoreTarget(const std::vector<af::Expression> &sizes,
+                                           const std::vector<af::Expression> &strides, const af::Expression &offset,
+                                           IndirectLoadStoreKind &kind);
 bool ShouldApplyInputInnerVectorization(const af::AscNodePtr &node);
+// 双 gather 水平融合：按 GetAllNodes 顺序收集图中全部 IndirectLoad 节点（确定性顺序）。
+std::vector<af::AscNodePtr> GetAllIndirectLoadNodes(const af::AscGraph &graph);
+// 多 gather 水平融合（SIMT）：组成员标记。携带该标记的 IL 走组员版 SIMT lowering 计划——
+// 计划仅含本路 index 链与 input 读取，输出为写 UB 局部目标（value tensor），共享归并/输出
+// 链不进入 SIMT 计划（作为普通向量代码在全部 SIMT invocation 之后执行）。
+af::Status SetSimtGroupMember(const af::AscNodePtr &node);
+bool IsSimtGroupMember(const af::AscNodePtr &node);
+// seq-V1 融合发射标记：组的 primary IL 携带该标记时，codegen 生成单个 fused invocation
+// （IndirectLoadSimtFused，逐路串行 load + 寄存器归并）；非 primary 成员跳过发射。
+af::Status SetSimtFusedPrimary(const af::AscNodePtr &node, const std::vector<std::string> &member_names);
+bool IsSimtFusedPrimary(const af::AscNodePtr &node);
+std::vector<std::string> GetSimtFusedMemberNames(const af::AscNodePtr &node);
+// 六级降级阶梯（L2/L3）：fused primary 携带的归并信息。register_merge=true 时归并树在
+// FusedEval 内按拓扑序折叠为标量表达式（寄存器归并，L2）；false 时各路 value 写各自 UB
+// 局部目标、归并链由向量代码执行（UB 归并，L3），merge 字段不消费。max_thread_tier 为
+// 资源压力模型推得的线程档上限（模型规格见设计文档「寄存器压力模型」）。
+// 防漂移约定：节点名跨图副本稳定（唯一存储介质）；视图/分类/输出链 tensor id 由 codegen
+// 在当前图上重建（见 BuildSimtMergeSideLoadMetadata 与「漂移防护」注释）。
+struct SimtFusedMergeInfo {
+  bool register_merge = false;
+  uint32_t max_thread_tier = 2048U;
+  // R_est 组件计数（位宽感知门控的输入；codegen 位宽漂移防护按 64 位基准重算档位用）。
+  uint32_t member_count = 0U;
+  uint32_t side_load_count = 0U;
+  uint32_t chain_node_count = 0U;
+  // [发射计划组件] 形态判定输入与单一真值源输出：l2_structural 为压力无关的结构性
+  // L2 资格（终端/可发射性/side 约束）；forward_node_count 为归并链节点数（观测/
+  // 日志）；forward_chain_width 为链 DAG 宽度（峰值模型 L2 瞬时项）；demand 为
+  // 选定形态的寄存器需求、peak_model 记录生效模型（观测/对拍用，禁止消费方重算）。
+  // 链发射者不由本结构决定：L3/L4 链无角色，VF/normal 由分区器自然裁决。
+  bool l2_structural = false;
+  uint32_t forward_node_count = 0U;
+  uint32_t forward_chain_width = 0U;
+  uint64_t demand = 0U;
+  bool peak_model = true;
+  std::vector<std::string> merge_node_names;   // 归并树闭包节点名（拓扑序，不含成员 IL 与 Store）
+  std::vector<std::string> merge_store_names;  // Store 终端节点名（codegen 按名重解析输出链 tensor id）
+  std::vector<std::string> side_load_names;    // side GM load 节点名（仅 L2 消费：evaluator 直读）
+};
+af::Status SetSimtFusedMergeInfo(const af::AscNodePtr &node, const SimtFusedMergeInfo &info);
+SimtFusedMergeInfo GetSimtFusedMergeInfo(const af::AscNodePtr &node);
+// 归并树 side GM load 的判定与寻址元数据构建（调用方在各自当前图上执行——调度期门控与
+// codegen 期重建各调一次，分类/视图取自当前节点，防两份图副本间的视图漂移）。
+// IsSimtDirectGmLoadNode：Load 或 direct-gm Nddma（evaluator 可直读的 GM 边界节点）。
+// BuildSimtMergeSideLoadMetadata：与单 gather 输出侧 load 同构——kZeroOffset/kOutputOffset
+// 分类 + use_logical_offset 坐标折叠（物理 view 承载 strided/行广播/视图匹配成员 index
+// load 的 ② 形态寻址——按自身物理视图从 output_index 分解，与单 gather 输出侧 load 行为
+// 一致，无 N 路 index_offset 歧义）+ 行广播标记（改写前写入的节点 attr，跨漂移稳定）。
+bool IsSimtDirectGmLoadNode(const af::AscNodePtr &node);
+af::Status BuildSimtMergeSideLoadMetadata(const af::AscNodePtr &load, SimtLoadMetadata &metadata);
+// seq-V1 融合发射模式下非 primary 成员携带该标记（发射由 fused primary 统一处理，自身跳过）；
+// L4（V2 多 evaluator）不设该标记——各成员走标准单 gather invocation。
+af::Status SetSimtFusedMemberEmitted(const af::AscNodePtr &node);
+bool IsSimtFusedMemberEmitted(const af::AscNodePtr &node);
+// SIMD input 区域节点携带的 per-IndirectLoad 输入内轴提示：调度期优先于全局 primary 模板轴，
+// 用于区分双 gather 中各路 input 边界的向量化内轴归属；单 gather 场景提示值与全局值一致。
+af::Status SetSimdInputInnerAxis(const af::AscNodePtr &node, af::AxisId axis);
+af::AxisId GetSimdInputInnerAxis(const af::AscNodePtr &node);
+// [per-IL index 内轴提示] 与 input 内轴 hint 同构：多 gather 组内各成员的 index 链形态
+// 可不同（成员 A 有 Broadcast → index_inner_axis 有效；成员 B 计算链 → kIdNone），
+// 调度器优先读节点 hint，无 hint 回退 primary 全局轴。
+af::Status SetSimdIndexInnerAxis(const af::AscNodePtr &node, af::AxisId axis);
+af::AxisId GetSimdIndexInnerAxis(const af::AscNodePtr &node);
 af::AscNodePtr GetInputProducer(const af::AscNodePtr &node, size_t input_index);
 af::AscNodePtr GetOnlyOutputConsumer(const af::AscNodePtr &node);
 af::AscNodePtr FindIndirectLoadNode(const af::AscGraph &graph);
 af::Status ValidateSingleIndirectLoadNode(const af::AscGraph &graph, af::AscNodePtr &node);
 bool GetPrebuiltYTilingCase(const af::AscGraph &graph, af::AxisId &tile_id,
                             std::pair<af::AxisPtr, af::AxisPtr> &tiling);
+// [组共享轴等价化] 多 gather 融合组成员输出视图中"同索引空间、仅 axis id 不同"的轴
+// （Broadcast 副本轴、split 兄弟轴、前端重复建轴）归一到新建的组共享轴，消除
+// sched_has_all_members 的覆盖误杀。判定规则（等价类）：
+//   同视图位置 + 轴 size 符号相等 + 视图 repeats/strides 相等 + 被改写节点输出是新分配
+//   buffer（IL 输出天然满足）。stride 不等（含 0 vs 1）或 size 不等 → 拒绝候选。
+// 仅在 candidate_graph 副本上执行；不触碰 split/concat/Store 目标节点。
+
+// 覆盖检查（从 schedule.cpp 的 sched_has_all_members 抽出，调度器与候选生成期共用）：
+// 节点的 sched.axis 需包含 merged_axis.from 的全部成员轴，否则模板轴折叠不适用。
+bool GroupAxesCoverable(af::AscGraph &graph, const af::AscNodePtr &node, ascir::AxisId merged_axis_id);
+
+// 等价判定：两个成员输出视图在同一 dim 上的轴是否等价（可归一）。
+bool AreAxesEquivalentInView(af::AscGraph &graph, const af::AscNodePtr &a, ascir::AxisId axis_a,
+                             const af::AscNodePtr &b, ascir::AxisId axis_b);
+
+// 主入口：逐 dim 分等价类，同类但 id 不同时新建组共享轴并替换；不等价时 is_legal=false。
+// old_to_group（可选输出）：被替换的旧轴 id → 组共享轴 id 的映射，供调用方做前向闭包的
+// 传递式归一化（链/Store/Reduce 视图同步迁移）。
+af::Status NormalizeMemberAxes(af::AscGraph &graph, const std::vector<af::AscNodePtr> &members, bool &is_legal,
+                               std::unordered_map<ascir::AxisId, ascir::AxisId> *old_to_group = nullptr);
+
+// [传递式轴归一化] 把 NormalizeMemberAxes 的替换映射沿成员前向闭包（链/Store/Reduce）
+// 传递到全部消费节点：闭包节点视图中的轴 ∈ 映射（或与成员轴同维等价——同 size/repeats/
+// strides）→ 计划替换为组共享轴/成员轴；∈ 成员归一化后轴集合 → 保持；size=1 或该维
+// stride=0 的广播轴 → 豁免；其余（真新维度）→ is_legal=false 拒绝候选。硬规则：只按
+// 精确 id 命中（不按位置猜——Reduce 输出轴集合比输入少 R）；原子性（先算计划 + 全量
+// 校验，再统一替换，失败不改图）；幂等（旧 id 全消后二跑 no-op）；vectorized_axis 必须
+// 另行替换（TryApplyAxisReplace 只覆盖 sched.axis 与输出视图轴）。链节点进 tiling group
+// 前必须完成本归一化——否则 GetLoopAxis 把旧 id 并进 y_group（GenTilingCase 枚举变大、
+// MergeAxesGroup 可能失败、[k,R] 窗口出现两套）。
+af::Status PropagateGroupAxes(af::AscGraph &graph, const std::vector<af::AscNodePtr> &members,
+                              const std::unordered_map<ascir::AxisId, ascir::AxisId> &old_to_group, bool &is_legal);
 }  // namespace ascgen_utils::indirect_load
 
 #endif  // __INDIRECT_LOAD_UTILS_H__

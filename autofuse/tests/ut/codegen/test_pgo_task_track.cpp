@@ -64,6 +64,57 @@ TEST(PgoTimestamp, RejectsMultipleOrBackwardCounterRange) {
   EXPECT_NE(ConvertTaskDuration(100U, 50U, info, &duration), 0);
 }
 
+TEST(PgoTimestamp, TruncatesFractionalTicksTowardZero) {
+  PgoDeviceTimeInfo info;
+  info.frequency = 3;
+  info.start_sys_count = 10;
+  info.start_real_time_ns = 2000000000ULL;
+  uint64_t converted = 0;
+  ASSERT_EQ(ConvertCounterToRealTime(14, info, &converted), 0);
+  EXPECT_EQ(converted, 3333333333ULL);
+  ASSERT_EQ(ConvertCounterToRealTime(6, info, &converted), 0);
+  EXPECT_EQ(converted, 666666667ULL);
+  ASSERT_EQ(ConvertCounterToRealTime(11, info, &converted), 0);
+  EXPECT_EQ(converted, 2333333333ULL);
+  ASSERT_EQ(ConvertCounterToRealTime(9, info, &converted), 0);
+  EXPECT_EQ(converted, 1666666667ULL);
+}
+
+TEST(PgoTimestamp, ConvertsFullSignedCounterRange) {
+  PgoDeviceTimeInfo info;
+  info.frequency = UINT64_MAX;
+  info.start_sys_count = uint64_t{1} << 63;
+  info.start_real_time_ns = 1000000000ULL;
+  uint64_t converted = 0;
+  ASSERT_EQ(ConvertCounterToRealTime(INT64_MAX, info, &converted), 0);
+  EXPECT_EQ(converted, 2000000000ULL);
+  info.start_sys_count = INT64_MAX;
+  ASSERT_EQ(ConvertCounterToRealTime(uint64_t{1} << 63, info, &converted), 0);
+  EXPECT_EQ(converted, 0ULL);
+}
+
+TEST(PgoTimestamp, RejectsOutOfRangeRealTime) {
+  PgoDeviceTimeInfo info;
+  info.frequency = 1;
+  info.start_sys_count = 1;
+  uint64_t converted = 0;
+  EXPECT_NE(ConvertCounterToRealTime(0, info, &converted), 0);
+  info.start_real_time_ns = UINT64_MAX;
+  EXPECT_NE(ConvertCounterToRealTime(2, info, &converted), 0);
+}
+
+TEST(PgoTimestamp, RejectsNullOutput) {
+  PgoDeviceTimeInfo info;
+  EXPECT_NE(ConvertCounterToRealTime(0, info, nullptr), 0);
+  EXPECT_NE(ConvertTaskDuration(0, 1, info, nullptr), 0);
+}
+
+TEST(PgoTimestamp, RejectsBackwardRawCounterRange) {
+  PgoDeviceTimeInfo info;
+  uint64_t duration = 0;
+  EXPECT_NE(ConvertTaskDuration(2, 1, info, &duration), 0);
+}
+
 TEST(PgoStarsParser, ParsesStarsBeginEnd) {
   struct RawStars {
     uint16_t func_type : 6;

@@ -21,8 +21,12 @@ void pyautofuse_type_init();
 void pyascir_type_init();
 void pyascir_types_type_init();
 
-PyMODINIT_FUNC PyInit_ascir(void);
-PyMODINIT_FUNC PyInit_pyautofuse(void);
+// Older Python headers do not export module initializers under -fvisibility=hidden.
+__attribute__((visibility("default"))) PyObject *PyInit_graph(void);
+__attribute__((visibility("default"))) PyObject *PyInit_ascir(void);
+__attribute__((visibility("default"))) PyObject *PyInit_pyautofuse(void);
+__attribute__((visibility("default"))) PyObject *PyInit_autofuse_pyautofuse(void);
+__attribute__((visibility("default"))) PyObject *PyInit_autofuse(void);
 
 #ifdef __cplusplus
 }
@@ -76,7 +80,10 @@ PyMODINIT_FUNC PyInit_pyautofuse(void);
   OP(RShift)                      \
   OP(Isnan)                       \
   OP(Max)                         \
-  OP(ArgMax)                      \
+  OP(Argmax)                      \
+  OP(ArgmaxWithValue)             \
+  OP(Argmin)                      \
+  OP(ArgminWithValue)             \
   OP(Any)                         \
   OP(All)                         \
   OP(Sum)                         \
@@ -149,6 +156,7 @@ PyMODINIT_FUNC PyInit_pyautofuse(void);
   OP(Ceil2Int)                    \
   OP(Rand)                        \
   OP(Randn)                       \
+  OP(RandInt)                     \
   OP(RoundToInt)                  \
   OP(Square)                      \
   OP(Sinh)                        \
@@ -160,6 +168,7 @@ PyMODINIT_FUNC PyInit_pyautofuse(void);
   OP(I0)                          \
   OP(I0e)                         \
   OP(I1e)                         \
+  OP(I1)                          \
   OP(BesselJ0)                    \
   OP(BesselJ1)                    \
   OP(BesselY0)                    \
@@ -171,6 +180,7 @@ PyMODINIT_FUNC PyInit_pyautofuse(void);
   OP(Ndtri)                       \
   OP(LogNdtr)                     \
   OP(NextAfter)                   \
+  OP(Bucketize)                   \
   OP(PolyGamma)                   \
   OP(SignBit)                     \
   OP(Frexp)                       \
@@ -187,5 +197,14 @@ PyMODINIT_FUNC PyInit_pyautofuse(void);
   OP(ChebyshevPolynomialW)        \
   OP(HermitePolynomialH)          \
   OP(HermitePolynomialHe)         \
+  OP(Identity)                    \
+  OP(DeviceAssertAsync)           \
+  OP(InlineAsmElementwise)        \
+  OP(Masked)                      \
+  OP(Randint64)                   \
+  OP(XorSum)                      \
+  OP(Welford)                     \
+  OP(Scan)                        \
+  OP(StoreReduction)              \
   OP(Unsupported)
 #endif

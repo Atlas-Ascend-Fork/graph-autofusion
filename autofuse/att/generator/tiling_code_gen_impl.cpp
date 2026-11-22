@@ -9,6 +9,7 @@
  */
 
 #include "tiling_code_gen_impl.h"
+#include "axes_solver_resources.h"
 #include "final_tiling_log_gen.h"
 #include <fstream>
 #include <algorithm>
@@ -25,6 +26,7 @@
 #include "base/att_group_perf_config.h"
 #include "common_utils.h"
 #include "generator_utils/tilingdata_gen_utils.h"
+#include "cache/segment_level_cache_gen.h"
 #include "tiling_data_gen/tiling_data_generator.h"
 #include "autofuse_config/auto_fuse_config.h"
 #include "symbolizer/symbolic_utils.h"
@@ -126,6 +128,15 @@ void GenLogDefine(ge::CodePrinter &print, bool preserve_includes) {
   const std::string final_tiling_info_log_define =
       is_null_log ? R"(#define ATT_FINAL_TILING_LOGI(name, fmt, ...))"
                   : R"(#define ATT_FINAL_TILING_LOGI(name, fmt, ...) GELOGI("[%s]" fmt, name, ##__VA_ARGS__))";
+  // 分段缓存日志与耗时统计（OP_EVENT/Duration record）同场景可观测：att_profiling 开启时会将
+  // OP_LOGx 置空以避免日志I/O干扰计时，分段缓存日志需绕过该静音；级别降为debug，
+  // 默认日志级别下不输出（不付格式化/IO成本），开debug级别或profiling时仍可观测
+  const std::string segment_cache_debug_log_define =
+      is_null_log ? R"(#define ATT_SEGMENT_CACHE_LOGD(name, fmt, ...))"
+                  : R"(#define ATT_SEGMENT_CACHE_LOGD(name, fmt, ...) GELOGD("[%s]" fmt, name, ##__VA_ARGS__))";
+  const std::string segment_cache_warn_log_define =
+      is_null_log ? R"(#define ATT_SEGMENT_CACHE_LOGW(name, fmt, ...))"
+                  : R"(#define ATT_SEGMENT_CACHE_LOGW(name, fmt, ...) GELOGW("[%s]" fmt, name, ##__VA_ARGS__))";
   const std::string warn_log_define =
       (is_null_log || profiling_enabled) ? R"(#define OP_LOGW(name, fmt, ...))"
                                          : R"(#define OP_LOGW(name, fmt, ...) GELOGW("[%s]" fmt, name, ##__VA_ARGS__))";
@@ -142,6 +153,8 @@ void GenLogDefine(ge::CodePrinter &print, bool preserve_includes) {
   print.AddLine(debug_log_define);
   print.AddLine(info_log_define);
   print.AddLine(final_tiling_info_log_define);
+  print.AddLine(segment_cache_debug_log_define);
+  print.AddLine(segment_cache_warn_log_define);
   print.AddLine(warn_log_define);
   print.AddLine(err_log_define);
   print.AddLine(event_log_define);
@@ -173,8 +186,8 @@ std::string GenInputParamsPrint(const ArgsManager &args_manager, const std::stri
   std::string set_code;
   std::string param;
   for (const auto &arg : args_manager.GetInputVars()) {
-    set_code.append(" ").append(Str(arg)).append(" = %u.");
-    param.append(", tiling_data.get_").append(Str(arg)).append("()");
+    set_code.append(" ").append(Str(arg)).append(" = %lld.");
+    param.append(", static_cast<long long>(tiling_data.get_").append(Str(arg)).append("())");
   }
   std::string output("    OP_LOG");
   std::string log_level_str = (log_level == DLOG_ERROR) ? "E" : "I";
@@ -205,11 +218,14 @@ inline std::string GenScheduleResultFuncsDefine(
   return schedule_result_funcs_define;
 }
 
-inline const std::string GenScheduleResultFuncTypeDefine(const std::string &tiling_data_name) {
+inline const std::string GenScheduleResultFuncTypeDefine(const std::string &tiling_data_name,
+                                                         const bool with_segment_ctx) {
   std::string schedule_result_func_define =
       "using ScheduleResultFunction = std::function<bool(const uint32_t ori_block_dim, const int32_t tiling_case_id, ";
   return schedule_result_func_define.append(tiling_data_name)
-      .append(" &tiling_data, double &cur_perf, double &best_perf, uint32_t &cur_block_dim)>;");
+      .append(" &tiling_data, double &cur_perf, double &best_perf, uint32_t &cur_block_dim")
+      .append(with_segment_ctx ? ", SegmentCacheContext *segment_ctx" : "")
+      .append(")>;");
 }
 
 inline const std::string GenPGOScheduleResultFuncTypeDefine(const std::string &tiling_data_name) {
@@ -224,7 +240,7 @@ inline const std::string GenPGOScheduleResultFuncTypeDefine(const std::string &t
 
 inline const std::string GenPGOByCoreNumScheduleResultFuncTypeDefine() {
   std::string schedule_result_func_define =
-      "using ScheduleResultFunctionPGOByCoreNum = std::function<bool(std::vector<AutofuseTilingData>& "
+      "using ScheduleResultFunctionPGOByCoreNum = std::function<bool(std::vector<AutofuseTilingDataPerf>& "
       "tiling_data_list, AutofuseTilingData tiling_data)>;";
   return schedule_result_func_define;
 }
@@ -417,9 +433,12 @@ inline std::string GenCallUpdateBetterTiling(bool is_uniq_group, bool hardware_h
 inline std::string GenScoreTilingCaseStruct() {
   return R"(
 struct ScoreTilingCase {
-  const char* sub_case_tag;
-  int32_t tiling_case_id;
-  TilingCaseImpl *tiling_case_ptr;
+  const char* sub_case_tag{nullptr};
+  int32_t tiling_case_id{0};
+  TilingCaseImpl *tiling_case_ptr{nullptr};
+  int32_t score{0};
+  uint32_t origin_idx{0};
+  ScoreTilingCase() = default;
   ScoreTilingCase(const char *tag, int32_t case_id, TilingCaseImpl *case_ptr)
       :sub_case_tag(tag), tiling_case_id(case_id), tiling_case_ptr(case_ptr){}
 };
@@ -431,11 +450,18 @@ std::string GenTilingScoreFuncDefineHead(bool is_uniq_group) {
   if (!is_uniq_group) {
     workspace_param = ", workspace_map";
   }
+  // 与原 score_map(降序) + 桶内插入序双层遍历等价：数组按(score降序, 原序号升序)排序后，
+  // 相同score的连续段为一个桶；if (ret) break 位于桶处理之后、外层循环之内，层次与原实现一致
   const std::string part1 = R"(  bool ret = false;
-  for (const auto &s: score_map) {
-    for (const auto &tiling: s.second) {
+  for (uint32_t bucket_begin = 0U; bucket_begin < candidate_num;) {
+    uint32_t bucket_end = bucket_begin;
+    while ((bucket_end < candidate_num) && (candidates[bucket_end].score == candidates[bucket_begin].score)) {
+      ++bucket_end;
+    }
+    for (uint32_t idx = bucket_begin; idx < bucket_end; ++idx) {
+      auto &tiling = candidates[idx];
       OP_LOGD(OP_NAME, "Calculating the tiling data for tiling_case_id %s%d of score[%d]", tiling.sub_case_tag,
-              tiling.tiling_case_id, s.first);
+              tiling.tiling_case_id, tiling.score);
       ret |= FindPerfBetterTilingbyCaseId(tiling.tiling_case_ptr, obj, ub_ratio, tmp_tiling, tiling_data)";
 
   // core_num 始终传递给 FindPerfBetterTilingbyCaseId（用于保持签名一致）
@@ -502,16 +528,20 @@ std::string WrapAtomicHeaderBody(autofuse::GeneratedHeaderId header_id, const st
   }
   if (header_id == autofuse::GeneratedHeaderId::kApi) {
     if (has_global_tiling_data) {
-      return "struct FinalTilingGroupSelection;\nstruct " + tiling_data_type_name +
-             ";\nstruct AutofuseTilingDataPerf;\nbool GetWorkspaceSize(const " + tiling_data_type_name +
+      return "struct FinalTilingSelectionSnapshot;\nstruct FinalTilingContext;\nstruct FinalTilingGroupSelection;\n"
+             "struct TemplateSemanticInfo;\nstruct " +
+             tiling_data_type_name + ";\nstruct AutofuseTilingDataPerf;\nbool GetWorkspaceSize(const " +
+             tiling_data_type_name +
              " &tiling_data, uint64_t &workspace_size);\nnamespace optiling {\nstruct PgoTensorArgs;\nstruct "
              "SearchConfig;\n" +
              body + "}  // namespace optiling\n";
     }
     const std::string global_tiling_decl = is_autofuse ? "struct AutofuseTilingData;\n" : "";
-    return "struct FinalTilingGroupSelection;\n" + global_tiling_decl +
-           "struct AutofuseTilingDataPerf;\nnamespace optiling {\nstruct " + tiling_data_type_name +
-           ";\nstruct PgoTensorArgs;\nstruct SearchConfig;\n" + body + "}  // namespace optiling\n";
+    return "struct FinalTilingSelectionSnapshot;\nstruct FinalTilingContext;\nstruct FinalTilingGroupSelection;\n"
+           "struct TemplateSemanticInfo;\n" +
+           global_tiling_decl + "struct AutofuseTilingDataPerf;\nnamespace optiling {\nstruct " +
+           tiling_data_type_name + ";\nstruct PgoTensorArgs;\nstruct SearchConfig;\n" + body +
+           "}  // namespace optiling\n";
   }
   std::string prefix;
   if (header_id == autofuse::GeneratedHeaderId::kSolver) {
@@ -622,12 +652,14 @@ af::Status TilingCodeGenImpl::FinishGeneratedHeaders(
   return af::SUCCESS;
 }
 
-inline void SetTilingDefinition(const std::set<std::string> &var_names, const std::string &param_name,
+template <typename Container>
+inline void SetTilingDefinition(const Container &var_names, const std::string &param_name,
                                 std::set<std::string> &tiling_data_vars,
-                                std::map<std::string, std::string> &type_name_to_definition) {
+                                std::map<std::string, std::string> &type_name_to_definition,
+                                const std::set<std::string> &dynamic_size_var_names) {
   ge::CodePrinter dumper;
   if (TilingDataGenUtils::NeedWrittenTilingData(var_names, tiling_data_vars)) {
-    TilingDataGenUtils::WriteTilingDataElement(dumper, tiling_data_vars, var_names);
+    TilingDataGenUtils::WriteTilingDataElement(dumper, tiling_data_vars, var_names, dynamic_size_var_names);
     type_name_to_definition[param_name] += dumper.GetOutputStr();
   }
 }
@@ -674,7 +706,7 @@ inline std::string RemoveSpace(std::string str) {
 }
 
 af::Status TilingCodeGenImpl::GenCastReuseTilingDataCode(const ReuseScheduleGroupInfo &reuse_info,
-                                                         const ReuseScheduleGroupInfo &info) {
+                                                         const ReuseScheduleGroupInfo &info, bool map_explicit_case) {
   GE_ASSERT_TRUE(reuse_info.reuse_input_axes.size() == info.reuse_input_axes.size(),
                  "reuse input axes size is not equal: [%zu vs %zu]", reuse_info.reuse_input_axes.size(),
                  info.reuse_input_axes.size());
@@ -689,13 +721,30 @@ af::Status TilingCodeGenImpl::GenCastReuseTilingDataCode(const ReuseScheduleGrou
     tiling_func_.AddLine("  reuse_tiling_data.set_" + reuse_info.reuse_input_axes[i] + "(tiling_data.get_" +
                          info.reuse_input_axes[i] + "());");
   }
+  const bool remap_case_id = map_explicit_case && reuse_info.tiling_keys != info.tiling_keys;
+  const std::string lookup_key = remap_case_id ? "requested_tiling_key" : "tiling_data.get_tiling_key()";
+  if (remap_case_id) {
+    tiling_func_.AddLine(
+        "  const auto requested_tiling_key = tiling_case_id >= 0 "
+        "? static_cast<uint32_t>(tiling_case_id) : tiling_data.get_tiling_key();");
+  }
   for (size_t i = 0UL; i < reuse_info.tiling_keys.size(); i++) {
-    std::string judge_cond = "if (tiling_data.get_tiling_key() == " + std::to_string(info.tiling_keys[i]) + ") {";
+    std::string judge_cond = "if (" + lookup_key + " == " + std::to_string(info.tiling_keys[i]) + "U) {";
     if (i != 0UL) {
       judge_cond = " else " + judge_cond;
     }
     tiling_func_.AddLine("  " + judge_cond);
     tiling_func_.AddLine("    reuse_tiling_data.set_tiling_key(" + std::to_string(reuse_info.tiling_keys[i]) + ");");
+    if (remap_case_id) {
+      tiling_func_.AddLine(
+          "    if (tiling_case_id >= 0) { tiling_case_id = " + std::to_string(reuse_info.tiling_keys[i]) + "; }");
+    }
+    tiling_func_.AddLine("  }");
+  }
+  if (remap_case_id) {
+    tiling_func_.AddLine("  else if (tiling_case_id >= 0) {");
+    tiling_func_.AddLine("    ResetCurrentFinalTilingSelection();");
+    tiling_func_.AddLine("    return false;");
     tiling_func_.AddLine("  }");
   }
   return af::SUCCESS;
@@ -713,6 +762,14 @@ TilingCodeGenImpl::TilingCodeGenImpl(const std::string &op_name, const TilingCod
       score_funcs_(score_funcs),
       operator_level_cache_gen_(std::make_unique<cache::OperatorLevelCacheGen>()),
       group_level_cache_gen_(std::make_unique<cache::GroupLevelCacheGen>()) {
+  std::set<std::string> sub_case_tags;
+  for (const auto &model_info : tiling_model_info_) {
+    sub_case_tags.insert(model_info.sub_case_tag);
+  }
+  int32_t sub_case_id = 0;
+  for (const auto &sub_case_tag : sub_case_tags) {
+    final_tiling_sub_case_ids_.emplace(sub_case_tag, sub_case_id++);
+  }
   extra_info_config_.tiling_data_type_name = config_.tiling_data_type_name;
   if (config_.gen_extra_infos) {
     extra_info_config_.do_axes_calc = true;
@@ -727,6 +784,18 @@ TilingCodeGenImpl::TilingCodeGenImpl(const std::string &op_name, const TilingCod
                                  ? (!att_config.set_env_enable_tiling_cache || att_config.enable_tiling_cache == "true")
                                  : (att_config.enable_tiling_cache == "true");
   config_.cache_enabled_at_compile_time = (!config_.is_cube) && cache_enabled && !pgo_enabled;
+  // force_template_op_name不匹配本算子时先清理force配置，再计算分段缓存开关，
+  // 避免他算子的force配置误关本算子的分段缓存
+  if (!config_.force_template_op_name.empty() && (config_.force_template_op_name != op_name_)) {
+    config_.force_tiling_case.Clear();
+    config_.force_schedule_result = -1L;
+  }
+  // 动态shape分段缓存：复用att_accuracy_level=0（低精度档位）开启；Cube/PGO/force场景不启用。
+  // Inductor场景同样支持（其算子级缓存默认开启，未命中精确shape时仍可命中分段缓存）
+  const bool segment_cache_enabled = att_config.set_env_solution_accuracy_level &&
+                                     (att_config.solution_accuracy_level == 0L) && (!config_.is_cube) &&
+                                     (!pgo_enabled) && (config_.force_schedule_result < 0) && !HasForcedTilingCase();
+  config_.enable_tiling_segment_cache = segment_cache_enabled;
 
   for (const auto &model_info : tiling_model_info) {
     const auto &hardware_cons = model_info.hardware_cons;
@@ -735,11 +804,14 @@ TilingCodeGenImpl::TilingCodeGenImpl(const std::string &op_name, const TilingCod
       break;
     }
   }
-  if (!config_.force_template_op_name.empty() && (config_.force_template_op_name != op_name_)) {
-    config_.force_tiling_case.Clear();
-    config_.force_schedule_result = -1L;
-  }
   GELOGI("[DFX] Get tiling code gen config(%s)", config.Debug().c_str());
+}
+
+void TilingCodeGenImpl::SetFinalTilingObservationMetadata(const size_t slot, const size_t slot_count,
+                                                          const std::map<std::string, int32_t> &sub_case_ids) {
+  final_tiling_observation_slot_ = slot;
+  final_tiling_observation_slot_count_ = std::max<size_t>(1UL, slot_count);
+  final_tiling_sub_case_ids_ = sub_case_ids;
 }
 
 af::Status TilingCodeGenImpl::GetRelatedHardware(std::map<std::string, std::string> &hardware_info) {
@@ -797,14 +869,12 @@ af::Status TilingCodeGenImpl::GenDurationClearCode(const std::string &indent) {
   return af::SUCCESS;
 }
 
-af::Status TilingCodeGenImpl::GenBaseTilingData(std::map<std::string, std::string> &type_name_to_definition) {
-  std::set<std::string> tiling_data_vars;
-  std::set<std::string> input_vars_set;
-  std::set<std::string> searchable_vars_set;
-  std::set<std::string> const_vars_set;
-  std::set<std::string> hardware_vars_set;
-  std::set<std::string> mem_vars_set;
-  std::set<std::string> general_post_var_set;
+af::Status TilingCodeGenImpl::CollectBaseTilingVarSets(std::set<std::string> &input_vars_set,
+                                                       std::set<std::string> &hardware_vars_set,
+                                                       std::set<std::string> &const_vars_set,
+                                                       std::set<std::string> &searchable_vars_set,
+                                                       std::set<std::string> &general_post_var_set,
+                                                       std::set<std::string> &mem_vars_set) {
   for (const auto &model_info : tiling_model_info_) {
     ArgsManager args_manager(model_info);
     GE_ASSERT_TRUE(args_manager.Process(false), "Args manager process failed.");
@@ -812,12 +882,8 @@ af::Status TilingCodeGenImpl::GenBaseTilingData(std::map<std::string, std::strin
     input_vars_set.insert(input_vars.begin(), input_vars.end());
     auto scope_names = GetHardwareNames(args_manager.GetTotalHardwareCons(config_.do_variable_replace));
     hardware_vars_set.insert(scope_names.begin(), scope_names.end());
-
     // 预留一个变量接口workspacesize，用于记录workspace信息
-    std::string workspace_str = "workspaceSize";
-    hardware_vars_set.insert(workspace_str);
-
-    // const vars 如果没有出现在searchable vars中，那么归为InputParams。否则归为baseParams
+    hardware_vars_set.insert("workspaceSize");
     auto const_vars = GetConstVarNames(args_manager.GetConstVars());
     const_vars_set.insert(const_vars.begin(), const_vars.end());
     auto search_vars = GetVarsNames(args_manager.GetSearchableVars());
@@ -832,16 +898,54 @@ af::Status TilingCodeGenImpl::GenBaseTilingData(std::map<std::string, std::strin
       mem_vars_set.insert(mem_pair.first);
     }
   }
+  return af::SUCCESS;
+}
+
+std::set<std::string> TilingCodeGenImpl::GetDynamicSizeVarNames() const {
+  std::set<std::string> dynamic_size_var_names;
+  for (const auto &model_info : tiling_model_info_) {
+    dynamic_size_var_names.insert(model_info.dynamic_size_var_names.begin(), model_info.dynamic_size_var_names.end());
+  }
+  return dynamic_size_var_names;
+}
+
+af::Status TilingCodeGenImpl::GenBaseTilingData(std::map<std::string, std::string> &type_name_to_definition) {
+  const std::set<std::string> dynamic_size_var_names = GetDynamicSizeVarNames();
+  std::set<std::string> tiling_data_vars;
+  std::set<std::string> input_vars_set;
+  std::set<std::string> searchable_vars_set;
+  std::set<std::string> const_vars_set;
+  std::set<std::string> hardware_vars_set;
+  std::set<std::string> mem_vars_set;
+  std::set<std::string> general_post_var_set;
+  GE_ASSERT_SUCCESS(CollectBaseTilingVarSets(input_vars_set, hardware_vars_set, const_vars_set, searchable_vars_set,
+                                             general_post_var_set, mem_vars_set),
+                    "Collect base tiling vars failed.");
+  // const vars 如果没有出现在searchable vars中，那么归为InputParams。否则归为baseParams
   for (auto &const_var : const_vars_set) {
     if (hardware_vars_set.count(const_var) == 0u) {
       input_vars_set.insert(const_var);
     }
   }
-  SetTilingDefinition(input_vars_set, "InputParams", tiling_data_vars, type_name_to_definition);
-  SetTilingDefinition(hardware_vars_set, "HardWareParams", tiling_data_vars, type_name_to_definition);
-  SetTilingDefinition(searchable_vars_set, "BaseParams", tiling_data_vars, type_name_to_definition);
-  SetTilingDefinition(general_post_var_set, "GeneralParams", tiling_data_vars, type_name_to_definition);
-  SetTilingDefinition(mem_vars_set, "MemoryParams", tiling_data_vars, type_name_to_definition);
+  SetTilingDefinition(input_vars_set, "InputParams", tiling_data_vars, type_name_to_definition, dynamic_size_var_names);
+  // HardWareParams 中 block_dim 与 tiling_key 相邻声明，与非 ATT 结构体保持一致
+  std::vector<std::string> hardware_write_order;
+  if (hardware_vars_set.count("block_dim") != 0U) {
+    hardware_write_order.emplace_back("block_dim");
+  }
+  hardware_write_order.emplace_back("tiling_key");
+  for (const auto &var_name : hardware_vars_set) {
+    if (var_name != "block_dim" && var_name != "tiling_key") {
+      hardware_write_order.emplace_back(var_name);
+    }
+  }
+  SetTilingDefinition(hardware_write_order, "HardWareParams", tiling_data_vars, type_name_to_definition,
+                      dynamic_size_var_names);
+  SetTilingDefinition(searchable_vars_set, "BaseParams", tiling_data_vars, type_name_to_definition,
+                      dynamic_size_var_names);
+  SetTilingDefinition(general_post_var_set, "GeneralParams", tiling_data_vars, type_name_to_definition,
+                      dynamic_size_var_names);
+  SetTilingDefinition(mem_vars_set, "MemoryParams", tiling_data_vars, type_name_to_definition, dynamic_size_var_names);
   return af::SUCCESS;
 }
 
@@ -851,6 +955,7 @@ af::Status TilingCodeGenImpl::GenHeaderCodesHead() {
   tiling_data_.AddLine("#ifndef ATT_TILING_DATA_" + op_spec + "_H_");
   tiling_data_.AddLine("#define ATT_TILING_DATA_" + op_spec + "_H_");
   GE_ASSERT_SUCCESS(GenHeaderInclude(), "Generate tiling data head failed.");
+  tiling_data_.AddLine(ascgen_utils::GenFinalTilingSelectionSnapshotSnippet());
   tiling_data_.AddLine("namespace optiling {");
   return af::SUCCESS;
 }
@@ -892,11 +997,6 @@ af::Status TilingCodeGenImpl::GenHeaderVarsDef() {
                       "Generate extra tiling data failed.");
   }
   tiling_data_def += DumpTilingData(extra_tiling_data);
-  // 增加一个tiling_key的param
-  ge::CodePrinter tiling_key_dumper;
-  TilingDataGenUtils::AddElementDefinition(tiling_key_dumper, "uint32_t", "tiling_key");
-  std::map<std::string, std::string> tiling_key_def = {{"TilingKeyParms", tiling_key_dumper.GetOutputStr()}};
-  tiling_data_def += DumpTilingData(tiling_key_def) + "\n";
   std::string tiling_data_type_name;
   if (is_uniq_group_) {
     tiling_data_type_name = config_.tiling_data_type_name;
@@ -968,6 +1068,7 @@ af::Status TilingCodeGenImpl::CollectStructCopyVars(std::set<std::string> &tilin
 }
 
 af::Status TilingCodeGenImpl::GenStructCopyDef() {
+  const std::set<std::string> dynamic_size_var_names = GetDynamicSizeVarNames();
   std::set<std::string> tiling_data_vars;
   // 获取所有的var name和复用var的映射关系
   std::map<std::string, std::string> var_names_to_reuse_var_name;
@@ -982,16 +1083,17 @@ af::Status TilingCodeGenImpl::GenStructCopyDef() {
   for (const auto &var : tiling_data_vars) {
     // 如果没有复用，则定义该变量
     std::string reuse_var = var;
+    const std::string copy_type = TilingDataGenUtils::GetFieldType(var, dynamic_size_var_names);
     const auto &iter = var_names_to_reuse_var_name.find(var);
     if (iter == var_names_to_reuse_var_name.end()) {
-      AddAtomicHeaderLine(autofuse::GeneratedHeaderId::kState, "  uint32_t " + var + ";");
+      AddAtomicHeaderLine(autofuse::GeneratedHeaderId::kState, "  " + copy_type + " " + var + ";");
     } else {
       reuse_var = iter->second;
     }
     AddAtomicHeaderLine(autofuse::GeneratedHeaderId::kState,
-                        "  void set_" + var + "(uint32_t val) { " + reuse_var + " = val; }");
+                        "  void set_" + var + "(" + copy_type + " val) { " + reuse_var + " = val; }");
     AddAtomicHeaderLine(autofuse::GeneratedHeaderId::kState,
-                        "  inline uint32_t get_" + var + "() { return " + reuse_var + "; }");
+                        "  inline " + copy_type + " get_" + var + "() { return " + reuse_var + "; }");
   }
   AddAtomicHeaderLine(autofuse::GeneratedHeaderId::kState, "};");
   return af::SUCCESS;
@@ -1014,9 +1116,15 @@ af::Status TilingCodeGenImpl::GenCacheHashMapDef() {
   // HashMap模板和常量可能在Operator缓存或Group缓存中使用
   // Operator缓存：由cache_enabled_at_compile_time控制
   // Group缓存：由with_reuse_info_控制
-  GELOGI("Gen cache config=[cache_enabled_at_compile_time=%d, with_reuse_info=%d]",
-         config_.cache_enabled_at_compile_time, with_reuse_info_);
-  if (!config_.cache_enabled_at_compile_time && !with_reuse_info_) {
+  // 分段缓存：由enable_tiling_segment_cache控制
+  // 组级GetTiling形参：多组场景恒带GroupLevelCache*形参（与复用数据解耦），其类型由本函数
+  // 在head impl单份生成（kInputShapeSize按全图输入变量数），group TU不再各自生成类型，
+  // 避免FinishGroupTiling拼接公共头时出现kInputShapeSize/FixedSizeHashMap重定义
+  GELOGI("Gen cache config=[cache_enabled_at_compile_time=%d, with_reuse_info=%d, segment_cache=%d, multi_group=%d]",
+         config_.cache_enabled_at_compile_time, with_reuse_info_, config_.enable_tiling_segment_cache,
+         static_cast<int32_t>(!is_uniq_group_));
+  if (!config_.cache_enabled_at_compile_time && !with_reuse_info_ && !config_.enable_tiling_segment_cache &&
+      is_uniq_group_) {
     return af::SUCCESS;
   }
 
@@ -1042,6 +1150,28 @@ af::Status TilingCodeGenImpl::GenCacheHashMapDef() {
 
     GE_ASSERT_SUCCESS(operator_level_cache_gen_->GenTilingCacheContext(state_header),
                       "Generate TilingCacheContext failed.");
+  }
+
+  // Group级缓存类型（GroupLevelCache别名）：组级GetTiling恒带形参的场景head单份生成。
+  // 容量按全量model数计算（与GenTilingCode对组TU传入的all_model_infos.size()*2同口径）——
+  // head impl不走GenTiling、cache_capacity_未设置（默认0），直接使用会产生容量0的
+  // FixedSizeHashMap（hash % 0除零、缓存无法写入），PR 2674流水线根因之二
+  if (!is_uniq_group_ || with_reuse_info_) {
+    const uint32_t group_cache_capacity = static_cast<uint32_t>(tiling_model_info_.size()) * 2U;
+    GE_ASSERT_SUCCESS(group_level_cache_gen_->GenGroupCacheTypes(state_header, group_cache_capacity),
+                      "Generate Group cache types failed.");
+  }
+
+  // 分段缓存类型（跨TU函数签名引用，仅head impl生成一次）
+  if (config_.enable_tiling_segment_cache) {
+    const auto slot_map = cache::SegmentLevelCacheGen::BuildGroupSlotMap(tiling_model_info_);
+    std::set<size_t> asc_graph_ids;
+    for (const auto &model_info : tiling_model_info_) {
+      asc_graph_ids.insert(model_info.schedule_group_ident.asc_graph_id);
+    }
+    GE_ASSERT_SUCCESS(
+        cache::SegmentLevelCacheGen::GenSegmentCacheTypes(state_header, asc_graph_ids.size(), slot_map.size()),
+        "Generate segment cache types failed.");
   }
 
   AppendAtomicHeaderBody(autofuse::GeneratedHeaderId::kState, state_header.GetOutputStr());
@@ -1114,6 +1244,7 @@ void TilingCodeGenImpl::GenPgoHeaderCodesTail() {
         "struct AutofuseTilingDataPerf {\n"
         "  AutofuseTilingData tiling_data;\n"
         "  double best_perf;\n"
+        "  std::vector<FinalTilingSelectionSnapshot> final_tiling_selections;\n"
         "};\n"};
     tiling_data_.AddLine(pgo_perf_struct);
   }
@@ -1315,7 +1446,7 @@ af::Status TilingCodeGenImpl::GenSmallShapeTiling(const ModelInfo &model_info) {
       auto reordered_hardware_args = ReorderHardwareArgs(hardware_args, args_manager, pair.first);
       InitTilingUpperBound(reordered_hardware_args, args_manager, pair.first, visited);
       // 如果设置了阈值，那么ubsize不超过阈值*原始UB大小，否则ubsize不超过原始UB大小
-      if (AutoFuseConfig::GetAttStrategyConfig().enable_multicore_ub_tradeoff != "true") {
+      if (!IsMulticoreUBTradeoffEnabled(model_info)) {
         tiling_func_.AddLine(
             "    if ((Getub_size(tiling_data) < 0) || (tiling_data.get_ub_size() < "
             "static_cast<double>(Getub_size(tiling_data)))) {");
@@ -1368,7 +1499,7 @@ af::Status TilingCodeGenImpl::GenGetTiling() {
   tiling_func_.AddLine("    if (tiling_data.get_block_dim() > corenum_) {");
   tiling_func_.AddLine(
       "      OP_LOGW(OP_NAME, \"Generated block_dim %u exceeds core budget %u.\", "
-      "tiling_data.get_block_dim(), corenum_);");
+      "static_cast<unsigned>(tiling_data.get_block_dim()), corenum_);");
   tiling_func_.AddLine("      return false;");
   tiling_func_.AddLine("    }");
   if (config_.gen_extra_infos) {
@@ -1405,6 +1536,7 @@ af::Status TilingCodeGenImpl::GenTilingImplBaseClass() {
   tiling_func_.AddLine("  virtual void CollectPipeEstimates(" + data_type +
                        " &tiling_data, std::vector<FinalTilingPipeEstimate> &out) { (void)tiling_data; (void)out; }");
   tiling_func_.AddLine("  virtual const char *GetTemplateName() const { return \"\"; }");
+  tiling_func_.AddLine("  virtual const char *GetSemanticName() const { return \"\"; }");
   tiling_func_.AddLine("  virtual const char *GetSubCaseTag() const { return \"\"; }");
   tiling_func_.AddLine(" protected:");
   if (config_.enable_small_shape_strategy) {
@@ -1514,7 +1646,7 @@ af::Status TilingCodeGenImpl::GenHardwareJudge(const ModelInfo &model_info) {
   }
   for (const auto &arg : related_vars) {
     GELOGD("Add related vars [%s].", arg.c_str());
-    tiling_func_.AddLine("    uint32_t " + arg + " = tiling_data.get_" + arg + "();");
+    tiling_func_.AddLine("    auto " + arg + " = tiling_data.get_" + arg + "();");
   }
   tiling_func_.AddLine(judge_code);
   return af::SUCCESS;
@@ -1645,8 +1777,20 @@ af::Status TilingCodeGenImpl::GenImplPtr() {
   tiling_func_.AddLine("  return tilingCaseImplPtr;");
   tiling_func_.AddLine("}");
   tiling_func_.AddLine("");
-  tiling_func_.AddLine("thread_local const char *g_final_selected_sub_case_tag = nullptr;");
-  tiling_func_.AddLine("thread_local bool g_final_selected_sub_case_tag_valid = false;");
+  tiling_func_.AddLine(
+      "constexpr size_t kFinalTilingObservationSlot = " + std::to_string(final_tiling_observation_slot_) + "U;");
+  tiling_func_.AddLine("void ResetFinalTilingSelection() { ResetCurrentFinalTilingSelection(); }");
+  AddAtomicHeaderLine(autofuse::GeneratedHeaderId::kApi, "void ResetFinalTilingSelection();");
+  tiling_func_.AddLine("");
+  tiling_func_.AddLine("int32_t GetFinalTilingSubCaseId(const char *sub_case_tag) {");
+  tiling_func_.AddLine("  if (sub_case_tag == nullptr) { return -1; }");
+  tiling_func_.AddLine("  const std::string selected_sub_case_tag(sub_case_tag);");
+  for (const auto &[sub_case_tag, sub_case_id] : final_tiling_sub_case_ids_) {
+    tiling_func_.AddLine("  if (selected_sub_case_tag == \"" + sub_case_tag + "\") { return " +
+                         std::to_string(sub_case_id) + "; }");
+  }
+  tiling_func_.AddLine("  return -1;");
+  tiling_func_.AddLine("}");
   tiling_func_.AddLine("");
   tiling_func_.AddLine("int32_t GetFinalTilingCaseId(uint32_t tiling_key) {");
   tiling_func_.AddLine("  switch (tiling_key) {");
@@ -1673,12 +1817,10 @@ af::Status TilingCodeGenImpl::GenImplPtr() {
     if (!emitted_selected_cases.insert(selected_case).second) {
       continue;
     }
-    const std::string tag = model_info.sub_case_tag;
-    const std::string tag_literal = tag.empty() ? "" : tag;
+    const std::string tag_literal = model_info.sub_case_tag;
     const std::string condition = "tiling_case_id == " + std::to_string(model_info.tiling_case_id) +
-                                  "u && (sub_case_tag == nullptr || sub_case_tag[0] == '\\0' || "
-                                  "std::string(sub_case_tag) == \"" +
-                                  tag_literal + "\")";
+                                  "u && sub_case_tag != nullptr && std::string(sub_case_tag) == \"" + tag_literal +
+                                  "\"";
     tiling_func_.AddLine(std::string("  ") + (first_selected_case ? "if (" : "else if (") + condition + ") {");
     tiling_func_.AddLine("    tilingCaseImplPtr = std::make_shared<TilingCase" + model_info.sub_case_tag +
                          std::to_string(model_info.tiling_case_id) + "Impl>(corenum);");
@@ -1688,27 +1830,206 @@ af::Status TilingCodeGenImpl::GenImplPtr() {
   tiling_func_.AddLine("  return tilingCaseImplPtr;");
   tiling_func_.AddLine("}");
   tiling_func_.AddLine("");
-  tiling_func_.AddLine("bool GetFinalTilingSelection(" + config_.tiling_data_type_name +
-                       " &tiling_data, ::FinalTilingGroupSelection &selection) {");
-  tiling_func_.AddLine("  const uint32_t tiling_key = tiling_data.get_tiling_key();");
-  tiling_func_.AddLine("  if (!g_final_selected_sub_case_tag_valid) { return false; }");
-  tiling_func_.AddLine("  const int32_t case_id = GetFinalTilingCaseId(tiling_key);");
-  tiling_func_.AddLine("  if (case_id < 0) { return false; }");
+  tiling_func_.AddLine("bool HasAmbiguousFinalTilingCase(uint32_t tiling_key, const char *sub_case_tag) {");
+  tiling_func_.AddLine("  uint32_t match_count = 0U;");
+  tiling_func_.AddLine("  if (sub_case_tag == nullptr) {");
+  for (const auto &selected_case : emitted_selected_cases) {
+    const std::string condition = "tiling_key == " + std::to_string(selected_case.first) + "u";
+    tiling_func_.AddLine("  if (" + condition + ") { ++match_count; }");
+  }
+  tiling_func_.AddLine("  return match_count > 1U;");
+  tiling_func_.AddLine("  }");
+  tiling_func_.AddLine("  const std::string selected_sub_case_tag(sub_case_tag);");
+  tiling_func_.AddLine("  match_count = 0U;");
+  for (const auto &selected_case : emitted_selected_cases) {
+    const std::string tag_literal = selected_case.second;
+    const std::string condition = "tiling_key == " + std::to_string(selected_case.first) +
+                                  "u && selected_sub_case_tag == \"" + tag_literal + "\"";
+    tiling_func_.AddLine("  if (" + condition + ") { ++match_count; }");
+  }
+  tiling_func_.AddLine("  return match_count > 1U;");
+  tiling_func_.AddLine("}");
+  tiling_func_.AddLine("");
+
+  std::map<uint32_t, size_t> model_count_by_key;
+  std::map<uint32_t, const ModelInfo *> first_model_by_key;
+  for (const auto &model_info : tiling_model_info_) {
+    ++model_count_by_key[model_info.tiling_case_id];
+    first_model_by_key.emplace(model_info.tiling_case_id, &model_info);
+  }
+  tiling_func_.AddLine("bool GetFinalTilingSelectionFromSnapshot(" + config_.tiling_data_type_name +
+                       " &tiling_data, const ::FinalTilingSelectionSnapshot &snapshot, "
+                       "::FinalTilingGroupSelection &selection) {");
   tiling_func_.AddLine(
-      "  auto impl = GetSelectedTilingImplPtr(static_cast<uint32_t>(case_id), tiling_data.get_block_dim(), "
-      "g_final_selected_sub_case_tag);");
+      "  if (!snapshot.valid || snapshot.case_id < 0 || snapshot.tiling_key != tiling_data.get_tiling_key() || "
+      "snapshot.graph != " +
+      std::to_string(tiling_model_info_[0].schedule_group_ident.asc_graph_id) +
+      "U || snapshot.result != " + std::to_string(tiling_model_info_[0].schedule_group_ident.impl_graph_id) +
+      "U || snapshot.group != " + std::to_string(tiling_model_info_[0].schedule_group_ident.group_id) + "U) {");
+  tiling_func_.AddLine("    return false;");
+  tiling_func_.AddLine("  }");
+  tiling_func_.AddLine("  const char *selected_sub_case_tag = nullptr;");
+  for (const auto &model_info : tiling_model_info_) {
+    const auto sub_case_id = final_tiling_sub_case_ids_.find(model_info.sub_case_tag);
+    if (sub_case_id == final_tiling_sub_case_ids_.cend()) {
+      continue;
+    }
+    tiling_func_.AddLine("  if (snapshot.tiling_key == " + std::to_string(model_info.tiling_case_id) +
+                         "U && snapshot.sub_case_id == " + std::to_string(sub_case_id->second) + ") {");
+    tiling_func_.AddLine("    selected_sub_case_tag = \"" + model_info.sub_case_tag + "\";");
+    tiling_func_.AddLine("  }");
+  }
+  for (const auto &[tiling_key, model_count] : model_count_by_key) {
+    if (model_count != 1UL || first_model_by_key.find(tiling_key) == first_model_by_key.cend()) {
+      continue;
+    }
+    tiling_func_.AddLine(
+        "  if (selected_sub_case_tag == nullptr && snapshot.tiling_key == " + std::to_string(tiling_key) + "U) {");
+    tiling_func_.AddLine("    selected_sub_case_tag = \"" + first_model_by_key.at(tiling_key)->sub_case_tag + "\";");
+    tiling_func_.AddLine("  }");
+  }
+  tiling_func_.AddLine("  if (selected_sub_case_tag == nullptr) { return false; }");
+  tiling_func_.AddLine(
+      "  auto impl = GetSelectedTilingImplPtr(static_cast<uint32_t>(snapshot.case_id), "
+      "tiling_data.get_block_dim(), selected_sub_case_tag);");
   tiling_func_.AddLine("  if (impl == nullptr) { return false; }");
   tiling_func_.AddLine("  selection = ::FinalTilingGroupSelection{" +
                        std::to_string(tiling_model_info_[0].schedule_group_ident.group_id) +
-                       "U, case_id, tiling_key, impl->CalcScore(tiling_data), impl->GetSubCaseTag(), "
-                       "impl->GetTemplateName()};");
+                       "U, snapshot.case_id, snapshot.tiling_key, impl->CalcScore(tiling_data), "
+                       "impl->GetSubCaseTag(), impl->GetTemplateName(), impl->GetSemanticName()};");
   tiling_func_.AddLine("  return true;");
+  tiling_func_.AddLine("}");
+  AddAtomicHeaderLine(autofuse::GeneratedHeaderId::kApi,
+                      "bool GetFinalTilingSelectionFromSnapshot(" + config_.tiling_data_type_name +
+                          " &, const ::FinalTilingSelectionSnapshot &, ::FinalTilingGroupSelection &);");
+  tiling_func_.AddLine("");
+  tiling_func_.AddLine("bool GetFinalTilingSelection(" + config_.tiling_data_type_name +
+                       " &tiling_data, ::FinalTilingGroupSelection &selection) {");
+  tiling_func_.AddLine("  ::FinalTilingSelectionSnapshot snapshot;");
+  tiling_func_.AddLine(
+      "  if (!GetFinalTilingSelectionSnapshot(kFinalTilingObservationSlot, snapshot)) { return false; }");
+  tiling_func_.AddLine("  return GetFinalTilingSelectionFromSnapshot(tiling_data, snapshot, selection);");
   tiling_func_.AddLine("}");
   AddAtomicHeaderLine(
       autofuse::GeneratedHeaderId::kApi,
       "bool GetFinalTilingSelection(" + config_.tiling_data_type_name + " &, ::FinalTilingGroupSelection &);");
+  GE_ASSERT_SUCCESS(GenTemplateSemanticInfos(), "Generate template semantic infos failed.");
   return af::SUCCESS;
 }
+
+namespace {
+using SemanticIdentity = std::pair<std::string, std::string>;
+std::vector<SemanticIdentity> GetSemanticIdentitiesByTilingKey(const std::vector<ModelInfo> &model_infos,
+                                                               uint32_t tiling_key);
+std::string GetCommonSemanticParentName(const std::vector<SemanticIdentity> &semantic_identities);
+}  // namespace
+
+af::Status TilingCodeGenImpl::GenTemplateSemanticInfos() {
+  tiling_func_.AddLine("std::vector<::TemplateSemanticInfo> GetTemplateSemanticInfos(" + config_.tiling_data_type_name +
+                       " &tiling_data) {");
+  tiling_func_.AddLine("  std::vector<::TemplateSemanticInfo> semantic_infos;");
+  std::set<uint32_t> emitted_semantic_keys;
+  for (const auto &model_info : tiling_model_info_) {
+    const auto &ident = model_info.schedule_group_ident;
+    const std::string group_key = "tiling_data.get_tiling_key()";
+    if (!emitted_semantic_keys.insert(model_info.tiling_case_id).second) {
+      continue;
+    }
+    const std::vector<SemanticIdentity> semantic_identities =
+        GetSemanticIdentitiesByTilingKey(tiling_model_info_, model_info.tiling_case_id);
+    const bool ambiguous = semantic_identities.size() > 1UL;
+    const std::string semantic_name =
+        ambiguous ? GetCommonSemanticParentName(semantic_identities) : semantic_identities.front().first;
+    tiling_func_.AddLine("  if (" + group_key + " == " + std::to_string(model_info.tiling_case_id) + "U) {");
+    tiling_func_.AddLine("    ::TemplateSemanticInfo info;");
+    tiling_func_.AddLine("    info.graph = " + std::to_string(ident.asc_graph_id) + "U;");
+    tiling_func_.AddLine("    info.result = " + std::to_string(ident.impl_graph_id) + "U;");
+    tiling_func_.AddLine("    info.group = " + std::to_string(ident.group_id) + "U;");
+    tiling_func_.AddLine("    info.tiling_key = " + group_key + ";");
+    tiling_func_.AddLine("    info.semantic_names = {\"" + semantic_name + "\"};");
+    tiling_func_.AddLine("    info.semantic_name = \"" + semantic_name + "\";");
+    tiling_func_.AddLine("    info.template_name = " +
+                         std::string(ambiguous ? "\"\"" : "\"" + semantic_identities.front().second + "\"") + ";");
+    if (ambiguous) {
+      tiling_func_.AddLine("    info.name_status = \"ambiguous\";");
+    }
+    tiling_func_.AddLine("    semantic_infos.push_back(info);");
+    tiling_func_.AddLine("  }");
+  }
+  const auto &first_ident = tiling_model_info_[0].schedule_group_ident;
+  tiling_func_.AddLine("  if (semantic_infos.empty()) {");
+  tiling_func_.AddLine("    ::TemplateSemanticInfo unavailable_info;");
+  tiling_func_.AddLine("    unavailable_info.graph = " + std::to_string(first_ident.asc_graph_id) + "U;");
+  tiling_func_.AddLine("    unavailable_info.result = " + std::to_string(first_ident.impl_graph_id) + "U;");
+  tiling_func_.AddLine("    unavailable_info.group = " + std::to_string(first_ident.group_id) + "U;");
+  tiling_func_.AddLine("    unavailable_info.tiling_key = tiling_data.get_tiling_key();");
+  tiling_func_.AddLine("    unavailable_info.semantic_names = {\"\"};");
+  tiling_func_.AddLine("    unavailable_info.name_status = \"unavailable\";");
+  tiling_func_.AddLine("    semantic_infos.push_back(unavailable_info);");
+  tiling_func_.AddLine("  }");
+  tiling_func_.AddLine("  return semantic_infos;");
+  tiling_func_.AddLine("}");
+  AddAtomicHeaderLine(
+      autofuse::GeneratedHeaderId::kApi,
+      "std::vector<::TemplateSemanticInfo> GetTemplateSemanticInfos(" + config_.tiling_data_type_name + " &);");
+  return af::SUCCESS;
+}
+
+namespace {
+std::vector<SemanticIdentity> GetSemanticIdentitiesByTilingKey(const std::vector<ModelInfo> &model_infos,
+                                                               uint32_t tiling_key) {
+  std::vector<SemanticIdentity> identities;
+  for (const auto &model_info : model_infos) {
+    if (model_info.tiling_case_id != tiling_key) {
+      continue;
+    }
+    const std::string semantic_name = model_info.semantic_name.empty() ? "Unknown" : model_info.semantic_name;
+    const std::string template_name = model_info.schedule_group_ident.GetItemPrefix() + "_" + model_info.sub_case_tag +
+                                      std::to_string(model_info.tiling_case_id);
+    const SemanticIdentity identity{semantic_name, template_name};
+    if (std::find(identities.begin(), identities.end(), identity) == identities.end()) {
+      identities.push_back(identity);
+    }
+  }
+  return identities;
+}
+
+std::string GetCommonSemanticParentName(const std::vector<SemanticIdentity> &semantic_identities) {
+  if (semantic_identities.empty()) {
+    return "Unknown";
+  }
+  if (semantic_identities.size() == 1UL) {
+    return semantic_identities.front().first;
+  }
+  const auto is_boundary = [](const char value) {
+    return value == '/' || value == '@' || value == '#' || value == '|' || value == '+';
+  };
+  const std::string &first_name = semantic_identities.front().first;
+  size_t common_size = first_name.size();
+  for (size_t index = 1UL; index < semantic_identities.size(); ++index) {
+    const std::string &name = semantic_identities[index].first;
+    size_t current_size = 0UL;
+    while (current_size < common_size && current_size < name.size() && first_name[current_size] == name[current_size]) {
+      ++current_size;
+    }
+    if (current_size == common_size) {
+      continue;
+    }
+    if (current_size < name.size() && (is_boundary(first_name[current_size]) || is_boundary(name[current_size]))) {
+      common_size = current_size;
+    } else {
+      while (current_size > 0UL && !is_boundary(first_name[current_size - 1UL])) {
+        --current_size;
+      }
+      common_size = current_size > 0UL ? current_size - 1UL : 0UL;
+    }
+    if (common_size == 0UL) {
+      return "Unknown";
+    }
+  }
+  return first_name.substr(0UL, common_size);
+}
+}  // namespace
 
 af::Status TilingCodeGenImpl::CheckImplPtr(const std::string &indent) {
   tiling_func_.AddLine(indent + "if (tilingCaseImplPtr == nullptr) {");
@@ -1769,7 +2090,23 @@ af::Status TilingCodeGenImpl::GenGetTilingImpl() {
   return af::SUCCESS;
 }
 
+af::Status TilingCodeGenImpl::GenSegmentCacheDefinesAndKeyFunc() {
+  uint32_t r_axis_threshold = 0U;
+  uint32_t innermost_threshold = 0U;
+  cache::SegmentLevelCacheGen::GetThresholds(tiling_model_info_, r_axis_threshold, innermost_threshold);
+  GE_ASSERT_SUCCESS(
+      cache::SegmentLevelCacheGen::GenSegmentCacheStorage(tiling_func_, r_axis_threshold, innermost_threshold),
+      "Generate segment cache storage failed.");
+  GE_ASSERT_SUCCESS(cache::SegmentLevelCacheGen::GenKeyComputeFunc(tiling_func_, tiling_model_info_, config_),
+                    "Generate segment key compute function failed.");
+  return af::SUCCESS;
+}
+
 af::Status TilingCodeGenImpl::GenTilingFuncCallEntrance() {
+  // 单group算子的分段缓存代码发射在group TU（GetTilingWithObservation所在TU）；多group在tail TU发射
+  if (config_.enable_tiling_segment_cache && is_uniq_group_) {
+    GE_ASSERT_SUCCESS(GenSegmentCacheDefinesAndKeyFunc(), "Generate segment cache defines and key func failed.");
+  }
   GE_ASSERT_SUCCESS(GenGetTilingImpl(), "Generate context tiling impl failed.");
   return af::SUCCESS;
 }
@@ -1797,27 +2134,10 @@ af::Status TilingCodeGenImpl::GenExternFuncDef() {
 }
 
 af::Status TilingCodeGenImpl::GenExpressionMacro() {
-  AddAtomicHeaderLine(autofuse::GeneratedHeaderId::kSolver,
-                      "template <typename T, typename U> inline auto Max(T a, U b) { return static_cast<double>(a) > "
-                      "static_cast<double>(b) ? a : b; }");
-  AddAtomicHeaderLine(autofuse::GeneratedHeaderId::kSolver,
-                      "template <typename T, typename U> inline auto Min(T a, U b) { return static_cast<double>(a) < "
-                      "static_cast<double>(b) ? a : b; }");
-  AddAtomicHeaderLine(autofuse::GeneratedHeaderId::kSolver,
-                      "template <typename T> inline auto Abs(T a) { return static_cast<double>(a) >= 0 ? a : -a; }");
-  const std::array<std::string, 11U> macros = {"#define Log(a) (log((double)(a)))",
-                                               "#define Pow(a, b) pow(a, b)",
-                                               "#define Rational(a, b) ((double)(a) / (double)(b))",
-                                               "#define ExpectEq(a, b) ((a) == (b))",
-                                               "#define ExpectNe(a, b) ((a) != (b))",
-                                               "#define ExpectLe(a, b) ((a) <= (b))",
-                                               "#define ExpectLt(a, b) ((a) < (b))",
-                                               "#define LogicAnd(a, b) ((a) && (b))",
-                                               "#define LogicOr(a, b) ((a) || (b))",
-                                               "#define True true",
-                                               "#define False false"};
-  for (const auto &macro : macros) {
-    AddAtomicHeaderLine(autofuse::GeneratedHeaderId::kSolver, macro);
+  std::istringstream source(axes_resource::kExpressionHelpers);
+  std::string line;
+  while (std::getline(source, line)) {
+    AddAtomicHeaderLine(autofuse::GeneratedHeaderId::kSolver, line);
   }
   return af::SUCCESS;
 }
@@ -1877,48 +2197,8 @@ af::Status TilingCodeGenImpl::GenToolFuncs() {
   for (const auto &header : {"cmath", "cstdint", "type_traits"}) {
     autofuse::RequireSystemHeader(solver_dependencies, header);
   }
-  ge::CodePrinter solver_header;
-  solver_header.AddLine("inline bool IsEqual(double a, double b)");
-  solver_header.AddLine("{");
-  solver_header.AddLine("    const double epsilon = 1e-8;");
-  solver_header.AddLine("    double abs = (a > b) ? (a - b) : (b - a);");
-  solver_header.AddLine("    return abs < epsilon;");
-  solver_header.AddLine("}");
-  solver_header.AddLine("template<typename T1, typename T2>");
-  solver_header.AddLine("inline double TernaryOp(bool cond, T1 a, T2 b)");
-  solver_header.AddLine("{");
-  solver_header.AddLine("    return static_cast<double>(cond ? a : b);");
-  solver_header.AddLine("}");
-  solver_header.AddLine("template<typename T>");
-  solver_header.AddLine("inline T Ceiling(T a)");
-  solver_header.AddLine("{");
-  solver_header.AddLine("    T value = static_cast<T>(static_cast<int64_t>(a));");
-  solver_header.AddLine("    return (IsEqual(value, a)) ? value : (value + 1);");
-  solver_header.AddLine("}");
-  solver_header.AddLine("template<typename T>");
-  solver_header.AddLine("inline T Floor(T a)");
-  solver_header.AddLine("{");
-  solver_header.AddLine("    return static_cast<T>(static_cast<int64_t>(a));");
-  solver_header.AddLine("}");
-  solver_header.AddLine("template<typename T1, typename T2>");
-  solver_header.AddLine("inline auto Mod(T1 a, T2 b)->decltype(a % b)");
-  solver_header.AddLine("{");
-  solver_header.AddLine("    return a % b;");
-  solver_header.AddLine("}");
-  solver_header.AddLine("template<typename T1, typename T2>");
-  solver_header.AddLine(
-      "inline auto Mod(T1 a, T2 b)->typename std::enable_if<std::is_floating_point<T1>::value || "
-      "std::is_floating_point<T2>::value, decltype(std::fmod(a, b))>::type");
-  solver_header.AddLine("{");
-  solver_header.AddLine("    return std::fmod(a, b);");
-  solver_header.AddLine("}");
-  solver_header.AddLine("template<typename TI, typename TO>");
-  solver_header.AddLine("inline TO &RefToRef(TI &ptr) {");
-  solver_header.AddLine("  return *(reinterpret_cast<TO *>(reinterpret_cast<void *>(&ptr)));");
-  solver_header.AddLine("}");
-  solver_header.AddLine("");
-  AppendAtomicHeaderBody(autofuse::GeneratedHeaderId::kSolver, solver_header.GetOutputStr());
-  tiling_head_.AddLine(solver_header.GetOutputStr());
+  AppendAtomicHeaderBody(autofuse::GeneratedHeaderId::kSolver, axes_resource::kScalarHelpers);
+  tiling_head_.AddLine(axes_resource::kScalarHelpers);
   return af::SUCCESS;
 }
 
@@ -2079,6 +2359,8 @@ af::Status TilingCodeGenImpl::GenTilingCaseImpl(const ModelInfo &model_info) {
   const std::string template_name =
       model_info.schedule_group_ident.GetItemPrefix() + "_" + model_info.sub_case_tag + tiling_id;
   tiling_func_.AddLine("  const char *GetTemplateName() const override { return \"" + template_name + "\"; }");
+  const std::string semantic_name = model_info.semantic_name.empty() ? "Unknown" : model_info.semantic_name;
+  tiling_func_.AddLine("  const char *GetSemanticName() const override { return \"" + semantic_name + "\"; }");
   tiling_func_.AddLine("  const char *GetSubCaseTag() const override { return \"" + model_info.sub_case_tag + "\"; }");
   std::string tiling_data_key_word = "AutofuseTilingData";
   if (!is_uniq_group_) {
@@ -2128,7 +2410,16 @@ void TilingCodeGenImpl::GenInductorExecutePGOSolver(const ModelInfo &model_info)
     tiling_func_.AddLine("    tiling_perf.tiling_data = tiling_data;");
   }
   tiling_func_.AddLine("    tiling_perf.best_perf = GetPerf(tiling_data);");
-  tiling_func_.AddLine("    tiling_data_list.push_back(tiling_perf);");
+  const auto &ident = model_info.schedule_group_ident;
+  tiling_func_.AddLine("    if (IsFinalTilingObservationEnabled()) {");
+  tiling_func_.AddLine("    tiling_perf.final_tiling_selections = CaptureFinalTilingSelectionSnapshot(" +
+                       std::to_string(final_tiling_observation_slot_) + "U, {true, " +
+                       std::to_string(ident.asc_graph_id) + "U, " + std::to_string(ident.impl_graph_id) + "U, " +
+                       std::to_string(ident.group_id) + "U, tiling_data.get_tiling_key(), " +
+                       std::to_string(model_info.tiling_case_id) + ", " +
+                       std::to_string(final_tiling_sub_case_ids_.at(model_info.sub_case_tag)) + "});");
+  tiling_func_.AddLine("    }");
+  tiling_func_.AddLine("    tiling_data_list.push_back(std::move(tiling_perf));");
   tiling_func_.AddLine("    pending_search_cfg_ = nullptr;");
   tiling_func_.AddLine("    return true;");
   tiling_func_.AddLine("  }");
@@ -2139,7 +2430,12 @@ af::Status TilingCodeGenImpl::GenPreTiling(const ModelInfo &model_info) {
 }
 
 af::Status TilingCodeGenImpl::GenDoApiTiling(const ModelInfo &model_info) {
+  // 同类型高阶 API 的 function_impl 是类型级共享代码（与节点无关），逐节点发射会重复定义，只发一份。
+  std::set<std::string> emitted_func_impls;
   for (const auto &tiling_api_code : model_info.node_name_to_api_code) {
+    if (!emitted_func_impls.insert(tiling_api_code.second.function_impl).second) {
+      continue;
+    }
     tiling_func_.AddLine(tiling_api_code.second.function_impl);
     tiling_func_.AddLine("");
   }
@@ -2147,8 +2443,12 @@ af::Status TilingCodeGenImpl::GenDoApiTiling(const ModelInfo &model_info) {
   if (model_info.node_name_to_api_code.empty()) {
     tiling_func_.AddLine("  (void)tiling_data;");
   }
+  // 同一图内可能存在多个同类高阶 API 节点（例如对齐 pass 为多个消费者各插一个 Pad），
+  // 各节点的 function_invoke 段内变量名固定（如 apiPadTiling），必须用独立作用域隔离，否则重定义。
   for (const auto &tiling_api_code : model_info.node_name_to_api_code) {
+    tiling_func_.AddLine("{");
     tiling_func_.AddLine(tiling_api_code.second.function_invoke);
+    tiling_func_.AddLine("}");
   }
   tiling_func_.AddLine("}");
   return af::SUCCESS;
@@ -2338,8 +2638,35 @@ af::Status TilingCodeGenImpl::GenGetObj(const ModelInfo &model_info) {
 }
 
 af::Status TilingCodeGenImpl::GenCalcScore(const ModelInfo &model_info) {
+  // [ScoreFunc 诊断] 空 score_func 会静默继承基类 CalcScore{return 0;}——与"运行期算出的 0"
+  // 在日志上无法区分。这里把"是否送达"与"是否带组绑定占位符（运行期形态）"显性打出来，
+  // 用于排障：empty=1 表示打分函数没送达（见 gen_model_info 的 key 漂移告警）；placeholder=1
+  // 表示该函数体引用了运行期组子结构。
+  GELOGI(
+      "[ScoreFunc] emit graph[%s] empty=%d placeholder=%d", model_info.graph_name.c_str(),
+      static_cast<int32_t>(model_info.score_func.empty()),
+      static_cast<int32_t>(model_info.score_func.find(ascgen_utils::kGroupTilingDataPlaceholder) != std::string::npos));
   if (!model_info.score_func.empty()) {
-    tiling_func_.AddLine(model_info.score_func);
+    std::string score_func = model_info.score_func;
+    // [统一打分组绑定] 占位符 → 本模型真实组子结构（schedule_group_ident）：
+    // 绑定与候选/组序位置无关。替换逻辑提取为 SubstituteGroupTilingDataPlaceholder
+    // （common_utils.h，UT 直测）。
+    // 单 group（is_uniq_group_）时 tiling_data 本身就是组 tiling data，没有
+    // graphX_resultY_gZ_tiling_data 子结构，必须绑定到 tiling_data 本身。
+    if (is_uniq_group_) {
+      const std::string qualified = std::string("tiling_data.") + ascgen_utils::kGroupTilingDataPlaceholder;
+      size_t pos = score_func.find(qualified);
+      while (pos != std::string::npos) {
+        score_func.replace(pos, qualified.size(), "tiling_data");
+        pos = score_func.find(qualified, pos + std::string("tiling_data").size());
+      }
+    } else {
+      ascgen_utils::SubstituteGroupTilingDataPlaceholder(score_func, model_info.schedule_group_ident.GetItemPrefix());
+    }
+    // [ScoreFunc 诊断] 记录本模型的绑定目标，便于核对 result 级与 case 级是否绑到同一子结构。
+    GELOGI("[ScoreFunc] bind graph[%s] target=[%s]", model_info.graph_name.c_str(),
+           is_uniq_group_ ? "tiling_data" : (model_info.schedule_group_ident.GetItemPrefix() + "_tiling_data").c_str());
+    tiling_func_.AddLine(score_func);
   }
   return af::SUCCESS;
 }
@@ -2379,6 +2706,9 @@ af::Status TilingCodeGenImpl::GenGetSetTilingImpl(const ModelInfo &model_info) {
   if (ws_vars.empty()) {
     tiling_func_.AddLine("    (void)tiling_data; (void)workspace_map;");
   } else {
+    if (ws_vars.find("tiling_data.get_") == std::string::npos) {
+      tiling_func_.AddLine("    (void)tiling_data;");
+    }
     tiling_func_.AddLine(ws_vars);
   }
   tiling_func_.AddLine("    return true;");
@@ -2389,15 +2719,27 @@ af::Status TilingCodeGenImpl::GenGetSetTilingImpl(const ModelInfo &model_info) {
 af::Status TilingCodeGenImpl::GenerateInputParamsAndTiling() {
   tiling_func_.AddLine("  } else {");
   tiling_func_.AddLine("    OP_LOGD(OP_NAME, \"Calculating the tiling data for tiling_case_id %u.\", tiling_case_id);");
-  tiling_func_.AddLine("    TilingCaseImplPtr tilingCaseImplPtr = GetTilingImplPtr(tiling_case_id, corenum);");
+  if (config_.enable_tiling_segment_cache) {
+    // 分段缓存：命中场景按(id, tag)还原求解器，tag为空时保持原有id分发
+    tiling_func_.AddLine("    TilingCaseImplPtr tilingCaseImplPtr = (segment_sub_case_tag != nullptr)");
+    tiling_func_.AddLine(
+        "        ? GetSelectedTilingImplPtr(static_cast<uint32_t>(tiling_case_id), corenum, segment_sub_case_tag)");
+    tiling_func_.AddLine("        : GetTilingImplPtr(tiling_case_id, corenum);");
+  } else {
+    tiling_func_.AddLine("    TilingCaseImplPtr tilingCaseImplPtr = GetTilingImplPtr(tiling_case_id, corenum);");
+  }
   GE_ASSERT_SUCCESS(CheckImplPtr("    "), "Generate implptr check failed!");
   if (is_uniq_group_) {
     GE_ASSERT_SUCCESS(GenDurationBeginCode(TilingFuncDurationType::TILING_FUNC_DURATION_DOTILING, "    "),
                       "Generate begin code!");
   }
-  tiling_func_.AddLine(std::string("    ret = tilingCaseImplPtr->GetTiling(tiling_data") +
+  tiling_func_.AddLine("    auto trial_tiling = tiling_data;");
+  tiling_func_.AddLine(std::string("    ret = tilingCaseImplPtr->GetTiling(trial_tiling") +
                        (hardware_has_ub_ ? ", ub_ratio" : "") + ");");
-  tiling_func_.AddLine("    tiling_data.set_tiling_key(tiling_case_id);");
+  tiling_func_.AddLine("    if (ret) {");
+  tiling_func_.AddLine("      trial_tiling.set_tiling_key(tiling_case_id);");
+  tiling_func_.AddLine("      tiling_data = trial_tiling;");
+  tiling_func_.AddLine("    }");
   tiling_func_.AddLine(
       "    OP_LOGD(OP_NAME, \"Finish calculating the tiling data for tiling_case_id %u.\", tiling_case_id);");
   if (is_uniq_group_) {
@@ -2461,23 +2803,8 @@ af::Status TilingCodeGenImpl::GenGetTilingDataFromCopy() {
 }
 
 af::Status TilingCodeGenImpl::GenFindCacheAndSaveCache() {
-  ge::CodePrinter state_header;
-  auto &state_dependencies = atomic_headers_[autofuse::GeneratedHeaderId::kState].dependencies;
-  for (const auto &header : {"array", "cstddef", "cstdint", "type_traits"}) {
-    autofuse::RequireSystemHeader(state_dependencies, header);
-  }
-  // 当OperatorCache关闭但GroupCache开启时，需要在这里补齐GroupCache依赖的共享定义
-  if (!config_.cache_enabled_at_compile_time) {
-    cache::OperatorLevelCacheGen::GenConstantDefs(state_header, CollectInputVarsSize());
-    GE_ASSERT_SUCCESS(operator_level_cache_gen_->GenFixedSizeHashMapDef(state_header),
-                      "Generate FixedSizeHashMap definition for Group cache failed.");
-  }
-
-  GE_ASSERT_SUCCESS(group_level_cache_gen_->GenGroupCacheTypes(state_header, cache_capacity_),
-                    "Generate Group cache types failed.");
-  AppendAtomicHeaderBody(autofuse::GeneratedHeaderId::kState, state_header.GetOutputStr());
-  tiling_head_.AddLine(state_header.GetOutputStr());
-
+  // 类型定义（GroupLevelCache/FixedSizeHashMap/常量）由head impl的GenCacheHashMapDef单份生成，
+  // 组TU仅生成Find/Save函数，依赖kState头可见类型
   GE_ASSERT_SUCCESS(group_level_cache_gen_->GenGroupCacheFunctions(tiling_func_, config_.tiling_data_type_name),
                     "Generate Group cache functions failed.");
 
@@ -2489,13 +2816,12 @@ void TilingCodeGenImpl::GenCalcScoreVarsDefine() {
   // 根据 is_uniq_group_ 决定是否包含 workspace_map 参数，确保与 FindPerfBetterTilingbyCaseId 定义一致
   // core_num 始终作为函数参数（用于保持签名一致）
   std::string function_signature =
-      std::string(
-          "bool GetTilingCaseScoreFunc(const std::map<int32_t, std::vector<ScoreTilingCase>, greater<int32_t>> ") +
-      "&score_map, double &obj, double &ub_ratio, TilingDataCopy &tmp_tiling, bool &sub_case_flag, " +
-      "const char *&selected_sub_case_tag, " + config_.tiling_data_type_name + " &tiling_data" +
+      std::string("bool GetTilingCaseScoreFunc(ScoreTilingCase *candidates, uint32_t candidate_num, double &obj, ") +
+      "double &ub_ratio, TilingDataCopy &tmp_tiling, bool &sub_case_flag, " + "const char *&selected_sub_case_tag, " +
+      config_.tiling_data_type_name + " &tiling_data" +
       (is_uniq_group_ ? "" : ", std::unordered_map<int64_t, uint64_t> &workspace_map") + ", uint32_t core_num";
   const char_t *cache_args =
-      with_reuse_info_ ? ", std::array<uint32_t, kInputShapeSize> &input_shapes, GroupLevelCache *cache = nullptr" : "";
+      with_reuse_info_ ? ", std::array<int64_t, kInputShapeSize> &input_shapes, GroupLevelCache *cache = nullptr" : "";
   tiling_func_.AddLine(function_signature.append(cache_args).append(") {"));
   tiling_func_.AddLine(GenTilingScoreFuncDefineHead(is_uniq_group_));
   tiling_func_.AddLine("    if (ret) {");
@@ -2506,9 +2832,11 @@ void TilingCodeGenImpl::GenCalcScoreVarsDefine() {
   }
   tiling_func_.AddLine("      OP_LOGI(OP_NAME, \"[PROF]The score_map[%d] has been processed, tiling case %s%u of " +
                        tiling_model_info_[0].schedule_group_ident.GetItemPrefix() + " is the best choice.\",");
-  tiling_func_.AddLine(R"(        s.first, sub_case_flag ? "R" : "", tiling_data.get_tiling_key());
+  tiling_func_.AddLine(
+      R"(        candidates[bucket_begin].score, sub_case_flag ? "R" : "", static_cast<unsigned>(tiling_data.get_tiling_key()));
       break;
     }
+    bucket_begin = bucket_end;
   }
 )");
   GenDurationEndCode(TilingFuncDurationType::TILING_FUNC_DURATION_DOTILING, "    ");
@@ -2519,6 +2847,12 @@ void TilingCodeGenImpl::GenCalcScoreVarsDefine() {
 af::Status TilingCodeGenImpl::GenAllSameScoreTilingCases(
     std::map<std::string, std::vector<const ModelInfo *>> &same_args_name_to_graphs,
     const std::vector<std::string> &ordered_assemble_args_name) {
+  // 各 assemble_args_name 块的候选数不同，定长数组取最大值；数组跨块复用（按块覆盖重写），
+  // 消除每块的std::map红黑树插入与vector动态分配
+  size_t max_case_num = 0UL;
+  for (const auto &assemble_args_name : ordered_assemble_args_name) {
+    max_case_num = std::max(max_case_num, same_args_name_to_graphs[assemble_args_name].size());
+  }
   bool is_first_same_args_graph = true;
   for (const auto &assemble_args_name : ordered_assemble_args_name) {
     auto &same_args_graphs = same_args_name_to_graphs[assemble_args_name];
@@ -2529,16 +2863,20 @@ af::Status TilingCodeGenImpl::GenAllSameScoreTilingCases(
       std::string kInitVar = R"(    TilingCaseImpl *tilingCaseImplPtr;
     TilingDataCopy tmp_tiling;
     int32_t score = 0;
-    std::map<int32_t, std::vector<ScoreTilingCase>, greater<int32_t>> score_map;)";
+    ScoreTilingCase candidates[)" +
+                             std::to_string(max_case_num) + R"(];
+    uint32_t candidate_num = 0;)";
       tiling_func_.AddLine(kInitVar);
       is_first_same_args_graph = false;
     } else {
       tiling_func_.AddLine("    score = 0;");
-      tiling_func_.AddLine("    score_map.clear();");
     }
+    tiling_func_.AddLine("    candidate_num = " + std::to_string(same_args_graphs.size()) + "U;");
+    uint32_t candidate_idx = 0U;
     for (const auto &models : same_args_graphs) {
       auto model_info = models;
       std::string case_id_str = model_info->sub_case_tag + std::to_string(model_info->tiling_case_id);
+      std::string cand_var = "candidates[" + std::to_string(candidate_idx) + "]";
       tiling_func_.AddLine(std::string("    TilingCase")
                                .append(case_id_str)
                                .append("Impl case")
@@ -2548,11 +2886,19 @@ af::Status TilingCodeGenImpl::GenAllSameScoreTilingCases(
       tiling_func_.AddLine("    score = tilingCaseImplPtr->CalcScore(tiling_data);");
       tiling_func_.AddLine("    OP_LOGI(OP_NAME, \"tiling case" + case_id_str + " of " +
                            model_info->schedule_group_ident.GetGroupPrefixSnakeCase() + " score is %d\", score);");
-      tiling_func_.AddLine("    score_map[score].emplace_back(\"" + model_info->sub_case_tag + "\", " +
+      tiling_func_.AddLine("    " + cand_var + " = ScoreTilingCase(\"" + model_info->sub_case_tag + "\", " +
                            std::to_string(model_info->tiling_case_id) + ", tilingCaseImplPtr);");
+      tiling_func_.AddLine("    " + cand_var + ".score = score;");
+      tiling_func_.AddLine("    " + cand_var + ".origin_idx = " + std::to_string(candidate_idx) + "U;");
+      ++candidate_idx;
     }
+    // 与原 score_map(greater) 语义一致：score 降序进入各桶；同分桶内按原插入序（origin_idx 升序）处理
+    tiling_func_.AddLine(R"(    std::sort(candidates, candidates + candidate_num,
+              [](const ScoreTilingCase &a, const ScoreTilingCase &b) -> bool {
+                return (a.score != b.score) ? (a.score > b.score) : (a.origin_idx < b.origin_idx);
+              });)");
     std::string call_str =
-        "    ret |= GetTilingCaseScoreFunc(score_map, obj, ub_ratio, tmp_tiling, sub_case_flag, "
+        "    ret |= GetTilingCaseScoreFunc(candidates, candidate_num, obj, ub_ratio, tmp_tiling, sub_case_flag, "
         "selected_sub_case_tag, tiling_data";
     std::string workspace_str = is_uniq_group_ ? "" : ", workspace_map";
     // 始终传递 corenum 参数给 GetTilingCaseScoreFunc（用于保持签名一致）
@@ -2567,7 +2913,7 @@ af::Status TilingCodeGenImpl::GenGroupCacheLookupCode() {
   GE_ASSERT_TRUE(args_manager.Process(false), "Args manager process failed.");
   auto input_vars = args_manager.GetInputVars();
 
-  std::string input_shapes_init = "  std::array<uint32_t, kInputShapeSize> input_shapes = {";
+  std::string input_shapes_init = "  std::array<int64_t, kInputShapeSize> input_shapes = {";
   for (size_t i = 0; i < input_vars.size(); ++i) {
     if (i > 0) input_shapes_init += ", ";
     input_shapes_init += "tiling_data.get_" + Str(input_vars[i]) + "()";
@@ -2578,7 +2924,7 @@ af::Status TilingCodeGenImpl::GenGroupCacheLookupCode() {
   tiling_func_.AddLine("  if (cache != nullptr) {");
   tiling_func_.AddLine("    if (FindGroupCache(input_shapes, tiling_data, *cache)) {");
   tiling_func_.AddLine("      OP_LOGD(OP_NAME, \"" + config_.tiling_data_type_name + " find cache for this shape.\");");
-  tiling_func_.AddLine("      if (::g_final_tiling_observe_enabled) { g_final_selected_sub_case_tag_valid = false; }");
+  tiling_func_.AddLine("      if (IsFinalTilingObservationEnabled()) { ResetCurrentFinalTilingSelection(); }");
   tiling_func_.AddLine("      return true;");
   tiling_func_.AddLine("    }");
   tiling_func_.AddLine("  }");
@@ -2620,9 +2966,10 @@ af::Status TilingCodeGenImpl::GenTemplateIterationLogic() {
   // 3.若切分轴一致，则将所有model info的切分轴加入同一个score_map，保证顺序为model info的顺序为tiling case id的顺序
   GE_ASSERT_SUCCESS(GenAllSameScoreTilingCases(same_args_name_to_graphs, ordered_assemble_args_name));
   tiling_func_.AddLine("    if (ret) {");
-  tiling_func_.AddLine("      OP_LOGI(OP_NAME, \"[PROF]Among the templates, tiling case %s%u of " +
-                       tiling_model_info_[0].schedule_group_ident.GetItemPrefix() +
-                       R"( is the best choice.", sub_case_flag ? "R" : "", tiling_data.get_tiling_key());)");
+  tiling_func_.AddLine(
+      "      OP_LOGI(OP_NAME, \"[PROF]Among the templates, tiling case %s%u of " +
+      tiling_model_info_[0].schedule_group_ident.GetItemPrefix() +
+      R"( is the best choice.", sub_case_flag ? "R" : "", static_cast<unsigned>(tiling_data.get_tiling_key()));)");
   tiling_func_.AddLine("    }");
   return af::SUCCESS;
 }
@@ -2670,15 +3017,12 @@ af::Status TilingCodeGenImpl::GenPGOTilingCase(const ModelInfo &model_info) {
                        model_info.sub_case_tag + tiling_id_str + ".\");");
   tiling_func_.AddLine("    autofuse_tiling_data_tmp = *output_tiling_data;");
 
-  if (!is_uniq_group_) {
-    tiling_func_.AddLine("    autofuse_tiling_data_tmp." + model_info.schedule_group_ident.GetItemPrefix() +
-                         "_tiling_data.set_tiling_key(" + tiling_id_str + ");");
-  } else {
-    tiling_func_.AddLine("    autofuse_tiling_data_tmp.set_tiling_key(" + tiling_id_str + ");");
-  }
-
-  tiling_func_.AddLine("    ret = (SearchAllTilingbyCaseId(tilingCaseImplPtr, tiling_data, tiling_data_list, " +
-                       tiling_id_str + "u, &autofuse_tiling_data_tmp, " +
+  // Keep trial writes private until a complete candidate is selected.
+  const std::string trial_tiling_data =
+      is_uniq_group_ ? "autofuse_tiling_data_tmp"
+                     : "autofuse_tiling_data_tmp." + model_info.schedule_group_ident.GetItemPrefix() + "_tiling_data";
+  tiling_func_.AddLine("    ret = (SearchAllTilingbyCaseId(tilingCaseImplPtr, " + trial_tiling_data +
+                       ", tiling_data_list, " + tiling_id_str + "u, &autofuse_tiling_data_tmp, " +
                        "stream, workspace_map, block_dim_vec, effective_cfg) || ret);");
   tiling_func_.AddLine("    OP_LOGD(OP_NAME, \"Finish calculating the tiling data for tiling_case_id " +
                        model_info.sub_case_tag + tiling_id_str + ".\");");
@@ -3027,6 +3371,11 @@ af::Status TilingCodeGenImpl::GenGetTilingKey() {
                        (is_uniq_group_ ? "" : ", std::unordered_map<int64_t, uint64_t> &workspace_map") +
                        ", int32_t tiling_case_id = -1";
   const ge::char_t *cache_str = (with_reuse_info_) ? ", GroupLevelCache *cache = nullptr" : "";
+  // 分段缓存：透传命中case的sub_case tag用于还原(id,tag)求解器；全量搜索成功时写出选中tag用于保存
+  std::string segment_params;
+  if (config_.enable_tiling_segment_cache) {
+    segment_params = ", const char *segment_sub_case_tag = nullptr, bool *segment_selected_is_sub_case = nullptr";
+  }
   GenCalcScoreVarsDefine();
   if (config_.is_inductor_scene && is_uniq_group_) {
     tiling_func_.AddLine("#if defined(__clang__)");
@@ -3039,10 +3388,10 @@ af::Status TilingCodeGenImpl::GenGetTilingKey() {
     tiling_func_.AddLine("#pragma GCC diagnostic pop");
     tiling_func_.AddLine("#endif");
   }
-  tiling_func_.AddLine("bool GetTilingKey(" + params + cache_str + ") {");
+  tiling_func_.AddLine("bool GetTilingKey(" + params + cache_str + segment_params + ") {");
   GE_ASSERT_SUCCESS(GenDurationBeginCode(TilingFuncDurationType::TILING_FUNC_DURATION_DOTILING, "    "),
                     "Generate begin code!");
-  tiling_func_.AddLine("  if (::g_final_tiling_observe_enabled) { g_final_selected_sub_case_tag_valid = false; }");
+  tiling_func_.AddLine("  if (IsFinalTilingObservationEnabled()) { ResetCurrentFinalTilingSelection(); }");
   tiling_func_.AddLine("  bool ret = false;");
   tiling_func_.AddLine("  bool sub_case_flag = false;");
   tiling_func_.AddLine("  double obj = -1;");
@@ -3053,9 +3402,22 @@ af::Status TilingCodeGenImpl::GenGetTilingKey() {
   auto core_num = BaseTypeUtils::DumpHardware(HardwareDef::CORENUM);
   tiling_func_.AddLine("  uint32_t corenum = tiling_data.get_" + core_num + "();");
   GE_ASSERT_SUCCESS(GenGetTilingbyCaseId(), "Gen GetTilingbyCaseId failed.");
-  tiling_func_.AddLine("  if (::g_final_tiling_observe_enabled) {");
-  tiling_func_.AddLine("    g_final_selected_sub_case_tag = selected_sub_case_tag;");
-  tiling_func_.AddLine("    g_final_selected_sub_case_tag_valid = true;");
+  if (config_.enable_tiling_segment_cache) {
+    // 分段缓存：全量搜索成功时写出选中tag，供上层首填保存
+    tiling_func_.AddLine("  if (ret && tiling_case_id == -1 && segment_selected_is_sub_case != nullptr) {");
+    tiling_func_.AddLine("    *segment_selected_is_sub_case = (std::string(selected_sub_case_tag) == \"R\");");
+    tiling_func_.AddLine("  }");
+  }
+  tiling_func_.AddLine("  if (ret && IsFinalTilingObservationEnabled()) {");
+  tiling_func_.AddLine("    const int32_t observed_case_id = GetFinalTilingCaseId(tiling_data.get_tiling_key());");
+  tiling_func_.AddLine("    if (observed_case_id >= 0) {");
+  tiling_func_.AddLine("      CommitCurrentFinalTilingSelection({true, " +
+                       std::to_string(tiling_model_info_[0].schedule_group_ident.asc_graph_id) + "U, " +
+                       std::to_string(tiling_model_info_[0].schedule_group_ident.impl_graph_id) + "U, " +
+                       std::to_string(tiling_model_info_[0].schedule_group_ident.group_id) +
+                       "U, tiling_data.get_tiling_key(), observed_case_id, "
+                       "GetFinalTilingSubCaseId(selected_sub_case_tag)});");
+  tiling_func_.AddLine("    }");
   tiling_func_.AddLine("  }");
   GE_ASSERT_SUCCESS(ValidateSingleResultAndGroup(), "Gen ValidateSingleResultAndGroup failed.");
   return af::SUCCESS;
@@ -3076,36 +3438,109 @@ af::Status TilingCodeGenImpl::GenFinalTilingRepresentation() {
   return af::SUCCESS;
 }
 
-af::Status TilingCodeGenImpl::GenFinalTilingByCaseEmitter() {
-  const auto &ident = tiling_model_info_[0].schedule_group_ident;
-  const std::string data_type = config_.tiling_data_type_name;
-  tiling_func_.AddLine("void EmitFinalTilingByCase(" + data_type +
-                       " &tiling_data, uint32_t corenum, const char *source, const char *selection_mode, "
-                       "uint32_t group_id, int32_t requested_case_id) {");
-  AddAtomicHeaderLine(
-      autofuse::GeneratedHeaderId::kApi,
-      "void EmitFinalTilingByCase(" + data_type + " &, uint32_t, const char *, const char *, uint32_t, int32_t);");
-  tiling_func_.AddLine("  if (!ShouldEmitFinalTiling()) { return; }");
+void TilingCodeGenImpl::GenFinalTilingSemanticFallback() {
+  tiling_func_.AddLine("  auto ApplySemanticFallback = [&]() {");
+  tiling_func_.AddLine("    for (const auto &semantic_info : GetTemplateSemanticInfos(tiling_data)) {");
+  tiling_func_.AddLine("      final_context.semantic_name = semantic_info.semantic_name;");
+  tiling_func_.AddLine("      final_context.semantic_names = semantic_info.semantic_names;");
+  tiling_func_.AddLine("      final_context.template_name = semantic_info.template_name;");
+  tiling_func_.AddLine("      return;");
+  tiling_func_.AddLine("    }");
+  tiling_func_.AddLine("  };");
+}
+
+af::Status TilingCodeGenImpl::GenFinalTilingContextQuery() {
+  tiling_func_.AddLine("bool GetFinalTilingContextFromSnapshot(" + config_.tiling_data_type_name +
+                       " &tiling_data, uint32_t corenum, int32_t requested_case_id, "
+                       "const ::FinalTilingSelectionSnapshot &snapshot, ::FinalTilingContext &final_context) {");
+  AddAtomicHeaderLine(autofuse::GeneratedHeaderId::kApi,
+                      "bool GetFinalTilingContextFromSnapshot(" + config_.tiling_data_type_name +
+                          " &, uint32_t, int32_t, const ::FinalTilingSelectionSnapshot &, "
+                          "::FinalTilingContext &);");
+  tiling_func_.AddLine("  ::FinalTilingGroupSelection selection;");
+  tiling_func_.AddLine(
+      "  if (!GetFinalTilingSelectionFromSnapshot(tiling_data, snapshot, selection)) { return false; }");
+  tiling_func_.AddLine("  if (requested_case_id >= 0 && requested_case_id != selection.case_id) { return false; }");
+  tiling_func_.AddLine(
+      "  auto final_case_impl = GetSelectedTilingImplPtr(static_cast<uint32_t>(selection.case_id), corenum, "
+      "selection.sub_case_tag.c_str());");
+  tiling_func_.AddLine("  if (final_case_impl == nullptr) { return false; }");
+  tiling_func_.AddLine("  final_context.case_id = selection.case_id;");
+  tiling_func_.AddLine("  final_context.tiling_key = selection.tiling_key;");
+  tiling_func_.AddLine("  final_context.score = selection.score;");
+  tiling_func_.AddLine("  final_context.sub_case_tag = selection.sub_case_tag;");
+  tiling_func_.AddLine("  final_context.template_name = selection.template_name;");
+  tiling_func_.AddLine("  final_context.semantic_name = selection.semantic_name;");
+  tiling_func_.AddLine("  final_context.semantic_names = {final_context.semantic_name};");
+  tiling_func_.AddLine("  final_case_impl->CollectPipeEstimates(tiling_data, final_context.pipe_estimates);");
+  tiling_func_.AddLine("  return true;");
+  tiling_func_.AddLine("}");
+  tiling_func_.AddLine("");
+  tiling_func_.AddLine(
+      "bool GetFinalTilingContext(" + config_.tiling_data_type_name +
+      " &tiling_data, uint32_t corenum, int32_t requested_case_id, ::FinalTilingContext &final_context) {");
+  AddAtomicHeaderLine(autofuse::GeneratedHeaderId::kApi, "bool GetFinalTilingContext(" + config_.tiling_data_type_name +
+                                                             " &, uint32_t, int32_t, ::FinalTilingContext &);");
   tiling_func_.AddLine("  const uint32_t final_tiling_key = tiling_data.get_tiling_key();");
+  tiling_func_.AddLine("  ::FinalTilingSelectionSnapshot final_selection_snapshot;");
+  tiling_func_.AddLine("  ::FinalTilingGroupSelection final_selection;");
+  tiling_func_.AddLine("  const bool has_selected_snapshot =");
+  tiling_func_.AddLine(
+      "      GetFinalTilingSelectionSnapshot(kFinalTilingObservationSlot, final_selection_snapshot) &&");
+  tiling_func_.AddLine(
+      "      GetFinalTilingSelectionFromSnapshot(tiling_data, final_selection_snapshot, final_selection);");
   tiling_func_.AddLine(
       "  const int32_t final_case_id = requested_case_id >= 0 ? requested_case_id : "
       "GetFinalTilingCaseId(final_tiling_key);");
-  tiling_func_.AddLine("  if (final_case_id < 0) { return; }");
+  tiling_func_.AddLine("  final_context.case_id = final_case_id;");
+  tiling_func_.AddLine("  final_context.tiling_key = final_tiling_key;");
+  GenFinalTilingSemanticFallback();
+  tiling_func_.AddLine("  if (final_case_id < 0) { ApplySemanticFallback(); return false; }");
   tiling_func_.AddLine(
       "  TilingCaseImplPtr final_case_impl = GetSelectedTilingImplPtr(static_cast<uint32_t>(final_case_id), corenum, "
-      "nullptr);");
-  tiling_func_.AddLine("  if (final_case_impl == nullptr) { return; }");
-  tiling_func_.AddLine("  std::vector<FinalTilingPipeEstimate> final_pipe_estimates;");
-  tiling_func_.AddLine("  final_case_impl->CollectPipeEstimates(tiling_data, final_pipe_estimates);");
-  tiling_func_.AddLine("  const int32_t final_score = final_case_impl->CalcScore(tiling_data);");
+      "has_selected_snapshot ? final_selection.sub_case_tag.c_str() : nullptr);");
+  tiling_func_.AddLine("  if (final_case_impl == nullptr) { ApplySemanticFallback(); return false; }");
+  tiling_func_.AddLine("  final_case_impl->CollectPipeEstimates(tiling_data, final_context.pipe_estimates);");
+  tiling_func_.AddLine("  final_context.score = final_case_impl->CalcScore(tiling_data);");
+  tiling_func_.AddLine("  final_context.sub_case_tag = final_case_impl->GetSubCaseTag();");
+  tiling_func_.AddLine("  final_context.template_name = final_case_impl->GetTemplateName();");
+  tiling_func_.AddLine("  final_context.semantic_name = final_case_impl->GetSemanticName();");
+  tiling_func_.AddLine("  final_context.semantic_names = {final_context.semantic_name};");
+  tiling_func_.AddLine("  return true;");
+  tiling_func_.AddLine("}");
+  return af::SUCCESS;
+}
+
+af::Status TilingCodeGenImpl::GenFinalTilingByCaseEmitter() {
+  GE_ASSERT_SUCCESS(GenFinalTilingContextQuery());
+  const auto &ident = tiling_model_info_[0].schedule_group_ident;
+  tiling_func_.AddLine("void EmitFinalTilingByCase(" + config_.tiling_data_type_name +
+                       " &tiling_data, uint32_t corenum, const char *source, const char *selection_mode, "
+                       "uint32_t group_id, int32_t requested_case_id, int64_t topn_output) {");
+  AddAtomicHeaderLine(autofuse::GeneratedHeaderId::kApi,
+                      "void EmitFinalTilingByCase(" + config_.tiling_data_type_name +
+                          " &, uint32_t, const char *, const char *, uint32_t, int32_t, int64_t topn_output = -1);");
+  tiling_func_.AddLine("  if (!ShouldEmitFinalTiling()) { return; }");
+  tiling_func_.AddLine("  try {");
+  tiling_func_.AddLine("  const uint32_t final_tiling_key = tiling_data.get_tiling_key();");
+  tiling_func_.AddLine("  FinalTilingContext final_context{1U, source, selection_mode, OP_NAME, " +
+                       std::to_string(ident.asc_graph_id) + "U, " + std::to_string(ident.impl_graph_id) +
+                       "U, group_id, -1, final_tiling_key, 0, \"\", \"\", \"\", {}, {}, \"\", \"\"};");
+  tiling_func_.AddLine(
+      "  const bool has_details = GetFinalTilingContext(tiling_data, corenum, requested_case_id, "
+      "final_context);");
+  tiling_func_.AddLine("  if (has_details || topn_output >= 0) {");
   GE_ASSERT_SUCCESS(GenFinalTilingRepresentation(), "Generate final tiling representation failed.");
-  tiling_func_.AddLine("  FinalTilingContext final_context{");
-  tiling_func_.AddLine("      1U, source, selection_mode, OP_NAME,");
-  tiling_func_.AddLine("      " + std::to_string(ident.asc_graph_id) + "U, " + std::to_string(ident.impl_graph_id) +
-                       "U, group_id, final_case_id, final_tiling_key, final_score, final_case_impl->GetSubCaseTag(),");
-  tiling_func_.AddLine("      final_case_impl->GetTemplateName(), final_pipe_estimates, final_tiling_repr,");
-  tiling_func_.AddLine("      final_repr_kind};");
-  tiling_func_.AddLine("  EmitFinalTilingRecord(final_context);");
+  tiling_func_.AddLine("  final_context.tiling_repr = final_tiling_repr;");
+  tiling_func_.AddLine("  final_context.repr_kind = final_repr_kind;");
+  tiling_func_.AddLine("    EmitFinalTilingRecord(final_context, topn_output);");
+  tiling_func_.AddLine("  }");
+  tiling_func_.AddLine("  if (topn_output >= 0) { return; }");
+  tiling_func_.AddLine(
+      "  const bool ambiguous_sub_case = !has_details && "
+      "HasAmbiguousFinalTilingCase(final_tiling_key, nullptr);");
+  tiling_func_.AddLine("  EmitTemplateSemanticRecord(final_context, ambiguous_sub_case);");
+  tiling_func_.AddLine("  } catch (...) { DisableFinalTilingObservation(); }");
   tiling_func_.AddLine("}");
   return af::SUCCESS;
 }
@@ -3195,19 +3630,14 @@ void TilingCodeGenImpl::GenPGOSearchTilingKeyUniqGroupBatch() {
   tiling_func_.AddLine("  }");
 }
 
-af::Status TilingCodeGenImpl::GenPGOByCoreNumSearchTilingKeyCollectTilingData(FusedGraphNamespaceMap namespace_map) {
-  for (auto &asc_graph_map_iter : namespace_map) {
-    size_t asc_graph_id = asc_graph_map_iter.first;
-    tiling_func_.AddLine("    for (auto ascgraph_tiling_data_" + std::to_string(asc_graph_id) + " : vec" +
-                         std::to_string(asc_graph_id) + ") {");
-  }
-
-  tiling_func_.AddLine("      AutofuseTilingData tiling_data_tmp;");
-  tiling_func_.AddLine("      tiling_data_tmp = *tiling_data; // 用于初始化部分常量参数");
-
+void TilingCodeGenImpl::GenPGOCollectAscGraphTilingData(const FusedGraphNamespaceMap &namespace_map) {
   for (auto &asc_graph_map_iter : namespace_map) {
     auto &asc_graph_map = asc_graph_map_iter.second;
     size_t asc_graph_id = asc_graph_map_iter.first;
+    tiling_func_.AddLine("      const auto &ascgraph_tiling_data_" + std::to_string(asc_graph_id) +
+                         " = ascgraph_candidate_" + std::to_string(asc_graph_id) + ".tiling_data;");
+    tiling_func_.AddLine("      MergeFinalTilingSelectionSnapshots(ascgraph_candidate_" + std::to_string(asc_graph_id) +
+                         ".final_tiling_selections);");
     tiling_func_.AddLine("      tiling_data_tmp.set_graph" + std::to_string(asc_graph_id) +
                          "_tiling_key(ascgraph_tiling_data_" + std::to_string(asc_graph_id) + ".get_graph" +
                          std::to_string(asc_graph_id) + "_tiling_key());");
@@ -3221,24 +3651,9 @@ af::Status TilingCodeGenImpl::GenPGOByCoreNumSearchTilingKeyCollectTilingData(Fu
       }
     }
   }
+}
 
-  std::set<int64_t> workspace_ids;
-  for (const auto &asc_graph_workspace_ids : workspace_tensor_id_set_) {
-    for (const auto &impl_graph_workspace_ids : asc_graph_workspace_ids.second) {
-      workspace_ids.insert(impl_graph_workspace_ids.second.begin(), impl_graph_workspace_ids.second.end());
-    }
-  }
-  for (const auto &tensor_id : workspace_ids) {
-    const auto tensor_id_str = std::to_string(tensor_id);
-    for (const auto &asc_graph_map_iter : namespace_map) {
-      const auto asc_graph_id = asc_graph_map_iter.first;
-      tiling_func_.AddLine("      tiling_data_tmp.set_workspace" + tensor_id_str +
-                           "(std::max(tiling_data_tmp.get_workspace" + tensor_id_str + "(), ascgraph_tiling_data_" +
-                           std::to_string(asc_graph_id) + ".get_workspace" + tensor_id_str + "()));");
-    }
-  }
-  GenWorkspaceOffsetFinalize("tiling_data_tmp");
-
+void TilingCodeGenImpl::GenPGONormalizeBlockDim(const FusedGraphNamespaceMap &namespace_map) {
   // The root search starts from the current core-count probe.  After composing
   // graph candidates, normalize the outer block_dim to the shared block range
   // instead of carrying that probe value into the candidate identity.
@@ -3256,7 +3671,8 @@ af::Status TilingCodeGenImpl::GenPGOByCoreNumSearchTilingKeyCollectTilingData(Fu
         if (enable_group_parallels_[asc_graph_id][result_id]) {
           tiling_func_.AddLine("        result_block_dim += " + group_block_dim + ";");
         } else {
-          tiling_func_.AddLine("        result_block_dim = std::max(result_block_dim, " + group_block_dim + ");");
+          tiling_func_.AddLine("        result_block_dim = std::max(result_block_dim, static_cast<uint32_t>(" +
+                               group_block_dim + "));");
         }
       }
       if (enable_group_parallels_[asc_graph_id][result_id]) {
@@ -3267,8 +3683,42 @@ af::Status TilingCodeGenImpl::GenPGOByCoreNumSearchTilingKeyCollectTilingData(Fu
     }
   }
   tiling_func_.AddLine("      tiling_data_tmp.set_block_dim(total_block_dim);");
+}
 
-  tiling_func_.AddLine("      tiling_data_list.push_back(tiling_data_tmp);");
+af::Status TilingCodeGenImpl::GenPGOByCoreNumSearchTilingKeyCollectTilingData(FusedGraphNamespaceMap namespace_map) {
+  for (auto &asc_graph_map_iter : namespace_map) {
+    size_t asc_graph_id = asc_graph_map_iter.first;
+    tiling_func_.AddLine("    for (const auto &ascgraph_candidate_" + std::to_string(asc_graph_id) + " : vec" +
+                         std::to_string(asc_graph_id) + ") {");
+  }
+
+  tiling_func_.AddLine("      RestoreFinalTilingSelectionSnapshots({});");
+  tiling_func_.AddLine("      AutofuseTilingData tiling_data_tmp;");
+  tiling_func_.AddLine("      tiling_data_tmp = *tiling_data; // 用于初始化部分常量参数");
+
+  GenPGOCollectAscGraphTilingData(namespace_map);
+
+  std::set<int64_t> workspace_ids;
+  for (const auto &asc_graph_workspace_ids : workspace_tensor_id_set_) {
+    for (const auto &impl_graph_workspace_ids : asc_graph_workspace_ids.second) {
+      workspace_ids.insert(impl_graph_workspace_ids.second.begin(), impl_graph_workspace_ids.second.end());
+    }
+  }
+  for (const auto &tensor_id : workspace_ids) {
+    const auto tensor_id_str = std::to_string(tensor_id);
+    for (const auto &asc_graph_map_iter : namespace_map) {
+      const auto asc_graph_id = asc_graph_map_iter.first;
+      tiling_func_.AddLine("      tiling_data_tmp.set_workspace" + tensor_id_str +
+                           "(std::max(tiling_data_tmp.get_workspace" + tensor_id_str + "(), ascgraph_tiling_data_" +
+                           std::to_string(asc_graph_id) + ".get_workspace" + tensor_id_str + "()));");
+    }
+  }
+  GenWorkspaceOffsetFinalize("tiling_data_tmp", true);
+
+  GenPGONormalizeBlockDim(namespace_map);
+
+  tiling_func_.AddLine(
+      "      tiling_data_list.push_back({tiling_data_tmp, DBL_MAX, GetFinalTilingSelectionSnapshots()});");
   for ([[maybe_unused]] size_t i = 0; i < namespace_map.size(); ++i) {
     tiling_func_.AddLine("    }");
   }
@@ -3276,13 +3726,15 @@ af::Status TilingCodeGenImpl::GenPGOByCoreNumSearchTilingKeyCollectTilingData(Fu
 }
 
 af::Status TilingCodeGenImpl::GenPGOByCoreNumSearchTilingKeySingleGroup() {
+  tiling_func_.AddLine("    FinalTilingObservationSlotGuard final_tiling_slot_guard(0U);");
   for (auto model_info : tiling_model_info_) {
     tiling_func_.AddLine("    tiling_case = " + std::to_string(model_info.tiling_case_id) + ";");
     tiling_func_.AddLine("    tiling_data->set_block_dim(block_dim_i);");
     tiling_func_.AddLine("    tiling_data->set_tiling_key(tiling_case);");
     tiling_func_.AddLine("    if (GetTilingKey(*tiling_data, tiling_case)) {");
     tiling_func_.AddLine("      tiling_data_tmp = *tiling_data;");
-    tiling_func_.AddLine("      tiling_data_list.push_back(tiling_data_tmp);");
+    tiling_func_.AddLine(
+        "      tiling_data_list.push_back({tiling_data_tmp, DBL_MAX, GetFinalTilingSelectionSnapshots()});");
     tiling_func_.AddLine("    }");
   }
   return af::SUCCESS;
@@ -3290,7 +3742,7 @@ af::Status TilingCodeGenImpl::GenPGOByCoreNumSearchTilingKeySingleGroup() {
 
 af::Status TilingCodeGenImpl::GenPGOByCoreNumSearchTilingKey() {
   tiling_func_.AddLine(
-      "bool PGOByCoreNumSearchTilingKey(std::vector<AutofuseTilingData>& tiling_data_list, AutofuseTilingData* "
+      "bool PGOByCoreNumSearchTilingKey(std::vector<AutofuseTilingDataPerf>& tiling_data_list, AutofuseTilingData* "
       "tiling_data, uint32_t max_block_dim) {");
   tiling_func_.AddLine("  (void)tiling_data_list; (void)tiling_data; (void)max_block_dim;");
   tiling_func_.AddLine("  bool ret = true;");
@@ -3329,7 +3781,7 @@ af::Status TilingCodeGenImpl::GenHeaderCodesSummaryBody() {
     auto scope_names = GetHardwareNames(args_manager.GetTotalHardwareCons(config_.do_variable_replace));
     fixed_var_name.insert(scope_names.begin(), scope_names.end());
   }
-  TilingDataGenUtils::WriteTilingDataElement(dumper, keep_uniq, fixed_var_name);
+  TilingDataGenUtils::WriteTilingDataElement(dumper, keep_uniq, fixed_var_name, GetDynamicSizeVarNames());
   // add struct tiling data
   std::map<std::string, std::string> struct_set;
   for (const auto &model_info : tiling_model_info_) {
@@ -3439,10 +3891,9 @@ af::Status TilingCodeGenImpl::GenTilingHead(std::map<std::string, std::string> &
     GenTilingHeadMultiGroup();
   }
   if (config_.enable_autofuse_pgo) {
-    AddAtomicHeaderLine(autofuse::GeneratedHeaderId::kApi, "bool PGOByCoreNumSearchTilingKey(std::vector<" +
-                                                               config_.tiling_data_type_name + ">& tiling_data_list, " +
-                                                               config_.tiling_data_type_name +
-                                                               "* tiling_data, uint32_t max_block_dim);");
+    AddAtomicHeaderLine(autofuse::GeneratedHeaderId::kApi,
+                        "bool PGOByCoreNumSearchTilingKey(std::vector<AutofuseTilingDataPerf>& tiling_data_list, " +
+                            config_.tiling_data_type_name + "* tiling_data, uint32_t max_block_dim);");
   }
   tiling_head_.AddLine("using namespace std;");
   // 生成ArrangeBlockOffsets函数声明
@@ -3477,7 +3928,8 @@ void TilingCodeGenImpl::GenArrangeBlockOffsetsDeclarations(const FusedGraphNames
 }
 
 af::Status TilingCodeGenImpl::ObtainInnerParams(std::map<std::string, std::set<std::string>> &hardware_map,
-                                                FusedGraphNamespaceMap &namespace_map) {
+                                                FusedGraphNamespaceMap &namespace_map,
+                                                std::map<std::string, std::set<std::string>> *input_vars) {
   std::string obj_name;
   for (const auto &model_info : tiling_model_info_) {
     obj_name = model_info.schedule_group_ident.GetItemPrefix();
@@ -3487,6 +3939,11 @@ af::Status TilingCodeGenImpl::ObtainInnerParams(std::map<std::string, std::set<s
     schedule_group_namespace_map = std::make_pair(model_info.schedule_group_ident.GetGroupPrefix(), obj_name);
     ArgsManager args_manager(model_info);
     GE_ASSERT_TRUE(args_manager.Process(false), "Args manager process failed.");
+    if (input_vars != nullptr) {
+      const auto names = GetVarsNames(args_manager.GetInputVars());
+      auto &group_inputs = (*input_vars)[obj_name];
+      group_inputs.insert(names.begin(), names.end());
+    }
     for (const auto &hardware : args_manager.GetTotalHardwareCons(config_.do_variable_replace)) {
       hardware_map[obj_name].insert(BaseTypeUtils::DumpHardware(hardware.first));
     }
@@ -3506,8 +3963,8 @@ af::Status TilingCodeGenImpl::GenGetResultSummary(const size_t asc_graph_id) {
   std::string tiling_key_prefix = "graph" + std::to_string(asc_graph_id) + "_";
   tiling_func_.AddLine("  OP_LOGI(OP_NAME, \"[PROF]Among all schedule results, " + tiling_key_prefix +
                        "result%u is the best choice.\", "
-                       "tiling_data.get_" +
-                       tiling_key_prefix + "tiling_key());");
+                       "static_cast<unsigned>(tiling_data.get_" +
+                       tiling_key_prefix + "tiling_key()));");
   tiling_func_.AddLine("    return true;");
   tiling_func_.AddLine("}");
   return af::SUCCESS;
@@ -3529,11 +3986,36 @@ void TilingCodeGenImpl::GenCacheInit() {
     std::unordered_set<std::string> declared_cache_types_;  // 防止重复声明
     for (const auto &pair : cache_reuse_info_) {
       if (declared_cache_types_.find(pair.second) == declared_cache_types_.end()) {
-        tiling_func_.AddLine("  " + pair.second + "::GroupLevelCache " + pair.second + "_Cache;");
+        // 类型由head impl单份生成于optiling层（GenCacheHashMapDef），引用用非限定名：
+        // 组命名空间嵌套于optiling内可直接解析，带组前缀限定反而解析不到（PR 2674流水线根因）
+        tiling_func_.AddLine("  GroupLevelCache " + pair.second + "_Cache;");
         declared_cache_types_.insert(pair.second);
       }
     }
   }
+}
+
+std::string TilingCodeGenImpl::GetGroupCacheCallArg(const std::string &group_prefix) const {
+  for (const auto &pair : cache_reuse_info_) {
+    if (pair.first == group_prefix || pair.second == group_prefix) {
+      // 命中复用方/被复用方，传共享的Group级缓存
+      return ", &" + pair.second + "_Cache";
+    }
+  }
+  // 未命中：组级GetTiling定义恒带cache形参（与复用数据解耦），此处须以nullptr占位，
+  // 避免后随的segment参数错绑到cache形参槽
+  return ", nullptr";
+}
+
+bool TilingCodeGenImpl::IsReuseWrapperGroup(const std::string &group_prefix) const {
+  for (const auto &model_info : tiling_model_info_) {
+    if (model_info.schedule_group_ident.GetGroupPrefix() != group_prefix) {
+      continue;
+    }
+    const auto &reuse_group = model_info.reuse_schedule_group;
+    return reuse_group != nullptr && reuse_group->IsReuseGroup(model_info.schedule_group_ident);
+  }
+  return false;
 }
 
 inline af::Expression GetInputVarFromSrcVarExpr(const af::Expression &src_var_expr,
@@ -3742,7 +4224,8 @@ void TilingCodeGenImpl::GenWorkspaceOffsetHelpers() {
   }
   tiling_func_.AddLine("}");
 
-  tiling_func_.AddLine("inline bool FinalizeWorkspaceOffsets(" + tiling_data_type + " &tiling_data) {");
+  tiling_func_.AddLine("inline bool FinalizeWorkspaceOffsets(" + tiling_data_type +
+                       " &tiling_data, uint64_t capacity = UINT64_MAX) {");
   tiling_func_.AddLine("  uint64_t workspace_offset = 0U;");
   for (const auto &tensor_id : workspace_ids) {
     const auto tensor_id_str = std::to_string(tensor_id);
@@ -3756,8 +4239,20 @@ void TilingCodeGenImpl::GenWorkspaceOffsetHelpers() {
     tiling_func_.AddLine("    return false;");
     tiling_func_.AddLine("  }");
   }
+  tiling_func_.AddLine("  if (workspace_offset > capacity) {");
+  tiling_func_.AddLine("    OP_LOGE(OP_NAME, \"Workspace offsets exceed the allocated size.\");");
+  tiling_func_.AddLine("    return false;");
+  tiling_func_.AddLine("  }");
   tiling_func_.AddLine("  return true;");
   tiling_func_.AddLine("}");
+  if (config_.enable_autofuse_pgo || config_.is_inductor_scene) {
+    tiling_func_.AddLine("inline bool FinalizePGOWorkspaceOffsets(" + tiling_data_type + " &tiling_data) {");
+    tiling_func_.AddLine("  uint64_t capacity = 0;");
+    tiling_func_.AddLine(
+        "  return GetWorkspaceSize(tiling_data, capacity) && "
+        "FinalizeWorkspaceOffsets(tiling_data, capacity);");
+    tiling_func_.AddLine("}");
+  }
 }
 
 void TilingCodeGenImpl::GenWorkspaceOffsetReset(const std::string &tiling_data_name) {
@@ -3767,24 +4262,26 @@ void TilingCodeGenImpl::GenWorkspaceOffsetReset(const std::string &tiling_data_n
   tiling_func_.AddLine("  ResetWorkspaceSizes(" + tiling_data_name + ");");
 }
 
-void TilingCodeGenImpl::GenWorkspaceOffsetFinalize(const std::string &tiling_data_name) {
+void TilingCodeGenImpl::GenWorkspaceOffsetFinalize(const std::string &tiling_data_name, bool check_capacity) {
   if (GetWorkspaceTensorIds(workspace_tensor_id_set_).empty()) {
     return;
   }
-  tiling_func_.AddLine("  if (!FinalizeWorkspaceOffsets(" + tiling_data_name + ")) {");
+  const auto finalizer = check_capacity ? "FinalizePGOWorkspaceOffsets(" : "FinalizeWorkspaceOffsets(";
+  tiling_func_.AddLine(std::string("  if (!") + finalizer + tiling_data_name + ")) {");
   tiling_func_.AddLine("    return false;");
   tiling_func_.AddLine("  }");
 }
 
-void TilingCodeGenImpl::GenUpdateWorkspace(const size_t asc_graph_id, const size_t impl_graph_id) {
-  // 选中新 best 候选时，先清空本子图全部 workspace id 的占用，再写入当前候选的 size。
-  // workspace 当前不存在复用，每个 id 仅由一个候选持有，直接赋值即可：
-  // 落选候选独有的 id 会被清零，字段值始终等于选中候选各 id 的 size，
-  // FinalizeWorkspaceOffsets 计算出的偏移与 GetWorkspaceSize 按选中分支计算的总大小严格一致。
+void TilingCodeGenImpl::GenUpdateWorkspace(const size_t asc_graph_id) {
+  // 选中新 best 候选时先清零本子图全部 workspace id，再按当前 workspace_map 写回；
+  // 未出现在 map 中的 id 保持 0，FinalizeWorkspaceOffsets 据此按实际使用顺序分配偏移。
   for (const auto &tensor_id : GetAscGraphWorkspaceTensorIds(workspace_tensor_id_set_, asc_graph_id)) {
     tiling_func_.AddLine("      tiling_data.set_workspace" + std::to_string(tensor_id) + "(0U);");
   }
-  for (const auto &tensor_id : workspace_tensor_id_set_[asc_graph_id][impl_graph_id]) {
+  // kernel 侧每个 result 组都会使用自己的 workspace id，而这里只拿到当前选中 result 的
+  // workspace_map；按整个 asc graph 的 id 并集写回，未出现在 map 中的 id 保持 0（未被使用），
+  // 避免复用组自己的 id 因不在当前 impl 的 id 集合里而被漏写、最终在 Finalize 时互相别名。
+  for (const auto &tensor_id : GetAscGraphWorkspaceTensorIds(workspace_tensor_id_set_, asc_graph_id)) {
     auto tensor_id_str = to_string(tensor_id);
     tiling_func_.AddLine("      auto it" + tensor_id_str + " = workspace_map.find(" + tensor_id_str + ");");
     tiling_func_.AddLine("      if (it" + tensor_id_str + " != workspace_map.end()) {");
@@ -3925,9 +4422,9 @@ void TilingCodeGenImpl::GenBestPerfUpdateCode(const size_t asc_graph_id, const s
                        std::to_string(impl_graph_id) + ");");
   tiling_func_.AddLine(indent +
                        "  OP_LOGI(OP_NAME, \"Update best perf to %lf, tiling key = %u, block dim = %u\", best_perf, "
-                       "tiling_data.get_" +
-                       tiling_key_prefix + "tiling_key(), cur_block_dim);");
-  GenUpdateWorkspace(asc_graph_id, impl_graph_id);
+                       "static_cast<unsigned>(tiling_data.get_" +
+                       tiling_key_prefix + "tiling_key()), cur_block_dim);");
+  GenUpdateWorkspace(asc_graph_id);
   tiling_func_.AddLine(indent + "  return true;");
   tiling_func_.AddLine(indent + "}");
   tiling_func_.AddLine(indent + "return true;");
@@ -3991,6 +4488,25 @@ af::Status TilingCodeGenImpl::GenUpdatePerf(const size_t asc_graph_id, const siz
   return af::SUCCESS;
 }
 
+bool TilingCodeGenImpl::HasForcedTilingCase() const {
+  // op级统一口径：只要force配置了任意组的case即视为该算子存在force，
+  // 不依赖本实例的tiling_model_info_过滤——head/tail与各group实例算出一致开关，
+  // 避免"仅部分group配force"时head/tail关、group开的契约分裂
+  if (config_.force_tiling_case.is_single_mode) {
+    return config_.force_tiling_case.single_case >= 0;
+  }
+  return !config_.force_tiling_case.group_cases.empty();
+}
+
+size_t TilingCodeGenImpl::GetSegmentGroupSlot(const size_t asc_graph_id, const size_t impl_graph_id,
+                                              const size_t group_id) const {
+  const auto slot_map = cache::SegmentLevelCacheGen::BuildGroupSlotMap(tiling_model_info_);
+  const auto iter = slot_map.find({asc_graph_id, impl_graph_id, group_id});
+  GE_ASSERT_TRUE(iter != slot_map.cend(), "Segment cache slot not found, asc %zu, result %zu, group %zu", asc_graph_id,
+                 impl_graph_id, group_id);
+  return iter->second;
+}
+
 af::Status TilingCodeGenImpl::GenDoGroupTilingFunction(
     const size_t asc_graph_id, const size_t impl_graph_id,
     const std::map<size_t, std::pair<std::string, std::string>> &graph_info) {
@@ -4006,9 +4522,15 @@ af::Status TilingCodeGenImpl::GenDoGroupTilingFunction(
   func_decl += "const std::vector<int32_t> &case_ids_or_keys, ";
   func_decl += "std::unordered_map<int64_t, uint64_t> &workspace_map, ";
   func_decl += "std::vector<uint32_t> &output_tiling_keys, ";
-  func_decl += "double secondary_ratio = 0.0) {";
+  func_decl += "double secondary_ratio = 0.0";
+  if (config_.enable_tiling_segment_cache) {
+    func_decl += ", SegmentCacheContext *segment_ctx = nullptr";
+  }
+  func_decl += ") {";
   tiling_func_.AddLine(func_decl);
   tiling_func_.AddLine("  // 设置每个Group的block_dim和ub_size");
+  // 组级cache恢复nullptr占位（group-parallel路径不启用GroupLevelCache，保持base行为）：
+  // 组级GetTiling调用恒以nullptr占位cache形参（被调方签名带cache形参时），无_Cache变量引用
 
   // 声明每个Group的tiling_data引用并设置block_dim和ub_size
   for (const auto &group_info : graph_info) {
@@ -4025,7 +4547,7 @@ af::Status TilingCodeGenImpl::GenDoGroupTilingFunction(
   tiling_func_.AddLine("  }");
 
   // 生成调用所有Group的GetTiling部分
-  GenDoGroupTilingGetTilingCalls(graph_info);
+  GenDoGroupTilingGetTilingCalls(asc_graph_id, impl_graph_id, graph_info);
 
   // 失败处理
   GenDoGroupTilingFailureHandler(graph_info);
@@ -4034,15 +4556,44 @@ af::Status TilingCodeGenImpl::GenDoGroupTilingFunction(
 }
 
 void TilingCodeGenImpl::GenDoGroupTilingGetTilingCalls(
+    const size_t asc_graph_id, const size_t impl_graph_id,
     const std::map<size_t, std::pair<std::string, std::string>> &graph_info) {
   tiling_func_.AddLine("  // 调用所有Group的GetTiling");
-  std::string get_tiling_condition = "  if (";
+  const bool need_segment_cache = config_.enable_tiling_segment_cache;
   size_t group_index = 0;
+  for (const auto &group_info : graph_info) {
+    if (need_segment_cache) {
+      const size_t slot = GetSegmentGroupSlot(asc_graph_id, impl_graph_id, group_info.first);
+      tiling_func_.AddLine("  const char *seg_tag_" + std::to_string(group_index) + " = nullptr;");
+      tiling_func_.AddLine("  bool *seg_out_" + std::to_string(group_index) + " = nullptr;");
+      tiling_func_.AddLine("  if (segment_ctx != nullptr && segment_ctx->hit) {");
+      tiling_func_.AddLine("    seg_tag_" + std::to_string(group_index) + " = segment_ctx->entry.group_cases[" +
+                           std::to_string(slot) + "].is_sub_case ? \"R\" : \"\";");
+      tiling_func_.AddLine("  } else if ((segment_ctx != nullptr) && (secondary_ratio <= 0.0)) {");
+      tiling_func_.AddLine("    seg_out_" + std::to_string(group_index) + " = &segment_ctx->selected_is_sub_case[" +
+                           std::to_string(slot) + "];");
+      tiling_func_.AddLine("  }");
+    }
+    ++group_index;
+  }
+  std::string get_tiling_condition = "  if (";
+  group_index = 0;
   for (const auto &group_info : graph_info) {
     std::string group_var = group_info.second.second + "_tiling_data";
     std::string group_class = group_info.second.first;
+    std::string segment_args;
+    if (need_segment_cache) {
+      segment_args = ", seg_tag_" + std::to_string(group_index) + ", seg_out_" + std::to_string(group_index);
+    }
+    // 组级GetTiling的cache形参按组条件生成（GenScheduleGroupTilingGroup按组过滤cache_reuse_info，
+    // 仅复用对端点组的签名带GroupLevelCache*形参），调用侧须同口径判定：端点组以nullptr占位
+    // （group-parallel路径不启用GroupLevelCache，见PR检视意见），无关组不占位避免多传实参
+    // 组级GetTiling定义恒带cache形参（与复用数据解耦），调用恒以nullptr占位：
+    // group-parallel路径不启用GroupLevelCache（见PR 2674检视意见，启用拆独立修复）；
+    // 复用wrapper定义无perf形参，尾部nullptr占位仅普通组需要
+    const std::string perf_arg = IsReuseWrapperGroup(group_class) ? "" : ", nullptr";
     get_tiling_condition += "(" + group_class + "::GetTiling(" + group_var + ", workspace_map, case_ids_or_keys[" +
-                            std::to_string(group_index) + "], nullptr))";
+                            std::to_string(group_index) + "], nullptr" + segment_args + perf_arg + "))";
     if (group_index < graph_info.size() - 1) {
       get_tiling_condition += " && ";
     }
@@ -4083,12 +4634,31 @@ void TilingCodeGenImpl::GenDoGroupTilingFailureHandler(
   tiling_func_.AddLine("}");
 }
 
-void TilingCodeGenImpl::GenGroupParallelFirstTiling(const size_t impl_graph_id) {
+void TilingCodeGenImpl::GenGroupParallelFirstTiling(
+    const size_t asc_graph_id, const size_t impl_graph_id,
+    const std::map<size_t, std::pair<std::string, std::string>> &graph_info) {
   tiling_func_.AddLine("  // ========== 首次Tiling ==========");
   tiling_func_.AddLine("  std::vector<int32_t> tiling_case_ids(group_num, tiling_case_id);");
+  if (config_.enable_tiling_segment_cache) {
+    // 分段缓存命中：注入缓存的case id，跳过首次Tiling的多case搜索（满核单case求解）
+    size_t group_index = 0;
+    for (const auto &group_info : graph_info) {
+      const size_t slot = GetSegmentGroupSlot(asc_graph_id, impl_graph_id, group_info.first);
+      tiling_func_.AddLine("  if ((segment_ctx != nullptr) && segment_ctx->hit) {");
+      tiling_func_.AddLine("    tiling_case_ids[" + std::to_string(group_index) + "] = static_cast<int32_t>(" +
+                           "segment_ctx->entry.group_cases[" + std::to_string(slot) + "].case_id);");
+      tiling_func_.AddLine("  }");
+      ++group_index;
+    }
+  }
   tiling_func_.AddLine("  std::vector<uint32_t> first_tiling_keys(group_num);");
+  std::string segment_arg;
+  if (config_.enable_tiling_segment_cache) {
+    segment_arg = ", 0.0, segment_ctx";
+  }
   tiling_func_.AddLine("  if (!DoGroupTiling" + std::to_string(impl_graph_id) +
-                       "(tiling_data, ori_block_dim, tiling_case_ids, workspace_map, first_tiling_keys)) {");
+                       "(tiling_data, ori_block_dim, tiling_case_ids, workspace_map, first_tiling_keys" + segment_arg +
+                       ")) {");
   tiling_func_.AddLine("    return false;");
   tiling_func_.AddLine("  }");
 }
@@ -4109,8 +4679,13 @@ void TilingCodeGenImpl::GenGroupParallelSecondTiling(
   tiling_func_.AddLine("    std::vector<uint32_t> dummy_keys(group_num);");
   tiling_func_.AddLine("    OP_LOGD(OP_NAME, \"Begin to second tiling for result" + std::to_string(impl_graph_id) +
                        " core_usage_ratio=%lf, adjusted_ratio=%lf.\", original_ratio, adjusted_ratio);");
+  std::string segment_arg;
+  if (config_.enable_tiling_segment_cache) {
+    segment_arg = ", segment_ctx";
+  }
   tiling_func_.AddLine("    if (!DoGroupTiling" + std::to_string(impl_graph_id) +
-                       "(tiling_data, ori_block_dim, first_keys_as_int, workspace_map, dummy_keys, adjusted_ratio)) {");
+                       "(tiling_data, ori_block_dim, first_keys_as_int, workspace_map, dummy_keys, adjusted_ratio" +
+                       segment_arg + ")) {");
   for (const auto &group_info : graph_info) {
     tiling_func_.AddLine("      " + group_info.second.second + "_tiling_data.set_block_dim(0);");
   }
@@ -4120,27 +4695,42 @@ void TilingCodeGenImpl::GenGroupParallelSecondTiling(
 }
 
 af::Status TilingCodeGenImpl::GenScheduleGroupDoTiling(std::string &check_cond, const std::string &hardware_param,
-                                                       const std::string &schedule_result_prefix) {
+                                                       const std::string &schedule_result_prefix,
+                                                       const size_t asc_graph_id, const size_t impl_graph_id,
+                                                       const size_t group_id) {
   std::string tiling_hyphens = "&&";
   if (check_cond.empty()) {
     tiling_hyphens = "";
   }
   std::string first_param = hardware_param + "_tiling_data, ";
-  std::string cache_param;
-  const auto &key = schedule_result_prefix;
-  for (const auto &pair : cache_reuse_info_) {
-    if (pair.first == key || pair.second == key) {
-      // 看是否为复用方/被复用方
-      cache_param = ", &" + pair.second + "_Cache";
-      break;
-    }
-  }
+  std::string cache_param = GetGroupCacheCallArg(schedule_result_prefix);
   std::string workspace_param;
   if (!is_uniq_group_) {
     workspace_param = "workspace_map, ";
   }
-  std::string tiling = "(" + schedule_result_prefix + "::GetTiling(" + first_param + workspace_param +
-                       "tiling_case_id" + cache_param + "))";
+  std::string segment_args;
+  std::string case_arg = "tiling_case_id";
+  if (config_.enable_tiling_segment_cache) {
+    // 分段缓存：命中时按缓存的(case,tag)求解；未命中时收集全量搜索选中的tag
+    const size_t slot = GetSegmentGroupSlot(asc_graph_id, impl_graph_id, group_id);
+    const std::string var_suffix = std::to_string(group_id);
+    tiling_func_.AddLine("  int32_t seg_case_id_" + var_suffix + " = tiling_case_id;");
+    tiling_func_.AddLine("  const char *seg_tag_" + var_suffix + " = nullptr;");
+    tiling_func_.AddLine("  bool *seg_out_" + var_suffix + " = nullptr;");
+    tiling_func_.AddLine("  if (segment_ctx != nullptr && segment_ctx->hit) {");
+    tiling_func_.AddLine("    seg_case_id_" + var_suffix + " = static_cast<int32_t>(segment_ctx->entry.group_cases[" +
+                         std::to_string(slot) + "].case_id);");
+    tiling_func_.AddLine("    seg_tag_" + var_suffix + " = segment_ctx->entry.group_cases[" + std::to_string(slot) +
+                         "].is_sub_case ? \"R\" : \"\";");
+    tiling_func_.AddLine("  } else if (segment_ctx != nullptr) {");
+    tiling_func_.AddLine("    seg_out_" + var_suffix + " = &segment_ctx->selected_is_sub_case[" + std::to_string(slot) +
+                         "];");
+    tiling_func_.AddLine("  }");
+    case_arg = "seg_case_id_" + var_suffix;
+    segment_args = ", seg_tag_" + var_suffix + ", seg_out_" + var_suffix;
+  }
+  std::string tiling = "(" + schedule_result_prefix + "::GetTiling(" + first_param + workspace_param + case_arg +
+                       cache_param + segment_args + "))";
   check_cond += (tiling_hyphens + tiling);
   return af::SUCCESS;
 }
@@ -4193,7 +4783,8 @@ af::Status TilingCodeGenImpl::GenSingleGroupScheduleResult(
         std::string tiling_hyphens = check_cond.empty() ? "" : "&&";
         check_cond += (tiling_hyphens + "(" + input_vars_set_code + ")");
       }
-      GE_ASSERT_SUCCESS(GenScheduleGroupDoTiling(check_cond, group_info.second.second, group_info.second.first),
+      GE_ASSERT_SUCCESS(GenScheduleGroupDoTiling(check_cond, group_info.second.second, group_info.second.first,
+                                                 asc_graph_id, impl_graph_id, group_info.first),
                         "Gen schedule group do tiling failed, graph id[%zu], impl id[%zu]", asc_graph_id,
                         impl_graph_id);
       groups_perf.emplace_back(GenGetScheduleGroupPerf(group_info.second.first, group_info.second.second));
@@ -4243,7 +4834,11 @@ af::Status TilingCodeGenImpl::GenGetScheduleResult(
       .append(std::to_string(impl_graph_id))
       .append("(const uint32_t ori_block_dim, const int32_t tiling_case_id,")
       .append(config_.tiling_data_type_name)
-      .append(" &tiling_data, double &cur_perf, double &best_perf, uint32_t &cur_block_dim) {");
+      .append(" &tiling_data, double &cur_perf, double &best_perf, uint32_t &cur_block_dim");
+  if (config_.enable_tiling_segment_cache) {
+    func_define.append(", SegmentCacheContext *segment_ctx");
+  }
+  func_define.append(") {");
   tiling_func_.AddLine(func_define);
   tiling_func_.AddLine("  std::unordered_map<int64_t, uint64_t> workspace_map{};");
   GenCacheInit();
@@ -4254,7 +4849,7 @@ af::Status TilingCodeGenImpl::GenGetScheduleResult(
     tiling_func_.AddLine("  constexpr size_t group_num = " + std::to_string(group_num) + ";");
 
     // ========== 首次Tiling ==========
-    GenGroupParallelFirstTiling(impl_graph_id);
+    GenGroupParallelFirstTiling(asc_graph_id, impl_graph_id, graph_info);
     GenGroupParallelFirstTilingDecls(graph_info);
 
     // ========== 二次Tiling ==========
@@ -4326,6 +4921,7 @@ void TilingCodeGenImpl::GenPGOByCoreNumDoTiling(
                          std::to_string(index) + "." + hard_ware_param + "_tiling_data" + ";");
     tiling_func_.AddLine("    sub_tiling_data_tmp" + std::to_string(index) + ".set_tiling_key(" +
                          std::to_string(model_info.tiling_case_id) + ");");
+    tiling_func_.AddLine("    RestoreFinalTilingSelectionSnapshots(candidate.final_tiling_selections);");
     tiling_func_.AddLine("    if (" + schedule_result_prefex + "::GetTiling(sub_tiling_data_tmp" +
                          std::to_string(index) + ", workspace_map, " + std::to_string(model_info.tiling_case_id) +
                          ", nullptr)) { ");
@@ -4334,8 +4930,8 @@ void TilingCodeGenImpl::GenPGOByCoreNumDoTiling(
         .append(hard_ware_param)
         .append("_tiling_data=sub_tiling_data_tmp" + std::to_string(index) + ";");
     tiling_func_.AddLine(tiling_data_add);
-    tiling_func_.AddLine("      tiling_data_list_tmp" + std::to_string(group_index) + ".push_back(tiling_data_tmp" +
-                         std::to_string(index) + ");");
+    tiling_func_.AddLine("      tiling_data_list_tmp" + std::to_string(group_index) + ".push_back({tiling_data_tmp" +
+                         std::to_string(index) + ", DBL_MAX, GetFinalTilingSelectionSnapshots()});");
     tiling_func_.AddLine("    }");
     index++;
   }
@@ -4345,14 +4941,12 @@ void TilingCodeGenImpl::GenPGOByCoreNumFunctionHead(size_t impl_graph_id) {
   std::string func_define(kInlineStr);
   func_define.append("bool GetScheduleResult")
       .append(std::to_string(impl_graph_id) + "PGOByCoreNum")
-      .append("(std::vector<" + config_.tiling_data_type_name + ">& tiling_data_list, ")
+      .append("(std::vector<AutofuseTilingDataPerf>& tiling_data_list, ")
       .append(config_.tiling_data_type_name + " tiling_data")
       .append(") {");
   tiling_func_.AddLine(func_define);
   tiling_func_.AddLine("  std::unordered_map<int64_t, uint64_t> workspace_map{};");
-  tiling_func_.AddLine("  " + config_.tiling_data_type_name + " tiling_data_tmp = tiling_data;");
-  tiling_func_.AddLine("  std::vector<" + config_.tiling_data_type_name +
-                       "> tiling_data_list_tmp0 = {tiling_data_tmp};");
+  tiling_func_.AddLine("  std::vector<AutofuseTilingDataPerf> tiling_data_list_tmp0 = {{tiling_data, DBL_MAX, {}}};");
 }
 
 bool TilingCodeGenImpl::TryGenPGOByCoreNumReuseTiling(size_t asc_graph_id, size_t impl_graph_id, size_t group_id,
@@ -4369,12 +4963,19 @@ bool TilingCodeGenImpl::TryGenPGOByCoreNumReuseTiling(size_t asc_graph_id, size_
   }
   const auto &reuse_ident = iter->reuse_schedule_group->reuse_group_ident;
   const auto &current_ident = iter->schedule_group_ident;
+  // Only earlier groups in this result have a successful solve in each incoming candidate.
+  if (reuse_ident.asc_graph_id != asc_graph_id || reuse_ident.impl_graph_id != impl_graph_id ||
+      reuse_ident.group_id >= group_id) {
+    return false;
+  }
   const auto source = "tiling_data." + reuse_ident.GetItemPrefix() + "_tiling_data";
   const auto target = current_ident.GetItemPrefix() + "_tiling_data";
   tiling_func_.AddLine("    auto reuse_tiling_data = RefToRef<" + reuse_ident.GetGroupPrefix() + "TilingData, " +
                        current_ident.GetGroupPrefix() + "TilingData>(" + source + ");");
   tiling_func_.AddLine("    tiling_data." + target + " = reuse_tiling_data;");
-  tiling_func_.AddLine("    tiling_data_list_tmp" + std::to_string(group_index) + ".push_back(tiling_data);");
+  tiling_func_.AddLine("    if (!" + current_ident.GetGroupPrefix() + "::CopyPgoReuseSelection(tiling_data." + target +
+                       ", candidate.final_tiling_selections)) { continue; }");
+  tiling_func_.AddLine("    tiling_data_list_tmp" + std::to_string(group_index) + ".push_back(std::move(candidate));");
   return true;
 }
 
@@ -4384,13 +4985,15 @@ void TilingCodeGenImpl::GenPGOByCoreNumGetScheduleResult(
     const std::map<std::string, std::set<std::string>> &hardware_map,
     const std::map<size_t, std::map<size_t, std::map<std::string, af::Expression>>> &var_relation) {
   GenPGOByCoreNumFunctionHead(impl_graph_id);
+  tiling_func_.AddLine("  const size_t candidate_count_before = tiling_data_list.size();");
   uint32_t group_index = 0U;
 
   for (const auto &group_info : graph_info) {
     group_index++;
-    tiling_func_.AddLine("  std::vector<" + config_.tiling_data_type_name + "> tiling_data_list_tmp" +
-                         std::to_string(group_index) + ";");
-    tiling_func_.AddLine("  for (auto &tiling_data : tiling_data_list_tmp" + std::to_string(group_index - 1) + ") {");
+    tiling_func_.AddLine("  std::vector<AutofuseTilingDataPerf> tiling_data_list_tmp" + std::to_string(group_index) +
+                         ";");
+    tiling_func_.AddLine("  for (auto &candidate : tiling_data_list_tmp" + std::to_string(group_index - 1) + ") {");
+    tiling_func_.AddLine("    auto &tiling_data = candidate.tiling_data;");
     if (TryGenPGOByCoreNumReuseTiling(asc_graph_id, impl_graph_id, group_info.first, group_index)) {
       tiling_func_.AddLine("  }");
       tiling_func_.AddLine("");
@@ -4417,27 +5020,84 @@ void TilingCodeGenImpl::GenPGOByCoreNumGetScheduleResult(
     tiling_func_.AddLine("  }");
     tiling_func_.AddLine("");
   }
-  tiling_func_.AddLine("  for (auto &tiling_data : tiling_data_list_tmp" + std::to_string(group_index) + ") {");
+  tiling_func_.AddLine("  for (auto &candidate : tiling_data_list_tmp" + std::to_string(group_index) + ") {");
+  tiling_func_.AddLine("    auto &tiling_data = candidate.tiling_data;");
   if (enable_group_parallels_[asc_graph_id][impl_graph_id]) {
     tiling_func_.AddLine("    const uint32_t ori_block_dim = tiling_data.get_block_dim();");
   }
-  GenPGOUpdateTilingInfo(asc_graph_id, impl_graph_id, graph_info);
+  GenPGOUpdateTilingInfo(asc_graph_id, impl_graph_id, graph_info, "continue;");
+  tiling_func_.AddLine("    tiling_data_list.push_back(std::move(candidate));");
   tiling_func_.AddLine("  }");
-  tiling_func_.AddLine("  tiling_data_list.insert(tiling_data_list.end(), tiling_data_list_tmp" +
-                       std::to_string(group_index) + ".begin(), tiling_data_list_tmp" + std::to_string(group_index) +
-                       ".end());");
-  tiling_func_.AddLine("  return !tiling_data_list_tmp" + std::to_string(group_index) + ".empty();");
+  tiling_func_.AddLine("  return tiling_data_list.size() > candidate_count_before;");
   tiling_func_.AddLine("}");
 }
 
-void TilingCodeGenImpl::GenPGOUpdateTilingInfo(
-    const size_t asc_graph_id, const size_t impl_graph_id,
-    const std::map<size_t, std::pair<std::string, std::string>> &graph_info) {
+af::Status TilingCodeGenImpl::GenPGOCollectWorkspaceSizes(size_t asc_graph_id, size_t impl_graph_id) {
+  if (GetAscGraphWorkspaceTensorIds(workspace_tensor_id_set_, asc_graph_id).empty()) {
+    return af::SUCCESS;
+  }
+  std::map<size_t, std::map<uint32_t, const ModelInfo *>> group_models;
+  for (const auto &model : tiling_model_info_) {
+    const auto &ident = model.schedule_group_ident;
+    if (ident.asc_graph_id != asc_graph_id || ident.impl_graph_id != impl_graph_id) {
+      continue;
+    }
+    const auto [existing, inserted] = group_models[ident.group_id].try_emplace(model.tiling_case_id, &model);
+    const auto &first = *existing->second;
+    GE_ASSERT_TRUE(inserted || (first.workspace_size_map == model.workspace_size_map &&
+                                first.variable_expr_map == model.variable_expr_map),
+                   "%s case %u has inconsistent workspace expressions for sub-cases [%s] and [%s].",
+                   ident.GetItemPrefix().c_str(), model.tiling_case_id, first.sub_case_tag.c_str(),
+                   model.sub_case_tag.c_str());
+  }
+  tiling_func_.AddLine("static bool CollectPGOWorkspaceSizesForResult" + std::to_string(impl_graph_id) + "(const " +
+                       config_.tiling_data_type_name +
+                       " &candidate, std::unordered_map<int64_t, uint64_t> &workspace_map) {");
+  tiling_func_.AddLine("  workspace_map.clear();");
+  if (group_models.empty()) {
+    tiling_func_.AddLine("  (void)candidate;");
+  }
+  for (const auto &group : group_models) {
+    const auto &models = group.second;
+    const auto prefix = models.begin()->second->schedule_group_ident.GetItemPrefix();
+    const auto field = "candidate." + prefix + "_tiling_data";
+    tiling_func_.AddLine("  switch (" + field + ".get_tiling_key()) {");
+    for (const auto &[key, model] : models) {
+      tiling_func_.AddLine("  case " + std::to_string(key) + "U: {");
+      const auto code = GenWorkspaceRelatedVars(model->workspace_size_map, model->variable_expr_map);
+      if (code.find("tiling_data.get_") != std::string::npos) {
+        tiling_func_.AddLine("    const auto &tiling_data = " + field + ";");
+      }
+      tiling_func_.AddLine(code);
+      tiling_func_.AddLine("    break;");
+      tiling_func_.AddLine("  }");
+    }
+    tiling_func_.AddLine("  default:");
+    tiling_func_.AddLine("    OP_LOGE(OP_NAME, \"Invalid workspace tiling key %u for " + prefix + ".\", " + field +
+                         ".get_tiling_key());");
+    tiling_func_.AddLine("    return false;");
+    tiling_func_.AddLine("  }");
+  }
+  tiling_func_.AddLine("  return true;");
+  tiling_func_.AddLine("}");
+  return af::SUCCESS;
+}
+
+void TilingCodeGenImpl::GenPGOUpdateTilingInfo(const size_t asc_graph_id, const size_t impl_graph_id,
+                                               const std::map<size_t, std::pair<std::string, std::string>> &graph_info,
+                                               const std::string &on_workspace_failure) {
+  if (!GetAscGraphWorkspaceTensorIds(workspace_tensor_id_set_, asc_graph_id).empty()) {
+    // The search map may omit inherited groups or contain sizes from other trials.
+    tiling_func_.AddLine("      if (!CollectPGOWorkspaceSizesForResult" + std::to_string(impl_graph_id) +
+                         "(tiling_data, workspace_map)) {");
+    tiling_func_.AddLine("        " + on_workspace_failure);
+    tiling_func_.AddLine("      }");
+  }
   // Serial groups reuse the same launch block range; the outer block_dim is therefore the group maximum.
   for (const auto &line : GenScheduleResultBlockDimCode(graph_info)) {
     tiling_func_.AddLine(line);
   }
-  GenUpdateWorkspace(asc_graph_id, impl_graph_id);
+  GenUpdateWorkspace(asc_graph_id);
   if (enable_group_parallels_[asc_graph_id][impl_graph_id]) {
     tiling_func_.AddLine("      ArrangeBlockOffsetsAscGraph" + std::to_string(asc_graph_id) + "Result" +
                          std::to_string(impl_graph_id) + "(tiling_data, ori_block_dim);");
@@ -4500,8 +5160,13 @@ af::Status TilingCodeGenImpl::GenPGOGetScheduleResultPerGroup(
   tiling_func_.AddLine("      std::unordered_map<int64_t, uint64_t> workspace_map;");
   tiling_func_.AddLine("      workspace_map.reserve(workspace_map_filter_use.size());");
   tiling_func_.AddLine("      workspace_map.insert(workspace_map_filter_use.begin(), workspace_map_filter_use.end());");
+  tiling_func_.AddLine("      RestoreFinalTilingSelectionSnapshots(tiling_data_perf.final_tiling_selections);");
   GenFillOtherGroupsGetTiling(asc_graph_id, impl_graph_id, graph_info, group_info, hardware_map);
-  GenPGOUpdateTilingInfo(asc_graph_id, impl_graph_id, graph_info);
+  tiling_func_.AddLine("      tiling_data_perf.final_tiling_selections = GetFinalTilingSelectionSnapshots();");
+  GenPGOUpdateTilingInfo(asc_graph_id, impl_graph_id, graph_info,
+                         "valid_candidates[candidate_index - " + candidate_begin_name +
+                             "] = false;\n"
+                             "        continue;");
   tiling_func_.AddLine("      uint64_t workspaceSizeTmp = 0U;");
   tiling_func_.AddLine("      if (!GetWorkspaceSize(tiling_data, workspaceSizeTmp)) {");
   tiling_func_.AddLine("        return false;");
@@ -4516,7 +5181,7 @@ af::Status TilingCodeGenImpl::GenPGOGetScheduleResultPerGroup(
                        "; candidate_index < tiling_data_list_tmp.size(); ++candidate_index) {");
   tiling_func_.AddLine("      const size_t candidate_offset = candidate_index - " + candidate_begin_name + ";");
   tiling_func_.AddLine("      if (candidate_offset < valid_candidates.size() && valid_candidates[candidate_offset]) {");
-  tiling_func_.AddLine("        valid_tiling_data_list.push_back(tiling_data_list_tmp[candidate_index]);");
+  tiling_func_.AddLine("        valid_tiling_data_list.push_back(std::move(tiling_data_list_tmp[candidate_index]));");
   tiling_func_.AddLine("      }");
   tiling_func_.AddLine("    }");
   tiling_func_.AddLine("    if (__builtin_add_overflow(workspaceSize, 16ULL * 1024ULL * 1024ULL, &workspaceSize)) {");
@@ -4531,11 +5196,11 @@ af::Status TilingCodeGenImpl::GenPGOGetScheduleResultPerGroup(
   tiling_func_.AddLine("      }");
   tiling_func_.AddLine("    }");
   tiling_func_.AddLine("    for (auto &tiling_data_perf : valid_tiling_data_list) {");
-  tiling_func_.AddLine("      tiling_data_list.push_back(tiling_data_perf);");
   tiling_func_.AddLine("      if (tiling_data_perf.best_perf < best_perf) {");
   tiling_func_.AddLine("        tiling_data = tiling_data_perf.tiling_data;");
   tiling_func_.AddLine("        best_perf = tiling_data_perf.best_perf;");
   tiling_func_.AddLine("      }");
+  tiling_func_.AddLine("      tiling_data_list.push_back(std::move(tiling_data_perf));");
   tiling_func_.AddLine("    }");
   return af::SUCCESS;
 }
@@ -4585,6 +5250,7 @@ af::Status TilingCodeGenImpl::GenPGOGetScheduleResult(
     const size_t asc_graph_id, const size_t impl_graph_id,
     const std::map<size_t, std::pair<std::string, std::string>> &graph_info,
     const std::map<std::string, std::set<std::string>> &hardware_map) {
+  GE_ASSERT_SUCCESS(GenPGOCollectWorkspaceSizes(asc_graph_id, impl_graph_id));
   std::string func_define(kInlineStr);
   func_define.append("bool GetScheduleResult")
       .append(std::to_string(impl_graph_id) + "PGO")
@@ -4626,8 +5292,34 @@ void TilingCodeGenImpl::GenGetScoreFuncs(
     if (score_func.empty()) {
       score_func =
           "int32_t CalcScore(" + config_.tiling_data_type_name + " &tiling_data) { (void)tiling_data; return 0;}";
+    } else if (score_func.find(ascgen_utils::kGroupTilingDataPlaceholder) != std::string::npos) {
+      // [双通道·结果级组绑定] 结果级打分（跨 schedule result 竞标：scores[] → max_index）
+      // 与 per-model 通道共用同一套占位符替换规则：
+      //  - uniq_group：tiling_data 本身就是组 tiling data，没有 graphX_resultY_gZ 子结构；
+      //  - 单 group：用该 group 的 item_prefix 绑定子结构；
+      //  - 多 group：一个结果级函数无法同时绑多个组，退化为常量 0（避免未声明标识符）。
+      if (is_uniq_group_) {
+        const std::string qualified = std::string("tiling_data.") + ascgen_utils::kGroupTilingDataPlaceholder;
+        size_t pos = score_func.find(qualified);
+        while (pos != std::string::npos) {
+          score_func.replace(pos, qualified.size(), "tiling_data");
+          pos = score_func.find(qualified, pos + std::string("tiling_data").size());
+        }
+      } else {
+        const auto groups_iter = namespace_map.find(i);
+        if (groups_iter != namespace_map.end() && groups_iter->second.size() == 1UL) {
+          ascgen_utils::SubstituteGroupTilingDataPlaceholder(score_func, groups_iter->second.begin()->second.second);
+        } else {
+          GELOGW(
+              "[ScoreFunc] schedule result[%zu] has %zu groups; group binding placeholder cannot be resolved, "
+              "fall back to constant 0.",
+              i, groups_iter == namespace_map.end() ? 0UL : groups_iter->second.size());
+          score_func =
+              "int32_t CalcScore(" + config_.tiling_data_type_name + " &tiling_data) { (void)tiling_data; return 0;}";
+        }
+      }
     }
-    // Inject (void)tiling_data; for externally-provided score funcs that don't use the parameter
+    // 外部提供的打分函数可能不使用 tiling_data 参数，统一补 (void) 以避免未使用告警。
     if (!score_func.empty() && score_func.find("(void)tiling_data") == std::string::npos) {
       auto brace_pos = score_func.find('{');
       if (brace_pos != std::string::npos) {
@@ -4646,6 +5338,9 @@ void TilingCodeGenImpl::GenGetScoreFuncsCalling(
   for (size_t i = 0UL; i < namespace_map.size(); i++) {
     tiling_func_.AddLine("  scores[" + std::to_string(i) + "] = " + GetScheduleResultPrefix(asc_graph_id, i) +
                          "::CalcScore(tiling_data);");
+    // [ScoreFunc 诊断] 跨 schedule result 打分逐个可见（此前只有被执行的 result 才有 score is）。
+    tiling_func_.AddLine("  OP_LOGI(OP_NAME, \"[ScoreFunc] result[" + std::to_string(i) + "] score=%d\", scores[" +
+                         std::to_string(i) + "]);");
   }
 }
 
@@ -4658,12 +5353,16 @@ void TilingCodeGenImpl::GenGetMaxScoreIndex(const AscGraphNamepspaceMap &namespa
     tiling_func_.AddLine("    }");
     tiling_func_.AddLine("  }");
   }
+  // [ScoreFunc 诊断] max_index 及其分数（严格 >，平票保留下标最小）。
+  tiling_func_.AddLine("  OP_LOGI(OP_NAME, \"[ScoreFunc] max_index=%d score=%d\", max_index, scores[max_index]);");
 }
 
 void TilingCodeGenImpl::GenScheduleResultGetTilingCalling(const std::string &index, const std::string &ident) {
+  const std::string segment_arg = config_.enable_tiling_segment_cache ? ", segment_ctx" : "";
   tiling_func_.AddLine(ident + "  if (kScheduleResultFunctions[" + index +
                        "](ori_block_dim, tiling_case_id, tiling_data, cur_perf, best_perf, "
-                       "cur_block_dim)) {");
+                       "cur_block_dim" +
+                       segment_arg + ")) {");
   tiling_func_.AddLine(ident + "    auto res = GetResultSummary(best_perf, tiling_data);");
   GenDurationEndCode(TilingFuncDurationType::TILING_FUNC_DURATION_TOTAL, ident + "    ");
   GenDurationPrintCode(ident + "    ");
@@ -4675,8 +5374,14 @@ void TilingCodeGenImpl::GenScheduleResultGetTilingCalling(const std::string &ind
 af::Status TilingCodeGenImpl::GenGetAllSchedulesResults(const AscGraphNamepspaceMap &namespace_map) {
   std::string chosen_index =
       (config_.force_schedule_result < 0) ? "max_index" : std::to_string(config_.force_schedule_result);
+  const std::string segment_arg = config_.enable_tiling_segment_cache ? ", segment_ctx" : "";
   if (NeedGenScoreFunc(score_funcs_)) {
     GenScheduleResultGetTilingCalling(chosen_index);
+  } else if (!namespace_map.empty()) {
+    // [ScoreFunc 诊断] 没有任何打分函数 → 退化为"遍历全部 result 按 perf 选"。
+    // 注意：namespace_map 为空（无 schedule result）时不输出任何代码，保持函数产物为空。
+    tiling_func_.AddLine(
+        "  OP_LOGW(OP_NAME, \"[ScoreFunc] no score func emitted; fall back to perf over all results\");");
   }
   if (config_.force_schedule_result >= 0) {
     GELOGI("Force schedule result %ld for op %s", config_.force_schedule_result, config_.tiling_data_type_name.c_str());
@@ -4686,7 +5391,8 @@ af::Status TilingCodeGenImpl::GenGetAllSchedulesResults(const AscGraphNamepspace
                    config_.force_schedule_result, namespace_map.size());
     tiling_func_.AddLine("  auto got_result = kScheduleResultFunctions[" + chosen_index +
                          "](ori_block_dim, tiling_case_id, tiling_data, cur_perf, "
-                         "best_perf, cur_block_dim);");
+                         "best_perf, cur_block_dim" +
+                         segment_arg + ");");
     tiling_func_.AddLine("  if (!got_result) {");
     tiling_func_.AddLine("    OP_LOGW(OP_NAME, \"Schedule result" + std::to_string(config_.force_schedule_result) +
                          " cannot be found for op\");");
@@ -4702,7 +5408,8 @@ af::Status TilingCodeGenImpl::GenGetAllSchedulesResults(const AscGraphNamepspace
   }
   tiling_func_.AddLine(
       "    (void)kScheduleResultFunctions[index](ori_block_dim, tiling_case_id, tiling_data, cur_perf, "
-      "best_perf, cur_block_dim);");
+      "best_perf, cur_block_dim" +
+      segment_arg + ");");
   tiling_func_.AddLine("  }");
   return af::SUCCESS;
 }
@@ -4769,18 +5476,21 @@ af::Status TilingCodeGenImpl::GenFusedScheduleResultsGetTilingDefine(const Fused
   return af::SUCCESS;
 }
 
-af::Status TilingCodeGenImpl::GenFusedScheduleResultsCoreSelection(const FusedGraphNamespaceMap &namespace_map) {
+af::Status TilingCodeGenImpl::GenFusedScheduleResultsSelectionBody(const FusedGraphNamespaceMap &namespace_map,
+                                                                   const bool with_segment_ctx) {
   GenWorkspaceOffsetReset("tiling_data");
   size_t asc_graph_id = 0UL;
   const std::string failed_log_level =
       (config_.enable_autofuse_pgo || config_.is_inductor_scene) ? "OP_LOGW" : "OP_LOGE";
+  const std::string segment_ctx_arg = with_segment_ctx ? ", segment_ctx" : "";
   for (const auto &asc_graph_namespace_map : namespace_map) {
     if (asc_graph_id == 0UL) {
       tiling_func_.AddLine("  uint32_t max_block_dim = 0U;");
       tiling_func_.AddLine("  uint32_t org_block_dim = tiling_data.get_block_dim();");
     }
     const std::string asc_graph_namespace = "AscGraph" + std::to_string(asc_graph_namespace_map.first);
-    tiling_func_.AddLine("  if (!" + asc_graph_namespace + "::GetTiling(tiling_data, tiling_case_id, perf)) {");
+    tiling_func_.AddLine("  if (!" + asc_graph_namespace + "::GetTiling(tiling_data, tiling_case_id, perf" +
+                         segment_ctx_arg + ")) {");
     tiling_func_.AddLine("    " + failed_log_level + "(OP_NAME, \"Failed to get tiling of " + asc_graph_namespace +
                          ".\");");
     tiling_func_.AddLine("    return false;");
@@ -4801,27 +5511,125 @@ af::Status TilingCodeGenImpl::GenFusedScheduleResultsCoreSelection(const FusedGr
   return af::SUCCESS;
 }
 
+af::Status TilingCodeGenImpl::GenFusedScheduleResultsCoreSelection(const FusedGraphNamespaceMap &namespace_map,
+                                                                   const bool need_segment_cache) {
+  if (!need_segment_cache) {
+    return GenFusedScheduleResultsSelectionBody(namespace_map, false);
+  }
+  // 命中执行：lambda内保留原流程的return false早退语义；命中case求解失败则失效槽并回退原逻辑重跑。
+  // 选择体是"边解边写"模式（GenBestPerfUpdateCode增量改写tiling_data.block_dim），部分asc graph
+  // 命中成功后失败回退时，需先恢复进入时的block_dim预算，否则第二次全量搜索按被改写的预算
+  // 做max_block_dim校验会误杀合法结果（或反向放宽核预算）
+  tiling_func_.AddLine("  const uint32_t segment_entry_block_dim = tiling_data.get_block_dim();");
+  tiling_func_.AddLine("  const auto run_core_selection = [&](SegmentCacheContext *segment_ctx) -> bool {");
+  GE_ASSERT_SUCCESS(GenFusedScheduleResultsSelectionBody(namespace_map, true),
+                    "Generate selection body with segment ctx failed.");
+  tiling_func_.AddLine("    return true;");
+  tiling_func_.AddLine("  };");
+  tiling_func_.AddLine("  if (segment_ctx.hit) {");
+  tiling_func_.AddLine("    ret = run_core_selection(&segment_ctx);");
+  tiling_func_.AddLine("    if (!ret) {");
+  tiling_func_.AddLine("      InvalidateSegmentCache(segment_key);");
+  tiling_func_.AddLine(
+      "      ATT_SEGMENT_CACHE_LOGW(OP_NAME, \"[Segment Cache] HIT case solve failed, invalidate and fallback, "
+      "key=%u.\", segment_key);");
+  tiling_func_.AddLine("      segment_ctx = SegmentCacheContext{};");
+  tiling_func_.AddLine("      tiling_data.set_block_dim(segment_entry_block_dim);");
+  tiling_func_.AddLine("    }");
+  tiling_func_.AddLine("  }");
+  tiling_func_.AddLine("  if (!segment_ctx.hit) {");
+  tiling_func_.AddLine("    ret = run_core_selection(&segment_ctx);");
+  tiling_func_.AddLine("    if (!ret) {");
+  tiling_func_.AddLine("      return false;");
+  tiling_func_.AddLine("    }");
+  tiling_func_.AddLine("  }");
+  return af::SUCCESS;
+}
+
 af::Status TilingCodeGenImpl::GenFusedScheduleResultsGetTilingCoreDefine(const FusedGraphNamespaceMap &namespace_map) {
+  const bool has_forced_tiling_case =
+      std::any_of(tiling_model_info_.cbegin(), tiling_model_info_.cend(), [this](const auto &model_info) {
+        return config_.force_tiling_case.GetCase(model_info.schedule_group_ident.group_id).first >= 0;
+      });
+  // force场景不启用分段缓存（与算子级缓存对齐），避免与强制选择语义冲突
+  const bool need_segment_cache =
+      config_.enable_tiling_segment_cache && !has_forced_tiling_case && (config_.force_schedule_result < 0);
+  if (need_segment_cache) {
+    // tail TU内的分段缓存存储与key计算函数（多group场景owner为tail TU）
+    GE_ASSERT_SUCCESS(GenSegmentCacheDefinesAndKeyFunc(), "Generate segment cache defines and key func failed.");
+  }
   tiling_func_.AddLine("bool GetTilingCore(" + config_.tiling_data_type_name +
                        " &tiling_data, int32_t tiling_case_id, double *perf) {");
   AddAtomicHeaderLine(autofuse::GeneratedHeaderId::kApi,
                       "bool GetTilingCore(" + config_.tiling_data_type_name +
                           " &tiling_data, int32_t tiling_case_id, double *perf = nullptr);");
-  const bool has_forced_tiling_case =
-      std::any_of(tiling_model_info_.cbegin(), tiling_model_info_.cend(), [this](const auto &model_info) {
-        return config_.force_tiling_case.GetCase(model_info.schedule_group_ident.group_id).first >= 0;
-      });
   if (config_.cache_enabled_at_compile_time && !has_forced_tiling_case) {
     GE_ASSERT_SUCCESS(cache::OperatorLevelCacheGen::GenInitAndQueryCacheCode(tiling_func_, tiling_model_info_, config_,
                                                                              true, "tiling_case_id == -1"),
                       "Generate init and query cache code failed.");
   }
   tiling_func_.AddLine("  bool ret = true;");
-  GE_ASSERT_SUCCESS(GenFusedScheduleResultsCoreSelection(namespace_map));
+  if (need_segment_cache) {
+    // 第二级：分段缓存查询（算子级缓存未命中后，按3公式key查询）
+    tiling_func_.AddLine("  uint32_t segment_key = 0U;");
+    tiling_func_.AddLine("  SegmentCacheContext segment_ctx{};");
+    // 命中时INFO打印选中的result case（各asc graph的result id），便于动态shape场景确认缓存选择
+    std::string hit_result_fmt;
+    std::string hit_result_args;
+    for (const auto &asc_graph_namespace_map : namespace_map) {
+      hit_result_fmt += hit_result_fmt.empty() ? "%u" : ",%u";
+      hit_result_args += ", segment_ctx.entry.result_ids[" + std::to_string(asc_graph_namespace_map.first) + "U]";
+    }
+    tiling_func_.AddLine("  if (tiling_case_id == -1) {");
+    tiling_func_.AddLine("    segment_key = ComputeSegmentKey(tiling_data);");
+    tiling_func_.AddLine("    const SegmentCacheEntry *segment_entry = FindSegmentCache(segment_key);");
+    tiling_func_.AddLine("    if (segment_entry != nullptr) {");
+    tiling_func_.AddLine("      segment_ctx.hit = true;");
+    tiling_func_.AddLine("      segment_ctx.key = segment_key;");
+    tiling_func_.AddLine("      segment_ctx.entry = *segment_entry;");
+    tiling_func_.AddLine(
+        "      ATT_SEGMENT_CACHE_LOGD(OP_NAME, \"[Segment Cache] HIT key=%u, result case=" + hit_result_fmt + ".\",");
+    tiling_func_.AddLine("                 segment_key" + hit_result_args + ");");
+    tiling_func_.AddLine("    } else {");
+    tiling_func_.AddLine("      ATT_SEGMENT_CACHE_LOGD(OP_NAME, \"[Segment Cache] MISS key=%u.\", segment_key);");
+    tiling_func_.AddLine("    }");
+    tiling_func_.AddLine("  }");
+  }
+  GE_ASSERT_SUCCESS(GenFusedScheduleResultsCoreSelection(namespace_map, need_segment_cache));
   if (config_.cache_enabled_at_compile_time && !has_forced_tiling_case) {
     tiling_func_.AddLine("  if (tiling_case_id == -1) {");
     GE_ASSERT_SUCCESS(cache::OperatorLevelCacheGen::GenSaveCacheCalls(tiling_func_, tiling_model_info_, config_),
                       "Generate save cache calls failed.");
+    tiling_func_.AddLine("  }");
+  }
+  if (need_segment_cache) {
+    // 分段缓存首填保存：本次实际执行了全量搜索（未命中或回退）且成功
+    tiling_func_.AddLine("  if (ret && tiling_case_id == -1 && !segment_ctx.hit) {");
+    tiling_func_.AddLine("    SegmentCacheEntry segment_new_entry{};");
+    tiling_func_.AddLine("    segment_new_entry.valid = true;");
+    size_t asc_graph_index = 0UL;
+    for (const auto &asc_graph_namespace_map : namespace_map) {
+      // 与读取侧（result_ids[asc_graph_id]）下标口径一致：保存也用asc_graph_id，
+      // 不做枚举序号与id的隐式映射
+      tiling_func_.AddLine("    segment_new_entry.result_ids[" + std::to_string(asc_graph_namespace_map.first) +
+                           "] = tiling_data.get_graph" + std::to_string(asc_graph_namespace_map.first) +
+                           "_tiling_key();");
+      ++asc_graph_index;
+      for (const auto &result_id_and_groups : asc_graph_namespace_map.second) {
+        for (const auto &group_id_and_names : result_id_and_groups.second) {
+          const size_t slot =
+              GetSegmentGroupSlot(asc_graph_namespace_map.first, result_id_and_groups.first, group_id_and_names.first);
+          tiling_func_.AddLine("    segment_new_entry.group_cases[" + std::to_string(slot) +
+                               "].case_id = tiling_data." + group_id_and_names.second.second +
+                               "_tiling_data"
+                               ".get_tiling_key();");
+          tiling_func_.AddLine("    segment_new_entry.group_cases[" + std::to_string(slot) +
+                               "].is_sub_case = segment_ctx.selected_is_sub_case[" + std::to_string(slot) + "];");
+        }
+      }
+    }
+    tiling_func_.AddLine("    SaveSegmentCache(segment_key, segment_new_entry);");
+    tiling_func_.AddLine("    ATT_SEGMENT_CACHE_LOGD(OP_NAME, \"[Segment Cache] SAVE key=%u.\", segment_key);");
     tiling_func_.AddLine("  }");
   }
   tiling_func_.AddLine("  (void)perf;");
@@ -4846,14 +5654,14 @@ void TilingCodeGenImpl::GenFinalTilingSummaryForResult(
     tiling_func_.AddLine("    auto &" + final_group_tiling_data + " = tiling_data." + group_info.second.second +
                          "_tiling_data;");
     tiling_func_.AddLine("    FinalTilingGroupSelection " + final_group_selection + "{" + group_suffix +
-                         "U, -1, 0U, 0, \"\", \"\"};");
+                         "U, -1, 0U, 0, \"\", \"\", \"\"};");
     tiling_func_.AddLine("    if (" + group_info.second.first + "::GetFinalTilingSelection(" + final_group_tiling_data +
                          ", " + final_group_selection + ")) {");
-    tiling_func_.AddLine("      " + group_info.second.first + "::EmitFinalTilingByCase(" + final_group_tiling_data +
-                         ", org_block_dim, \"runtime\", tiling_case_id == -1 ? \"default\" : \"explicit\", " +
-                         group_suffix + "U, " + final_group_selection + ".case_id);");
     tiling_func_.AddLine("      final_summary.groups.push_back(" + final_group_selection + ");");
     tiling_func_.AddLine("    }");
+    tiling_func_.AddLine("    " + group_info.second.first + "::EmitFinalTilingByCase(" + final_group_tiling_data +
+                         ", org_block_dim, \"runtime\", tiling_case_id == -1 ? \"default\" : \"explicit\", " +
+                         group_suffix + "U, " + final_group_selection + ".case_id);");
   }
   tiling_func_.AddLine("    if (!final_summary.groups.empty()) { EmitFinalTilingSummary(final_summary); }");
   tiling_func_.AddLine("  }");
@@ -4867,16 +5675,20 @@ af::Status TilingCodeGenImpl::GenFusedScheduleResultsGetTilingObserveWrapper(
                       "bool GetTiling(" + config_.tiling_data_type_name + " &, int32_t, double *perf = nullptr);");
   tiling_func_.AddLine("  const bool emit_final_tiling = ShouldEmitFinalTiling();");
   tiling_func_.AddLine("  const uint32_t org_block_dim = tiling_data.get_block_dim();");
-  tiling_func_.AddLine("  ::g_final_tiling_observe_enabled = emit_final_tiling;");
+  tiling_func_.AddLine("  FinalTilingObservationContext final_tiling_observation;");
+  tiling_func_.AddLine(std::string("  FinalTilingObservationCallGuard final_tiling_observation_guard(") +
+                       "final_tiling_observation, emit_final_tiling, " +
+                       std::to_string(final_tiling_observation_slot_count_) + "U);");
   tiling_func_.AddLine("  const bool ret = GetTilingCore(tiling_data, tiling_case_id, perf);");
-  tiling_func_.AddLine("  ::g_final_tiling_observe_enabled = false;");
-  tiling_func_.AddLine("  if (!ret || !emit_final_tiling) { return ret; }");
+  tiling_func_.AddLine("  if (!ret || !IsFinalTilingObservationEnabled()) { return ret; }");
+  tiling_func_.AddLine("  try {");
   for (const auto &asc_graph_namespace_map : namespace_map) {
     for (const auto &result_id_and_groups : asc_graph_namespace_map.second) {
       GenFinalTilingSummaryForResult(asc_graph_namespace_map.first, result_id_and_groups.first,
                                      result_id_and_groups.second);
     }
   }
+  tiling_func_.AddLine("  } catch (...) { DisableFinalTilingObservation(); }");
   tiling_func_.AddLine("  return ret;");
   tiling_func_.AddLine("}");
 
@@ -4907,13 +5719,13 @@ af::Status TilingCodeGenImpl::GenFusedScheduleResultsGetTilingObserveWrapper(
 af::Status TilingCodeGenImpl::GenPGOByCoreNumFusedScheduleResultsGetTilingDefine(
     const FusedGraphNamespaceMap &namespace_map) {
   tiling_func_.AddLine(
-      "bool PGOByCoreNumSearchTilingKey(std::vector<AutofuseTilingData>& tiling_data_list, AutofuseTilingData* "
+      "bool PGOByCoreNumSearchTilingKey(std::vector<AutofuseTilingDataPerf>& tiling_data_list, AutofuseTilingData* "
       "tiling_data, uint32_t max_block_dim) {");
   tiling_func_.AddLine("  OP_LOGI(OP_NAME, \"Start PGOSearchTilingKey root.\");");
   tiling_func_.AddLine("  bool ret = true;");
   tiling_func_.AddLine("  for (uint32_t block_dim_i=1; block_dim_i <= max_block_dim; block_dim_i++) {");
   for (const auto &asc_graph_namespace_map : namespace_map) {
-    tiling_func_.AddLine("    std::vector<AutofuseTilingData> vec" + std::to_string(asc_graph_namespace_map.first) +
+    tiling_func_.AddLine("    std::vector<AutofuseTilingDataPerf> vec" + std::to_string(asc_graph_namespace_map.first) +
                          ";");
   }
   auto core_num = BaseTypeUtils::DumpHardware(HardwareDef::CORENUM);
@@ -4956,9 +5768,14 @@ af::Status TilingCodeGenImpl::GenPGOFusedScheduleResultsGetTilingDefine(const Fu
 
   // Rebuild size aggregation base by calling each AscGraph::GetTiling to populate workspace values
   // This is the critical fix to ensure each subgraph's workspace values are included in tilingTmp
+  std::string segment_null_args;
+  if (config_.enable_tiling_segment_cache) {
+    segment_null_args = ", nullptr";
+  }
   for (const auto &asc_graph_namespace_map : namespace_map) {
     const std::string &asc_graph_namespace = "AscGraph" + std::to_string(asc_graph_namespace_map.first);
-    tiling_func_.AddLine("  if (!" + asc_graph_namespace + "::GetTiling(tilingTmp, -1, nullptr)) {");
+    tiling_func_.AddLine("  if (!" + asc_graph_namespace + "::GetTiling(tilingTmp, -1, nullptr" + segment_null_args +
+                         ")) {");
     tiling_func_.AddLine("    OP_LOGW(OP_NAME, \"Failed to rebuild size base for " + asc_graph_namespace + ".\");");
     tiling_func_.AddLine("    return false;");
     tiling_func_.AddLine("  }");
@@ -4990,30 +5807,45 @@ af::Status TilingCodeGenImpl::GenPGOFusedScheduleResultsGetTilingDefine(const Fu
   // 无 workspace 时调用点必须同步跳过，否则生成的 tiling func 编译失败。
   if (!GetWorkspaceTensorIds(workspace_tensor_id_set_).empty()) {
     tiling_func_.AddLine("  for (size_t i = ws_baseline; i < tiling_data_list.size(); ++i) {");
-    tiling_func_.AddLine("    if (!FinalizeWorkspaceOffsets(tiling_data_list[i].tiling_data)) {");
+    tiling_func_.AddLine("    if (!FinalizePGOWorkspaceOffsets(tiling_data_list[i].tiling_data)) {");
     tiling_func_.AddLine("      return false;");
     tiling_func_.AddLine("    }");
     tiling_func_.AddLine("  }");
   }
 
-  GenWorkspaceOffsetFinalize("tiling_data");
+  GenWorkspaceOffsetFinalize("tiling_data", true);
   tiling_func_.AddLine("  OP_LOGI(OP_NAME, \"End PGOSearchTilingKey root.\");");
   tiling_func_.AddLine("  return true;");
   tiling_func_.AddLine("}");
   return af::SUCCESS;
 }
 
-void TilingCodeGenImpl::GenPGOByCoreNumGetAllSchedulesResults(const size_t asc_graph_id,
-                                                              const AscGraphNamepspaceMap &namespace_map) {
+void TilingCodeGenImpl::GenPGOByCoreNumGetAllSchedulesResults(
+    const size_t asc_graph_id, const AscGraphNamepspaceMap &namespace_map,
+    const std::map<std::string, std::set<std::string>> &input_vars) {
   std::string tiling_key_prefix = "graph" + std::to_string(asc_graph_id) + "_";
+  // Each result receives a copy of this seed. Clear prior solutions but preserve the shape inputs.
+  for (const auto &result_id_and_groups : namespace_map) {
+    for (const auto &group_info : result_id_and_groups.second) {
+      const auto &prefix = group_info.second.second;
+      const std::string field = "tiling_data." + prefix + "_tiling_data";
+      const auto vars = input_vars.find(prefix);
+      if (vars == input_vars.end() || vars->second.empty()) {
+        tiling_func_.AddLine("  " + field + " = {};");
+        continue;
+      }
+      tiling_func_.AddLine("  {");
+      tiling_func_.AddLine("    decltype(" + field + ") group_inputs{};");
+      for (const auto &name : vars->second) {
+        tiling_func_.AddLine("    group_inputs.set_" + name + "(" + field + ".get_" + name + "());");
+      }
+      tiling_func_.AddLine("    " + field + " = group_inputs;");
+      tiling_func_.AddLine("  }");
+    }
+  }
   tiling_func_.AddLine("  bool has_valid_tiling = false;");
   tiling_func_.AddLine("  for (int32_t index = 0; index < " + std::to_string(namespace_map.size()) + "; index++) {");
   tiling_func_.AddLine("    tiling_data.set_" + tiling_key_prefix + "tiling_key(index);");
-  for (const auto &result_id_and_groups : namespace_map) {
-    for (const auto &group_info : result_id_and_groups.second) {
-      tiling_func_.AddLine("    tiling_data." + group_info.second.second + "_tiling_data = {};");
-    }
-  }
   tiling_func_.AddLine("    if (kScheduleResultFunctionsPGOByCoreNum[index](tiling_data_list, tiling_data)) {");
   tiling_func_.AddLine("      has_valid_tiling = true;");
   tiling_func_.AddLine("    }");
@@ -5030,8 +5862,15 @@ void TilingCodeGenImpl::GenPGOGetAllSchedulesResults(const size_t asc_graph_id,
   tiling_func_.AddLine("    tilingTmp = tiling_data;");
   tiling_func_.AddLine("    tilingTmp.set_" + tiling_key_prefix + "tiling_key(index);");
   tiling_func_.AddLine("    cur_perf = DBL_MAX;");
-  tiling_func_.AddLine("    if (!AscGraph" + std::to_string(asc_graph_id) +
-                       "::GetTiling(tilingTmp, index, nullptr)) {");
+  // The schedule index selects the result. Each group in that result chooses its own case.
+  tiling_func_.AddLine("    double baseline_perf = DBL_MAX;");
+  tiling_func_.AddLine("    double baseline_best_perf = -1.0;");
+  tiling_func_.AddLine("    uint32_t baseline_block_dim = 1U;");
+  const std::string segment_null_arg = config_.enable_tiling_segment_cache ? ", nullptr" : "";
+  tiling_func_.AddLine(
+      "    if (!kScheduleResultFunctions[index](ori_block_dim, -1, tilingTmp, baseline_perf, baseline_best_perf, "
+      "baseline_block_dim" +
+      segment_null_arg + ")) {");
   tiling_func_.AddLine("      OP_LOGW(OP_NAME, \"Skip invalid PGO schedule result candidate.\");");
   tiling_func_.AddLine("      continue;");
   tiling_func_.AddLine("    }");
@@ -5046,8 +5885,15 @@ void TilingCodeGenImpl::GenPGOGetAllSchedulesResults(const size_t asc_graph_id,
 
 af::Status TilingCodeGenImpl::GenGetTilingForAllSchedulesResults(const uint32_t asc_graph_id,
                                                                  const AscGraphNamepspaceMap &asc_graph_map) {
+  std::string segment_define_func;
+  if (config_.enable_tiling_segment_cache) {
+    segment_define_func = ", SegmentCacheContext *segment_ctx";
+  }
   tiling_func_.AddLine("bool GetTiling(" + config_.tiling_data_type_name + " &tiling_data, " +
-                       "int32_t tiling_case_id, double *perf) {");
+                       "int32_t tiling_case_id, double *perf" + segment_define_func + ") {");
+  // kApi头按公共入口签名声明：SegmentCacheContext定义在state头，且segment尾参是
+  // AscGraph{N}::GetTiling的TU内部实现细节，不得泄漏进api头（只含api头的TU会编译失败）；
+  // 不带默认值，避免与顶层GetTiling包装声明的默认参数重复指定
   AddAtomicHeaderLine(
       autofuse::GeneratedHeaderId::kApi,
       "bool GetTiling(" + config_.tiling_data_type_name + " &tiling_data, " + "int32_t tiling_case_id, double *perf);");
@@ -5055,6 +5901,32 @@ af::Status TilingCodeGenImpl::GenGetTilingForAllSchedulesResults(const uint32_t 
   GE_ASSERT_SUCCESS(GenDurationBeginCode(TilingFuncDurationType::TILING_FUNC_DURATION_TOTAL, "  "),
                     "Generate begin code!");
   GE_ASSERT_SUCCESS(GenGetTilingForAllInitLines());
+  if (config_.enable_tiling_segment_cache) {
+    // 分段缓存命中：跳过score预选与其余result，直接执行缓存的result
+    tiling_func_.AddLine("  if (segment_ctx != nullptr && segment_ctx->hit) {");
+    tiling_func_.AddLine("    const uint32_t segment_result = segment_ctx->entry.result_ids[" +
+                         std::to_string(asc_graph_id) + "U];");
+    tiling_func_.AddLine("    if (segment_result >= " + std::to_string(asc_graph_map.size()) + "U) {");
+    tiling_func_.AddLine(
+        "      ATT_SEGMENT_CACHE_LOGW(OP_NAME, \"[Segment Cache] cached result %u out of range.\", segment_result);");
+    tiling_func_.AddLine("      return false;");
+    tiling_func_.AddLine("    }");
+    tiling_func_.AddLine(
+        "    const bool segment_got_result = kScheduleResultFunctions[segment_result](ori_block_dim, "
+        "tiling_case_id, tiling_data, cur_perf, best_perf, cur_block_dim, segment_ctx);");
+    tiling_func_.AddLine(
+        "    const bool segment_result_ok = segment_got_result ? GetResultSummary(best_perf, "
+        "tiling_data) : false;");
+    tiling_func_.AddLine(
+        "    ATT_SEGMENT_CACHE_LOGD(OP_NAME, \"[Segment Cache] run cached result %u, ok=%d.\", segment_result,");
+    tiling_func_.AddLine("               static_cast<int32_t>(segment_result_ok));");
+    GE_ASSERT_SUCCESS(GenDurationEndCode(TilingFuncDurationType::TILING_FUNC_DURATION_TOTAL, "    "),
+                      "Generate end code!");
+    GE_ASSERT_SUCCESS(GenDurationPrintCode("    "), "Generate print code failed.");
+    GE_ASSERT_SUCCESS(GenDurationClearCode("    "), "Generate clear code failed.");
+    tiling_func_.AddLine("    return segment_result_ok;");
+    tiling_func_.AddLine("  }");
+  }
   if (NeedGenScoreFunc(score_funcs_)) {
     GenGetScoreFuncsCalling(asc_graph_id, asc_graph_map);
     GenGetMaxScoreIndex(asc_graph_map);
@@ -5098,7 +5970,8 @@ af::Status TilingCodeGenImpl::GenGetTilingForScheduleResult() {
     for (const auto &graph_info : asc_graph_map) {
       GenGetScheduleResult(asc_graph_id, graph_info.first, graph_info.second, hardware_map);
     }
-    tiling_func_.AddLine(GenScheduleResultFuncTypeDefine(config_.tiling_data_type_name));
+    tiling_func_.AddLine(
+        GenScheduleResultFuncTypeDefine(config_.tiling_data_type_name, config_.enable_tiling_segment_cache));
     tiling_func_.AddLine(GenScheduleResultFuncsDefine(asc_graph_map));
     GE_ASSERT_SUCCESS(GenGetTilingForAllSchedulesResults(asc_graph_id, asc_graph_map),
                       "Generate GetTiling for all schedules results failed, asc_graph_id = %zu.", asc_graph_id);
@@ -5144,8 +6017,9 @@ af::Status TilingCodeGenImpl::GenPGOGetTilingForAll() {
 
 af::Status TilingCodeGenImpl::GenPGOByCoreNumTilingForAll() {
   std::map<std::string, std::set<std::string>> hardware_map;
+  std::map<std::string, std::set<std::string>> input_vars;
   FusedGraphNamespaceMap namespace_map;
-  GE_ASSERT_SUCCESS(ObtainInnerParams(hardware_map, namespace_map));
+  GE_ASSERT_SUCCESS(ObtainInnerParams(hardware_map, namespace_map, &input_vars));
   for (auto &asc_graph_map_iter : namespace_map) {
     auto &asc_graph_map = asc_graph_map_iter.second;
     size_t asc_graph_id = asc_graph_map_iter.first;
@@ -5157,9 +6031,9 @@ af::Status TilingCodeGenImpl::GenPGOByCoreNumTilingForAll() {
     tiling_func_.AddLine(GenPGOByCoreNumScheduleResultFuncTypeDefine());
     tiling_func_.AddLine(GenScheduleResultFuncsDefine(asc_graph_map, "PGOByCoreNum"));
     tiling_func_.AddLine(
-        "bool PGOByCoreNumSearchTilingKey(std::vector<AutofuseTilingData>& tiling_data_list, AutofuseTilingData "
+        "bool PGOByCoreNumSearchTilingKey(std::vector<AutofuseTilingDataPerf>& tiling_data_list, AutofuseTilingData "
         "tiling_data) {");
-    GenPGOByCoreNumGetAllSchedulesResults(asc_graph_id, asc_graph_map);
+    GenPGOByCoreNumGetAllSchedulesResults(asc_graph_id, asc_graph_map, input_vars);
     tiling_func_.AddLine("  OP_LOGI(OP_NAME, \"End PGOSearchTilingKey in AscGraph.\");");
     GE_ASSERT_SUCCESS(GenDurationPrintCode("  "), "Generate print code failed.");
     GE_ASSERT_SUCCESS(GenDurationClearCode("  "), "Generate clear code failed.");
@@ -5172,7 +6046,11 @@ af::Status TilingCodeGenImpl::GenPGOByCoreNumTilingForAll() {
 }
 
 af::Status TilingCodeGenImpl::GenGetTilingWithCaseId(bool is_tail) {
+  // 组级GetTiling的cache形参恒生成（多组）：参数个数与复用数据/过滤结果解耦，
+  // 调用侧（DoGroupTiling恒传nullptr、result级命中传&Cache）不再推断定义形态；
+  // 形参是否存在与cache是否启用无关，行为仍按with_reuse_info_门控
   bool use_cache = (!is_tail && with_reuse_info_);
+  const bool gen_cache_param = !is_uniq_group_ && !is_tail;
   bool use_workspace = !(is_uniq_group_ || is_tail);
 
   // 收集并验证tiling case信息
@@ -5188,8 +6066,8 @@ af::Status TilingCodeGenImpl::GenGetTilingWithCaseId(bool is_tail) {
 
   // 获取参数定义字符串
   std::string cache_define_head, cache_define_func, cache_used;
-  std::string workspace_define =
-      GetGetTilingParamDefines(use_cache, use_workspace, cache_define_head, cache_define_func, cache_used);
+  std::string workspace_define = GetGetTilingParamDefines(gen_cache_param, use_cache, use_workspace, cache_define_head,
+                                                          cache_define_func, cache_used);
 
   // 生成GetTiling函数签名
   GenGetTilingFunctionSignature(workspace_define, cache_define_func, cache_define_head);
@@ -5197,14 +6075,39 @@ af::Status TilingCodeGenImpl::GenGetTilingWithCaseId(bool is_tail) {
   // 生成GetTiling函数体
   GE_ASSERT_SUCCESS(GenGetTilingFunctionBody(use_cache, is_tail, cache_used), "Generate function body failed.");
 
+  if (is_uniq_group_) {
+    tiling_func_.AddLine("bool GetTiling(" + config_.tiling_data_type_name + " &tiling_data" + workspace_define +
+                         ", int32_t tiling_case_id" + cache_define_func + ", double *perf) {");
+    AddAtomicHeaderLine(autofuse::GeneratedHeaderId::kApi,
+                        "bool GetTiling(" + config_.tiling_data_type_name + " &tiling_data" + workspace_define +
+                            ", int32_t tiling_case_id" + cache_define_head + ", double *perf = nullptr);");
+    tiling_func_.AddLine("  FinalTilingObservationContext final_tiling_observation;");
+    tiling_func_.AddLine("  const bool emit_final_tiling = ShouldEmitFinalTiling();");
+    tiling_func_.AddLine(std::string("  FinalTilingObservationCallGuard final_tiling_observation_guard(") +
+                         "final_tiling_observation, emit_final_tiling, 1U);");
+    const std::string runtime_observation = config_.is_inductor_scene ? ", true" : "";
+    // 分段缓存：透传收集出参（局部bool地址）而非nullptr，确保全量搜索时选中R模板的tag可被收集并在保存时读取
+    std::string segment_collect_args;
+    if (config_.enable_tiling_segment_cache) {
+      tiling_func_.AddLine("  bool segment_selected_is_sub_case = false;");
+      segment_collect_args = ", nullptr, &segment_selected_is_sub_case";
+    }
+    tiling_func_.AddLine("  return GetTilingWithObservation(tiling_data, tiling_case_id" + cache_used +
+                         segment_collect_args + ", perf" + runtime_observation + ");");
+    tiling_func_.AddLine("}");
+  }
+
   return af::SUCCESS;
 }
 
-std::string TilingCodeGenImpl::GetGetTilingParamDefines(bool use_cache, bool use_workspace,
-                                                        std::string &cache_define_head, std::string &cache_define_func,
-                                                        std::string &cache_used) const {
-  cache_define_head = use_cache ? (", GroupLevelCache *cache = nullptr") : "";
-  cache_define_func = use_cache ? (", GroupLevelCache *cache") : "";
+std::string TilingCodeGenImpl::GetGetTilingParamDefines(const bool gen_cache_param, const bool use_cache,
+                                                        const bool use_workspace, std::string &cache_define_head,
+                                                        std::string &cache_define_func, std::string &cache_used) const {
+  // gen_cache_param：签名是否生成cache形参（恒定，与复用数据解耦）；
+  // use_cache：body是否使用cache（透传给GetTilingKey，仍按with_reuse_info_门控）
+  (void)use_cache;
+  cache_define_head = gen_cache_param ? (", GroupLevelCache *cache = nullptr") : "";
+  cache_define_func = gen_cache_param ? (", GroupLevelCache *cache") : "";
   cache_used = use_cache ? (", cache") : "";
   return use_workspace ? (", std::unordered_map<int64_t, uint64_t> &workspace_map") : "";
 }
@@ -5216,13 +6119,25 @@ void TilingCodeGenImpl::GenGetTilingFunctionSignature(const std::string &workspa
     GELOGE(ge::GRAPH_FAILED, "[GenGetTilingFunctionSignature] tiling_model_info_ is empty.");
     return;
   }
-  tiling_func_.AddLine("bool GetTiling(" + config_.tiling_data_type_name + " &tiling_data" + workspace_define +
-                       ", int32_t tiling_case_id" + cache_define_func + ", double *perf) {");
+  // 分段缓存：多group场景tail侧经此参数传入命中case的tag并收集选中tag
+  std::string segment_define_func;
+  std::string segment_define_head;
+  if (config_.enable_tiling_segment_cache) {
+    segment_define_func = ", const char *segment_sub_case_tag, bool *segment_selected_is_sub_case";
+    segment_define_head = ", const char *segment_sub_case_tag = nullptr, bool *segment_selected_is_sub_case = nullptr";
+  }
+  const std::string function_name = is_uniq_group_ ? "GetTilingWithObservation" : "GetTiling";
+  const bool is_inductor_single_group = is_uniq_group_ && config_.is_inductor_scene;
+  const std::string runtime_observation = is_inductor_single_group ? ", bool emit_runtime_tiling" : "";
+  tiling_func_.AddLine("bool " + function_name + "(" + config_.tiling_data_type_name + " &tiling_data" +
+                       workspace_define + ", int32_t tiling_case_id" + cache_define_func + segment_define_func +
+                       ", double *perf" + runtime_observation + ") {");
   const auto header_id =
       cache_define_head.empty() ? autofuse::GeneratedHeaderId::kApi : autofuse::GeneratedHeaderId::kState;
-  AddAtomicHeaderLine(header_id, "bool GetTiling(" + config_.tiling_data_type_name + " &tiling_data" +
+  AddAtomicHeaderLine(header_id, "bool " + function_name + "(" + config_.tiling_data_type_name + " &tiling_data" +
                                      workspace_define + ", int32_t tiling_case_id" + cache_define_head +
-                                     ", double *perf = nullptr);");
+                                     segment_define_head + ", double *perf = nullptr" + runtime_observation +
+                                     (is_inductor_single_group ? " = false" : "") + ");");
 }
 
 af::Status TilingCodeGenImpl::GenGetTilingFunctionBody(bool use_cache, bool is_tail, const std::string &cache_used) {
@@ -5233,11 +6148,27 @@ af::Status TilingCodeGenImpl::GenGetTilingFunctionBody(bool use_cache, bool is_t
       });
   const bool need_operator_cache =
       config_.cache_enabled_at_compile_time && !has_forced_tiling_case && (is_tail || (!is_tail && is_uniq_group_));
+  // 分段缓存仅用于单group算子的自动选优路径（多group由GetTilingCore处理）
+  const bool need_segment_cache = config_.enable_tiling_segment_cache && !has_forced_tiling_case && is_uniq_group_;
 
   // 初始化返回值
   tiling_func_.AddLine("  bool ret = true;");
+  if (!is_uniq_group_) {
+    // 多组定义恒带cache形参但未启用时不透传，显式消除未用形参告警
+    if (cache_used.empty()) {
+      tiling_func_.AddLine("  (void)cache;");
+    }
+    tiling_func_.AddLine(std::string("  FinalTilingObservationSlotGuard final_tiling_observation_slot_guard(") +
+                         "kFinalTilingObservationSlot);");
+  }
   if (need_operator_cache) {
     tiling_func_.AddLine("  bool cache_hit = false;");
+  }
+  if (need_segment_cache) {
+    // segment_selected_is_sub_case直接复用wrapper参数（收集出参）
+    tiling_func_.AddLine("  uint32_t segment_key = 0U;");
+    tiling_func_.AddLine("  bool segment_hit = false;");
+    tiling_func_.AddLine("  const SegmentCacheEntry *segment_entry = nullptr;");
   }
 
   // 生成duration begin代码
@@ -5250,6 +6181,27 @@ af::Status TilingCodeGenImpl::GenGetTilingFunctionBody(bool use_cache, bool is_t
                       "Generate init and query cache code failed.");
   }
 
+  // 第二级：分段缓存查询（算子级缓存未命中后，按3公式key查询）
+  if (need_segment_cache) {
+    std::string query_guard = "tiling_case_id == -1";
+    if (need_operator_cache) {
+      query_guard += " && !cache_hit";
+    }
+    tiling_func_.AddLine("  if (" + query_guard + ") {");
+    tiling_func_.AddLine("    segment_key = ComputeSegmentKey(tiling_data);");
+    tiling_func_.AddLine("    segment_entry = FindSegmentCache(segment_key);");
+    tiling_func_.AddLine("    segment_hit = (segment_entry != nullptr);");
+    tiling_func_.AddLine("    if (segment_hit) {");
+    tiling_func_.AddLine(
+        "      ATT_SEGMENT_CACHE_LOGD(OP_NAME, \"[Segment Cache] HIT key=%u, case=%u%s.\", segment_key,");
+    tiling_func_.AddLine("                 segment_entry->group_cases[0].case_id,");
+    tiling_func_.AddLine("                 segment_entry->group_cases[0].is_sub_case ? \"R\" : \"\");");
+    tiling_func_.AddLine("    } else {");
+    tiling_func_.AddLine("      ATT_SEGMENT_CACHE_LOGD(OP_NAME, \"[Segment Cache] MISS key=%u.\", segment_key);");
+    tiling_func_.AddLine("    }");
+    tiling_func_.AddLine("  }");
+  }
+
   // Enable sub-case tracking before GetTilingKey so the single-group emitter can report the selected template.
   GenSingleGroupFinalTilingObserveBegin();
 
@@ -5257,18 +6209,63 @@ af::Status TilingCodeGenImpl::GenGetTilingFunctionBody(bool use_cache, bool is_t
   if (need_operator_cache) {
     tiling_func_.AddLine("  if (!cache_hit) {");
   }
-  GE_ASSERT_SUCCESS(GenGetTilingKeyCall(cache_used), "Generate GetTilingKey call failed.");
+  if (need_segment_cache) {
+    // 命中：仅对缓存的(case,tag)求解；失败则失效该槽并回退原全量搜索逻辑（自愈重填）。
+    // 显式case求解可能已写入tiling_data（CORENUM映射block_dim），回退前恢复进入时的核预算，
+    // 保证第二次全量搜索与首次MISS路径行为一致（与多group回退的恢复对称）
+    tiling_func_.AddLine("    const uint32_t segment_entry_block_dim = tiling_data.get_block_dim();");
+    const std::string hit_case = "static_cast<int32_t>(segment_entry->group_cases[0].case_id)";
+    tiling_func_.AddLine("    if (segment_hit) {");
+    tiling_func_.AddLine("      if (!GetTilingKey(tiling_data, " + hit_case + cache_used +
+                         ", segment_entry->group_cases[0].is_sub_case ? \"R\" : \"\", nullptr)) {");
+    tiling_func_.AddLine("        InvalidateSegmentCache(segment_key);");
+    tiling_func_.AddLine("        segment_hit = false;");
+    tiling_func_.AddLine("        tiling_data.set_block_dim(segment_entry_block_dim);");
+    tiling_func_.AddLine(
+        "        ATT_SEGMENT_CACHE_LOGW(OP_NAME, \"[Segment Cache] HIT case solve failed, invalidate and fallback, "
+        "key=%u.\", segment_key);");
+    tiling_func_.AddLine("      }");
+    tiling_func_.AddLine("    }");
+    tiling_func_.AddLine("    if (!segment_hit) {");
+    tiling_func_.AddLine("      if (!GetTilingKey(tiling_data, tiling_case_id" + cache_used +
+                         ", nullptr, segment_selected_is_sub_case)) {");
+    tiling_func_.AddLine("        ret = false;");
+    tiling_func_.AddLine("      }");
+    tiling_func_.AddLine("    }");
+  } else {
+    GE_ASSERT_SUCCESS(GenGetTilingKeyCall(cache_used), "Generate GetTilingKey call failed.");
+  }
 
   if (need_operator_cache) {
     tiling_func_.AddLine("  }");
     tiling_func_.AddLine("  if (cache_hit) {");
-    tiling_func_.AddLine("    if (::g_final_tiling_observe_enabled) { g_final_selected_sub_case_tag_valid = false; }");
+    tiling_func_.AddLine("    if (IsFinalTilingObservationEnabled()) { ResetCurrentFinalTilingSelection(); }");
     tiling_func_.AddLine("  }");
     // 保存算子级缓存，仅在实际完成tiling且未命中缓存时执行。
     tiling_func_.AddLine("  if (ret) {");
     tiling_func_.AddLine("    if (tiling_case_id == -1 && !cache_hit) {");
     GE_ASSERT_SUCCESS(GenOperatorCacheSaveCode(true), "Generate save cache calls failed.");
     tiling_func_.AddLine("    }");
+    tiling_func_.AddLine("  }");
+  }
+  if (need_segment_cache) {
+    // 分段缓存首填保存：本次实际执行了全量搜索（未命中或回退）且成功
+    std::string save_guard = "ret && tiling_case_id == -1 && !segment_hit";
+    if (need_operator_cache) {
+      save_guard += " && !cache_hit";
+    }
+    tiling_func_.AddLine("  if (" + save_guard + ") {");
+    tiling_func_.AddLine("    SegmentCacheEntry segment_new_entry{};");
+    tiling_func_.AddLine("    segment_new_entry.valid = true;");
+    tiling_func_.AddLine("    segment_new_entry.group_cases[0].case_id = tiling_data.get_tiling_key();");
+    tiling_func_.AddLine(
+        "    segment_new_entry.group_cases[0].is_sub_case = (segment_selected_is_sub_case != "
+        "nullptr) && *segment_selected_is_sub_case;");
+    tiling_func_.AddLine("    SaveSegmentCache(segment_key, segment_new_entry);");
+    tiling_func_.AddLine(
+        "    ATT_SEGMENT_CACHE_LOGD(OP_NAME, \"[Segment Cache] SAVE key=%u, case=%u%s.\", segment_key,");
+    tiling_func_.AddLine("               segment_new_entry.group_cases[0].case_id,");
+    tiling_func_.AddLine("               segment_new_entry.group_cases[0].is_sub_case ? \"R\" : \"\");");
     tiling_func_.AddLine("  }");
   }
 
@@ -5298,8 +6295,13 @@ af::Status TilingCodeGenImpl::GenGetTilingKeyCall(const std::string &cache_used)
 
   int32_t force_case_id = config_.force_tiling_case.GetCase(tiling_model_info_[0].schedule_group_ident.group_id).first;
   std::string tiling_case = (force_case_id < 0) ? "tiling_case_id" : std::to_string(force_case_id);
+  // 分段缓存：透传命中case的tag与选中tag收集出参
+  std::string segment_args;
+  if (config_.enable_tiling_segment_cache) {
+    segment_args = ", segment_sub_case_tag, segment_selected_is_sub_case";
+  }
   tiling_func_.AddLine(std::string("  if (!GetTilingKey(tiling_data, ") + (is_uniq_group_ ? "" : "workspace_map, ") +
-                       tiling_case + cache_used + ")) {");
+                       tiling_case + cache_used + segment_args + ")) {");
   GE_ASSERT_SUCCESS(GenOpLog("    ", "GetTiling Failed."));
   tiling_func_.AddLine("    ret = false;");
   tiling_func_.AddLine("  }");
@@ -5666,7 +6668,6 @@ af::Status TilingCodeGenImpl::GenTiling(std::map<std::string, std::string> &tili
       RequireTranslationUnitSystemHeader("cfloat");
       RequireTranslationUnitSystemHeader("vector");
       RequireTranslationUnitGeneratedHeader(autofuse::GeneratedHeaderId::kPgo);
-      GE_ASSERT_SUCCESS(GenPGOReuseGroupTilingWrapper(), "Generate func call entrance failed.");
     }
     return GenReuseGroupTilingWrapper(tiling_res);
   }
@@ -5683,35 +6684,116 @@ af::Status TilingCodeGenImpl::GenTiling(std::map<std::string, std::string> &tili
   return FinishGroupTiling(cur_ident, tiling_res);
 }
 
+af::Status TilingCodeGenImpl::GenReuseGroupOwnWorkspaceRegistration() {
+  std::map<uint32_t, std::vector<const ModelInfo *>> models_by_tiling_key;
+  for (const auto &model_info : tiling_model_info_) {
+    if (model_info.workspace_size_map.empty()) {
+      continue;
+    }
+    models_by_tiling_key[model_info.tiling_case_id].push_back(&model_info);
+  }
+  if (models_by_tiling_key.empty()) {
+    return af::SUCCESS;
+  }
+  tiling_func_.AddLine("  // 复用组委托主组 GetTiling 只会把主组的 workspace id 写进 workspace_map，");
+  tiling_func_.AddLine("  // 设备侧 kernel 用的是复用组自己的 workspace id；按选中的 tiling key 补注册本组 id，");
+  tiling_func_.AddLine("  // 否则未注册的 id 在 FinalizeWorkspaceOffsets 中 size 为 0，会与其它 workspace 重叠。");
+  bool first_key = true;
+  for (const auto &[tiling_key, model_infos] : models_by_tiling_key) {
+    const std::string branch = first_key ? "if" : "else if";
+    tiling_func_.AddLine("  " + branch + " (tiling_data.get_tiling_key() == " + std::to_string(tiling_key) + "U) {");
+    for (const auto *model_info : model_infos) {
+      ArgsManager args_manager(*model_info);
+      args_manager.Process(false);
+      const auto ws_vars = GenWorkspaceRelatedVars(model_info->workspace_size_map, args_manager.GetContainerMap());
+      if (!ws_vars.empty()) {
+        // 同一 tiling key 可能有多个子 case，各自会声明同名尺寸变量，必须放在独立作用域内。
+        tiling_func_.AddLine("    {");
+        tiling_func_.AddLine(ws_vars);
+        tiling_func_.AddLine("    }");
+      }
+    }
+    tiling_func_.AddLine("  }");
+    first_key = false;
+  }
+  return af::SUCCESS;
+}
+
+af::Status TilingCodeGenImpl::GenRestoreReuseTilingKey(const ReuseScheduleGroupInfo &primary,
+                                                       const ReuseScheduleGroupInfo &current) {
+  GE_ASSERT_TRUE(primary.tiling_keys.size() == current.tiling_keys.size());
+  std::map<uint32_t, uint32_t> keys_by_primary;
+  for (size_t index = 0; index < primary.tiling_keys.size(); ++index) {
+    const auto [existing, inserted] =
+        keys_by_primary.try_emplace(primary.tiling_keys[index], current.tiling_keys[index]);
+    GE_ASSERT_TRUE(inserted || existing->second == current.tiling_keys[index],
+                   "Ambiguous mapping for primary tiling key %u.", primary.tiling_keys[index]);
+  }
+  tiling_func_.AddLine("static bool RestoreReuseTilingKey(" + config_.tiling_data_type_name + " &tiling_data) {");
+  tiling_func_.AddLine("  switch (tiling_data.get_tiling_key()) {");
+  for (const auto &[primary_key, current_key] : keys_by_primary) {
+    tiling_func_.AddLine("  case " + std::to_string(primary_key) + "U:");
+    tiling_func_.AddLine("    tiling_data.set_tiling_key(" + std::to_string(current_key) + "U);");
+    tiling_func_.AddLine("    return true;");
+  }
+  tiling_func_.AddLine("  default:");
+  tiling_func_.AddLine(
+      "    OP_LOGE(OP_NAME, \"Unmapped primary tiling key %u in reuse group.\", tiling_data.get_tiling_key());");
+  tiling_func_.AddLine("    return false;");
+  tiling_func_.AddLine("  }");
+  tiling_func_.AddLine("}");
+  return af::SUCCESS;
+}
+
 af::Status TilingCodeGenImpl::GenReuseGroupTilingWrapperGetTiling(
     const std::string &cur_prefix, const std::string &reuse_prefix, const ReuseScheduleGroupInfo &reuse_info,
     std::map<ScheduleGroupIdent, ReuseScheduleGroupInfo>::const_iterator iter) {
-  if (with_reuse_info_) {
-    tiling_func_.AddLine("bool GetTiling(" + config_.tiling_data_type_name + " &tiling_data, " +
-                         (is_uniq_group_ ? "" : "std::unordered_map<int64_t, uint64_t> &workspace_map, ") +
-                         "int32_t tiling_case_id, " + reuse_prefix + "::GroupLevelCache* cache) {");
-    AddAtomicHeaderLine(autofuse::GeneratedHeaderId::kState,
-                        "bool GetTiling(" + config_.tiling_data_type_name + " &tiling_data, " +
-                            (is_uniq_group_ ? "" : "std::unordered_map<int64_t, uint64_t> &workspace_map, ") +
-                            "int32_t tiling_case_id, " + reuse_prefix + "::GroupLevelCache* cache = nullptr);");
-  } else {
-    tiling_func_.AddLine("bool GetTiling(" + config_.tiling_data_type_name + " &tiling_data, " +
-                         (is_uniq_group_ ? "" : "std::unordered_map<int64_t, uint64_t> &workspace_map, ") +
-                         "int32_t tiling_case_id) {");
-    AddAtomicHeaderLine(autofuse::GeneratedHeaderId::kApi,
-                        "bool GetTiling(" + config_.tiling_data_type_name + " &tiling_data, " +
-                            (is_uniq_group_ ? "" : "std::unordered_map<int64_t, uint64_t> &workspace_map, ") +
-                            "int32_t tiling_case_id);");
+  GE_ASSERT_SUCCESS(GenRestoreReuseTilingKey(reuse_info, iter->second));
+  // 分段缓存：reuse wrapper透传命中case的tag与选中tag收集出参，保持与普通group wrapper签名一致。
+  // cache形参与普通组定义同口径恒生成（与复用数据解耦），转发侧恒透传给primary定义
+  std::string segment_define_func;
+  std::string segment_define_head;
+  if (config_.enable_tiling_segment_cache) {
+    segment_define_func = ", const char *segment_sub_case_tag, bool *segment_selected_is_sub_case";
+    segment_define_head = ", const char *segment_sub_case_tag = nullptr, bool *segment_selected_is_sub_case = nullptr";
   }
+  tiling_func_.AddLine("bool GetTiling(" + config_.tiling_data_type_name + " &tiling_data, " +
+                       (is_uniq_group_ ? "" : "std::unordered_map<int64_t, uint64_t> &workspace_map, ") +
+                       "int32_t tiling_case_id, GroupLevelCache* cache" + segment_define_func + ") {");
+  AddAtomicHeaderLine(autofuse::GeneratedHeaderId::kState,
+                      "bool GetTiling(" + config_.tiling_data_type_name + " &tiling_data, " +
+                          (is_uniq_group_ ? "" : "std::unordered_map<int64_t, uint64_t> &workspace_map, ") +
+                          "int32_t tiling_case_id, GroupLevelCache* cache = nullptr" + segment_define_head + ");");
   auto reuse_tiling_data =
       "  auto reuse_tiling_data = RefToRef<" + cur_prefix + "TilingData, " + reuse_prefix + "TilingData>(tiling_data);";
+  tiling_func_.AddLine("  FinalTilingObservationSlotGuard final_tiling_observation_slot_guard(" +
+                       std::to_string(final_tiling_observation_slot_) + "U);");
   tiling_func_.AddLine(reuse_tiling_data);
-  GE_ASSERT_SUCCESS(GenCastReuseTilingDataCode(reuse_info, iter->second));
+  GE_ASSERT_SUCCESS(GenCastReuseTilingDataCode(reuse_info, iter->second, true));
+  std::string segment_args;
+  if (config_.enable_tiling_segment_cache) {
+    segment_args = ", segment_sub_case_tag, segment_selected_is_sub_case";
+  }
   tiling_func_.AddLine("  auto ret = " + reuse_prefix + "::GetTiling(reuse_tiling_data, " +
-                       (is_uniq_group_ ? "" : "workspace_map, ") + "tiling_case_id" +
-                       (with_reuse_info_ ? ", cache" : "") + ");");
-  tiling_func_.AddLine("  tiling_data = RefToRef<" + reuse_prefix + "TilingData, " + cur_prefix +
+                       (is_uniq_group_ ? "" : "workspace_map, ") + "tiling_case_id, cache" + segment_args + ");");
+  tiling_func_.AddLine("  auto current_tiling_data = RefToRef<" + reuse_prefix + "TilingData, " + cur_prefix +
                        "TilingData>(reuse_tiling_data);");
+  tiling_func_.AddLine("  ret = ret && RestoreReuseTilingKey(current_tiling_data);");
+  tiling_func_.AddLine("  if (ret) {");
+  tiling_func_.AddLine("    tiling_data = current_tiling_data;");
+  GE_ASSERT_SUCCESS(GenReuseGroupOwnWorkspaceRegistration());
+  tiling_func_.AddLine("  }");
+  tiling_func_.AddLine("  if (IsFinalTilingObservationEnabled()) {");
+  tiling_func_.AddLine("    ::FinalTilingSelectionSnapshot snapshot;");
+  tiling_func_.AddLine("    if (ret && GetFinalTilingSelectionSnapshot(" +
+                       std::to_string(final_tiling_observation_slot_) + "U, snapshot)) {");
+  const auto &ident = tiling_model_info_[0].schedule_group_ident;
+  tiling_func_.AddLine("      CommitCurrentFinalTilingSelection({true, " + std::to_string(ident.asc_graph_id) + "U, " +
+                       std::to_string(ident.impl_graph_id) + "U, " + std::to_string(ident.group_id) +
+                       "U, tiling_data.get_tiling_key(), static_cast<int32_t>(tiling_data.get_tiling_key()), "
+                       "snapshot.sub_case_id});");
+  tiling_func_.AddLine("    } else { ResetCurrentFinalTilingSelection(); }");
+  tiling_func_.AddLine("  }");
   tiling_func_.AddLine("  return ret;");
   tiling_func_.AddLine("}");
   return af::SUCCESS;
@@ -5735,6 +6817,8 @@ af::Status TilingCodeGenImpl::GenReuseGroupTilingWrapperGetPerf(
 af::Status TilingCodeGenImpl::GenReuseGroupTilingWrapperGetSummary(
     const std::string &cur_prefix, const std::string &reuse_prefix, const ReuseScheduleGroupInfo &reuse_info,
     std::map<ScheduleGroupIdent, ReuseScheduleGroupInfo>::const_iterator iter) {
+  tiling_func_.AddLine("void ResetFinalTilingSelection() { ResetCurrentFinalTilingSelection(); }");
+  AddAtomicHeaderLine(autofuse::GeneratedHeaderId::kApi, "void ResetFinalTilingSelection();");
   tiling_func_.AddLine("void GetSummary(" + config_.tiling_data_type_name + " &tiling_data) {");
   AddAtomicHeaderLine(autofuse::GeneratedHeaderId::kApi,
                       "void GetSummary(" + config_.tiling_data_type_name + " &tiling_data);");
@@ -5748,32 +6832,233 @@ af::Status TilingCodeGenImpl::GenReuseGroupTilingWrapperGetSummary(
   // Reused groups share the primary group's tiling implementation.  Expose the
   // same final-selection query after converting the reused data so the fused
   // summary can use one interface for both ordinary and reused groups.
+  tiling_func_.AddLine("bool GetFinalTilingSelectionFromSnapshot(" + config_.tiling_data_type_name +
+                       " &tiling_data, const ::FinalTilingSelectionSnapshot &snapshot, "
+                       "::FinalTilingGroupSelection &selection) {");
+  AddAtomicHeaderLine(autofuse::GeneratedHeaderId::kApi,
+                      "bool GetFinalTilingSelectionFromSnapshot(" + config_.tiling_data_type_name +
+                          " &, const ::FinalTilingSelectionSnapshot &, ::FinalTilingGroupSelection &);");
+  tiling_func_.AddLine(reuse_tiling_data);
+  GE_ASSERT_SUCCESS(GenCastReuseTilingDataCode(reuse_info, iter->second));
+  GenReuseGroupSnapshotMapping();
+  tiling_func_.AddLine("  if (!" + reuse_prefix +
+                       "::GetFinalTilingSelectionFromSnapshot(reuse_tiling_data, primary_snapshot, selection)) {");
+  tiling_func_.AddLine("    return false;");
+  tiling_func_.AddLine("  }");
+  GE_ASSERT_SUCCESS(GenReuseGroupTilingWrapperSelectionIdentity());
+  tiling_func_.AddLine("  if (selection.template_name.empty()) { return false; }");
+  tiling_func_.AddLine("  return true;");
+  tiling_func_.AddLine("}");
   tiling_func_.AddLine("bool GetFinalTilingSelection(" + config_.tiling_data_type_name +
                        " &tiling_data, ::FinalTilingGroupSelection &selection) {");
   AddAtomicHeaderLine(
       autofuse::GeneratedHeaderId::kApi,
       "bool GetFinalTilingSelection(" + config_.tiling_data_type_name + " &, ::FinalTilingGroupSelection &);");
-  tiling_func_.AddLine(reuse_tiling_data);
-  GE_ASSERT_SUCCESS(GenCastReuseTilingDataCode(reuse_info, iter->second));
-  tiling_func_.AddLine("  if (!" + reuse_prefix + "::GetFinalTilingSelection(reuse_tiling_data, selection)) {");
-  tiling_func_.AddLine("    return false;");
+  tiling_func_.AddLine("  ::FinalTilingSelectionSnapshot snapshot;");
+  tiling_func_.AddLine("  if (!GetFinalTilingSelectionSnapshot(" + std::to_string(final_tiling_observation_slot_) +
+                       "U, snapshot)) { return false; }");
+  tiling_func_.AddLine("  return GetFinalTilingSelectionFromSnapshot(tiling_data, snapshot, selection);");
+  tiling_func_.AddLine("}");
+  if (config_.enable_autofuse_pgo) {
+    GenCopyPgoReuseSelection();
+  }
+  return GenReuseGroupTilingWrapperFinalEmitter(cur_prefix, reuse_prefix, reuse_info, iter);
+}
+
+void TilingCodeGenImpl::GenCopyPgoReuseSelection() {
+  const auto &current = tiling_model_info_[0].schedule_group_ident;
+  const auto &primary = tiling_model_info_[0].reuse_schedule_group->reuse_group_ident;
+  const std::string parameters =
+      config_.tiling_data_type_name + " &tiling_data, std::vector<FinalTilingSelectionSnapshot> &snapshots";
+  AddAtomicHeaderLine(autofuse::GeneratedHeaderId::kApi, "bool CopyPgoReuseSelection(" + parameters + ");");
+  tiling_func_.AddLine("bool CopyPgoReuseSelection(" + parameters + ") {");
+  tiling_func_.AddLine("  const uint32_t primary_key = tiling_data.get_tiling_key();");
+  tiling_func_.AddLine("  if (!RestoreReuseTilingKey(tiling_data)) { return false; }");
+  tiling_func_.AddLine("  constexpr size_t slot = " + std::to_string(final_tiling_observation_slot_) + "U;");
+  tiling_func_.AddLine("  if (slot >= snapshots.size()) { return true; }");
+  tiling_func_.AddLine("  for (const auto &snapshot : snapshots) {");
+  tiling_func_.AddLine("    if (snapshot.valid && snapshot.graph == " + std::to_string(primary.asc_graph_id) +
+                       "U && snapshot.result == " + std::to_string(primary.impl_graph_id) + "U && snapshot.group == " +
+                       std::to_string(primary.group_id) + "U && snapshot.tiling_key == primary_key) {");
+  tiling_func_.AddLine("      const uint32_t key = tiling_data.get_tiling_key();");
+  tiling_func_.AddLine("      snapshots[slot] = {true, " + std::to_string(current.asc_graph_id) + "U, " +
+                       std::to_string(current.impl_graph_id) + "U, " + std::to_string(current.group_id) +
+                       "U, key, static_cast<int32_t>(key), snapshot.sub_case_id};");
+  tiling_func_.AddLine("      break;");
+  tiling_func_.AddLine("    }");
   tiling_func_.AddLine("  }");
-  tiling_func_.AddLine("  selection.group = " + std::to_string(tiling_model_info_[0].schedule_group_ident.group_id) +
-                       "U;");
   tiling_func_.AddLine("  return true;");
   tiling_func_.AddLine("}");
+}
+
+af::Status TilingCodeGenImpl::GenReuseGroupTilingWrapperFinalEmitter(
+    const std::string &cur_prefix, const std::string &reuse_prefix, const ReuseScheduleGroupInfo &reuse_info,
+    std::map<ScheduleGroupIdent, ReuseScheduleGroupInfo>::const_iterator iter) {
+  RequireTranslationUnitSystemHeader("sstream");
+  GE_ASSERT_SUCCESS(GenFinalTilingReprFunction());
+  const std::string reuse_tiling_data =
+      "  auto reuse_tiling_data = RefToRef<" + cur_prefix + "TilingData, " + reuse_prefix + "TilingData>(tiling_data);";
   tiling_func_.AddLine("void EmitFinalTilingByCase(" + config_.tiling_data_type_name +
                        " &tiling_data, uint32_t corenum, const char *source, const char *selection_mode, "
-                       "uint32_t group_id, int32_t requested_case_id) {");
+                       "uint32_t group_id, int32_t requested_case_id, int64_t topn_output) {");
   AddAtomicHeaderLine(autofuse::GeneratedHeaderId::kApi,
                       "void EmitFinalTilingByCase(" + config_.tiling_data_type_name +
-                          " &, uint32_t, const char *, const char *, uint32_t, int32_t);");
+                          " &, uint32_t, const char *, const char *, uint32_t, int32_t, int64_t topn_output = -1);");
+  tiling_func_.AddLine("  if (!ShouldEmitFinalTiling()) { return; }");
+  tiling_func_.AddLine("  try {");
   tiling_func_.AddLine(reuse_tiling_data);
   GE_ASSERT_SUCCESS(GenCastReuseTilingDataCode(reuse_info, iter->second));
-  tiling_func_.AddLine("  " + reuse_prefix +
-                       "::EmitFinalTilingByCase(reuse_tiling_data, corenum, source, selection_mode, group_id, "
-                       "requested_case_id);");
+  tiling_func_.AddLine("  switch (requested_case_id) {");
+  std::set<uint32_t> emitted_case_ids;
+  for (size_t index = 0UL; index < reuse_info.tiling_keys.size(); ++index) {
+    if (!emitted_case_ids.insert(iter->second.tiling_keys[index]).second) {
+      continue;
+    }
+    tiling_func_.AddLine("    case " + std::to_string(iter->second.tiling_keys[index]) +
+                         ": requested_case_id = " + std::to_string(reuse_info.tiling_keys[index]) + "; break;");
+  }
+  tiling_func_.AddLine("    default: break;");
+  tiling_func_.AddLine("  }");
+  GenReuseGroupTilingWrapperFinalObservation(reuse_prefix);
+  tiling_func_.AddLine("  } catch (...) { DisableFinalTilingObservation(); }");
   tiling_func_.AddLine("}");
+  return af::SUCCESS;
+}
+
+void TilingCodeGenImpl::GenReuseGroupSnapshotMapping() {
+  const auto &ident = tiling_model_info_[0].schedule_group_ident;
+  const auto &primary = tiling_model_info_[0].reuse_schedule_group->reuse_group_ident;
+  tiling_func_.AddLine("  auto primary_snapshot = snapshot;");
+  tiling_func_.AddLine(
+      "  primary_snapshot.valid = snapshot.valid && snapshot.graph == " + std::to_string(ident.asc_graph_id) +
+      "U && snapshot.result == " + std::to_string(ident.impl_graph_id) + "U && snapshot.group == " +
+      std::to_string(ident.group_id) + "U && snapshot.tiling_key == tiling_data.get_tiling_key();");
+  tiling_func_.AddLine("  primary_snapshot.graph = " + std::to_string(primary.asc_graph_id) + "U;");
+  tiling_func_.AddLine("  primary_snapshot.result = " + std::to_string(primary.impl_graph_id) + "U;");
+  tiling_func_.AddLine("  primary_snapshot.group = " + std::to_string(primary.group_id) + "U;");
+  tiling_func_.AddLine("  primary_snapshot.tiling_key = reuse_tiling_data.get_tiling_key();");
+  tiling_func_.AddLine("  primary_snapshot.case_id = static_cast<int32_t>(primary_snapshot.tiling_key);");
+}
+
+void TilingCodeGenImpl::GenReuseGroupTilingWrapperFinalObservation(const std::string &reuse_prefix) {
+  const auto &ident = tiling_model_info_[0].schedule_group_ident;
+  tiling_func_.AddLine("  FinalTilingContext final_context{1U, source, selection_mode, OP_NAME, " +
+                       std::to_string(ident.asc_graph_id) + "U, " + std::to_string(ident.impl_graph_id) +
+                       "U, group_id, -1, 0U, 0, \"\", \"\", \"\", {}, {}, \"\", \"\"};");
+  tiling_func_.AddLine("  ::FinalTilingSelectionSnapshot snapshot;");
+  tiling_func_.AddLine("  const bool has_snapshot = GetFinalTilingSelectionSnapshot(" +
+                       std::to_string(final_tiling_observation_slot_) + "U, snapshot);");
+  GenReuseGroupSnapshotMapping();
+  tiling_func_.AddLine("  const bool has_details =");
+  tiling_func_.AddLine("      has_snapshot &&");
+  tiling_func_.AddLine("      " + reuse_prefix +
+                       "::GetFinalTilingContextFromSnapshot(reuse_tiling_data, corenum, requested_case_id, "
+                       "primary_snapshot, final_context);");
+  tiling_func_.AddLine(
+      "  final_context.case_id = final_context.case_id < 0 ? -1 : "
+      "static_cast<int32_t>(tiling_data.get_tiling_key());");
+  tiling_func_.AddLine("  final_context.tiling_key = tiling_data.get_tiling_key();");
+  tiling_func_.AddLine("  if (has_details) {");
+  GenReuseGroupSelectedTemplateIdentity("final_context");
+  tiling_func_.AddLine("    final_context.semantic_names = {final_context.semantic_name};");
+  tiling_func_.AddLine("  }");
+  tiling_func_.AddLine("  if (topn_output >= 0 || (has_details && !final_context.template_name.empty())) {");
+  tiling_func_.AddLine("    final_context.tiling_repr = GetTilingDataRepr(&tiling_data);");
+  tiling_func_.AddLine(
+      "    final_context.repr_kind = final_context.tiling_repr.empty() ? \"unavailable\" : \"full_json\";");
+  tiling_func_.AddLine("    EmitFinalTilingRecord(final_context, topn_output);");
+  tiling_func_.AddLine("    if (topn_output < 0) { EmitTemplateSemanticRecord(final_context); }");
+  tiling_func_.AddLine("    return;");
+  tiling_func_.AddLine("  }");
+  tiling_func_.AddLine("  for (const auto &info : GetTemplateSemanticInfos(tiling_data)) {");
+  tiling_func_.AddLine("    final_context.template_name = info.template_name;");
+  tiling_func_.AddLine("    final_context.semantic_name = info.semantic_name;");
+  tiling_func_.AddLine("    final_context.semantic_names = info.semantic_names;");
+  tiling_func_.AddLine("    EmitTemplateSemanticRecord(final_context, info.name_status == \"ambiguous\");");
+  tiling_func_.AddLine("  }");
+}
+
+af::Status TilingCodeGenImpl::GenReuseGroupTilingWrapperGetTemplateSemanticInfos(
+    const std::string &cur_prefix, const std::string &reuse_prefix, const ReuseScheduleGroupInfo &reuse_info,
+    std::map<ScheduleGroupIdent, ReuseScheduleGroupInfo>::const_iterator iter) {
+  const auto &current_ident = tiling_model_info_[0].schedule_group_ident;
+  tiling_func_.AddLine("std::vector<::TemplateSemanticInfo> GetTemplateSemanticInfos(" + config_.tiling_data_type_name +
+                       " &tiling_data) {");
+  AddAtomicHeaderLine(
+      autofuse::GeneratedHeaderId::kApi,
+      "std::vector<::TemplateSemanticInfo> GetTemplateSemanticInfos(" + config_.tiling_data_type_name + " &);");
+  tiling_func_.AddLine("  auto reuse_tiling_data = RefToRef<" + cur_prefix + "TilingData, " + reuse_prefix +
+                       "TilingData>(tiling_data);");
+  GE_ASSERT_SUCCESS(GenCastReuseTilingDataCode(reuse_info, iter->second));
+  tiling_func_.AddLine("  auto semantic_infos = " + reuse_prefix + "::GetTemplateSemanticInfos(reuse_tiling_data);");
+  tiling_func_.AddLine("  for (auto &info : semantic_infos) {");
+  tiling_func_.AddLine("    info.graph = " + std::to_string(current_ident.asc_graph_id) + "U;");
+  tiling_func_.AddLine("    info.result = " + std::to_string(current_ident.impl_graph_id) + "U;");
+  tiling_func_.AddLine("    info.group = " + std::to_string(current_ident.group_id) + "U;");
+  tiling_func_.AddLine("    info.tiling_key = tiling_data.get_tiling_key();");
+  GE_ASSERT_SUCCESS(GenReuseGroupTilingWrapperTemplateIdentity("info", true));
+  tiling_func_.AddLine("  }");
+  tiling_func_.AddLine("  return semantic_infos;");
+  tiling_func_.AddLine("}");
+  return af::SUCCESS;
+}
+
+af::Status TilingCodeGenImpl::GenReuseGroupTilingWrapperSelectionIdentity() {
+  const auto &current_ident = tiling_model_info_[0].schedule_group_ident;
+  tiling_func_.AddLine("  selection.group = " + std::to_string(current_ident.group_id) + "U;");
+  tiling_func_.AddLine("  selection.case_id = static_cast<int32_t>(tiling_data.get_tiling_key());");
+  tiling_func_.AddLine("  selection.tiling_key = tiling_data.get_tiling_key();");
+  GenReuseGroupSelectedTemplateIdentity("selection");
+  return af::SUCCESS;
+}
+
+void TilingCodeGenImpl::GenReuseGroupSelectedTemplateIdentity(const std::string &object_name) {
+  const auto &ident = tiling_model_info_[0].schedule_group_ident;
+  tiling_func_.AddLine("    " + object_name + ".template_name.clear();");
+  std::map<uint32_t, std::set<SemanticIdentity>> identities_by_key;
+  for (const auto &model : tiling_model_info_) {
+    identities_by_key[model.tiling_case_id].emplace(model.sub_case_tag, model.semantic_name);
+  }
+  std::set<std::pair<uint32_t, std::string>> emitted_cases;
+  for (const auto &model : tiling_model_info_) {
+    if (!emitted_cases.emplace(model.tiling_case_id, model.sub_case_tag).second) {
+      continue;
+    }
+    const std::string key = std::to_string(model.tiling_case_id);
+    const bool unique = identities_by_key.at(model.tiling_case_id).size() == 1UL;
+    const std::string tag_condition =
+        unique ? "" : " && " + object_name + ".sub_case_tag == \"" + model.sub_case_tag + "\"";
+    tiling_func_.AddLine("    if (" + object_name + ".tiling_key == " + key + "U" + tag_condition + ") {");
+    tiling_func_.AddLine("      " + object_name + ".sub_case_tag = \"" + model.sub_case_tag + "\";");
+    tiling_func_.AddLine("      " + object_name + ".template_name = \"" + ident.GetItemPrefix() + "_" +
+                         model.sub_case_tag + key + "\";");
+    tiling_func_.AddLine("      " + object_name + ".semantic_name = \"" + model.semantic_name + "\";");
+    tiling_func_.AddLine("    }");
+  }
+}
+
+af::Status TilingCodeGenImpl::GenReuseGroupTilingWrapperTemplateIdentity(const std::string &object_name,
+                                                                         bool emit_status) {
+  std::set<uint32_t> current_keys;
+  for (const auto &model_info : tiling_model_info_) {
+    current_keys.insert(model_info.tiling_case_id);
+  }
+  tiling_func_.AddLine("    " + object_name + ".template_name.clear();");
+  for (const auto tiling_key : current_keys) {
+    const auto semantic_identities = GetSemanticIdentitiesByTilingKey(tiling_model_info_, tiling_key);
+    const bool ambiguous = semantic_identities.size() > 1UL;
+    tiling_func_.AddLine("    if (tiling_data.get_tiling_key() == " + std::to_string(tiling_key) + "U) {");
+    if (!ambiguous) {
+      tiling_func_.AddLine("      " + object_name + ".template_name = \"" + semantic_identities.front().second + "\";");
+    }
+    if (emit_status) {
+      const std::string name = GetCommonSemanticParentName(semantic_identities);
+      tiling_func_.AddLine("      " + object_name + ".semantic_name = \"" + name + "\";");
+      tiling_func_.AddLine("      " + object_name + ".semantic_names = {\"" + name + "\"};");
+      tiling_func_.AddLine("      " + object_name + ".name_status = \"" + (ambiguous ? "ambiguous" : "") + "\";");
+    }
+    tiling_func_.AddLine("    }");
+  }
   return af::SUCCESS;
 }
 
@@ -5801,6 +7086,10 @@ af::Status TilingCodeGenImpl::GenReuseGroupTilingWrapper(std::map<std::string, s
   GE_ASSERT_SUCCESS(GenReuseGroupTilingWrapperGetPerf(cur_prefix, reuse_prefix, reuse_info, iter));
   // Gen GetSummary
   GE_ASSERT_SUCCESS(GenReuseGroupTilingWrapperGetSummary(cur_prefix, reuse_prefix, reuse_info, iter));
+  GE_ASSERT_SUCCESS(GenReuseGroupTilingWrapperGetTemplateSemanticInfos(cur_prefix, reuse_prefix, reuse_info, iter));
+  if (config_.enable_autofuse_pgo) {
+    GE_ASSERT_SUCCESS(GenPGOReuseGroupTilingWrapper(), "Generate func call entrance failed.");
+  }
   AppendAtomicHeaderBody(autofuse::GeneratedHeaderId::kState, "} // namespace " + cur_prefix + "\n");
   AddAtomicHeaderLine(autofuse::GeneratedHeaderId::kApi, "} // namespace " + cur_prefix);
   tiling_func_.AddLine("} // namespace " + cur_prefix);
@@ -5836,6 +7125,7 @@ af::Status TilingCodeGenImpl::GenPGOReuseGroupTilingWrapper() {
   auto reuse_tiling_data = "  auto reuse_tiling_data = RefToRef<" + reuse_prefix + "TilingData, " + cur_prefix +
                            "TilingData>(autofuse_tiling_data_tmp." + reuse_item_prefix + "_tiling_data);";
   tiling_func_.AddLine(reuse_tiling_data);
+  tiling_func_.AddLine("  if (!RestoreReuseTilingKey(reuse_tiling_data)) { return false; }");
   tiling_func_.AddLine("  autofuse_tiling_data_tmp." + cur_item_prefix + "_tiling_data = reuse_tiling_data;");
   tiling_func_.AddLine("  if (!GetWorkspaceSize(autofuse_tiling_data_tmp, workspaceSize)) {");
   tiling_func_.AddLine("    return false;");

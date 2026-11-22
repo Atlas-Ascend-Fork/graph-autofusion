@@ -26,6 +26,7 @@
 #include "graph/ge_context.h"
 #include "common/platform_context.h"
 #include "graph/utils/type_utils.h"
+#include "graph/symbolizer/symbolic_utils.h"
 
 namespace codegen {
 using namespace af::ascir_op;
@@ -49,6 +50,18 @@ std::string GetDeviceIdForCubeTiling() {
   return std::to_string(af::GetContext().DeviceId());
 }
 
+std::string TensorShapeToStr(const std::vector<ge::Expression> &shape) {
+  std::string result = "{";
+  for (size_t i = 0U; i < shape.size(); ++i) {
+    const std::string dim = shape[i].Str().get();
+    if (i != 0U) {
+      result += ", ";
+    }
+    result += dim.find("Rational") == std::string::npos ? dim : af::SymbolicUtils::AsNumerDenomToString(shape[i]);
+  }
+  return result + "}";
+}
+
 void AppendCvUbFusionStageSizeName(const ascir::FusedScheduledResult &fused_schedule_result, std::stringstream &ss) {
   if (!ascgen_utils::IsCubeUBFusedScheduled(fused_schedule_result) ||
       fused_schedule_result.node_idx_to_scheduled_results.empty() ||
@@ -60,16 +73,78 @@ void AppendCvUbFusionStageSizeName(const ascir::FusedScheduledResult &fused_sche
   auto graph = fused_schedule_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs[0];
   ss << std::endl;
   ss << "extern \"C\" const char* GetCVUBFusionStageSizeName() {" << std::endl;
+  std::string stage_axis_name;
   for (auto axis : graph.GetAllAxis()) {
     if (axis->type == ascir::Axis::Type::kAxisTypeTileInner) {
-      ss << "  return \"" << axis->name << "_size\";" << std::endl;
-      GELOGD("gen GetCVUBFusionStageSizeName axis name:%s", axis->name.c_str());
+      stage_axis_name = axis->name;
     }
+  }
+  if (!stage_axis_name.empty()) {
+    ss << "#define STAGE_SIZE_NAME " << stage_axis_name << "_size\n";
+    ss << "  return \"" << stage_axis_name << "_size\";\n";
+    GELOGD("gen GetCVUBFusionStageSizeName axis name:%s", stage_axis_name.c_str());
+  } else {
+    ss << "  return \"\";\n";
   }
   ss << "}" << std::endl;
 }
 
 }  // namespace
+
+void TilingLib::AppendCvUbStageSizeSelection(const ascir::FusedScheduledResult &fused_schedule_result,
+                                             const ascir::FusedScheduledResult &elemwise_schedule_result,
+                                             std::stringstream &ss) {
+  if (!ascgen_utils::IsCubeUBFusedScheduled(fused_schedule_result)) {
+    return;
+  }
+  ss << "static inline uint32_t GetCvUbStageSize(const AutofuseTilingData &data, uint32_t selected_case) {\n";
+  ss << "  switch (selected_case) {\n";
+  uint32_t case_id = 0U;
+  for (size_t node_id = 0U; node_id < fused_schedule_result.node_idx_to_scheduled_results.size(); ++node_id) {
+    const auto &results = fused_schedule_result.node_idx_to_scheduled_results[node_id];
+    for (size_t result_id = 0U; result_id < results.size(); ++result_id) {
+      if (results[result_id].cube_type != ascir::CubeTemplateType::kUBFuse) {
+        continue;
+      }
+      const auto &groups = results[result_id].schedule_groups;
+      for (size_t group_id = 0U; group_id < groups.size(); ++group_id) {
+        const std::string field = ascgen_utils::IsSingleGroup(elemwise_schedule_result)
+                                      ? "data"
+                                      : "data.graph" + std::to_string(node_id) + "_result" + std::to_string(result_id) +
+                                            "_g" + std::to_string(group_id) + "_tiling_data";
+        for (const auto &graph : groups[group_id].impl_graphs) {
+          if (ascgen_utils::IsCubeType(graph)) {
+            continue;
+          }
+          std::string full_m;
+          for (const auto &node : graph.GetAllNodes()) {
+            if (ascir::IsCvMBroadcast(*node)) {
+              full_m = ascir::GetCvBroadcastShape(*node)[0].Str().get();
+              break;
+            }
+          }
+          std::string stage_axis_name;
+          for (const auto &axis : graph.GetAllAxis()) {
+            if (axis->type == ascir::Axis::kAxisTypeTileInner) {
+              stage_axis_name = axis->name;
+            }
+          }
+          ss << "    case " << case_id++ << "U: return ";
+          if (stage_axis_name.empty()) {
+            ss << "0U;\n";
+          } else if (!full_m.empty()) {
+            ss << "([](uint64_t elements) { return elements <= UINT32_MAX ? static_cast<uint32_t>(elements) : 0U; })("
+               << "static_cast<uint64_t>(" << full_m << ") * " << field << ".get_" << stage_axis_name << "_size());\n";
+          } else {
+            ss << field << ".get_" << stage_axis_name << "_size();\n";
+          }
+        }
+      }
+    }
+  }
+  ss << "    default: return 0U;\n  }\n}\n";
+}
+
 std::string DtypeToStr(ge::DataType dtype) {
   const std::map<ge::DataType, const ge::char_t *> kTypeName = {
       {ge::DT_FLOAT, "float32"}, {ge::DT_FLOAT16, "float16"}, {ge::DT_BF16, "bfloat16"}, {ge::DT_INT8, "int8"},
@@ -82,7 +157,7 @@ std::string DtypeToStr(ge::DataType dtype) {
   return type_name_iter->second;
 }
 
-std::string TilingLib::GenCVTilingFunc() const {
+std::string TilingLib::GenCVTilingFunc(const std::vector<bool> &broadcast_policies, bool batch_n_rows) const {
   std::string find_cv_tiling_func = R"(
 static int32_t g_basen_basem_align = 0;
 
@@ -121,10 +196,79 @@ extern "C" int64_t GenCVFusionTilingKey(char* config_file, int aiv_num, int ub_s
   return 0; // ub全载模板返回0
 }
 )";
+  if (!broadcast_policies.empty()) {
+    // Static GE compile and const serialization must run the same feasibility
+    // check with the same Cube reservation and actual candidate buffer policy.
+    find_cv_tiling_func.erase(find_cv_tiling_func.find("extern \"C\" int64_t GenCVFusionTilingKey"));
+    std::stringstream ss;
+    ss << find_cv_tiling_func;
+    ss << R"(
+static int64_t SelectCvBroadcastTiling(char *config_file, int aiv_num, int ub_size,
+                                      AutofuseTilingData &data, uint64_t &workspace_size, uint32_t &block_dim,
+                                      bool &non_db) {
+  if (ub_size <= 256 || basen_basem_align <= 0 || cube_output_type_size <= 0) {return -1;}
+  const uint64_t cube_reserve = static_cast<uint64_t>(basen_basem_align) * cube_output_type_size;
+  if (cube_reserve >= static_cast<uint64_t>(ub_size - 256)) {return -1;}
+  ResLimit limit;
+  limit.aiv_num = aiv_num;
+)";
+    if (batch_n_rows) {
+      ss << "  const auto row_capacity = static_cast<uint32_t>(basen_basem_align / basen_align);\n"
+         << "  limit.ub_size = (ub_size - 256 - cube_reserve) / row_capacity;\n";
+    } else {
+      ss << "  limit.ub_size = ub_size - 256 - cube_reserve;\n";
+    }
+    ss << "  const bool non_db_cases[] = {";
+    for (size_t i = 0UL; i < broadcast_policies.size(); ++i) {
+      ss << (i == 0UL ? "" : ", ") << (broadcast_policies[i] ? "true" : "false");
+    }
+    ss << "};\n";
+    ss << "  for (uint32_t selected_case = 0; selected_case < " << broadcast_policies.size()
+       << "U; ++selected_case) {\n";
+    ss << R"(    set_g_basen_basem_align(non_db_cases[selected_case] ? basen_basem_align : basen_align);
+    if (AutofuseTilingWithConfig(config_file, &data, &workspace_size, &block_dim, &limit, selected_case) == 0) {
+)";
+    if (batch_n_rows) {
+      ss << "      const auto width = GetCvUbStageSize(data, selected_case);\n"
+         << "      if (width == 0U || width % 32U != 0U || width > INT32_MAX / row_capacity) {continue;}\n";
+    }
+    ss << R"(      non_db = non_db_cases[selected_case];
+      return selected_case;
+    }
+  }
+  return -1;
+}
+extern "C" int64_t GenCVFusionTilingKey(char *config_file, int aiv_num, int ub_size) {
+  uint64_t workspace_size = 0U;
+  uint32_t block_dim = 0U;
+  bool non_db = false;
+  const auto selected = SelectCvBroadcastTiling(config_file, aiv_num, ub_size, TilingDataValue,
+                                                workspace_size, block_dim, non_db);
+  return selected < 0 ? -1 : (non_db ? 0 : 1);
+}
+)";
+    return ss.str();
+  }
   return find_cv_tiling_func;
 }
 
 std::string TilingLib::GenTilingDataBlockDimAndWss() const {
+  return GenTilingDataBlockDimAndWss(false);
+}
+
+std::string TilingLib::GenTilingDataBlockDimAndWss(bool exclude_system_workspace, bool cv_broadcast) const {
+  if (cv_broadcast) {
+    return R"(
+extern "C" int GenTilingDataValueBlockDimAndWss(char *config_file, uint32_t aiv_num, uint32_t ub_size,
+                                             uint64_t *workspace_size, uint32_t *block_dim) {
+  bool non_db = false;
+  if (SelectCvBroadcastTiling(config_file, aiv_num, ub_size, TilingDataValue, *workspace_size, *block_dim, non_db) < 0) {
+    return -1;
+  }
+  return GetWorkspaceSize(TilingDataValue, *workspace_size) ? 0 : -1;
+}
+)";
+  }
   std::string get_block_dim_and_wss = R"(
 extern "C" int GenTilingDataValueBlockDimAndWss(char* config_file, uint32_t aiv_num, uint32_t ub_size, uint64_t* workspace_size, uint32_t* block_dim) {
     ResLimit limit;
@@ -135,8 +279,14 @@ extern "C" int GenTilingDataValueBlockDimAndWss(char* config_file, uint32_t aiv_
         OP_LOGI(OP_NAME, "get_block_dim_and_wss return -1");
         return -1;
     } else {
-        return 0;
-    }
+)";
+  if (exclude_system_workspace) {
+    // AscendC passes user workspace after its system-reserved region.
+    get_block_dim_and_wss += "        return GetWorkspaceSize(TilingDataValue, *workspace_size) ? 0 : -1;\n";
+  } else {
+    get_block_dim_and_wss += "        return 0;\n";
+  }
+  get_block_dim_and_wss += R"(    }
 }
 )";
   return get_block_dim_and_wss;
@@ -247,6 +397,12 @@ Status TilingLib::ExtractInputsFromMatMulNode(const ge::AscNodePtr &matmul_node,
 
     TensorInfo tensor_info;
     GE_CHK_STATUS(GetInputTensorInfoFromLoadNode(load_node, tensor_info), "Get matmul input info failed.");
+    const auto bmm_input_view = i == 1U ? GetBmmInputView(matmul_node) : nullptr;
+    if (bmm_input_view != nullptr) {
+      tensor_info.strides = bmm_input_view->outputs[0].attr.strides;
+      // A unit N axis may have zero stride after loop normalization.
+      tensor_info.strides.back() = af::sym::kSymbolOne;
+    }
     inputs.push_back(tensor_info);
   }
 
@@ -284,8 +440,11 @@ std::string TilingLib::GenerateTensorInfoCode(const TensorInfo &tensor, const st
   ss << "  " << var_name << ".name = \"" << tensor.name << "\";\n";
   ss << "  " << var_name << ".dtype = \"" << tensor.dtype << "\";\n";
   ss << "  " << var_name << ".format = \"" << tensor.format << "\";\n";
-  ss << "  " << var_name << ".shape = " << VectorToStr(tensor.shape, '{', '}') << ";\n";
-  ss << "  " << var_name << ".ori_shape = " << VectorToStr(tensor.ori_shape, '{', '}') << ";\n";
+  ss << "  " << var_name << ".shape = " << TensorShapeToStr(tensor.shape) << ";\n";
+  ss << "  " << var_name << ".ori_shape = " << TensorShapeToStr(tensor.ori_shape) << ";\n";
+  if (!tensor.strides.empty()) {
+    ss << "  " << var_name << ".strides = " << TensorShapeToStr(tensor.strides) << ";\n";
+  }
   ss << "  " << var_name << ".param_name = \"" << tensor.param_name << "\";\n";
   return ss.str();
 }
@@ -325,7 +484,7 @@ void TilingLib::PrepareMatMulAttrs(const MatMulCubeInfo &cube_info, std::vector<
   AttrInfo attr3;
   attr3.name = "offset_x";
   attr3.dtype = "int";
-  attr3.value_int = 0x80;
+  attr3.value_int = cube_info.offset_x;
   attrs.push_back(attr3);
 
   AttrInfo attr4;
@@ -385,14 +544,28 @@ void TilingLib::GenerateTilingCallCode(std::stringstream &code_ss, bool is_batch
   code_ss << "CubeKernelTilingWrapper wrapper;\n";
   code_ss << "TilingResult result = wrapper.DoMatMulTiling(compile_info, inputs, outputs, attrs, "
           << (is_batch ? "true" : "false") << ");\n";
+  code_ss << "if (!result.success || result.tiling_data.empty()) {\n";
+  code_ss << "  OP_LOGE(OP_NAME, \"Cube tiling failed: %s\", result.error_msg.c_str());\n";
+  code_ss << "  return false;\n";
+  code_ss << "}\n";
   code_ss << "ws_size = result.workspace_size;\n";
+  code_ss << "#ifdef CV_BMM_INPUT_VIEW\n";
+  code_ss << "tiling_data->cv_tiling_data.materialize_b = result.materialize_b;\n";
+  code_ss << "tiling_data->cv_tiling_data.b_workspace_offset = result.b_workspace_offset;\n";
+  code_ss << "#ifdef CV_DYNAMIC_BMM_INPUT_VIEW\n";
+  code_ss << "const auto b_input_shape = inputs[1].shape;\n";
+  code_ss << "for (size_t i = 0U; i < 3U; ++i) {\n";
+  code_ss << "  tiling_data->cv_tiling_data.b_input_shape[i] = static_cast<uint64_t>(b_input_shape[i]);\n";
+  code_ss << "}\n";
+  code_ss << "#endif\n";
+  code_ss << "#endif\n";
 
   // 保存字节流到全局变量（用于静态shape常量生成）
   code_ss << "// Save tiling bytes for const generation in static shape\n";
   code_ss << "g_matmul_tiling_bytes = result.tiling_data;\n";
-  code_ss << "std::memset(tiling_data->matmul_tiling_data, 0, sizeof(tiling_data->matmul_tiling_data));\n";
+  code_ss << "std::memset(&tiling_data->matmul_tiling_data, 0, sizeof(tiling_data->matmul_tiling_data));\n";
   code_ss << "size_t copy_size = std::min(result.tiling_data.size(), sizeof(tiling_data->matmul_tiling_data));\n";
-  code_ss << "std::memcpy(tiling_data->matmul_tiling_data, result.tiling_data.data(), copy_size);\n";
+  code_ss << "std::memcpy(&tiling_data->matmul_tiling_data, result.tiling_data.data(), copy_size);\n";
 
   code_ss << "cube_block_dim = result.cube_used_core_num;\n";
   code_ss << "basem = result.cube_base_m;\n";
@@ -438,8 +611,8 @@ std::string TilingLib::GenerateMatMulTilingCode(const CompileInfo &compile_info,
   return code_ss.str();
 }
 
-std::string TilingLib::ProcessCubeKernelTilingFromFusedResult(
-    const ascir::FusedScheduledResult &fused_schedule_result) const {
+std::string TilingLib::ProcessCubeKernelTilingFromFusedResult(const ascir::FusedScheduledResult &fused_schedule_result,
+                                                              bool enable_input_view) const {
   MatMulCubeInfo cube_info;
   GE_ASSERT_SUCCESS(ExtractMatMulCubeInfoFromFusedResult(fused_schedule_result, cube_info),
                     "[Extract][MatMulCubeInfo]Failed to extract MatMul cube info from FusedScheduledResult");
@@ -448,6 +621,26 @@ std::string TilingLib::ProcessCubeKernelTilingFromFusedResult(
   GE_ASSERT_SUCCESS(ExtractInputsFromMatMulNode(cube_info.matmul_node, inputs),
                     "[Extract][Inputs]Failed to extract inputs from MatMul node[%s]",
                     cube_info.matmul_node->GetName().c_str());
+
+  // Lowering pads a shared N-vector bias to the output rank for loop alignment.
+  // Native BMM interprets a ranked bias as per-batch; restore the vector metadata.
+  if (cube_info.is_batch && cube_info.has_bias && inputs.size() > 2U) {
+    auto &bias = inputs[2U];
+    if (bias.shape.size() > 1U && std::all_of(bias.shape.begin(), bias.shape.end() - 1, [](const af::Expression &dim) {
+          int64_t value = 0;
+          return dim.GetConstValue(value) && value == 1;
+        })) {
+      bias.shape = {bias.shape.back()};
+      bias.ori_shape = bias.shape;
+    }
+  }
+
+  // Only Inductor graphs that retain the original B view carry native strides.
+  if (!enable_input_view || FindBmmInputView(fused_schedule_result) == nullptr) {
+    for (auto &input : inputs) {
+      input.strides.clear();
+    }
+  }
 
   std::vector<TensorInfo> outputs;
   GE_ASSERT_SUCCESS(ExtractOutputsFromMatMulNode(cube_info.matmul_node, outputs),
@@ -477,12 +670,30 @@ std::map<std::string, std::string> TilingLib::GenerateCVFusionStatic(
     const ascir::FusedScheduledResult &elemwise_schedule_result, const std::map<std::string, std::string> &shape_info,
     const std::string &pgo_dir, const std::string &core_num) const {
   std::stringstream ss;
+  AppendCvUbStageSizeSelection(fused_schedule_result, elemwise_schedule_result, ss);
   ss << TilingFuncDef(fused_schedule_result, elemwise_schedule_result, shape_info, pgo_dir, core_num) << std::endl;
   ss << TilingData("Autofuse").GenerateConst(elemwise_schedule_result, false) << std::endl;
 
-  ss << GenCVTilingFunc();
+  const bool cv_broadcast = ascir::HasCvBroadcast(fused_schedule_result);
+  ss << GenCVTilingFunc(cv_broadcast ? GetCvUbBufferPolicies(fused_schedule_result) : std::vector<bool>{},
+                        UseCvNRowBatch(fused_schedule_result));
   AppendCvUbFusionStageSizeName(elemwise_schedule_result, ss);
-  ss << GenTilingDataBlockDimAndWss();
+  ss << GenTilingDataBlockDimAndWss(!ascgen_utils::IsConv2DFusedScheduled(fused_schedule_result), cv_broadcast);
+  if (!ascgen_utils::IsConv2DFusedScheduled(fused_schedule_result)) {
+    MatMulCubeInfo cube_info;
+    GE_ASSERT_SUCCESS(ExtractMatMulCubeInfoFromFusedResult(fused_schedule_result, cube_info),
+                      "Failed to extract MatMul cube info for static CV kernel mode.");
+    AppendCvSafetyMixModeHelperDefs(ss, cube_info.is_batch);
+    ss << R"(
+extern "C" bool IsCVSafetyAivOnly(int64_t tiling_key) {
+  return is_cv_safety_aiv_only_mode(tiling_key);
+}
+
+extern "C" bool IsCVSafetyBlockIdxScheduled(int64_t tiling_key) {
+  return is_cv_safety_blockidx_scheduled_mode(tiling_key);
+}
+)";
+  }
   return {{kTilingDefAndConstIdentify, ss.str()}};
 }
 
@@ -498,7 +709,7 @@ std::map<std::string, std::string> TilingLib::GenerateCVFusionDynamic(
       std::string var_define = std::string(vars.Str().get());
       auto it = shape_info.find(var_define);
       if (it != shape_info.end()) {
-        shape_symbol << "uint32_t " << var_define << ", ";
+        shape_symbol << "int64_t " << var_define << ", ";
       }
     }
   }
@@ -510,17 +721,21 @@ std::map<std::string, std::string> TilingLib::GenerateCVFusionDynamic(
   GE_ASSERT_SUCCESS(ExtractMatMulCubeInfoFromFusedResult(fused_schedule_result, cube_info),
                     "[Extract][MatMulCubeInfo]Failed to extract MatMul cube info from FusedScheduledResult");
   AppendCvSafetyMixModeHelperDefs(call_cube_tiling, cube_info.is_batch);
+  AppendCvUbSupportedKeyHelperDef(call_cube_tiling,
+                                  (!cube_info.is_batch && cube_info.type_size == sizeof(float)) ? "true" : "false");
 
   // 在CallCubeTiling函数之前定义全局变量（用于静态shape常量生成）
   call_cube_tiling << "// Global variable to store tiling bytes for const generation in static shape\n";
   call_cube_tiling << "std::vector<uint8_t> g_matmul_tiling_bytes;\n\n";
 
-  call_cube_tiling << "extern \"C\" void CallCubeTiling(" << shape_symbol.str() << ") {" << std::endl;
+  call_cube_tiling << "extern \"C\" bool CallCubeTiling(" << shape_symbol.str() << ") {" << std::endl;
   call_cube_tiling << ProcessCubeKernelTilingFromFusedResult(fused_schedule_result) << std::endl;
+  call_cube_tiling << "return true;" << std::endl;
   call_cube_tiling << "}" << std::endl;
   ss << call_cube_tiling.str();
 
   AppendCvUbFusionStageSizeName(elemwise_schedule_result, ss);
+  AppendCvUbStageSizeSelection(fused_schedule_result, elemwise_schedule_result, ss);
   ss << TilingFuncDef(fused_schedule_result, elemwise_schedule_result, shape_info, pgo_dir, core_num) << std::endl;
 
   std::map<std::string, std::string> result;

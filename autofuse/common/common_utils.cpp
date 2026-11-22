@@ -9,11 +9,16 @@
  */
 
 #include "common_utils.h"
+#include "arg_reduce_utils.h"
 
+#include <algorithm>
+#include <cctype>
+#include <map>
 #include <sstream>
 #include <vector>
 #include <regex>
 #include <climits>
+#include <cstdlib>
 #include "ascir_ops.h"
 #include "ascir.h"
 #include "ascir_utils.h"
@@ -22,15 +27,85 @@
 #include "common/ge_common/debug/log.h"
 #include "graph/symbolizer/symbolic_utils.h"
 #include "common/platform_context.h"
+#include "common/codegen_api_param/codegen_api_param.h"
+#include "common/ascir_node_param/ascir_node_param.h"
+#include "common/indirect_load_utils.h"
 #include "autofuse_config/auto_fuse_config.h"
+#include "att/base/arch_param.h"
 
 using namespace af::ascir_op;
 using namespace af::ops;
 namespace ascgen_utils {
+namespace semantic = template_semantic;
 constexpr int WORKSPACE_ALIGN_SIZE = 512;
 constexpr uint32_t BRC_INLINE_INPUTS_SIZE = 2U;
 const af::Expression ONE = af::Symbol(1);
 constexpr int64_t kMaxGroupPerCompileUnit = 5;
+constexpr char kTemplateSemanticNameAttr[] = "af.internal.template.semantic_name";
+constexpr char kTemplateSemanticTransformAttr[] = "af.internal.template.semantic_transform";
+constexpr char kTemplateSemanticRoleAttr[] = "af.internal.template.semantic_role";
+
+void AppendSemanticPart(std::vector<std::string> &parts, const std::string &value) {
+  if (!value.empty() && std::find(parts.begin(), parts.end(), value) == parts.end()) {
+    parts.push_back(value);
+  }
+}
+
+std::string JoinSemanticParts(const std::vector<std::string> &parts, const char separator) {
+  std::string value;
+  for (size_t index = 0U; index < parts.size(); ++index) {
+    if (index != 0U) {
+      value.push_back(separator);
+    }
+    value += parts[index];
+  }
+  return value;
+}
+
+std::string NormalizeTemplateSemanticName(const std::string &name) {
+  if (name.empty() || name.find('@') != std::string::npos || name.find('#') != std::string::npos) {
+    return name;
+  }
+  const auto transform = name.find('+');
+  const std::string core = name.substr(0UL, transform);
+  std::vector<std::string> parts;
+  size_t begin = 0UL;
+  while (begin <= core.size()) {
+    const auto end = core.find('/', begin);
+    parts.push_back(core.substr(begin, end == std::string::npos ? end : end - begin));
+    if (end == std::string::npos) {
+      break;
+    }
+    begin = end + 1UL;
+  }
+  if (parts.size() < 3UL) {
+    return name;
+  }
+  std::string value = parts[0] + "/" + parts[1];
+  const bool has_role = std::any_of(std::begin(template_semantic::kRoles), std::end(template_semantic::kRoles),
+                                    [&parts](const char *role) { return parts[2] == role; });
+  size_t feature = 2UL;
+  if (has_role) {
+    value += "@" + parts[feature++];
+  }
+  if (feature < parts.size()) {
+    value += "#";
+    for (size_t index = feature; index < parts.size(); ++index) {
+      if (index != feature) {
+        value += "|";
+      }
+      value += parts[index];
+    }
+  }
+  if (transform != std::string::npos) {
+    value += name.substr(transform);
+  }
+  return value;
+}
+
+bool HasSemanticPart(const std::string &name, const std::string &part, const char separator) {
+  return name.find(std::string(1U, separator) + part) != std::string::npos;
+}
 
 std::string CamelToLowerSneak(const std::string &str) {
   std::string s1 = std::regex_replace(str, std::regex("(.)([A-Z][a-z]+)"), "$1_$2");
@@ -84,6 +159,411 @@ std::string GenValidName(const std::string &t_name) {
   return result;
 }
 
+std::string MakeTemplateSemanticName(const std::string &family, const std::string &strategy, const std::string &role,
+                                     const std::vector<std::string> &api_features,
+                                     const std::vector<std::string> &transforms) {
+  if (family.empty()) {
+    return "Unknown";
+  }
+  std::vector<std::string> parts{family};
+  AppendSemanticPart(parts, strategy);
+  AppendSemanticPart(parts, role);
+  for (const auto &feature : api_features) {
+    AppendSemanticPart(parts, feature);
+  }
+  std::string name = JoinSemanticParts(parts, '/');
+  if (!transforms.empty()) {
+    name += "+" + JoinSemanticParts(transforms, '+');
+  }
+  return name;
+}
+
+void AppendReduceApiFeatures(const af::AscGraph &graph, std::vector<std::string> &features) {
+  for (const auto &node : graph.GetAllNodes()) {
+    if (node->attr.api.compute_type != af::ComputeType::kComputeReduce) {
+      continue;
+    }
+    const auto params = ascir_param::GetAscirNodeParams(node);
+    const auto *reduce_params =
+        params == nullptr ? nullptr : ascir_param::GetSpecificParams<ascir_param::ReduceNodeParams>(*params);
+    if (reduce_params == nullptr || params->status != ascir_param::ParamBuildStatus::kBuilt) {
+      continue;
+    }
+    const auto &reduce = reduce_params->canonical_params;
+    if (!reduce.valid) {
+      continue;
+    }
+    if (reduce.pattern == codegen::ReducePattern::kAR) {
+      AppendSemanticPart(features, semantic::kAr);
+    } else if (reduce.pattern == codegen::ReducePattern::kRA) {
+      AppendSemanticPart(features, semantic::kRa);
+    }
+    if (reduce.reuse.valid && reduce.reuse.is_reuse_source) {
+      AppendSemanticPart(features, semantic::kReuseSrc);
+    }
+    if (reduce.merge_mode == codegen::ReduceMergeMode::kCopy ||
+        reduce.merge_mode == codegen::ReduceMergeMode::kMergeByElementwise) {
+      AppendSemanticPart(features, semantic::kMultiRound);
+    }
+    break;
+  }
+}
+
+using IndirectLoadMetadata = ascgen_utils::indirect_load::IndirectLoadLoweringMetadata;
+
+std::string GetSimdSemanticRole(const IndirectLoadMetadata &metadata) {
+  if (metadata.simd.try_embedding) {
+    return semantic::kAdaptive;
+  }
+  if (metadata.simd.fallback == ascgen_utils::indirect_load::SimdFallback::kGatherApi) {
+    return semantic::kGatherApi;
+  }
+  if (metadata.simd.fallback == ascgen_utils::indirect_load::SimdFallback::kStrided) {
+    return semantic::kStrided;
+  }
+  return semantic::kRegisterGather;
+}
+
+const char *GetSimtSemanticRole(const indirect_load::SimtAddressPolicy policy) {
+  switch (policy) {
+    case ascgen_utils::indirect_load::SimtAddressPolicy::kStaticPowerOfTwo:
+      return semantic::kStaticPowerOfTwo;
+    case ascgen_utils::indirect_load::SimtAddressPolicy::kStaticInner:
+      return semantic::kStaticInner;
+    case ascgen_utils::indirect_load::SimtAddressPolicy::kStructuredMagic:
+      return semantic::kStructuredMagic;
+    case ascgen_utils::indirect_load::SimtAddressPolicy::kEmbedding:
+      return semantic::kEmbedding;
+    case ascgen_utils::indirect_load::SimtAddressPolicy::kRecursive:
+      return semantic::kRecursive;
+    case ascgen_utils::indirect_load::SimtAddressPolicy::kStrided:
+      return semantic::kStrided;
+    default:
+      return semantic::kAdaptive;
+  }
+}
+
+bool TryGetIndirectLoadMetadata(const af::AscNodePtr &node, IndirectLoadMetadata &metadata) {
+  return ascgen_utils::indirect_load::HasLoweringMetadata(node) &&
+         ascgen_utils::indirect_load::GetLoweringMetadata(node, metadata) == af::SUCCESS;
+}
+
+std::string GetIndirectLoadSemanticName(const af::AscNodePtr &node) {
+  const auto template_id = ascir::GetTemplateIdOrDefault(*node);
+  const auto api_param = codegen::CodegenApiParam::TryGetNodeApiParam(node);
+  if (api_param != nullptr && !api_param->semantic_feature.empty()) {
+    return semantic::kIndirectLoadPrefix + api_param->semantic_feature;
+  }
+  std::string strategy;
+  std::string role = semantic::kAdaptive;
+  std::vector<std::string> features;
+  IndirectLoadMetadata metadata;
+  if (template_id == ascir::TemplateId::kIndirectLoadSimd) {
+    strategy = semantic::kSimd;
+    if (TryGetIndirectLoadMetadata(node, metadata)) {
+      role = GetSimdSemanticRole(metadata);
+    }
+  } else if (template_id == ascir::TemplateId::kIndirectLoadSimt) {
+    strategy = semantic::kSimt;
+    if (TryGetIndirectLoadMetadata(node, metadata)) {
+      role = GetSimtSemanticRole(metadata.simt.policy.policy);
+      AppendSemanticPart(features,
+                         metadata.simt.policy.offset_width == ascgen_utils::indirect_load::SimtOffsetWidth::kUint32
+                             ? semantic::kOffset32
+                             : semantic::kOffset64);
+    }
+  } else if (template_id == ascir::TemplateId::kIndirectLoadSK) {
+    strategy = semantic::kSk;
+    role.clear();
+  }
+  return MakeTemplateSemanticName(semantic::kIndirectLoad, strategy, role, features);
+}
+
+// Collect workspace reuse in the same pass, preserving the existing exported helper.
+void AppendNddmaTransforms(const af::AscGraph &graph, std::vector<std::string> &transforms) {
+  const std::vector<std::pair<std::string, std::string>> rules = {{semantic::kSlice, semantic::kNddmaSlice},
+                                                                  {semantic::kLoad, semantic::kLoadToNddma},
+                                                                  {semantic::kTranspose, semantic::kNddmaTranspose},
+                                                                  {semantic::kBroadcast, semantic::kNddmaBroadcast},
+                                                                  {semantic::kCast, semantic::kNddmaCast}};
+  std::vector<std::string> sources;
+  bool has_nddma = false;
+  bool has_output_reuse = false;
+  for (const auto &node : graph.GetAllNodes()) {
+    const bool is_nddma = af::ops::IsOps<af::ascir_op::Nddma>(node);
+    if (!is_nddma && !af::ops::IsOps<af::ascir_op::Workspace>(node)) {
+      continue;
+    }
+    has_nddma = has_nddma || is_nddma;
+    const std::string source = GetTemplateSemanticTransform(*node);
+    size_t begin = 0UL;
+    while (begin <= source.size()) {
+      const size_t end = source.find('+', begin);
+      const std::string token = source.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
+      if (is_nddma) {
+        AppendSemanticPart(sources, token);
+      } else {
+        has_output_reuse = has_output_reuse || token == semantic::kOutputReuse;
+      }
+      if (end == std::string::npos) {
+        break;
+      }
+      begin = end + 1UL;
+    }
+  }
+  for (const auto &rule : rules) {
+    if (std::find(sources.begin(), sources.end(), rule.first) != sources.end()) {
+      AppendSemanticPart(transforms, rule.second);
+    }
+  }
+  if (has_nddma && transforms.empty()) {
+    AppendSemanticPart(transforms, semantic::kNddma);
+  }
+  if (has_output_reuse) {
+    AppendSemanticPart(transforms, semantic::kOutputReuse);
+  }
+}
+
+void AppendNodeSemanticFacts(const af::AscGraph &graph, std::vector<std::string> &features) {
+  for (const auto &node : graph.GetAllNodes()) {
+    if (node == nullptr || node->GetOpDesc() == nullptr) {
+      continue;
+    }
+    AppendSemanticPart(features, node->GetOpDesc()->TryGetExtAttr(kTemplateSemanticRoleAttr, std::string()));
+    const auto api_param = codegen::CodegenApiParam::TryGetNodeApiParam(node);
+    if (api_param != nullptr) {
+      AppendSemanticPart(features, api_param->semantic_feature);
+    }
+  }
+}
+
+std::string GetGraphTemplateSemanticName(const af::AscGraph &graph) {
+  for (const auto &node : graph.GetAllNodes()) {
+    if (node == nullptr || node->GetOpDesc() == nullptr) {
+      continue;
+    }
+    const std::string semantic_name = node->GetOpDesc()->TryGetExtAttr(kTemplateSemanticNameAttr, std::string());
+    if (!semantic_name.empty()) {
+      return semantic_name;
+    }
+  }
+  return "";
+}
+
+std::string DetectTemplateSemanticFamily(const af::AscGraph &graph, std::vector<std::string> &indirect_load_names) {
+  std::string family = semantic::kPointwise;
+  for (const auto &node : graph.GetAllNodes()) {
+    if (af::ops::IsOps<af::ascir_op::IndirectLoad>(node)) {
+      indirect_load_names.push_back(GetIndirectLoadSemanticName(node));
+      continue;
+    }
+    if (!indirect_load_names.empty()) {
+      continue;
+    }
+    if (af::ops::IsOps<af::ascir_op::Concat>(node)) {
+      return semantic::kConcat;
+    }
+    if (af::ops::IsOps<af::ascir_op::Split>(node)) {
+      return semantic::kSplit;
+    }
+    if (af::ops::IsOps<af::ascir_op::Transpose>(node)) {
+      return semantic::kTranspose;
+    }
+    if (node->attr.api.compute_type == af::ComputeType::kComputeReduce) {
+      return semantic::kReduce;
+    }
+    if (af::ops::IsOps<af::ascir_op::Broadcast>(node)) {
+      return semantic::kBroadcast;
+    }
+  }
+  return family;
+}
+
+std::string ResolveIndirectLoadNames(const std::vector<std::string> &indirect_load_names) {
+  if (indirect_load_names.empty()) {
+    return "";
+  }
+  const std::string &first = indirect_load_names.front();
+  const bool same_name = std::all_of(indirect_load_names.begin(), indirect_load_names.end(),
+                                     [&first](const std::string &name) { return name == first; });
+  return same_name ? first : semantic::kIndirectLoadMixed;
+}
+
+std::string PromoteSemanticStrategy(const std::string &family, const std::string &strategy,
+                                    std::vector<std::string> &features) {
+  const bool adaptive_strategy = strategy.empty() || strategy == family + "/" + semantic::kAdaptive;
+  if (!adaptive_strategy) {
+    return strategy;
+  }
+  std::vector<std::string> promoted_strategies;
+  std::vector<std::string> remaining_features;
+  for (const auto &feature : features) {
+    std::string promoted_strategy;
+    std::string remaining_feature;
+    if (family == semantic::kBroadcast) {
+      if (feature == semantic::kInline) {
+        promoted_strategy = feature;
+      } else if (feature.rfind(semantic::kBroadcastPrefix, 0UL) == 0UL) {
+        promoted_strategy = feature.substr(sizeof(semantic::kBroadcastPrefix) - 1UL);
+      }
+    } else if (family == semantic::kConcat || family == semantic::kSplit) {
+      const auto separator = feature.find('/');
+      if (separator != std::string::npos) {
+        const auto prefix = feature.substr(0UL, separator);
+        if (prefix == semantic::kUb || prefix == semantic::kGm) {
+          promoted_strategy = prefix;
+          remaining_feature = feature.substr(separator + 1UL);
+        }
+      }
+    }
+    if (promoted_strategy.empty()) {
+      remaining_features.push_back(feature);
+      continue;
+    }
+    promoted_strategies.push_back(promoted_strategy);
+    if (!remaining_feature.empty()) {
+      remaining_features.push_back(remaining_feature);
+    }
+  }
+  if (promoted_strategies.empty() ||
+      !std::all_of(promoted_strategies.begin(), promoted_strategies.end(),
+                   [&promoted_strategies](const std::string &item) { return item == promoted_strategies.front(); })) {
+    return strategy;
+  }
+  features = remaining_features;
+  return family + "/" + promoted_strategies.front();
+}
+
+std::string BuildTemplateSemanticName(const af::AscGraph &graph, const std::string &strategy) {
+  std::vector<std::string> indirect_load_names;
+  const std::string family = DetectTemplateSemanticFamily(graph, indirect_load_names);
+  const std::string indirect_load_name = ResolveIndirectLoadNames(indirect_load_names);
+  if (!indirect_load_name.empty()) {
+    return indirect_load_name;
+  }
+
+  if (strategy.find('/') != std::string::npos) {
+    std::vector<std::string> features;
+    std::vector<std::string> transforms;
+    AppendNodeSemanticFacts(graph, features);
+    AppendNddmaTransforms(graph, transforms);
+    const auto strategy_family = strategy.substr(0UL, strategy.find('/'));
+    return MakeTemplateSemanticName(PromoteSemanticStrategy(strategy_family, strategy, features), "", "", features,
+                                    transforms);
+  }
+
+  std::string resolved_strategy = strategy;
+  std::string role;
+  std::vector<std::string> features;
+  std::vector<std::string> transforms;
+  AppendNodeSemanticFacts(graph, features);
+  if (family == semantic::kReduce) {
+    AppendReduceApiFeatures(graph, features);
+    if (resolved_strategy.empty()) {
+      resolved_strategy = semantic::kCommon;
+    }
+  } else if (family == semantic::kConcat || family == semantic::kSplit || family == semantic::kBroadcast) {
+    if (resolved_strategy.empty()) {
+      resolved_strategy = PromoteSemanticStrategy(family, resolved_strategy, features);
+      const std::string family_prefix = family + "/";
+      if (resolved_strategy.rfind(family_prefix, 0UL) == 0UL) {
+        resolved_strategy = resolved_strategy.substr(family_prefix.size());
+      }
+      if (resolved_strategy.empty()) {
+        resolved_strategy = semantic::kAdaptive;
+      }
+    }
+  } else if (family == semantic::kTranspose) {
+    resolved_strategy = resolved_strategy.empty() ? semantic::kUb : resolved_strategy;
+    role = semantic::kReorder;
+  } else if (resolved_strategy.empty()) {
+    resolved_strategy = semantic::kCommon;
+  }
+  AppendNddmaTransforms(graph, transforms);
+  return MakeTemplateSemanticName(family, resolved_strategy, role, features, transforms);
+}
+
+std::string GetTemplateSemanticName(const af::AscGraph &graph, const std::string &strategy) {
+  return RefineTemplateSemanticName(BuildTemplateSemanticName(graph, strategy), graph);
+}
+
+std::string RefineTemplateSemanticName(const std::string &base_name, const af::AscGraph &graph) {
+  std::string refined = GetGraphTemplateSemanticName(graph);
+  std::vector<std::string> features;
+  if (refined.empty()) {
+    refined = base_name.empty() ? BuildTemplateSemanticName(graph, "") : base_name;
+  } else {
+    AppendNodeSemanticFacts(graph, features);
+  }
+  const auto transform_pos = refined.find('+');
+  const std::string existing_transforms = transform_pos == std::string::npos ? "" : refined.substr(transform_pos);
+  refined = refined.substr(0UL, transform_pos);
+  std::vector<std::string> transforms;
+  if (refined.rfind(semantic::kReducePrefix, 0U) == 0U) {
+    AppendReduceApiFeatures(graph, features);
+    if (refined.rfind(semantic::kReduceRCore, 0U) == 0U) {
+      for (const auto &node : graph.GetAllNodes()) {
+        if (IsArgReducePhase1(node->GetType())) {
+          AppendSemanticPart(features, semantic::kPhase1);
+        } else if (IsArgReducePhase2(node->GetType())) {
+          AppendSemanticPart(features, semantic::kPhase2);
+        }
+      }
+    }
+  }
+  for (const auto &feature : features) {
+    if (!HasSemanticPart(refined, feature, '/')) {
+      refined += "/" + feature;
+    }
+  }
+  refined += existing_transforms;
+  AppendNddmaTransforms(graph, transforms);
+  for (const auto &transform : transforms) {
+    if (!HasSemanticPart(refined, transform, '+')) {
+      refined += "+" + transform;
+    }
+  }
+  return refined;
+}
+
+af::Status SetTemplateSemanticNameForGraph(const af::AscGraph &graph, const std::string &semantic_name) {
+  for (const auto &node : graph.GetAllNodes()) {
+    if (node == nullptr || node->GetOpDesc() == nullptr) {
+      continue;
+    }
+    GE_ASSERT_TRUE(node->GetOpDesc()->SetExtAttr(kTemplateSemanticNameAttr, semantic_name),
+                   "Set template semantic name failed, node = %s", node->GetNamePtr());
+  }
+  return af::SUCCESS;
+}
+
+af::Status SetTemplateSemanticRole(const af::AscNodePtr &node, const std::string &role) {
+  GE_ASSERT_NOTNULL(node);
+  auto op_desc = node->GetOpDesc();
+  GE_ASSERT_NOTNULL(op_desc);
+  GE_ASSERT_TRUE(op_desc->SetExtAttr(kTemplateSemanticRoleAttr, role), "Set template semantic role failed, node = %s",
+                 node->GetNamePtr());
+  return af::SUCCESS;
+}
+
+af::Status SetTemplateSemanticTransform(const af::AscNodePtr &node, const std::string &transform) {
+  GE_ASSERT_NOTNULL(node);
+  auto op_desc = node->GetOpDesc();
+  GE_ASSERT_NOTNULL(op_desc);
+  const std::string current = GetTemplateSemanticTransform(*node);
+  const std::string updated = current.empty() ? transform : current + "+" + transform;
+  GE_ASSERT_TRUE(op_desc->SetExtAttr(kTemplateSemanticTransformAttr, updated),
+                 "Set template semantic transform failed, node = %s", node->GetNamePtr());
+  return af::SUCCESS;
+}
+
+std::string GetTemplateSemanticTransform(const af::AscNode &node) {
+  if (node.GetOpDesc() == nullptr) {
+    return "";
+  }
+  return node.GetOpDesc()->TryGetExtAttr(kTemplateSemanticTransformAttr, std::string());
+}
+
 bool GetRealPath(const std::string &file_path, std::string &real_file_path) {
   char buf[PATH_MAX] = " ";
   if (realpath(file_path.c_str(), buf) == nullptr) {
@@ -120,6 +600,32 @@ af::Status GetApiTilingFieldName(const ascir::NodeView &node, std::string &field
   }
   field_name = GenValidName(node->GetName() + "_tilingData");
   return af::SUCCESS;
+}
+
+// api tiling 值由节点输入/输出的 dtype、shape（repeats）和轴序（vectorized_axis）决定，
+// 与节点名无关（如 PadTiling 仅由 inputs[0] 的 shape/dtype 算出）。
+// 该指纹用于字段去重时的身份校验：指纹相同则 tiling 值必然相同，共享字段安全；
+// 同源节点的属性拷贝自同一份 attr，指纹逐字节相同，不会误判。
+std::string GenApiTilingValueFingerprint(const ascir::NodeView &node) {
+  std::ostringstream fingerprint;
+  const auto append_attr = [&fingerprint](const af::AscTensorAttr &attr) {
+    fingerprint << "dtype=" << static_cast<uint32_t>(attr.dtype) << ";repeats=";
+    for (const auto &repeat : attr.repeats) {
+      fingerprint << repeat.Str().get() << ",";
+    }
+    fingerprint << ";axis=";
+    for (const auto &axis : attr.vectorized_axis) {
+      fingerprint << axis << ",";
+    }
+    fingerprint << ";";
+  };
+  for (size_t i = 0UL; i < node->inputs().size(); ++i) {
+    append_attr(node->inputs[i].attr);
+  }
+  for (size_t i = 0UL; i < node->outputs().size(); ++i) {
+    append_attr(node->outputs[i].attr);
+  }
+  return fingerprint.str();
 }
 
 std::string GenUpdateCurPerfAndBlockByGroupHelper(bool with_log, bool use_std_max) {
@@ -186,7 +692,7 @@ af::Expression CalculateOneWorkspaceSize(const af::AscNodePtr &workspace_nodes) 
     auto out_size = GetTensorSize(load_node->outputs[0U]);
     ws_size = af::sym::Max(ws_size, out_size);
   }
-  return ws_size;
+  return af::sym::Align(ws_size, att::arch_param::kV2ArchHardwareConfig.cache_line_size);
 }
 
 af::Expression CalculateWorkspaceSize(const std::vector<af::AscNodePtr> &workspace_nodes) {
@@ -251,6 +757,16 @@ const std::vector<af::Expression> &GetFrontendShapeVars(const ascir::FusedSchedu
     return fused_schedule_result.frontend_shape_vars;
   }
   return fused_schedule_result.origin_vars;
+}
+
+void CollectDynamicSizeVarNames(const ascir::FusedScheduledResult &fused_schedule_result,
+                                std::set<std::string> &dynamic_size_var_names) {
+  dynamic_size_var_names.clear();
+  for (const auto &var : GetFrontendShapeVars(fused_schedule_result)) {
+    if (!var.IsConstExpr()) {
+      dynamic_size_var_names.emplace(var.Str().get());
+    }
+  }
 }
 
 bool IsFrontendStaticSchedResult(const ascir::FusedScheduledResult &fused_schedule_result) {
@@ -760,6 +1276,52 @@ bool IsSingleGroup(const ascir::FusedScheduledResult &fused_schedule_result) {
          fused_schedule_result.node_idx_to_scheduled_results[0][0].schedule_groups.size() == 1;
 }
 
+// 注册式TilingKey扁平展开的分支数上限：key总数超限的result整体回落运行时tiling_data解析分发。
+// （栈安全余量>=2x的硬上限1000，工程默认512）
+constexpr uint64_t kMaxRegTilingKeyCount = 512U;
+
+bool TryCalcTilingKeyCount(const ascir::FusedScheduledResult &fused_schedule_result, uint64_t limit, uint64_t &count) {
+  count = 0U;
+  for (const auto &scheduled_results : fused_schedule_result.node_idx_to_scheduled_results) {
+    for (const auto &scheduled_result : scheduled_results) {
+      const auto &schedule_groups = scheduled_result.schedule_groups;
+      const bool has_empty_group = std::any_of(schedule_groups.begin(), schedule_groups.end(),
+                                               [](const auto &group) { return group.impl_graphs.empty(); });
+      if (has_empty_group) {
+        continue;
+      }
+      uint64_t per_result_count = 1U;
+      for (const auto &schedule_group : schedule_groups) {
+        const uint64_t impl_count = schedule_group.impl_graphs.size();
+        if (impl_count == 0U || per_result_count > (limit - count) / impl_count) {
+          return false;
+        }
+        per_result_count *= impl_count;
+      }
+      if (per_result_count > limit - count) {
+        return false;
+      }
+      count += per_result_count;
+    }
+  }
+  return true;
+}
+
+bool IsTilingKeyCountWithinLimit(const ascir::FusedScheduledResult &fused_schedule_result) {
+  // cube融合场景豁免：其静态路径当前必走RegTilingKey，回落正确性未验证且实际组合数
+  // 不超限，维持原行为
+  if (IsCubeFusedScheduled(fused_schedule_result)) {
+    return true;
+  }
+  uint64_t tiling_key_count = 0U;
+  if (!TryCalcTilingKeyCount(fused_schedule_result, kMaxRegTilingKeyCount, tiling_key_count)) {
+    GELOGW("Tiling key count exceeds limit %llu, fallback to parse-tiling-data dispatch.",
+           static_cast<unsigned long long>(kMaxRegTilingKeyCount));
+    return false;
+  }
+  return true;
+}
+
 bool CanUseTilingKey(const ascir::FusedScheduledResult &fused_schedule_result) {
   if (fused_schedule_result.node_idx_to_scheduled_results.size() > 1U) {
     return false;
@@ -1057,6 +1619,11 @@ af::Status CreateAttResult(ascir::FusedScheduledResult &elemwise_schedule_result
 }
 
 af::Status CreateCVFusionResult(ascir::FusedScheduledResult &elemwise_schedule_result) {
+  return CreateCVFusionResult(elemwise_schedule_result, false);
+}
+
+af::Status CreateCVFusionResult(ascir::FusedScheduledResult &elemwise_schedule_result, bool allow_fragment_padding) {
+  allow_fragment_padding = allow_fragment_padding && !IsConv2DFusedScheduled(elemwise_schedule_result);
   if (!IsCubeFusedScheduled(elemwise_schedule_result)) {
     return af::SUCCESS;
   }
@@ -1075,17 +1642,40 @@ af::Status CreateCVFusionResult(ascir::FusedScheduledResult &elemwise_schedule_r
     }
   }
 
-  auto update_graph_axis = [](af::AscGraph &graph) {
+  auto update_graph_axis = [allow_fragment_padding](af::AscGraph &graph) {
+    bool n_broadcast = false;
+    bool m_broadcast = false;
+    for (const auto &node : graph.GetAllNodes()) {
+      n_broadcast = n_broadcast || !ascir::GetCvBroadcastShape(*node).empty();
+      m_broadcast = m_broadcast || ascir::IsCvMBroadcast(*node);
+    }
     for (auto &ax : graph.GetAllAxis()) {
       if (ax == nullptr) {
         continue;
       }
       if (ax->type == ascir::Axis::kAxisTypeTileInner) {
+        if (m_broadcast) {
+          ax->align = af::Symbol(32);
+          ax->allow_oversize_axis = true;  // A padded N tail; logical M is never tiled.
+          continue;
+        }
+        if (n_broadcast && allow_fragment_padding) {
+          // Consumer tiles are independent of the Cube fragment. The host
+          // reserves that fragment separately for both buffer policies.
+          ax->align = af::Symbol(1);
+          ax->allow_oversize_axis = false;
+          continue;
+        }
         GELOGI("Add tile inner axis(%s) symbol align for graph(%s)", ax->name.c_str(), graph.GetName().c_str());
         // 运行时占位符（由生成 tiling 代码中 set/get_g_basen_basem_align 维护），
         // 名字必须为合法标识符：轴属性会经 AscGraph 序列化克隆（FusedGraphUnfolder::CloneAscGraphs），
         // 带 "()" 的名字无法被表达式 scanner/parser 解析，导致克隆图 align 丢失
         ax->align = af::Symbol(kRuntimeAlignFuncName);
+        // A Cube fragment spans rows even when its native N axis is smaller than the fragment budget.
+        // The callback uses the fragment extents; ATT must not bound this budget by one original graph axis.
+        if (allow_fragment_padding) {
+          ax->allow_oversize_axis = true;
+        }
       }
     }
   };
@@ -1118,9 +1708,19 @@ af::Status CreateCVFusionCommonResult(ascir::FusedScheduledResult &elemwise_sche
 }
 
 af::Status ProcessCubeFusionResultDynamic(ascir::FusedScheduledResult &fused_result) {
+  return ProcessCubeFusionResultDynamic(fused_result, false);
+}
+
+af::Status ProcessCubeFusionResultDynamic(ascir::FusedScheduledResult &fused_result, bool allow_fragment_padding) {
+  if (!IsCubeUBFusedScheduled(fused_result) && IsCubeCommonFusedScheduled(fused_result)) {
+    // Without a UB candidate, the Common vector graphs are the complete ATT
+    // input. Appending them to the original result retains its Cube groups,
+    // whose input K axes are intentionally absent from the vector tiling view.
+    return CreateCVFusionCommonResult(fused_result);
+  }
   ascir::FusedScheduledResult common_schedule_result = fused_result;
   if (ascgen_utils::IsCubeUBFusedScheduled(fused_result)) {
-    GE_ASSERT_SUCCESS(ascgen_utils::CreateCVFusionResult(fused_result));
+    GE_ASSERT_SUCCESS(ascgen_utils::CreateCVFusionResult(fused_result, allow_fragment_padding));
   }
   if (ascgen_utils::IsCubeCommonFusedScheduled(common_schedule_result)) {
     GE_ASSERT_SUCCESS(ascgen_utils::CreateCVFusionCommonResult(common_schedule_result));
@@ -1170,9 +1770,17 @@ af::Status FilterCVFusionUBResult(ascir::FusedScheduledResult &ub_schedule_resul
 
 af::Status GetCubeInfo(const ascir::FusedScheduledResult &fused_schedule_result, bool &is_batch, bool &is_conv,
                        std::string &input_type, std::string &output_type) {
+  MatMulAttr matmul_attr;
+  return GetCubeInfo(fused_schedule_result, is_batch, is_conv, input_type, output_type, matmul_attr);
+}
+
+af::Status GetCubeInfo(const ascir::FusedScheduledResult &fused_schedule_result, bool &is_batch, bool &is_conv,
+                       std::string &input_type, std::string &output_type, MatMulAttr &matmul_attr) {
   is_batch = false;
   is_conv = false;
-  auto extract_from_impl_graphs = [&is_batch, &is_conv, &input_type, &output_type](const auto &schedule_groups) {
+  matmul_attr = {};
+  auto extract_from_impl_graphs = [&is_batch, &is_conv, &input_type, &output_type,
+                                   &matmul_attr](const auto &schedule_groups) {
     for (const auto &schedule_group : schedule_groups) {
       for (const auto &impl_graph : schedule_group.impl_graphs) {
         for (const auto &node : impl_graph.GetAllNodes()) {
@@ -1183,7 +1791,7 @@ af::Status GetCubeInfo(const ascir::FusedScheduledResult &fused_schedule_result,
             is_batch = false;
             is_conv = true;
           } else {
-            ascgen_utils::MatMulAttr mm_attr_data;
+            auto &mm_attr_data = matmul_attr;
             if (ascgen_utils::ParseMatmulAttr(node, mm_attr_data) != af::SUCCESS) {
               return false;
             }
@@ -1232,6 +1840,47 @@ af::Status GetCubeInfo(const ascir::FusedScheduledResult &fused_schedule_result,
     }
   }
   return af::FAILED;
+}
+
+bool IsLaunchDecoupleCvVariantEnabled(const ascir::FusedScheduledResult &fused_schedule_result, bool &is_batch,
+                                      bool launch_decouple) {
+  is_batch = false;
+  if (!launch_decouple) {
+    return false;
+  }
+  if (!IsCubeFusedScheduled(fused_schedule_result) || IsConv2DFusedScheduled(fused_schedule_result)) {
+    return false;
+  }
+  bool is_conv = false;
+  std::string input_type;
+  std::string output_type;
+  is_batch = false;
+  if (GetCubeInfo(fused_schedule_result, is_batch, is_conv, input_type, output_type) != af::SUCCESS) {
+    return false;
+  }
+  return true;
+}
+
+int64_t CalcDynamicUbSize(const ascir::FusedScheduledResult &fused_schedule_result) {
+  ge::PlatformInfo platform_info;
+  GE_ASSERT_SUCCESS(ge::PlatformContext::GetInstance().GetPlatformInfo(platform_info),
+                    "Failed to get platform info for dynamic ub size.");
+  const int64_t ub_size = platform_info.ub_size;
+  for (const auto &scheduled_results : fused_schedule_result.node_idx_to_scheduled_results) {
+    for (const auto &scheduled_result : scheduled_results) {
+      for (const auto &schedule_group : scheduled_result.schedule_groups) {
+        for (const auto &impl_graph : schedule_group.impl_graphs) {
+          for (const auto &node : impl_graph.GetAllNodes()) {
+            const int64_t simt_dcache_size = ::ascir::GetDcacheSize(*node);
+            if (simt_dcache_size > 0) {
+              return ub_size - simt_dcache_size;
+            }
+          }
+        }
+      }
+    }
+  }
+  return -1;
 }
 
 af::Status FilterCVFusionCommonResult(ascir::FusedScheduledResult &common_schedule_result) {

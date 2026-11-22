@@ -95,6 +95,33 @@ TEST_F(TestScopeSplitRange, TestNodeWithSingleScope) {
   EXPECT_FALSE(node4->IsFusible());
 }
 
+TEST_F(TestScopeSplitRange, MemoryEventScopePolicyAppliesAfterPostProcess) {
+  constexpr uint64_t kEventId = 0x301;
+  auto writeNode = std::make_unique<SuperKernelMemoryNode>(nullptr, ACL_MODEL_RI_TASK_VALUE_WRITE, 0, 0,
+                                                           INVALID_STREAM_ID, INVALID_TASK_ID);
+  writeNode->SetNodeId(1);
+  writeNode->SetNodeType(SkNodeType::NODE_MEMORY_WRITE);
+  writeNode->SetIsFusible(false);
+  writeNode->nodeInfos.syncInfos.eventId = kEventId;
+  writeNode->nodeInfos.syncInfos.addrValue = reinterpret_cast<void *>(0x1001);
+  writeNode->nodeInfos.syncInfos.memoryValue = 7;
+  SuperKernelMemoryNode *writeNodePtr = writeNode.get();
+  graph->graphMap[1] = std::move(writeNode);
+  graph->memoryToNodes[kEventId].writeNodeIdList.insert(1);
+
+  CreateScopeKernelNode(2, 0, "scopeA", true, true, true, false, false);
+  CreateScopeKernelNode(3, 0, "scopeA", true, true, false, true, false);
+  graph->scopeNameToIdx["scopeA"] = 0;
+
+  ASSERT_TRUE(graph->PostProcessMemoryNode());
+  EXPECT_EQ(writeNodePtr->GetNodeType(), SkNodeType::NODE_NOTIFY);
+  ASSERT_TRUE(writeNodePtr->IsFusible());
+
+  ASSERT_TRUE(graph->UpdateNodeScopeBitFlags());
+  EXPECT_FALSE(writeNodePtr->IsFusible());
+  EXPECT_EQ(writeNodePtr->GetFusionFailReason(), FusionFailReason::NOT_IN_SCOPE);
+}
+
 // Test 2: Verify node with unfusible scope (scopeName传nullptr时不可融合）
 TEST_F(TestScopeSplitRange, TestNodeWithUnfusibleScope) {
   auto scopeBeginNode = CreateScopeKernelNode(1, 0, "", false, true, true, false, false);

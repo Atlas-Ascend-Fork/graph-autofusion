@@ -1,0 +1,5 @@
+# 本目录 fork 自上游 PyAsc（见 README.md），保持上游原始格式以便与上游 diff 和同步。
+# DisableFormat 让任何方式调用的 clang-format 在本目录都成为 no-op，
+# 与 .pre-commit-config.yaml 中的 exclude 构成双重保护，防止误格式化。
+DisableFormat: true
+SortIncludes: Never

@@ -1,0 +1,98 @@
+{
+  "model": "NDDMA_ROUND1_1D_PIECEWISE_D_OVER_T_PLUS_H",
+  "formula": {
+    "name": "arbitrary_dim_multicore_1d_contiguous_base",
+    "split_block_dim": 2,
+    "le2": "cycles = bytes_per_core / T_1(dtype) + H_1(dtype)",
+    "gt2": "cycles = bytes_per_core / T_2(dtype) + H_2(dtype)",
+    "metric": "cycles is single-core/per-block cycles",
+    "bytes_definition": "bytes_per_core = logical_total_bytes / block_dim",
+    "fitting_dataset": "HW_GE_ATT round2 group A stage1 representative points plus group C all-block-dim points",
+    "fitting_method": "joint least-squares fit of cycles = bytes_per_core / T + H for each dtype and branch"
+  },
+  "parameters": {
+    "int8_t": {
+      "T_1": 11.7626,
+      "H_1": 194.421,
+      "T_2": 6.05735,
+      "H_2": 373.274
+    },
+    "int16_t": {
+      "T_1": 25.7579,
+      "H_1": 204.604,
+      "T_2": 13.259,
+      "H_2": 399.909
+    },
+    "int32_t": {
+      "T_1": 57.2624,
+      "H_1": 235.137,
+      "T_2": 29.4096,
+      "H_2": 453.859
+    },
+    "int64_t": {
+      "T_1": 57.2346,
+      "H_1": 243.205,
+      "T_2": 29.3906,
+      "H_2": 468.971
+    }
+  },
+  "metrics": {
+    "all": {
+      "count": 2387,
+      "rmse_cycles": 693.1368609272514,
+      "mae_cycles": 357.52186889107264,
+      "mape_percent": 8.282724759599901,
+      "max_absolute_error_cycles": 4262.037799304204
+    },
+    "by_dtype": {
+      "int8_t": {
+        "count": 413,
+        "rmse_cycles": 233.30825537729396,
+        "mae_cycles": 125.7381458740377,
+        "mape_percent": 2.572099293150462,
+        "max_absolute_error_cycles": 1716.8694624654709
+      },
+      "int16_t": {
+        "count": 560,
+        "rmse_cycles": 369.9909286403163,
+        "mae_cycles": 193.4175982605057,
+        "mape_percent": 4.401035647529649,
+        "max_absolute_error_cycles": 2161.7362976942313
+      },
+      "int32_t": {
+        "count": 707,
+        "rmse_cycles": 859.314765016761,
+        "mae_cycles": 486.9896536568098,
+        "mape_percent": 11.521335806594598,
+        "max_absolute_error_cycles": 4202.28760863121
+      },
+      "int64_t": {
+        "count": 707,
+        "rmse_cycles": 862.221378473626,
+        "mae_cycles": 493.4360772783109,
+        "mape_percent": 11.454628875834223,
+        "max_absolute_error_cycles": 4262.037799304204
+      }
+    },
+    "by_branch": {
+      "le2": {
+        "count": 206,
+        "rmse_cycles": 53.05479274321285,
+        "mae_cycles": 41.78918141403964,
+        "mape_percent": 4.55914251905861,
+        "max_absolute_error_cycles": 126.56370239185503
+      },
+      "gt2": {
+        "count": 2181,
+        "rmse_cycles": 724.9491578454641,
+        "mae_cycles": 387.34347990449254,
+        "mape_percent": 8.634424870352541,
+        "max_absolute_error_cycles": 4262.037799304204
+      }
+    }
+  },
+  "snapshot": {
+    "metrics_valid": false,
+    "reason": "Historical measurements do not validate the current fitting workflow or aligned parameters; recollect/refit before reporting accuracy."
+  }
+}

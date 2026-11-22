@@ -21,19 +21,19 @@
 #include "../test_util.h"
 namespace af {
 namespace ascir {
-extern std::vector<std::unique_ptr<af::TmpBufDesc>> CalcArgMaxTmpSize(const af::AscNode &node);
+extern std::vector<std::unique_ptr<af::TmpBufDesc>> CalcArgmaxTmpSize(const af::AscNode &node);
 
 using namespace testing;
 using namespace af::ascir_op;
 
-class CalcArgMaxTmpSizeTest : public ::testing::Test {
+class CalcArgmaxTmpSizeTest : public ::testing::Test {
  protected:
   void SetUp() override {}
   void TearDown() override {}
 };
 
 template <ge::DataType T>
-void CreateGraphArgMax(af::AscGraph &graph, Expression &s1, Expression &s2) {
+void CreateGraphArgmax(af::AscGraph &graph, Expression &s1, Expression &s2) {
   af::Expression One = af::Symbol(1);
   af::Expression Zero = af::Symbol(0);
   auto s0 = graph.CreateSizeVar("s0");
@@ -46,7 +46,7 @@ void CreateGraphArgMax(af::AscGraph &graph, Expression &s1, Expression &s2) {
 
   Data x1("x1", graph);
   Load load1("load1");
-  af::ascir_op::ArgMax argmax0("argmax0");
+  af::ascir_op::Argmax argmax0("argmax0");
   Store store("store");
   Output y("y");
 
@@ -89,7 +89,7 @@ void CreateGraphArgMax(af::AscGraph &graph, Expression &s1, Expression &s2) {
 }
 
 template <ge::DataType T>
-void CreateGraphArgMaxRA(af::AscGraph &graph, Expression &s1, Expression &s2) {
+void CreateGraphArgmaxRA(af::AscGraph &graph, Expression &s1, Expression &s2) {
   af::Expression One = af::Symbol(1);
   af::Expression Zero = af::Symbol(0);
   auto s0 = graph.CreateSizeVar("s0");
@@ -102,7 +102,7 @@ void CreateGraphArgMaxRA(af::AscGraph &graph, Expression &s1, Expression &s2) {
 
   Data x1("x1", graph);
   Load load1("load1");
-  af::ascir_op::ArgMax argmax0("argmax0");
+  af::ascir_op::Argmax argmax0("argmax0");
   Store store("store");
   Output y("y");
 
@@ -145,78 +145,78 @@ void CreateGraphArgMaxRA(af::AscGraph &graph, Expression &s1, Expression &s2) {
 }
 
 /**
- * @tc.name: CalcArgMaxTmpSize_test_0
- * @tc.number: CalcArgMaxTmpSize_Test_001
- * @tc.desc: Test when node is valid then CalcArgMaxTmpSize returns correct size for float input
+ * @tc.name: CalcArgmaxTmpSize_test_0
+ * @tc.number: CalcArgmaxTmpSize_Test_001
+ * @tc.desc: Test when node is valid then CalcArgmaxTmpSize returns correct size for float input
  */
-TEST_F(CalcArgMaxTmpSizeTest, CalcArgMaxTmpSize_test_0) {
+TEST_F(CalcArgmaxTmpSizeTest, CalcArgmaxTmpSize_test_0) {
   af::AscGraph graph("testx");
   af::Expression One = af::Symbol(1);
   af::Expression Zero = af::Symbol(0);
   Expression s1;
   Expression s2;
-  CreateGraphArgMax<ge::DT_FLOAT>(graph, s1, s2);
+  CreateGraphArgmax<ge::DT_FLOAT>(graph, s1, s2);
   std::shared_ptr<af::AscNode> node = graph.FindNode("argmax0");
   node->inputs[0].attr.vectorized_strides = {s2, One};
   node->outputs[0].attr.vectorized_strides = {One, Zero};
-  std::vector<std::unique_ptr<af::TmpBufDesc>> result = CalcArgMaxTmpSize(*node);
+  std::vector<std::unique_ptr<af::TmpBufDesc>> result = CalcArgmaxTmpSize(*node);
   ASSERT_GE(result.size(), 1);
 }
 
 /**
- * @tc.name: CalcArgMaxTmpSize_test_1
- * @tc.number: CalcArgMaxTmpSize_Test_002
- * @tc.desc: Test when node is valid then CalcArgMaxTmpSize returns correct size for int32 input
+ * @tc.name: CalcArgmaxTmpSize_test_1
+ * @tc.number: CalcArgmaxTmpSize_Test_002
+ * @tc.desc: Test when node is valid then CalcArgmaxTmpSize returns correct size for int32 input
  */
-TEST_F(CalcArgMaxTmpSizeTest, CalcArgMaxTmpSize_test_1) {
+TEST_F(CalcArgmaxTmpSizeTest, CalcArgmaxTmpSize_test_1) {
   af::AscGraph graph("testx");
   af::Expression One = af::Symbol(1);
   af::Expression Zero = af::Symbol(0);
   Expression s1;
   Expression s2;
-  CreateGraphArgMax<ge::DT_INT32>(graph, s1, s2);
+  CreateGraphArgmax<ge::DT_INT32>(graph, s1, s2);
   std::shared_ptr<af::AscNode> node = graph.FindNode("argmax0");
   node->inputs[0].attr.vectorized_strides = {s2, One};
   node->outputs[0].attr.vectorized_strides = {One, Zero};
-  std::vector<std::unique_ptr<af::TmpBufDesc>> result = CalcArgMaxTmpSize(*node);
+  std::vector<std::unique_ptr<af::TmpBufDesc>> result = CalcArgmaxTmpSize(*node);
   ASSERT_GE(result.size(), 1);
 }
 
 /**
- * @tc.name: CalcArgMaxTmpSize_test_2
- * @tc.number: CalcArgMaxTmpSize_Test_003
- * @tc.desc: Test when node is valid then CalcArgMaxTmpSize returns correct size for RA pattern with float input
+ * @tc.name: CalcArgmaxTmpSize_test_2
+ * @tc.number: CalcArgmaxTmpSize_Test_003
+ * @tc.desc: Test when node is valid then CalcArgmaxTmpSize returns correct size for RA pattern with float input
  */
-TEST_F(CalcArgMaxTmpSizeTest, CalcArgMaxTmpSize_test_2) {
+TEST_F(CalcArgmaxTmpSizeTest, CalcArgmaxTmpSize_test_2) {
   af::AscGraph graph("testx");
   af::Expression One = af::Symbol(1);
   af::Expression Zero = af::Symbol(0);
   Expression s1;
   Expression s2;
-  CreateGraphArgMaxRA<ge::DT_FLOAT>(graph, s1, s2);
+  CreateGraphArgmaxRA<ge::DT_FLOAT>(graph, s1, s2);
   std::shared_ptr<af::AscNode> node = graph.FindNode("argmax0");
   node->inputs[0].attr.vectorized_strides = {s2, One};
   node->outputs[0].attr.vectorized_strides = {Zero, One};
-  std::vector<std::unique_ptr<af::TmpBufDesc>> result = CalcArgMaxTmpSize(*node);
+  std::vector<std::unique_ptr<af::TmpBufDesc>> result = CalcArgmaxTmpSize(*node);
   ASSERT_GE(result.size(), 1);
 }
 
 /**
- * @tc.name: CalcArgMaxTmpSize_test_3
- * @tc.number: CalcArgMaxTmpSize_Test_004
- * @tc.desc: Test when node is valid then CalcArgMaxTmpSize returns correct size for RA pattern with int32 input
+ * @tc.name: CalcArgmaxTmpSize_test_3
+ * @tc.number: CalcArgmaxTmpSize_Test_004
+ * @tc.desc: Test when node is valid then CalcArgmaxTmpSize returns correct size for RA pattern with int32 input
  */
-TEST_F(CalcArgMaxTmpSizeTest, CalcArgMaxTmpSize_test_3) {
+TEST_F(CalcArgmaxTmpSizeTest, CalcArgmaxTmpSize_test_3) {
   af::AscGraph graph("testx");
   af::Expression One = af::Symbol(1);
   af::Expression Zero = af::Symbol(0);
   Expression s1;
   Expression s2;
-  CreateGraphArgMaxRA<ge::DT_INT32>(graph, s1, s2);
+  CreateGraphArgmaxRA<ge::DT_INT32>(graph, s1, s2);
   std::shared_ptr<af::AscNode> node = graph.FindNode("argmax0");
   node->inputs[0].attr.vectorized_strides = {s2, One};
   node->outputs[0].attr.vectorized_strides = {Zero, One};
-  std::vector<std::unique_ptr<af::TmpBufDesc>> result = CalcArgMaxTmpSize(*node);
+  std::vector<std::unique_ptr<af::TmpBufDesc>> result = CalcArgmaxTmpSize(*node);
   ASSERT_GE(result.size(), 1);
 }
 

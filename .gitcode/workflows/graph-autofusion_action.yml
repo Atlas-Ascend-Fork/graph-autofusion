@@ -11,11 +11,11 @@ concurrency:
 on:
   pr_comment:
       types: [ created ]
-      keyword: '^(?:\/)?compile*'
+      keyword: '^/?compile(@[A-Za-z0-9._-]+)?$'
   pull_request_comment:
     types: [created]
     branches: [ '**' ]
-    comments: [ '^(?:\/)?compile*' ]
+    comments: [ '^/?compile(@[A-Za-z0-9._-]+)?$' ]
 
 env:
   org_name: ${{ vars.ORG_NAME }}
@@ -46,6 +46,9 @@ stages:
         container:
           image: swr.cn-north-4.myhuaweicloud.com/ci_cann/ubuntu20.04.05_x86:k8s_v1.1006
       JOB_pre:
+        permissions:
+          repository: read
+          id-token: write
         name: Test_PreBuild
         uses: cann/.gitcode/.gitcode/workflows/pre_action.yml@master
     pre:
@@ -55,12 +58,18 @@ stages:
     name: Compile
     jobs:
       JOB_codecheck:
+        permissions:
+          repository: read
+          id-token: write
         name: CodeCheck
         uses: cann/.gitcode/.gitcode/workflows/codecheck_action.yml@master
         with:
           precommit_image_version: ${{ jobs.JOB_image.outputs.precommit }}
           codecheck_image_version: ${{ jobs.JOB_image.outputs.codecheck }}
       JOB_x86_compile:
+        permissions:
+          repository: read
+          id-token: write
         name: Compile_Ascend_X86
         uses: .gitcode/workflows/compile_action.yml
         with:
@@ -69,6 +78,9 @@ stages:
           arch: 'x64'
           package_name: 'cann-graph-autofusion_linux-x86_64.run'
       JOB_x86_compile_ubuntu24:
+        permissions:
+          repository: read
+          id-token: write
         name: Compile_Ascend_X86_ubuntu24
         uses: .gitcode/workflows/compile_action.yml
         with:
@@ -77,6 +89,9 @@ stages:
           arch: 'x64'
           package_name: 'cann-graph-autofusion_linux-x86_64_ubuntu24.run'
       JOB_arm_compile:
+        permissions:
+          repository: read
+          id-token: write
         name: Compile_Ascend_ARM
         uses: .gitcode/workflows/compile_action.yml
         with:
@@ -85,6 +100,9 @@ stages:
           arch: 'arm64'
           package_name: 'cann-graph-autofusion_linux-aarch64.run'
       JOB_arm_compile_ubuntu24:
+        permissions:
+          repository: read
+          id-token: write
         name: Compile_Ascend_ARM_ubuntu24
         uses: .gitcode/workflows/compile_action.yml
         with:
@@ -93,30 +111,45 @@ stages:
           arch: 'arm64'
           package_name: 'cann-graph-autofusion_linux-aarch64_ubuntu24.run'
       JOB_staticcheck_md_check:
+        permissions:
+          repository: read
+          id-token: write
         name: CodeCheck_staticcheck_md_check
         uses: .gitcode/workflows/staticcheck_action.yml
         with:
           check_type: 'markdown'
           image_version: ${{ jobs.JOB_image.outputs.staticcheck }}
       JOB_staticcheck_codespell_check:
+        permissions:
+          repository: read
+          id-token: write
         name: CodeCheck_staticcheck_codespell_check
         uses: .gitcode/workflows/staticcheck_action.yml
         with:
           check_type: 'codespell_check'
           image_version: ${{ jobs.JOB_image.outputs.staticcheck }}
       JOB_staticcheck_tag_closed_check:
+        permissions:
+          repository: read
+          id-token: write
         name: CodeCheck_staticcheck_tag_closed_check
         uses: .gitcode/workflows/staticcheck_action.yml
         with:
           check_type: 'tag_closed_check'
           image_version: ${{ jobs.JOB_image.outputs.staticcheck }}
       JOB_staticcheck_resource_existence_check:
+        permissions:
+          repository: read
+          id-token: write
         name: CodeCheck_staticcheck_resource_existence_check
         uses: .gitcode/workflows/staticcheck_action.yml
         with:
           check_type: 'resource_existence_check'
           image_version: ${{ jobs.JOB_image.outputs.staticcheck }}
       JOB_staticcheck_link_validity_check:
+        permissions:
+          repository: read
+          id-token: write
         name: CodeCheck_staticcheck_link_validity_check
         uses: .gitcode/workflows/staticcheck_action.yml
         with:
@@ -129,6 +162,19 @@ stages:
     name: UT
     select: selected_by_default
     jobs:
+      JOB_UT_TEST_Python_multistream:
+        permissions:
+          repository: read
+          id-token: write
+        name: UT_Test_Python_multistream
+        if: ${{ env.TARGET_BRANCH == 'master' || env.TARGET_BRANCH == 'develop' }}
+        select: selected_by_default
+        needs: []
+        uses: .gitcode/workflows/ut_action.yml
+        with:
+          ut_type: 'UT_Test_Python_multistream'
+          ut_package: 'coverage_*.info'
+          image_version: ${{ jobs.JOB_image.outputs.UT_Test_Python_superkernel }}
       JOB_api_check:
         name: API_Check
         select: selected_by_default
@@ -158,6 +204,9 @@ stages:
         container:
           image: swr.cn-north-4.myhuaweicloud.com/ci_cann/${{ jobs.JOB_image.outputs.codecheck }}
       JOB_UT_TEST_Python_superkernel:
+        permissions:
+          repository: read
+          id-token: write
         name: UT_Test_Python_superkernel
         select: selected_by_default
         needs: []
@@ -167,6 +216,9 @@ stages:
           ut_package: 'coverage_*.info'
           image_version: ${{ jobs.JOB_image.outputs.UT_Test_Python_superkernel }}
       JOB_ST_TEST_Python_superkernel:
+        permissions:
+          repository: read
+          id-token: write
         name: ST_Test_Python_superkernel
         select: selected_by_default
         needs: []
@@ -176,6 +228,9 @@ stages:
           ut_package: 'coverage_*.info'
           image_version: ${{ jobs.JOB_image.outputs.ST_Test_Python_superkernel }}
       JOB_UT_Test_Cpp_superkernel:
+        permissions:
+          repository: read
+          id-token: write
         name: UT_Test_Cpp_superkernel
         if: ${{ env.TARGET_BRANCH == 'master' }}
         select: selected_by_default
@@ -186,6 +241,9 @@ stages:
           ut_package: 'coverage_*.info'
           image_version: ${{ jobs.JOB_image.outputs.UT_Test_Cpp_superkernel }}
       JOB_ST_Test_Cpp_superkernel:
+        permissions:
+          repository: read
+          id-token: write
         name: ST_Test_Cpp_superkernel
         if: ${{ env.TARGET_BRANCH == 'master' }}
         select: selected_by_default
@@ -196,6 +254,9 @@ stages:
           ut_package: 'coverage_*.info'
           image_version: ${{ jobs.JOB_image.outputs.ST_Test_Cpp_superkernel }}
       JOB_UT_TEST_autofuse_framework:
+        permissions:
+          repository: read
+          id-token: write
         name: UT_Test_autofuse_framework
         select: selected_by_default
         needs: []
@@ -206,6 +267,9 @@ stages:
           spec_size: '2xlarge'
           image_version: ${{ jobs.JOB_image.outputs.UT_Test_autofuse_framework }}
       JOB_ST_TEST_autofuse_framework:
+        permissions:
+          repository: read
+          id-token: write
         name: ST_Test_autofuse_framework
         select: selected_by_default
         needs: []
@@ -215,6 +279,9 @@ stages:
           ut_package: 'coverage_*.info'
           image_version: ${{ jobs.JOB_image.outputs.ST_Test_autofuse_framework }}
       JOB_UT_TEST_autofuse_ascendc_api:
+        permissions:
+          repository: read
+          id-token: write
         name: UT_Test_autofuse_ascendc_api
         select: selected_by_default
         needs: []
@@ -224,6 +291,9 @@ stages:
           ut_package: 'coverage_*.info'
           image_version: ${{ jobs.JOB_image.outputs.UT_Test_autofuse_ascendc_api }}
       JOB_ST_TEST_autofuse_ascendc_api:
+        permissions:
+          repository: read
+          id-token: write
         name: ST_Test_autofuse_ascendc_api
         select: selected_by_default
         needs: []
@@ -231,8 +301,12 @@ stages:
         with:
           ut_type: 'ST_Test_autofuse_ascendc_api'
           ut_package: 'coverage_*.info'
+          spec_size: '2xlarge'
           image_version: ${{ jobs.JOB_image.outputs.ST_Test_autofuse_ascendc_api }}
       JOB_ST_TEST_autofuse_e2e:
+        permissions:
+          repository: read
+          id-token: write
         name: ST_Test_autofuse_e2e
         select: selected_by_default
         needs: []
@@ -240,6 +314,49 @@ stages:
         with:
           ut_type: 'ST_Test_autofuse_e2e'
           ut_package: 'coverage_*.info'
+          spec_size: '2xlarge'
+          image_version: ${{ jobs.JOB_image.outputs.ST_Test_autofuse_e2e }}
+      JOB_ST_TEST_autofuse_v35_1:
+        permissions:
+          repository: read
+          id-token: write
+        name: ST_Test_autofuse_v35_1
+        if: ${{ env.TARGET_BRANCH == 'master' || env.TARGET_BRANCH == 'develop' }}
+        select: selected_by_default
+        needs: []
+        uses: .gitcode/workflows/ut_action.yml
+        with:
+          ut_type: 'ST_Test_autofuse_v35_1'
+          ut_package: 'coverage_*.info'
+          spec_size: '2xlarge'
+          image_version: ${{ jobs.JOB_image.outputs.ST_Test_autofuse_e2e }}
+      JOB_ST_TEST_autofuse_v35_2:
+        permissions:
+          repository: read
+          id-token: write
+        name: ST_Test_autofuse_v35_2
+        if: ${{ env.TARGET_BRANCH == 'master' || env.TARGET_BRANCH == 'develop' }}
+        select: selected_by_default
+        needs: []
+        uses: .gitcode/workflows/ut_action.yml
+        with:
+          ut_type: 'ST_Test_autofuse_v35_2'
+          ut_package: 'coverage_*.info'
+          spec_size: '2xlarge'
+          image_version: ${{ jobs.JOB_image.outputs.ST_Test_autofuse_e2e }}
+      JOB_ST_TEST_autofuse_v35_3:
+        permissions:
+          repository: read
+          id-token: write
+        name: ST_Test_autofuse_v35_3
+        if: ${{ env.TARGET_BRANCH == 'master' || env.TARGET_BRANCH == 'develop' }}
+        select: selected_by_default
+        needs: []
+        uses: .gitcode/workflows/ut_action.yml
+        with:
+          ut_type: 'ST_Test_autofuse_v35_3'
+          ut_package: 'coverage_*.info'
+          spec_size: '2xlarge'
           image_version: ${{ jobs.JOB_image.outputs.ST_Test_autofuse_e2e }}
     pre:
     - type: auto
@@ -248,6 +365,9 @@ stages:
     name: UT_report
     jobs:
       JOB_ut_report:
+        permissions:
+          repository: read
+          id-token: write
         name: UT_report
         steps:
           -
@@ -257,6 +377,15 @@ stages:
             with:
               ref: ${{ atomgit.event.pull_request.merge_commit_sha }}
               allow-unsafe-pr-checkout: true
+          -
+            name: oidc_auth
+            uses: huaweicloud-oidc-auth
+            with:
+              audience: ${{ secrets.audience }}
+              agency_urn: ${{ secrets.agency_urn }}
+              provider_urn: ${{ secrets.provider_urn }}
+              region: cn-north-4
+              duration: 3600
           -
             name: download
             uses: obs-download
@@ -283,11 +412,10 @@ stages:
           -
             name: upload
             uses: obs-upload
+            if: ${{ always() }}
             with:
               endpoint: "https://obs.cn-north-4.myhuaweicloud.com"
               bucket: "ascend-ci"
-              access-key: ${{ secrets.AK }}
-              secret-key: ${{ secrets.SK }}
               artifact-path: |
                 ${{ steps.process_checkout.outputs.path }}/ut_cov_*.tar.gz
               object-prefix: ${{ env.obs_path }}/
@@ -296,6 +424,9 @@ stages:
         container:
           image: swr.cn-north-4.myhuaweicloud.com/ci_cann/${{ jobs.JOB_image.outputs.UT_Test_report }}
       JOB_st_report:
+        permissions:
+          repository: read
+          id-token: write
         name: ST_report
         steps:
           -
@@ -305,6 +436,15 @@ stages:
             with:
               ref: ${{ atomgit.event.pull_request.merge_commit_sha }}
               allow-unsafe-pr-checkout: true
+          -
+            name: oidc_auth
+            uses: huaweicloud-oidc-auth
+            with:
+              audience: ${{ secrets.audience }}
+              agency_urn: ${{ secrets.agency_urn }}
+              provider_urn: ${{ secrets.provider_urn }}
+              region: cn-north-4
+              duration: 3600
           -
             name: download
             uses: obs-download
@@ -323,19 +463,19 @@ stages:
               workspace: ${{ steps.process_checkout.outputs.path }}
               cov_mode: "report"
               ut_field: "superkernel"
-              modules: "ST_Test_Python_superkernel ST_Test_autofuse_ascendc_api ST_Test_autofuse_e2e"
+              modules: "ST_Test_autofuse_framework ST_Test_Python_superkernel ST_Test_autofuse_ascendc_api ST_Test_autofuse_e2e ST_Test_autofuse_v35_1 ST_Test_autofuse_v35_2 ST_Test_autofuse_v35_3"
               source_branch: ${{ env.SOURCE_BRANCH }}
               target_branch: ${{ env.TARGET_BRANCH }}
               obs_path: ${{ env.obs_path }}
               git_token: ${{ secrets.GIT_TOKEN }}
+              UT_SOFT_FAIL_REPOS: ${{ vars.UT_SOFT_FAIL_REPOS }}
           -
             name: upload
             uses: obs-upload
+            if: ${{ always() }}
             with:
               endpoint: "https://obs.cn-north-4.myhuaweicloud.com"
               bucket: "ascend-ci"
-              access-key: ${{ secrets.AK }}
-              secret-key: ${{ secrets.SK }}
               artifact-path: |
                 ${{ steps.process_checkout.outputs.path }}/ut_cov_*.tar.gz
               object-prefix: ${{ env.obs_path }}/
@@ -350,6 +490,9 @@ stages:
     name: PreSmoke
     jobs:
       A2_smoke:
+        permissions:
+          repository: read
+          id-token: write
         name: PreSmoke_A2
         timeout-minutes: 30
         steps:
@@ -361,13 +504,20 @@ stages:
               ref: ${{ atomgit.event.pull_request.merge_commit_sha }}
               allow-unsafe-pr-checkout: true
           -
+            name: oidc_auth
+            uses: huaweicloud-oidc-auth
+            with:
+              audience: ${{ secrets.audience }}
+              agency_urn: ${{ secrets.agency_urn }}
+              provider_urn: ${{ secrets.provider_urn }}
+              region: cn-north-4
+              duration: 3600
+          -
             name: download
             uses: obs-download
             with:
               endpoint: "https://obs.cn-north-4.myhuaweicloud.com"
               bucket: "ascend-ci"
-              access-key: ${{ secrets.AK }}
-              secret-key: ${{ secrets.SK }}
               key: |
                 ${{ env.obs_path }}/pr_filelist.txt
                 ${{ env.obs_path }}/pr_filelist_mod.txt
@@ -382,24 +532,85 @@ stages:
               export obs_path=${{ env.obs_path }}
               export repo_name=${{env.repo_name}}
               export pr_id=${{ env.MERGE_ID }}
-              export AK=${{secrets.AK}}
-              export SK=${{secrets.SK}}
               export WORKSPACE=${{ steps.process_checkout.outputs.path }}
               export NPU_ARCH=dav-2201
               bash ${{ steps.process_checkout.outputs.path }}/pre_smoke.sh
           - name: upload
             uses: obs-upload
+            if: ${{ always() }}
             with:
               endpoint: "https://obs.cn-north-4.myhuaweicloud.com"
               bucket: "ascend-ci"
-              access-key: ${{ secrets.AK }}
-              secret-key: ${{ secrets.SK }}
               artifact-path: "${{ steps.process_checkout.outputs.path }}/slog*.tar.gz"
-              object-prefix: ${obs_smoke_path}/plog/
+              object-prefix: ${{ env.obs_smoke_path }}/plog/
         if: env.TARGET_BRANCH == 'master'
         runs-on: ['self-hosted','npu=1','smoke=204']
         container:
           image: swr.cn-south-1.myhuaweicloud.com/pre_smoke/${{ jobs.JOB_image.outputs.PreSmoke_A900_npupool }}
+      A5_smoke:
+        permissions:
+          repository: read
+          id-token: write
+        name: PreSmoke_A5
+        timeout-minutes: 30
+        steps:
+          -
+            name: Checkout
+            identifier: process_checkout
+            uses: checkout
+            with:
+              ref: ${{ atomgit.event.pull_request.merge_commit_sha }}
+              allow-unsafe-pr-checkout: true
+          -
+            name: oidc_auth
+            uses: huaweicloud-oidc-auth
+            with:
+              audience: ${{ secrets.audience }}
+              agency_urn: ${{ secrets.agency_urn }}
+              provider_urn: ${{ secrets.provider_urn }}
+              region: cn-north-4
+              duration: 3600
+          -
+            name: download
+            uses: obs-download
+            with:
+              endpoint: "https://obs.cn-north-4.myhuaweicloud.com"
+              bucket: "ascend-ci"
+              key: |
+                ${{ env.obs_path }}/pr_filelist.txt
+                ${{ env.obs_path }}/pr_filelist_mod.txt
+                ${{ env.obs_path }}/update_file_detail.txt
+                ${{ env.obs_path }}/pre_smoke.sh
+              path: ${{ steps.process_checkout.outputs.path }}
+          -
+            name: smoke executor
+            run: |
+              export arm_run_url=${{jobs.JOB_x86_compile_ubuntu24.outputs.arm_run_url}}
+              export obs_smoke_path=${{ env.obs_smoke_path }}
+              export obs_path=${{ env.obs_path }}
+              export repo_name=${{env.repo_name}}
+              export pr_id=${{ env.MERGE_ID }}
+              export WORKSPACE=${{ steps.process_checkout.outputs.path }}
+              export NPU_ARCH=dav-3510
+              # A5 冒烟镜像(pre_mindspore_A5_conda)缺少运行期所需 python 依赖, 参照 ge/metadef 冒烟先补齐
+              # 装依赖失败同样不应拦截(bash -e 下会直接判死本步骤), 故一并 || 兜底
+              pip3 install numpy decorator sympy scipy attrs psutil || echo "[PreSmoke_A5] pip3 依赖安装失败, 继续执行冒烟(详见步骤日志)"
+              # A5 冒烟不拦截合入: 失败时用 || 兜底使步骤退出码为 0, A5 job 状态保持 COMPLETED,
+              # 避免 query-pipeline 按 job 状态打 ci-pipeline-failed (GitCode 的 step/job 级
+              # continue-on-error 均无法阻止该拦截); 失败详情见本步骤日志与已上传的 plog
+              bash ${{ steps.process_checkout.outputs.path }}/pre_smoke.sh || echo "[PreSmoke_A5] A5 冒烟失败, 但已配置为不拦截合入(详见步骤日志与 plog)"
+          - name: upload
+            uses: obs-upload
+            if: ${{ always() }}
+            with:
+              endpoint: "https://obs.cn-north-4.myhuaweicloud.com"
+              bucket: "ascend-ci"
+              artifact-path: "${{ steps.process_checkout.outputs.path }}/slog*.tar.gz"
+              object-prefix: ${{ env.obs_smoke_path }}/plog/A5/
+        if: env.TARGET_BRANCH == 'master' || env.TARGET_BRANCH == 'develop'
+        runs-on: ['self-hosted','npu=1','smoke=501']
+        container:
+          image: swr.cn-north-4.myhuaweicloud.com/pre_smoke/${{ jobs.JOB_image.outputs.PreSmoke_A5 }}
     pre:
     - type: auto
     fail-fast: true

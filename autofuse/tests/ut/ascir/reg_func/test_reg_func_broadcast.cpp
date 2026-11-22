@@ -226,5 +226,19 @@ TEST_F(CalcBroadCastTmpSizeTest, CalcBroadCastTmpSize_NeedExtrabufTrue) {
   ASSERT_EQ(result[0]->size, tmp_size);
   ASSERT_EQ(result[0]->life_time_axis_id, -1);
 }
+
+/**
+ * @tc.name: BroadcastInferDataType_SupportsBf16
+ * @tc.number: BroadcastInferDataType_Test_001
+ * @tc.desc: Test Broadcast accepts DT_BF16 on both v1(2201) and v2 platforms
+ */
+TEST_F(CalcBroadCastTmpSizeTest, BroadcastInferDataType_SupportsBf16) {
+  for (const auto *npu_arch : {"2201", "3510", "5102", "9201", "9202"}) {
+    std::vector<af::DataType> input_dtypes{af::DT_BF16};
+    std::vector<af::DataType> output_dtypes{af::DT_BF16};
+    EXPECT_EQ(af::ascir_op::Broadcast::InferDataType(input_dtypes, output_dtypes, npu_arch), af::SUCCESS)
+        << "npu_arch=" << npu_arch;
+  }
+}
 }  // namespace ascir
 }  // namespace af

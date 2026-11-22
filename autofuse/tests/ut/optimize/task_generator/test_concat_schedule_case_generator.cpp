@@ -826,6 +826,7 @@ TEST_F(ConcatScheduleCaseGeneratorTest, ConcatBackwardFusion) {
   load4.y.dtype = ge::DT_FLOAT16;
   *load4.y.repeats = {s0, s1};
   *load4.y.strides = {s1, af::sym::kSymbolOne};
+  load4.ir_attr.SetOffset(af::Symbol(23));
 
   Concat concat("concat");
   concat.attr.api.compute_type = af::ComputeType::kComputeConcat;
@@ -880,6 +881,7 @@ TEST_F(ConcatScheduleCaseGeneratorTest, ConcatBackwardFusion) {
   store_1.y.dtype = ge::DT_FLOAT16;
   *store_1.y.repeats = {s0, s1};
   *store_1.y.strides = {s1, af::sym::kSymbolOne};
+  store_1.attr.ir_attr = nullptr;
 
   Output out("out");
   out.attr.api.type = af::ApiType::kAPITypeBuffer;
@@ -901,6 +903,23 @@ TEST_F(ConcatScheduleCaseGeneratorTest, ConcatBackwardFusion) {
   auto cg1 = af::AscGraphUtils::GetComputeGraph(generated_graphs[1]);
   EXPECT_EQ(cg0->GetAllNodesSize(), 15UL);
   EXPECT_EQ(cg1->GetAllNodesSize(), 30UL);
+  for (const auto &node : cg1->GetAllNodes()) {
+    if (node->GetType() == "Load" && node->GetName().find("load4") != std::string::npos) {
+      const auto asc_node = std::dynamic_pointer_cast<af::AscNode>(node);
+      af::Expression offset;
+      const auto ir_attr = asc_node->attr.ir_attr->DownCastTo<af::ascir_op::Load::AscLoadIrAttrDef>();
+      EXPECT_EQ(ir_attr->GetOffset(offset), GRAPH_SUCCESS);
+      if (asc_node->GetName() == "load4") {
+        EXPECT_EQ(offset, af::Symbol(23));
+      } else if (asc_node->GetName() == "load4_split_1") {
+        EXPECT_EQ(offset, af::Symbol(23) + s1_1);
+      } else if (asc_node->GetName() == "load4_split_2") {
+        EXPECT_EQ(offset, af::Symbol(23) + s1_1 + s1_2);
+      } else {
+        FAIL() << "Unexpected generated load node: " << asc_node->GetName();
+      }
+    }
+  }
 }
 
 TEST_F(ConcatScheduleCaseGeneratorTest, ConcatBackwardFusion_WithSameLoad) {
@@ -928,7 +947,7 @@ TEST_F(ConcatScheduleCaseGeneratorTest, ConcatBackwardFusion_WithSameLoad) {
   *load1.y.axis = {z0.id, z1.id};
   *load1.y.repeats = {s0, s1_1};
   *load1.y.strides = {s1_1, af::sym::kSymbolOne};
-  load1.ir_attr.SetOffset(af::sym::kSymbolZero);
+  load1.ir_attr.SetOffset(af::Symbol(7));
 
   Load load2("load2");
   load2.x = data0.y;
@@ -937,7 +956,7 @@ TEST_F(ConcatScheduleCaseGeneratorTest, ConcatBackwardFusion_WithSameLoad) {
   *load2.y.axis = {z0.id, z1.id};
   *load2.y.repeats = {s0, s1_2};
   *load2.y.strides = {s1_2, af::sym::kSymbolOne};
-  load2.ir_attr.SetOffset(af::sym::kSymbolZero);
+  load2.ir_attr.SetOffset(af::Symbol(11));
 
   Load load3("load3");
   load3.attr.sched.axis = {z0.id, z1.id};
@@ -946,7 +965,7 @@ TEST_F(ConcatScheduleCaseGeneratorTest, ConcatBackwardFusion_WithSameLoad) {
   *load3.y.axis = {z0.id, z1.id};
   *load3.y.repeats = {s0, s1_3};
   *load3.y.strides = {s1_3, af::sym::kSymbolOne};
-  load3.ir_attr.SetOffset(af::sym::kSymbolZero);
+  load3.ir_attr.SetOffset(af::Symbol(13));
 
   Broadcast brc1("brc1");
   brc1.x = load3.y;
@@ -992,6 +1011,7 @@ TEST_F(ConcatScheduleCaseGeneratorTest, ConcatBackwardFusion_WithSameLoad) {
   *store.y.axis = {z0.id, z1.id};
   *store.y.repeats = {s0, s1};
   *store.y.strides = {s1, af::sym::kSymbolOne};
+  store.ir_attr.SetOffset(af::Symbol(17));
 
   Output out("out");
   out.attr.api.type = af::ApiType::kAPITypeBuffer;
@@ -1003,6 +1023,8 @@ TEST_F(ConcatScheduleCaseGeneratorTest, ConcatBackwardFusion_WithSameLoad) {
   std::vector<std::string> score_functions;
   EXPECT_EQ(generator.Generate(graph, generated_graphs, score_functions), af::SUCCESS);
   ASSERT_EQ(generated_graphs.size(), 3UL);
+  bool checked_store_offset = false;
+  bool checked_segment_offset = false;
   for (const auto &generated_graph : generated_graphs) {
     auto cg = af::AscGraphUtils::GetComputeGraph(generated_graph);
     auto add_node = cg->FindFirstNodeMatchType("Add");
@@ -1014,10 +1036,38 @@ TEST_F(ConcatScheduleCaseGeneratorTest, ConcatBackwardFusion_WithSameLoad) {
         const auto ir_attr = asc_node->attr.ir_attr->DownCastTo<af::ascir_op::Load::AscLoadIrAttrDef>();
         af::Expression offset;
         EXPECT_EQ(ir_attr->GetOffset(offset), GRAPH_SUCCESS);
-        EXPECT_EQ(offset, af::sym::kSymbolZero);
+        if (asc_node->GetName().find("load1") != std::string::npos) {
+          EXPECT_EQ(offset, af::Symbol(7));
+        } else if (asc_node->GetName().find("load2") != std::string::npos) {
+          EXPECT_EQ(offset, af::Symbol(11));
+        } else {
+          ASSERT_TRUE(asc_node->GetName().find("load3") != std::string::npos);
+          EXPECT_EQ(offset, af::Symbol(13));
+        }
+      }
+      if (node->GetType() == "Store") {
+        auto asc_node = std::dynamic_pointer_cast<af::AscNode>(node);
+        ASSERT_NE(asc_node->attr.ir_attr, nullptr);
+        const auto ir_attr = asc_node->attr.ir_attr->DownCastTo<af::ascir_op::Store::AscStoreIrAttrDef>();
+        af::Expression offset;
+        EXPECT_EQ(ir_attr->GetOffset(offset), GRAPH_SUCCESS);
+        if (asc_node->GetName() == "store_1") {
+          EXPECT_EQ(offset, af::Symbol(17));
+        } else if (asc_node->GetName() == "store_1_split_1") {
+          EXPECT_EQ(offset, af::Symbol(17) + s1_1);
+          checked_segment_offset = true;
+        } else if (asc_node->GetName() == "store_1_split_2") {
+          EXPECT_EQ(offset, af::Symbol(17) + s1_1 + s1_2);
+          checked_segment_offset = true;
+        } else {
+          FAIL() << "Unexpected generated store node: " << asc_node->GetName();
+        }
+        checked_store_offset = true;
       }
     }
   }
+  EXPECT_TRUE(checked_store_offset);
+  EXPECT_TRUE(checked_segment_offset);
 }
 
 TEST_F(ConcatScheduleCaseGeneratorTest, ConcatScoreFunc) {

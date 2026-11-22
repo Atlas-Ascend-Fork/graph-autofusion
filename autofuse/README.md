@@ -66,6 +66,22 @@ pip3 install setuptools
 bash scripts/env_install/pytorch/setup_torch_npu_daily.sh
 ```
 
+#### 样例运行依赖
+
+运行 [PyTorch 场景用例](./examples/pytorch/README.md)时，融合算子代码生成阶段会调用 `asc_tilling.py` 等生成脚本，这些脚本依赖 `decorator`、`scipy`、`attr`（`attrs`）等 Python 包，未包含在上述 `numpy`、`pyyaml`、`setuptools` 安装范围内。
+
+若运行时出现如下报错：
+
+```text
+RuntimeError: Failed to build ascend kernel. trigger bug by following command: '.../asc_tilling.py'
+```
+
+该报错会把真实失败原因包装为“触发 bug 的命令”，并不直接暴露缺失的依赖。此时请手动执行报错中给出的 `.py` 文件（例如 `python3 .../asc_tilling.py`），即可看到真实的报错（如 `ModuleNotFoundError: No module named 'decorator'`），再按提示安装缺失的依赖包。也可以直接在仓库根目录一次性安装全部依赖：
+
+```bash
+pip3 install -r super_kernel/requirements-dev.txt
+```
+
 #### 其他环境依赖
 
 ```bash
@@ -101,7 +117,7 @@ sudo apt-get install cmake gcc
 
    ```bash
     # 用户自己的 driver 包安装路径
-  source /usr/local/Ascend/driver/bin/setenv.sh
+  source /usr/local/Ascend/driver/bin/setenv.bash
   # 用户自己的 CANN 包安装路径
   source /usr/local/Ascend/ascend-toolkit/set_env.sh
     # 假设跑在 0卡，和脚本保持一致

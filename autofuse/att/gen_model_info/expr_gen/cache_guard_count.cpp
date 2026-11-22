@@ -94,10 +94,10 @@ uint64_t CountConstantHits(const CacheGuardInfo &info, uint64_t block) {
     return 0U;
   }
   const uint64_t base = block * inner;
-  if (base >= period) {
+  if (info.clip_to_period && base >= period) {
     return 0U;
   }
-  const uint64_t effective_extent = std::min(extent, period - base);
+  const uint64_t effective_extent = info.clip_to_period ? std::min(extent, period - base) : extent;
   const uint64_t last = (base + effective_extent - 1U) / period;
   const uint64_t before = (base == 0U) ? 0U : (base - 1U) / period;
   const uint64_t multiples = last - before + ((base == 0U) ? 1U : 0U);
@@ -149,7 +149,8 @@ Expr CountGuardHits(const CacheGuardInfo &info, const Expr &block_idx) {
   uint64_t block = 0U;
   uint64_t period = 0U;
   uint64_t inner = 0U;
-  if (GetIntegerConstant(block_idx, block) && GetIntegerConstant(info.period, period) &&
+  const bool block_is_integer = GetIntegerConstant(block_idx, block);
+  if (block_is_integer && GetIntegerConstant(info.period, period) &&
       GetIntegerConstant(info.block_inner_extent, inner) && GetIntegerConstant(info.loop_extent, extent)) {
     if (!HasSafeBlockRange(block, inner, extent)) {
       return CreateExpr(0U);
@@ -159,8 +160,20 @@ Expr CountGuardHits(const CacheGuardInfo &info, const Expr &block_idx) {
   if (info.kind == CacheGuardKind::kOriginBroadcast) {
     return CreateExpr(1U);
   }
+  // Block 0 starts at phase 0, so the general formula's offset term and its
+  // trailing-tail term are both constant there.  Returning the closed form
+  // keeps the emitted expression at a single Ceiling; the general path would
+  // instead carry Ceiling(L / (L + 1)) and Floor((P - 1) / P), which stay
+  // symbolic and multiply through every downstream cost.
+  if (block_is_integer && block == 0U) {
+    const Expr effective_extent = info.clip_to_period ? af::sym::Min(info.loop_extent, info.period) : info.loop_extent;
+    return af::sym::Ceiling(af::sym::Div(effective_extent, info.period));
+  }
   Expr base = af::sym::Mul(block_idx, info.block_inner_extent);
-  Expr effective_extent = af::sym::Min(info.loop_extent, af::sym::Max(CreateExpr(0U), af::sym::Sub(info.period, base)));
+  Expr effective_extent =
+      info.clip_to_period
+          ? af::sym::Min(info.loop_extent, af::sym::Max(CreateExpr(0U), af::sym::Sub(info.period, base)))
+          : info.loop_extent;
   Expr modulo_hits = af::sym::Sub(af::sym::Ceiling(af::sym::Div(af::sym::Add(base, effective_extent), info.period)),
                                   af::sym::Ceiling(af::sym::Div(base, info.period)));
   Expr first_offset = af::sym::Mod(base, info.period);
@@ -178,7 +191,7 @@ bool IsBlockCountUniform(const CacheGuardInfo &info, const Expr &block_dim) {
   if (info.kind == CacheGuardKind::kNone || info.kind == CacheGuardKind::kOriginBroadcast) {
     return true;
   }
-  if (IsCanonicalPartition(info, block_dim)) {
+  if (info.clip_to_period && IsCanonicalPartition(info, block_dim)) {
     return true;
   }
   uint64_t blocks = 0U;

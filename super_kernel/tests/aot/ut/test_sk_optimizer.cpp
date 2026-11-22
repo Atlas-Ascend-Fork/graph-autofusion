@@ -30,7 +30,8 @@ class SkOptimizerTaskReorderTest : public testing::Test {
     optimizer = std::make_unique<SuperKernelOptimizer>(*opts);
   }
 
-  SuperKernelBaseNode *CreateKernelNode(uint64_t nodeId, uint32_t streamIdx) {
+  SuperKernelBaseNode *CreateKernelNode(uint64_t nodeId, uint32_t streamIdx,
+                                        SkKernelType kernelType = SkKernelType::AIC_ONLY) {
     auto node = std::make_unique<SuperKernelKernelNode>(nullptr, ACL_MODEL_RI_TASK_KERNEL, 0, streamIdx,
                                                         INVALID_STREAM_ID, INVALID_TASK_ID);
     node->SetNodeType(SkNodeType::NODE_KERNEL);
@@ -38,6 +39,7 @@ class SkOptimizerTaskReorderTest : public testing::Test {
     node->SetPreNodeId(INVALID_TASK_ID);
     node->SetNextNodeId(INVALID_TASK_ID);
     node->nodeInfos.kernelInfos.funcName = "k";
+    node->nodeInfos.kernelInfos.kernelType = kernelType;
     auto *ptr = node.get();
     graph->graphMap[nodeId] = std::move(node);
     return ptr;
@@ -47,6 +49,30 @@ class SkOptimizerTaskReorderTest : public testing::Test {
     auto node = std::make_unique<SuperKernelMemoryNode>(nullptr, ACL_MODEL_RI_TASK_EVENT_WAIT, 0, streamIdx,
                                                         INVALID_STREAM_ID, INVALID_TASK_ID);
     node->SetNodeType(SkNodeType::NODE_WAIT);
+    node->SetNodeId(nodeId);
+    node->SetPreNodeId(INVALID_TASK_ID);
+    node->SetNextNodeId(INVALID_TASK_ID);
+    auto *ptr = node.get();
+    graph->graphMap[nodeId] = std::move(node);
+    return ptr;
+  }
+
+  SuperKernelBaseNode *CreateNotifyNode(uint64_t nodeId, uint32_t streamIdx) {
+    auto node = std::make_unique<SuperKernelMemoryNode>(nullptr, ACL_MODEL_RI_TASK_EVENT_RECORD, 0, streamIdx,
+                                                        INVALID_STREAM_ID, INVALID_TASK_ID);
+    node->SetNodeType(SkNodeType::NODE_NOTIFY);
+    node->SetNodeId(nodeId);
+    node->SetPreNodeId(INVALID_TASK_ID);
+    node->SetNextNodeId(INVALID_TASK_ID);
+    auto *ptr = node.get();
+    graph->graphMap[nodeId] = std::move(node);
+    return ptr;
+  }
+
+  SuperKernelBaseNode *CreateResetNode(uint64_t nodeId, uint32_t streamIdx) {
+    auto node = std::make_unique<SuperKernelMemoryNode>(nullptr, ACL_MODEL_RI_TASK_EVENT_RESET, 0, streamIdx,
+                                                        INVALID_STREAM_ID, INVALID_TASK_ID);
+    node->SetNodeType(SkNodeType::NODE_RESET);
     node->SetNodeId(nodeId);
     node->SetPreNodeId(INVALID_TASK_ID);
     node->SetNextNodeId(INVALID_TASK_ID);
@@ -193,6 +219,40 @@ TEST_F(SkOptimizerTaskReorderTest, ReorderWaitNodesForTaskBuild_CustomizeQueue_N
   EXPECT_EQ(ToNodeIds(reorderedTaskNodes), (std::vector<uint64_t>{1, 3, 2, 4, 5}));
 }
 
+TEST_F(SkOptimizerTaskReorderTest, SynthesizedEventDependencies_ConnectOnlyLastKernelOfEachStream) {
+  auto *stream0FirstKernel = CreateKernelNode(1, 0);
+  auto *stream1LastKernel = CreateKernelNode(2, 1);
+  auto *stream0LastKernel = CreateKernelNode(3, 0);
+  auto *trailingWait = CreateWaitNode(4, 1);
+  auto *firstEvent = CreateNotifyNode(100, 0);
+  std::vector<SuperKernelBaseNode *> reorderedTaskNodes = {stream0FirstKernel, stream1LastKernel, stream0LastKernel,
+                                                           trailingWait};
+
+  optimizer->ConnectLastKernelsToFirstEvent(reorderedTaskNodes, firstEvent);
+
+  EXPECT_EQ(stream0FirstKernel->sendToNodeId.count(100), 0);
+  EXPECT_EQ(stream0LastKernel->sendToNodeId.count(100), 1);
+  EXPECT_EQ(stream1LastKernel->sendToNodeId.count(100), 1);
+  EXPECT_EQ(firstEvent->receiveNodeId.count(3), 1);
+  EXPECT_EQ(firstEvent->receiveNodeId.count(2), 1);
+  EXPECT_EQ(firstEvent->receiveNodeId.size(), 2);
+}
+
+TEST_F(SkOptimizerTaskReorderTest, ExtractIntraStreamDependencies_ConnectsAdjacentNodesPerStream) {
+  auto *stream0First = CreateKernelNode(201, 0);
+  auto *stream1First = CreateKernelNode(202, 1);
+  auto *stream0Second = CreateWaitNode(203, 0);
+  auto *stream1Second = CreateKernelNode(204, 1);
+
+  ASSERT_TRUE(optimizer->ExtractIntraStreamDependencies({stream0First, stream1First, stream0Second, stream1Second}));
+
+  EXPECT_EQ(stream0First->sendToNodeId.count(203), 1);
+  EXPECT_EQ(stream0Second->receiveNodeId.count(201), 1);
+  EXPECT_EQ(stream1First->sendToNodeId.count(204), 1);
+  EXPECT_EQ(stream1Second->receiveNodeId.count(202), 1);
+  EXPECT_EQ(stream0First->sendToNodeId.count(202), 0);
+}
+
 /**
  * @brief Test case: only op4-op9 are fusible, others are not
  *
@@ -242,10 +302,12 @@ TEST_F(SkOptimizerTaskReorderTest, ThreeStreamParallel_OnlyOp4ToOp9Fusible) {
   // Setup stream connections
   graph->streams.clear();
   graph->headNodes.clear();
+  graph->tailNodes.clear();
 
   // Setup stream 0: op1 -> op4 -> op5 -> op10
   graph->streams.emplace_back();
   graph->headNodes.push_back(1);
+  graph->tailNodes.push_back(10);
   op1->SetNextNodeId(4);
   op1->SetPreNodeId(INVALID_TASK_ID);
   op1->nodeIdxInStream = 0;
@@ -269,6 +331,7 @@ TEST_F(SkOptimizerTaskReorderTest, ThreeStreamParallel_OnlyOp4ToOp9Fusible) {
   // Setup stream 1: op2 -> op6 -> op7 -> op11
   graph->streams.emplace_back();
   graph->headNodes.push_back(2);
+  graph->tailNodes.push_back(11);
   op2->SetNextNodeId(6);
   op2->SetPreNodeId(INVALID_TASK_ID);
   op2->nodeIdxInStream = 0;
@@ -292,6 +355,7 @@ TEST_F(SkOptimizerTaskReorderTest, ThreeStreamParallel_OnlyOp4ToOp9Fusible) {
   // Setup stream 2: op3 -> op8 -> op9 -> op12
   graph->streams.emplace_back();
   graph->headNodes.push_back(3);
+  graph->tailNodes.push_back(12);
   op3->SetNextNodeId(8);
   op3->SetPreNodeId(INVALID_TASK_ID);
   op3->nodeIdxInStream = 0;

@@ -125,6 +125,10 @@ bool GetMaxDtypeSize(const ge::DataType input_data_type, const ge::DataType out_
 bool IsCVFusionStage(const ApiCallContext &context);
 Status GetTensorDtypeSize(const Tensor &tensor, int64_t &dtype_size);
 std::string GenBlockAlignNExpr(const Tensor &tensor, const std::string &n_expr);
+bool IsCvUbFuseDenseTensor(const Tensor &tensor, const Tensor &reference);
+std::string GenCvUbFuseFlatApiCondition(const TPipe &tpipe,
+                                        const std::vector<std::reference_wrapper<const Tensor>> &inputs,
+                                        const Tensor &output);
 std::string GetCVAlignedSize(const ApiCallContext &context, const Tensor &tensor, const std::string &size_expr);
 bool ShouldIgnoreZeroAxis(const std::vector<Tensor> &inputs, const std::vector<Tensor> &outputs, int64_t cur_index);
 bool IsInputOutputStrideAllZero(const std::vector<Tensor> &inputs, const std::vector<Tensor> &outputs,

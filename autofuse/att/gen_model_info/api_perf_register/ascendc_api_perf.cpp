@@ -14,6 +14,7 @@
 #include <numeric>
 #include "common/checker.h"
 #include "base/att_const_values.h"
+#include "api_perf_register/soc_perf_config.h"
 
 using namespace af::sym;
 namespace att {
@@ -1172,7 +1173,22 @@ Perf GetPerfFunc(const std::string &op_type) {
 }
 
 AscendCPerf GetAscendCPerfFunc(const std::string &op_type) {
-  return EvalCosts::Instance().GetAscendCFunc(op_type);
+  AscendCPerf default_func = EvalCosts::Instance().GetAscendCFunc(op_type);
+  if (default_func == nullptr) {
+    return nullptr;
+  }
+
+  SocPerfTarget target;
+  bool required = false;
+  if (ReadSocPerfTarget(target) != af::SUCCESS || RequiresFullSocVersion(target.npu_arch, required) != af::SUCCESS ||
+      !required) {
+    return default_func;
+  }
+  AscendCPerf selected_func = nullptr;
+  if (ResolveSocAscendCPerf(target, op_type, default_func, selected_func) != af::SUCCESS) {
+    return nullptr;
+  }
+  return selected_func;
 }
 
 EvalCosts &EvalCosts::Instance() {

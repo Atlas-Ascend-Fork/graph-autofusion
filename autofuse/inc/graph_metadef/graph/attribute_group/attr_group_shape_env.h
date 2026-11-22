@@ -53,26 +53,14 @@ class Source {
 };
 using SourcePtr = std::shared_ptr<Source>;
 
-// todoo: 当前兼容ascgen仓使用，待删除
-struct HashSymbol {
-  size_t operator()(const Expression &e) const {
-    int64_t value_int = 0L;
-    double value_float = 0.0f;
-    bool value_bool = false;
-    switch (e.GetExprType()) {
-      case ExprType::kExprConstantBoolean:
-        GE_ASSERT_TRUE(e.GetConstValue(value_bool));
-        return std::hash<bool>()(value_bool);
-      case ExprType::kExprConstantInteger:
-        GE_ASSERT_TRUE(e.GetConstValue(value_int));
-        return std::hash<int64_t>()(value_int);
-      case ExprType::kExprConstantRealDouble:
-      case ExprType::kExprConstantRation:
-        GE_ASSERT_TRUE(e.GetConstValue(value_float));
-        return std::hash<double>()(value_float);
-      default:
-        return std::hash<std::string>()(std::string(e.Serialize().get()));
-    }
+struct ShapeEnvExpressionHash {
+  uint64_t operator()(const Expression &e) const {
+    return e.Hash();
+  }
+};
+struct ShapeEnvExpressionKeyEq {
+  bool operator()(const Expression &lhs, const Expression &rhs) const {
+    return lhs == rhs;
   }
 };
 struct SymbolCheckInfo {
@@ -148,7 +136,7 @@ class ShapeEnvAttr : public AttrGroupsBase {
       const auto &iter = value_to_symbol_.find(hint_int64);
       if (iter != value_to_symbol_.end()) {
         GE_ASSERT_TRUE(!iter->second.empty());
-        return Symbol(iter->second.front().Serialize().get());
+        return Symbol(iter->second.front().Str().get());
       }
     }
     auto global_index = unique_sym_id_++;
@@ -206,9 +194,10 @@ class ShapeEnvAttr : public AttrGroupsBase {
   graphStatus DeserializeSymbolCheckInfos(const proto::ShapeEnvAttrGroupsDef &shape_env_group);
   std::string GetGuardDfxContextInfo() const;
   bool CheckReplacementCycle(const Expression &expr1, const Expression &expr2) const;
-  using UMapExprReplacement = std::unordered_map<Expression, Replacement, ExpressionHash, ExpressionKeyEq>;
-  using UMapExprInt = std::unordered_map<Expression, int64_t, ExpressionHash, ExpressionKeyEq>;
-  using UMapExprSource = std::unordered_map<Expression, SourcePtr, ExpressionHash, ExpressionKeyEq>;
+  using UMapExprReplacement =
+      std::unordered_map<Expression, Replacement, ShapeEnvExpressionHash, ShapeEnvExpressionKeyEq>;
+  using UMapExprInt = std::unordered_map<Expression, int64_t, ShapeEnvExpressionHash, ShapeEnvExpressionKeyEq>;
+  using UMapExprSource = std::unordered_map<Expression, SourcePtr, ShapeEnvExpressionHash, ShapeEnvExpressionKeyEq>;
   UMapExprReplacement replacements_;
   UMapExprInt symbol_to_value_;
   UMapExprSource symbol_to_source_;

@@ -22,8 +22,6 @@ PYTHON_LIB_PATH=${AUTOFUSE_BUILD_PATH}/tests/
 PYTHON_MODULE_PATH=${AUTOFUSE_PATH}/compiler/python/
 TESTS_ST_PATH="${AUTOFUSE_PATH}/tests/st/"
 LOCAL_RUNTIME_LIB_PATH="${AUTOFUSE_BUILD_PATH}/ascir/generator:${AUTOFUSE_BUILD_PATH}/ascir/meta:${AUTOFUSE_BUILD_PATH}/graph_metadef/graph/ascendc_ir/generator:${AUTOFUSE_BUILD_PATH}/graph_metadef/graph/ascendc_ir:${AUTOFUSE_BUILD_PATH}/graph_metadef/graph/expression:${AUTOFUSE_BUILD_PATH}/graph_metadef/graph:${AUTOFUSE_BUILD_PATH}/tests:${AUTOFUSE_BUILD_PATH}/tests/depends/trace:${AUTOFUSE_BUILD_PATH}/tests/depends/runtime"
-RUN_V35_TESTS="off"
-
 select_compilers() {
   local selected_cc="${CC:-}"
   local selected_cxx="${CXX:-}"
@@ -79,6 +77,47 @@ set_test_ld_library_path() {
   fi
 }
 
+print_test_resources() {
+  local phase="$1"
+  local resource
+  local key value unit
+  printf '[autofuse resources][%s] build_jobs=%s\n' "${phase}" "${THREAD_NUM}"
+  if [ -r /proc/meminfo ]; then
+    while read -r key value unit; do
+      case "${key}" in
+        MemTotal:|MemAvailable:|SwapTotal:|SwapFree:)
+          printf '[autofuse resources][%s] %s %s %s\n' "${phase}" "${key}" "${value}" "${unit}"
+          ;;
+      esac
+    done < /proc/meminfo
+  fi
+  for resource in \
+    /sys/fs/cgroup/cpu.max \
+    /sys/fs/cgroup/cpuset.cpus.effective \
+    /sys/fs/cgroup/memory.max \
+    /sys/fs/cgroup/memory.current \
+    /sys/fs/cgroup/memory.peak \
+    /sys/fs/cgroup/memory.events \
+    /sys/fs/cgroup/cpu/cpu.cfs_quota_us \
+    /sys/fs/cgroup/cpu/cpu.cfs_period_us \
+    /sys/fs/cgroup/cpu,cpuacct/cpu.cfs_quota_us \
+    /sys/fs/cgroup/cpu,cpuacct/cpu.cfs_period_us \
+    /sys/fs/cgroup/memory/memory.limit_in_bytes \
+    /sys/fs/cgroup/memory/memory.max_usage_in_bytes \
+    /sys/fs/cgroup/memory/memory.failcnt \
+    /sys/fs/cgroup/memory/memory.oom_control; do
+    if [ -r "${resource}" ]; then
+      printf '[autofuse resources][%s] %s=\n' "${phase}" "${resource}"
+      cat "${resource}" || true
+    fi
+  done
+}
+
+
+mlir_tests_requested() {
+  [[ "${MODEL_NAME:-}" = "mlir" ]]
+}
+
 # print usage message
 usage() {
   echo "Usage:"
@@ -90,13 +129,14 @@ usage() {
   echo "    -s, --st       Build all st"
   echo "    -u, --ut       Build all ut"
   echo "    -m, --module    Option arg, specify the model name to build st or ut, default all"
+  echo "                     Use '-m mlir' to run all Autofuse MLIR tests"
   echo "    -j<N>            Set the number of threads used for llt, default 8."
   echo "    -c, --cov        Build ut with coverage tag"
   echo "                     Please ensure that the environment has correctly installed lcov, gcov, and genhtml."
   echo "                     and the version matched gcc/g++."
   echo "    -h, --help     Print usage"
   echo "    --ascend_install_path=<PATH>"
-  echo "                   Set ascend package install path, default /usr/local/Ascend/ascend-toolkit/latest"
+  echo "                   Set ascend package install path, default ASCEND_HOME_PATH or /usr/local/Ascend/ascend-toolkit/latest"
   echo "    --ascend_3rd_lib_path=<PATH>"
   echo "                     Set ascend third_party package install path, default ./output/third_party"
   echo ""
@@ -109,11 +149,7 @@ checkopts() {
   ENABLE_COV="off"
   THREAD_NUM=8
   MODEL_NAME="all"
-  if [ -n "$ASCEND_INSTALL_PATH" ]; then
-    ASCEND_INSTALL_PATH="$ASCEND_INSTALL_PATH"
-  else
-    ASCEND_INSTALL_PATH="/usr/local/Ascend/ascend-toolkit/latest"
-  fi
+  ASCEND_INSTALL_PATH="${ASCEND_INSTALL_PATH:-${ASCEND_HOME_PATH:-/usr/local/Ascend/ascend-toolkit/latest}}"
   if [ -n "$ASCEND_3RD_LIB_PATH" ]; then
     ASCEND_3RD_LIB_PATH="$ASCEND_3RD_LIB_PATH"
   else
@@ -123,9 +159,6 @@ checkopts() {
     ENABLE_PKG="$ENABLE_PKG"
   else
     ENABLE_PKG="off"
-  fi
-  if [ -d "${AUTOFUSE_PATH}/v35" ]; then
-    RUN_V35_TESTS="on"
   fi
 
   # Process the options
@@ -181,6 +214,28 @@ checkopts() {
         ;;
     esac
   done
+
+  if mlir_tests_requested && [[ "X${ENABLE_UT}" != "Xon" && "X${ENABLE_ST}" != "Xon" ]]; then
+    ENABLE_UT="on"
+    ENABLE_ST="on"
+  fi
+
+  AUTOFUSE_NON_MLIR_CMAKE_ARGS="-D ENABLE_AUTOFUSE_MLIR=OFF -D ENABLE_AUTOFUSE_MLIR_TESTS=OFF"
+}
+
+require_coverage_tools() {
+  local missing_tools=()
+  local tool
+  for tool in lcov genhtml gcov; do
+    if ! command -v "${tool}" >/dev/null 2>&1; then
+      missing_tools+=("${tool}")
+    fi
+  done
+  if [ "${#missing_tools[@]}" -ne 0 ]; then
+    echo "ERROR: coverage requires missing tool(s): ${missing_tools[*]}" >&2
+    echo "       Install lcov package in the dev image; it provides lcov and genhtml." >&2
+    return 1
+  fi
 }
 
 mk_dir() {
@@ -229,6 +284,10 @@ build_ascgen-dev() {
 
   CMAKE_ARGS="-D CMAKE_C_COMPILER=${C_COMPILER} \
               -D CMAKE_CXX_COMPILER=${CXX_COMPILER} \
+              -D CMAKE_BUILD_TYPE=${BUILD_TYPE:-Release} \
+              -D BUILD_AUTOFUSE=ON \
+              -D ENABLE_CPP_UTEST=OFF \
+              -D ENABLE_CPP_STEST=OFF \
               -D ASCEND_3RD_LIB_PATH=${ASCEND_3RD_LIB_PATH} \
               -D CANN_3RD_LIB_PATH=${ASCEND_3RD_LIB_PATH} \
               -D ASCEND_INSTALL_PATH=${ASCEND_INSTALL_PATH} \
@@ -242,7 +301,8 @@ build_ascgen-dev() {
               -D ENABLE_PKG=${ENABLE_PKG} \
               -D ENABLE_TEST=${ENABLE_TEST_FLAG} \
               -D ENABLE_GE_UT=${ENABLE_GE_UT_FLAG} \
-              -D ENABLE_GE_ST=${ENABLE_GE_ST_FLAG}"
+              -D ENABLE_GE_ST=${ENABLE_GE_ST_FLAG} \
+              ${AUTOFUSE_NON_MLIR_CMAKE_ARGS}"
 
   echo "CMAKE_ARGS is: $CMAKE_ARGS"
   export BUILD_METADEF=${BUILD_METADEF}
@@ -263,9 +323,13 @@ build_ascgen-dev() {
 
 build_test_ascendc_api_test() {
   echo "create build directory and build ascendc_api_test";
-  cd "${BUILD_PATH}"
+  mk_dir "${BUILD_PATH}" && cd "${BUILD_PATH}" || return 1
   CMAKE_ARGS="-D CMAKE_C_COMPILER=${C_COMPILER} \
               -D CMAKE_CXX_COMPILER=${CXX_COMPILER} \
+              -D CMAKE_BUILD_TYPE=${BUILD_TYPE:-Release} \
+              -D BUILD_AUTOFUSE=ON \
+              -D ENABLE_CPP_UTEST=OFF \
+              -D ENABLE_CPP_STEST=OFF \
               -D ASCEND_3RD_LIB_PATH=${ASCEND_3RD_LIB_PATH} \
               -D CANN_3RD_LIB_PATH=${ASCEND_3RD_LIB_PATH} \
               -D ASCEND_INSTALL_PATH=${ASCEND_INSTALL_PATH} \
@@ -279,12 +343,11 @@ build_test_ascendc_api_test() {
               -D ENABLE_PKG=${ENABLE_PKG} \
               -D ENABLE_TEST=True \
               -D ENABLE_GE_UT=on \
-              -D ENABLE_LLT_PKG=ON"
-  cmake $CMAKE_ARGS ..
+              -D ENABLE_LLT_PKG=ON \
+              ${AUTOFUSE_NON_MLIR_CMAKE_ARGS}"
+  cmake $CMAKE_ARGS .. || return 1
   MAKE_TEST_TARGET="test_ascendc_api
-                    test_ascendc_api_v35 \
-                    test_load_broadcast_store_codegen \
-                    test_load_broadcast_multi_axis_store_codegen"
+                    test_ascendc_api_v35"
   echo "[UT AUTOFUSE ASCENDC API] make -j${THREAD_NUM} start"
   make -j${THREAD_NUM} $MAKE_TEST_TARGET
   if [ $? -ne 0 ]; then
@@ -307,14 +370,15 @@ build_test_ascendc_api_test() {
     echo "[UT AUTOFUSE ASCENDC API] test ascendc_v35 failed."
     return 1
   fi
-  ctest --output-on-failure -j${THREAD_NUM} --test-dir ${AUTOFUSE_BUILD_PATH}/tests/ut/e2e --no-tests=error \
-          -O ${BUILD_PATH}/ctest_ut_e2e.log
-  if [ $? -ne 0 ]; then
-    env
-    echo "[UT AUTOFUSE ASCENDC API] test e2e failed."
-    return 1
-  fi
   echo "[UT AUTOFUSE ASCENDC API] test success!"
+}
+
+build_codegen_e2e_ut() {
+  echo "create build directory and build codegen e2e ut"
+  make -C "${BUILD_PATH}" -j${THREAD_NUM} \
+    test_load_broadcast_store_codegen test_load_broadcast_multi_axis_store_codegen || return 1
+  ctest --output-on-failure -j${THREAD_NUM} --test-dir "${AUTOFUSE_BUILD_PATH}/tests/ut/e2e" --no-tests=error \
+    -O "${BUILD_PATH}/ctest_ut_e2e.log"
 }
 
 build_test() {
@@ -345,6 +409,57 @@ build_test() {
   echo "$(date '+%F %T') ascgen-dev test success!"
 }
 
+configure_mlir_tests() {
+  if ! bash "${BASEPATH}/autofuse/mlir/scripts/check_llvm_dependency_resolution.sh"; then
+    echo "check_llvm_dependency_resolution failed."
+    return 1
+  fi
+
+  mk_dir "${BUILD_PATH}"
+
+  if ! cmake -S "${BASEPATH}" -B "${BUILD_PATH}" \
+      -D RUN_TEST=1 \
+      -D CMAKE_BUILD_TYPE=${BUILD_TYPE:-Release} \
+      -D CMAKE_C_COMPILER=${C_COMPILER} \
+      -D CMAKE_CXX_COMPILER=${CXX_COMPILER} \
+      -D ASCEND_3RD_LIB_PATH="${ASCEND_3RD_LIB_PATH}" \
+      -D CANN_3RD_LIB_PATH="${ASCEND_3RD_LIB_PATH}" \
+      -D ASCEND_INSTALL_PATH="${ASCEND_INSTALL_PATH}" \
+      -D ENABLE_OPEN_SRC=True \
+      -D ENABLE_SYMENGINE=True \
+      -D ENABLE_AUTOFUSE_MLIR_TESTS=ON \
+      -D ENABLE_AUTOFUSE_MLIR=ON; then
+    echo "configure Autofuse MLIR tests failed."
+    return 1
+  fi
+}
+
+run_mlir_targets() {
+  local targets=("$@")
+  echo "$(date '+%F %T') build and run Autofuse MLIR targets: ${targets[*]}"
+
+  configure_mlir_tests || return 1
+
+  if ! cmake --build "${BUILD_PATH}" --target "${targets[@]}" -j "${THREAD_NUM}"; then
+    echo "build targets ${targets[*]} failed."
+    return 1
+  fi
+
+  echo "$(date '+%F %T') Autofuse MLIR targets succeeded: ${targets[*]}"
+}
+
+build_mlir_tests() {
+  local test_targets=()
+  if [[ "X${ENABLE_UT}" = "Xon" ]]; then
+    test_targets+=(check-ut check-lit)
+  fi
+  if [[ "X${ENABLE_ST}" = "Xon" ]]; then
+    test_targets+=(check-st check-e2e)
+  fi
+
+  run_mlir_targets "${test_targets[@]}"
+}
+
 build_test_ascir_st() {
   echo "$(date '+%F %T') create build directory and build test_ascir_st";
   cd "${BUILD_PATH}"
@@ -362,7 +477,8 @@ build_test_ascir_st() {
               -D ENABLE_PKG=${ENABLE_PKG} \
               -D ENABLE_TEST=True \
               -D ENABLE_GE_ST=on \
-              -D ENABLE_LLT_PKG=ON"
+              -D ENABLE_LLT_PKG=ON \
+              ${AUTOFUSE_NON_MLIR_CMAKE_ARGS}"
   cmake $CMAKE_ARGS ..
 
   make -j${THREAD_NUM} test_ascir_st
@@ -587,6 +703,9 @@ codegen_e2e_st() {
   cd "${BUILD_PATH}"
   g++ -v
 
+  local v35_mode="${1:-}"
+  local v35_shard="${2:-}"
+
   ASCEND_INSTALL_LIB_PATH=${ASCEND_INSTALL_PATH}/$(uname -m)-linux/lib64/
   CMAKE_ARGS="-D CMAKE_C_COMPILER=${C_COMPILER} \
             -D CMAKE_CXX_COMPILER=${CXX_COMPILER} \
@@ -601,7 +720,8 @@ codegen_e2e_st() {
             -D ENABLE_TEST=True \
             -D RUN_TEST=1 \
             -D ENABLE_GE_ST=on \
-            -D ENABLE_LLT_PKG=ON"
+            -D ENABLE_LLT_PKG=ON \
+            ${AUTOFUSE_NON_MLIR_CMAKE_ARGS}"
   env
 
   cmake $CMAKE_ARGS ../
@@ -612,6 +732,7 @@ codegen_e2e_st() {
                     load_where_x2x3_is_ubscalar_throwfor_store_expect_code_e2e \
                     constant_load_gt_store_expect_code_e2e \
                     constant_load_le_store_expect_code_e2e \
+                    load_ub_scalar_gt_store_expect_code_e2e \
                     discrete_store_e2e \
                     discrete_load_e2e \
                     broadcast_force_merge_e2e \
@@ -647,18 +768,6 @@ codegen_e2e_st() {
                     load_rsum_invalid_axis_store_e2e \
                     load_gather_first_axis_split_b_t_abs_store_e2e \
                     load_logicalnot_store_e2e"
-  if [[ "X$RUN_V35_TESTS" = "Xon" ]]; then
-    MAKE_TARGET_LIST="${MAKE_TARGET_LIST} \
-                      load_abs_store_expect_code_e2e_v2 \
-                      load_scalar_abs_brc_store_expect_code_e2e_v2 \
-                      load_scalar_brc_store_2d_expect_code_e2e_v2 \
-                      load_scalar_clip_store_expect_code_e2e_v2 \
-                      load_div_store_expect_code_e2e_v2 \
-                      load_scalar_sub_store_expect_code_e2e_v2 \
-                      load_scalar_div_store_expect_code_e2e_v2 \
-                      load_switch_scalar_sub_store_expect_code_e2e_v2 \
-                      load_nan_out_for_store_expect_code_e2e_v2"
-  fi
   # 从 build_backend 移入的 >10s 长尾用例（含 inductor/pgo split_compile 链），与 ascendc_api 门禁并行。
   # ctest 仍按 build_backend_test1/2 标签 + 用例名正则选择（见下方 moved 两次 ctest 调用）。
   BACKEND_MOVED_TARGET_LIST="add_rsqrt_test_e2e \
@@ -669,9 +778,18 @@ codegen_e2e_st() {
                       load_logical_not_store_test_e2e \
                       pgo_add_abs_inductor_concat_test_e2e \
                       pgo_add_abs_inductor_test_e2e"
-  BACKEND_MOVED_TARGET_LIST_V35=""
-  if [[ "X$RUN_V35_TESTS" = "Xon" ]]; then
-    BACKEND_MOVED_TARGET_LIST_V35="acos_bf16_test_e2e_v2 \
+  if [[ "X${v35_mode}" = "Xv35" ]]; then
+    # v35 专属用例（原先与主列表混编），拆分至 ST_Test_autofuse_v35_1/2/3 分片任务与主架构 ST 并行执行
+    MAKE_TARGET_LIST="load_abs_store_expect_code_e2e_v2 \
+                      load_scalar_abs_brc_store_expect_code_e2e_v2 \
+                      load_scalar_brc_store_2d_expect_code_e2e_v2 \
+                      load_scalar_clip_store_expect_code_e2e_v2 \
+                      load_div_store_expect_code_e2e_v2 \
+                      load_scalar_sub_store_expect_code_e2e_v2 \
+                      load_scalar_div_store_expect_code_e2e_v2 \
+                      load_switch_scalar_sub_store_expect_code_e2e_v2 \
+                      load_nan_out_for_store_expect_code_e2e_v2"
+    BACKEND_MOVED_TARGET_LIST="acos_bf16_test_e2e_v2 \
                         add_abs_test_e2e_v2 \
                         add_exp2_test_e2e_v2 \
                         add_exp_bf16_test_e2e_v2 \
@@ -696,6 +814,7 @@ codegen_e2e_st() {
                         div_abs_test_e2e_v2 \
                         erfc_bf16_test_e2e_v2 \
                         floor_div_int32_store_test_e2e_v2 \
+                        floor_div_int64_store_test_e2e_v2 \
                         floordiv_abs_test_e2e_v2 \
                         frexp_store_test_e2e_v2 \
                         hermite_polynomial_h_store_test_e2e_v2 \
@@ -705,6 +824,7 @@ codegen_e2e_st() {
                         i1e_store_test_e2e_v2 \
                         indirect_load_broadcast_elements_sk_test_e2e_v2 \
                         indirect_load_broadcast_index_where_simt_test_e2e_v2 \
+                        indirect_load_graph_hint_dy_gather_slice_e2e_v2 \
                         indirect_load_graph_hint_embedding_slice_e2e_v2 \
                         indirect_load_rank3_axis1_torch_gather_frontend_e2e_v2 \
                         indirect_load_rank4_axis1_full_prefix_bessel_k0_sum_simd_e2e_v2 \
@@ -721,6 +841,30 @@ codegen_e2e_st() {
                         load_log2_store_test_e2e_v2 \
                         load_logicaland_store_test_e2e_v2 \
                         load_logicalor_store_test_e2e_v2 \
+                        reduce_any_bool_store_test_e2e_v2 \
+                        reduce_any_uint8_store_test_e2e_v2 \
+                        reduce_any_int8_store_test_e2e_v2 \
+                        reduce_any_int16_store_test_e2e_v2 \
+                        reduce_any_int32_store_test_e2e_v2 \
+                        reduce_any_int64_store_test_e2e_v2 \
+                        reduce_any_float_store_test_e2e_v2 \
+                        reduce_all_bool_store_test_e2e_v2 \
+                        reduce_all_uint8_store_test_e2e_v2 \
+                        reduce_all_int8_store_test_e2e_v2 \
+                        reduce_all_int16_store_test_e2e_v2 \
+                        reduce_all_int32_store_test_e2e_v2 \
+                        reduce_all_int64_store_test_e2e_v2 \
+                        reduce_all_float_store_test_e2e_v2 \
+                        reduce_prod_int8_store_test_e2e_v2 \
+                        reduce_prod_int16_store_test_e2e_v2 \
+                        reduce_prod_int32_store_test_e2e_v2 \
+                        reduce_prod_int64_store_test_e2e_v2 \
+                        reduce_prod_float_store_test_e2e_v2 \
+                        reduce_prod_int32_1025_store_test_e2e_v2 \
+                        reduce_prod_int64_1025_store_test_e2e_v2 \
+                        reduce_prod_int64_129800_store_test_e2e_v2 \
+                        reduce_prod_float_1025_store_test_e2e_v2 \
+                        reduce_prod_int8_ra_store_test_e2e_v2 \
                         load_lshift_store_test_e2e_v2 \
                         load_modified_bessel_i0_store_test_e2e_v2 \
                         load_modified_bessel_i1_store_test_e2e_v2 \
@@ -743,14 +887,37 @@ codegen_e2e_st() {
                         shifted_chebyshev_polynomial_v_store_test_e2e_v2 \
                         shifted_chebyshev_polynomial_w_store_test_e2e_v2 \
                         signbit_store_test_e2e_v2 \
+                        argmax_store_test_e2e_v2 \
+                         argmax_single_row_test_e2e_v2 \
+                         argmax_ara_test_e2e_v2 \
+                          argmax_ara_allload_test_e2e_v2 \
+                          argmin_store_test_e2e_v2 \
+                          argmin_rcore_i32_test_e2e_v2 \
+                          argmin_allload_test_e2e_v2 \
+                          argmin_value_test_e2e_v2 \
+                          argmin_value_i32_test_e2e_v2 \
+                          argmin_value_rcore_i64_test_e2e_v2 \
+                          argmin_value_ra_i64_test_e2e_v2 \
+                          argmin_value_ra_rcore_test_e2e_v2 \
                         spherical_bessel_j0_store_test_e2e_v2 \
                         zeta_store_test_e2e_v2"
   fi
-  MAKE_TARGET_LIST="${MAKE_TARGET_LIST} ${BACKEND_MOVED_TARGET_LIST} ${BACKEND_MOVED_TARGET_LIST_V35}"
-  BACKEND_MOVED_CODEGEN_LIST=$(echo "${BACKEND_MOVED_TARGET_LIST} ${BACKEND_MOVED_TARGET_LIST_V35}" | sed 's/e2e/codegen/g')
+  if [[ "X${v35_mode}" = "Xv35" && -n "${v35_shard}" ]]; then
+    MAKE_TARGET_LIST=$(shard_target_list "${MAKE_TARGET_LIST}" "${v35_shard}")
+    BACKEND_MOVED_TARGET_LIST=$(shard_target_list "${BACKEND_MOVED_TARGET_LIST}" "${v35_shard}")
+  fi
+  MAKE_TARGET_LIST="${MAKE_TARGET_LIST} ${BACKEND_MOVED_TARGET_LIST}"
+  BACKEND_MOVED_CODEGEN_LIST=$(echo "${BACKEND_MOVED_TARGET_LIST}" | sed 's/e2e/codegen/g')
   BACKEND_MOVED_TEST1_REGEX=$(build_backend_test_regex ${BACKEND_MOVED_CODEGEN_LIST})
-  BACKEND_MOVED_TEST2_REGEX=$(build_backend_test_regex ${BACKEND_MOVED_TARGET_LIST} ${BACKEND_MOVED_TARGET_LIST_V35})
+  BACKEND_MOVED_TEST2_REGEX=$(build_backend_test_regex ${BACKEND_MOVED_TARGET_LIST})
   MAKE_TARGET_LIST_CODEGEN=$(echo "${MAKE_TARGET_LIST}" | sed 's/e2e/codegen/g')
+  if [[ "$v35_mode" != "v35" ]]; then
+    MAKE_TARGET_LIST_CODEGEN="att_program_st ${MAKE_TARGET_LIST_CODEGEN}"
+  fi
+  # label 过滤会列出该 label 下全部用例(含未编译目标), 必须叠加目标名正则,
+  # 主任务与 v35 任务各自只跑本模式编译过的目标
+  CTEST_E2E_TEST1_REGEX=$(build_backend_test_regex ${MAKE_TARGET_LIST_CODEGEN})
+  CTEST_E2E_TEST2_REGEX=$(build_backend_test_regex ${MAKE_TARGET_LIST})
   echo "MAKE_TARGET_LIST_CODEGEN"
   echo $MAKE_TARGET_LIST_CODEGEN
   make -j${THREAD_NUM} $MAKE_TARGET_LIST_CODEGEN
@@ -762,7 +929,7 @@ codegen_e2e_st() {
   echo "$(date '+%F %T') make codegen_e2e_st_test1 end"
 
   (cd "${AUTOFUSE_BUILD_PATH}/tests" && \
-    ctest --output-on-failure -j${THREAD_NUM} -L st -L codegen_e2e_st_test1 --no-tests=error \
+    ctest --output-on-failure -j${THREAD_NUM} -L st -L codegen_e2e_st_test1 -R "${CTEST_E2E_TEST1_REGEX}" --no-tests=error \
           -O ${BUILD_PATH}/ctest_codegen_e2e_st_test1.log)
   if [ $? -ne 0 ]; then
     echo "execute command: run codegen_e2e_st_test1 failed."
@@ -786,7 +953,7 @@ codegen_e2e_st() {
   echo "$(date '+%F %T') make codegen_e2e_st_test2 end"
 
   (cd "${AUTOFUSE_BUILD_PATH}/tests" && \
-    ctest --output-on-failure -j${THREAD_NUM} -L st -L codegen_e2e_st_test2 --no-tests=error \
+    ctest --output-on-failure -j${THREAD_NUM} -L st -L codegen_e2e_st_test2 -R "${CTEST_E2E_TEST2_REGEX}" --no-tests=error \
           -O ${BUILD_PATH}/ctest_codegen_e2e_st_test2.log)
   if [ $? -ne 0 ]; then
     echo "execute command: run codegen_e2e_st_test2 failed."
@@ -815,11 +982,31 @@ build_backend_test_regex() {
   echo "^(${test_regex})$"
 }
 
+# 按 "shard_idx/total" 对空格分隔的目标列表取模分片, shard_idx 从 1 开始
+shard_target_list() {
+  local list="$1"
+  local idx="${2%%/*}"
+  local total="${2##*/}"
+  local out=""
+  local i=0
+  local target
+  for target in ${list}; do
+    if [ $((i % total)) -eq $((idx % total)) ]; then
+      out="${out} ${target}"
+    fi
+    i=$((i + 1))
+  done
+  echo "${out# }"
+}
+
 build_backend() {
   echo "$(date '+%F %T') create build directory and build build_backend";
   mk_dir "${BUILD_PATH}"
   cd "${BUILD_PATH}"
   g++ -v
+
+  local v35_mode="${1:-}"
+  local v35_shard="${2:-}"
 
   ASCEND_INSTALL_LIB_PATH=${ASCEND_INSTALL_PATH}/$(uname -m)-linux/lib64/
   CMAKE_ARGS="-D CMAKE_C_COMPILER=${C_COMPILER} \
@@ -834,7 +1021,8 @@ build_backend() {
             -D ENABLE_PKG=${ENABLE_PKG} \
             -D ENABLE_TEST=True \
             -D ENABLE_GE_ST=on \
-            -D ENABLE_LLT_PKG=ON"
+            -D ENABLE_LLT_PKG=ON \
+            ${AUTOFUSE_NON_MLIR_CMAKE_ARGS}"
   env
 
   cmake $CMAKE_ARGS ../
@@ -851,7 +1039,8 @@ build_backend() {
                     compare_x2_tensor_test_e2e \
                     compare_x2_tensor_int32_test_e2e \
                     load_to_store_and_abs_test_e2e \
-                    scalar_cast_add_test_e2e \
+                    scalar_cast_add_test_e2e  \
+                    cast_uint8_to_int64_test_e2e \
                     concat_all_aligned_test_e2e \
                     concat_to_stores_test_e2e \
                     load_unalign_pad_test_e2e \
@@ -867,10 +1056,13 @@ build_backend() {
                     axpy_abs_half_test_e2e \
                     pgo_add_abs_test_e2e \
                     matmul_elemwise_test_e2e \
-                    inductor_matmul_elemwise_test_e2e"
-  if [[ "X$RUN_V35_TESTS" = "Xon" ]]; then
-    MAKE_TARGET_LIST="${MAKE_TARGET_LIST} \
-                      load_loop_mode_test_e2e_v2 \
+                    inductor_matmul_elemwise_test_e2e \
+                    workspace_uint64_multi_reduce_test_e2e \
+                    workspace_uint64_tiling_test_e2e \
+                    segment_cache_tiling_test_e2e"
+  if [[ "X${v35_mode}" = "Xv35" ]]; then
+    # v35 专属用例（原先与主列表混编），拆分至 ST_Test_autofuse_v35_1/2/3 分片任务与主架构 ST 并行执行
+    MAKE_TARGET_LIST="load_loop_mode_test_e2e_v2 \
                       concat_test_e2e_v2 \
                       scalar_brc_test_e2e_v2 \
                       brc_reduce_test_e2e_v2 \
@@ -890,6 +1082,8 @@ build_backend() {
                       abs_fma_test_e2e_v2 \
                       floordiv_mul_le_select_test_e2e_v2 \
                       tail_brc_tail_reduce_test_e2e_v2 \
+                      softmax_expanddims_add_test_e2e_v2 \
+                      tail_brc_remove_pad_test_e2e_v2 \
                       int32_logical_not_test_e2e_v2 \
                       int16_logical_not_test_e2e_v2 \
                       float_logical_not_test_e2e_v2 \
@@ -919,7 +1113,6 @@ build_backend() {
                       indirect_load_broadcast_retained_simt_test_e2e_v2 \
                       indirect_load_both_transpose_simd_test_e2e_v2 \
                       indirect_load_both_transpose_simd_fallback_test_e2e_v2 \
-                      indirect_load_both_transpose_simd_nddma_test_e2e_v2 \
                       indirect_load_both_transpose_simt_test_e2e_v2 \
                       indirect_load_broadcast_index_physical_view_simt_test_e2e_v2 \
                       indirect_load_broadcast_index_abs_simt_test_e2e_v2 \
@@ -937,6 +1130,10 @@ build_backend() {
                       indirect_load_user_int64_dense_sweep_e2e_v2 \
                       indirect_load_user_dynamic_shape_sweep_e2e_v2 \
                       indirect_load_user_embedding_sum_simd_e2e_v2 \
+                      indirect_load_user_embedding_slice_minimal_front_e2e_v2 \
+                      indirect_load_user_embedding_slice_minimal_back_e2e_v2 \
+                      indirect_load_strided_store_rank2_axis1_simd_test_e2e_v2 \
+                      indirect_load_strided_store_rank2_axis1_simt_test_e2e_v2 \
                       indirect_load_user_layernorm_e2e_v2 \
                       indirect_load_user_embedding_exp_abs_add_simt_e2e_v2 \
                       indirect_load_user_fanout_direct_reduce_simt_e2e_v2 \
@@ -980,6 +1177,7 @@ build_backend() {
                       reciprocal_bf16_test_e2e_v2 \
                       relu_uint8_test_e2e_v2 \
                       round_bf16_test_e2e_v2 \
+                      load_to_store_and_round_test_e2e_v2 \
                       rshift_uint8_test_e2e_v2 \
                       sign_uint8_test_e2e_v2 \
                       sign_bf16_test_e2e_v2 \
@@ -988,12 +1186,28 @@ build_backend() {
                       ceil2int_bf16_test_e2e_v2 \
                       bool_mask_flow_test_e2e_v2 \
                       transpose_bool_test_e2e_v2 \
+                      transpose_int8_test_e2e_v2 \
                       select_bool_test_e2e_v2 \
                       copysign_bf16_test_e2e_v2 \
                       erfcx_test_e2e_v2 \
                       expm1_test_e2e_v2 \
                       rand_store_test_e2e_v2 \
-                      randn_store_test_e2e_v2"
+                      randn_store_test_e2e_v2 \
+                      randint_store_test_e2e_v2 \
+                      rand_seed_store_test_u32_e2e_v2 \
+                      rand_seed_store_test_i32_e2e_v2 \
+                      rand_seed_store_test_fp16_e2e_v2 \
+                      rand_seed_store_test_bf16_e2e_v2 \
+                      rand_seed_store_test_fp32_e2e_v2 \
+                      randn_seed_store_test_u32_e2e_v2 \
+                      randn_seed_store_test_i32_e2e_v2 \
+                      randn_seed_store_test_fp16_e2e_v2 \
+                      randn_seed_store_test_bf16_e2e_v2 \
+                      randn_seed_store_test_fp32_e2e_v2 \
+                      load_cast_brc_realign_test_e2e_v2"
+  fi
+  if [[ "X${v35_mode}" = "Xv35" && -n "${v35_shard}" ]]; then
+    MAKE_TARGET_LIST=$(shard_target_list "${MAKE_TARGET_LIST}" "${v35_shard}")
   fi
   MAKE_TARGET_LIST_CODEGEN=$(echo "${MAKE_TARGET_LIST}" | sed 's/e2e/codegen/g')
   CTEST_BACKEND_TEST1_REGEX=$(build_backend_test_regex ${MAKE_TARGET_LIST_CODEGEN})
@@ -1107,7 +1321,8 @@ build_ut_att() {
               -D ENABLE_PKG=${ENABLE_PKG} \
               -D ENABLE_TEST=True \
               -D ENABLE_GE_UT=on \
-              -D ENABLE_LLT_PKG=ON"
+              -D ENABLE_LLT_PKG=ON \
+              ${AUTOFUSE_NON_MLIR_CMAKE_ARGS}"
   cmake $CMAKE_ARGS ..
   make -j${THREAD_NUM} att_ut
   if [ $? -ne 0 ]
@@ -1146,7 +1361,8 @@ build_st_att() {
               -D ENABLE_PKG=${ENABLE_PKG} \
               -D ENABLE_TEST=True \
               -D ENABLE_GE_ST=on \
-              -D ENABLE_LLT_PKG=ON"
+              -D ENABLE_LLT_PKG=ON \
+              ${AUTOFUSE_NON_MLIR_CMAKE_ARGS}"
   cmake $CMAKE_ARGS ..
   make -j${THREAD_NUM} att_st
   if [ $? -ne 0 ]
@@ -1194,6 +1410,7 @@ build_ut() {
       build_ut_common || { echo "test ut common failed."; exit 1; }
       build_test || { echo "test build failed."; exit 1; }
       py_module_ut || { echo "run py module ut failed."; exit 1; }
+      run_mlir_targets check-ut check-lit || { echo "MLIR UT/lit tests failed."; exit 1; }
       ;;
     "all")
       build_ut_att || { echo "failed to build and run att ut."; exit 1; }
@@ -1202,10 +1419,11 @@ build_ut() {
       build_ut_common || { echo "test ut common failed."; exit 1; }
       build_test || { echo "test build failed."; exit 1; }
       build_test_ascendc_api_test || { echo "failed to build and run ascendc_api ."; exit 1; }
+      build_codegen_e2e_ut || { echo "test codegen e2e ut failed."; exit 1; }
       py_module_ut || { echo "run py module ut failed."; exit 1; }
       ;;
     *)
-      echo "输入无效，输入范围att/autofuse/optimize/codegen/all."
+      echo "输入无效，UT输入范围att/autofuse_utils/optimize/codegen/common/ascendc_api/framework/mlir/all."
       ;;
   esac
 }
@@ -1235,8 +1453,20 @@ build_st() {
     "backend")
       build_backend || { echo "run backend st failed."; exit 1; }
       ;;
+    "v35_1"|"v35_2"|"v35_3")
+      # 显式指定 v35 分片说明调用方(CI job)明确要求执行 v35 用例, 源码树缺失属于
+      # 配置错误, 必须失败告警, 禁止静默跳过产生零用例绿灯与覆盖率缺失
+      if [ ! -d "${AUTOFUSE_PATH}/v35" ]; then
+        echo "v35 source tree not found, cannot run v35 st: ${MODEL_NAME}" >&2
+        exit 1
+      fi
+      local v35_shard_spec="${MODEL_NAME#v35_}/3"
+      build_backend v35 "${v35_shard_spec}" || { echo "run v35 backend st failed."; exit 1; }
+      codegen_e2e_st v35 "${v35_shard_spec}" || { echo "run v35 e2e st failed."; exit 1; }
+      ;;
     "e2e")
       codegen_e2e_st || { echo "test build e2e st code generator failed."; exit 1; }
+      build_codegen_e2e_ut || { echo "test codegen e2e ut failed."; exit 1; }
       ;;
     "ascendc_api")
       build_test_ascir_st || { echo "run ascir st failed."; exit 1; }
@@ -1249,6 +1479,7 @@ build_st() {
       build_st_common || { echo "run common st failed."; exit 1; }
       build_st_optimize || { echo "run optimize st failed."; exit 1; }
       py_module_st || { echo "run py module st failed."; exit 1; }
+      run_mlir_targets check-st check-e2e || { echo "MLIR ST/e2e tests failed."; exit 1; }
       ;;
     "all")
       build_st_att || { echo "failed to build and run att st."; exit 1; }
@@ -1258,11 +1489,19 @@ build_st() {
       build_st_optimize || { echo "run optimize st failed."; exit 1; }
       build_backend || { echo "run backend st failed."; exit 1; }
       codegen_e2e_st || { echo "test build e2e st code generator failed."; exit 1; }
+      # 全量模式必须覆盖 v35 用例, 否则拆分后 all 语义缺失 v35 覆盖;
+      # v35 源码树缺失时提示跳过(可选组件), 不使 all 整体失败
+      if [ -d "${AUTOFUSE_PATH}/v35" ]; then
+        build_backend v35 || { echo "run v35 backend st failed."; exit 1; }
+        codegen_e2e_st v35 || { echo "run v35 e2e st failed."; exit 1; }
+      else
+        echo "v35 source tree not found, skip v35 st in all mode."
+      fi
       build_kernel_tool || { echo "test kernel tool failed."; exit 1; }
       py_module_st || { echo "run py module st failed."; exit 1; }
       ;;
     *)
-      echo "输入无效，输入范围att/ascir/autofuse/common/optimize/codegen/all."
+      echo "输入无效，输入范围att/ascir/optimize/common/codegen/tools/backend/v35_1/v35_2/v35_3/e2e/ascendc_api/framework/all."
       ;;
   esac
 }
@@ -1270,20 +1509,38 @@ build_st() {
 main() {
   cd "${BASEPATH}"
   checkopts "$@"
+  print_test_resources start
+  trap 'print_test_resources exit' EXIT
   INITIAL_LD_LIBRARY_PATH="${LD_LIBRARY_PATH-}"
+  if [[ "X${ENABLE_COV}" = "Xon" ]]; then
+    require_coverage_tools || exit 1
+  fi
 
   export ASCEND_CUSTOM_PATH=${ASCEND_INSTALL_PATH}
   ASCEND_INSTALL_LIB_PATH=${ASCEND_INSTALL_PATH}/$(uname -m)-linux/lib64/
   set_test_ld_library_path
 
-  build_ascgen-dev || { echo "ascgen-dev build failed."; exit 1; }
+  if mlir_tests_requested; then
+    build_mlir_tests || { echo "MLIR tests failed."; exit 1; }
+    if [[ "X${ENABLE_COV}" = "Xon" ]]; then
+      get_coverage
+    fi
+    echo "---------------- test mlir finished ----------------"
+    return
+  fi
 
-  METADEF_SOS=$(find ${AUTOFUSE_BUILD_PATH}/graph_metadef -name "*.so" 2>/dev/null)
-  for METADEF_SO in ${METADEF_SOS}
-  do
-    cp -rf ${METADEF_SO} ${METADEF_LIB_PATH}
-    echo "cp -rf ${METADEF_SO} ${METADEF_LIB_PATH}"
-  done
+  # Numeric API UT targets do not depend on pyautofuse, optimize or codegen.
+  # Their handler configures and builds the required simulator targets directly.
+  if [[ "X$ENABLE_UT" != "Xon" || "X$ENABLE_ST" == "Xon" || "${MODEL_NAME}" != "ascendc_api" ]]; then
+    build_ascgen-dev || { echo "ascgen-dev build failed."; exit 1; }
+
+    METADEF_SOS=$(find ${AUTOFUSE_BUILD_PATH}/graph_metadef -name "*.so" 2>/dev/null)
+    for METADEF_SO in ${METADEF_SOS}
+    do
+      cp -rf ${METADEF_SO} ${METADEF_LIB_PATH}
+      echo "cp -rf ${METADEF_SO} ${METADEF_LIB_PATH}"
+    done
+  fi
 
   if [[ "X$ENABLE_UT" = "Xon" ]]; then
     echo "---------------- ascgen-dev build finished ----------------"

@@ -31,6 +31,35 @@ bool IsLegalZeroInputNode(const af::AscNodePtr &node) {
   const auto definition = definitions.find(node->GetType());
   return definition != definitions.end() && definition->second.IsStartNode();
 }
+
+// AF 中大量产物直接由节点名派生（tiling data 字段、tiling 函数、repr 字段、perf 变量等），
+// 节点重名会导致这些产物重复声明，因此插节点时必须保证名字唯一。
+// 注意：字段名经 GenValidName 归一化（非字母数字折叠为 _）后，不同节点名可能派生出同一字段名
+// （如 a/b 与 a_b），因此除节点名本身外，还必须校验归一化后的派生 tiling 字段名在图中唯一，
+// 使"节点名唯一"等价于"字段名唯一"。
+std::string GenUniqueNodeName(const ascir::ImplGraph &graph, const std::string &base_name) {
+  auto name_conflicts = [&graph](const std::string &candidate) {
+    if (graph.FindNode(candidate.c_str()) != nullptr) {
+      return true;
+    }
+    const std::string candidate_field = ascgen_utils::GenValidName(candidate + "_tilingData");
+    for (const auto &node : graph.GetAllNodes()) {
+      if (ascgen_utils::GenValidName(node->GetName() + "_tilingData") == candidate_field) {
+        return true;
+      }
+    }
+    return false;
+  };
+  if (!name_conflicts(base_name)) {
+    return base_name;
+  }
+  for (uint32_t suffix = 1U;; ++suffix) {
+    const std::string candidate = base_name + "_" + std::to_string(suffix);
+    if (!name_conflicts(candidate)) {
+      return candidate;
+    }
+  }
+}
 }  // namespace
 
 const char *BaseAlignmentStrategy::AlignmentTypeToString(AlignmentType type) {
@@ -375,7 +404,12 @@ af::Status BaseAlignmentStrategy::InsertPadForCompactReduce(ascir::ImplGraph &im
     return af::UNSUPPORTED;
   }
 
-  const std::string node_name = reduce_node->GetName() + "_" + std::to_string(output_index) + "_pad";
+  // 同一个 compact Reduce 输出可能被多个 elmwise 消费者使用（例如 var/mean 的 sum 被复用），
+  // 每个消费者都要插一个 Pad；节点名必须唯一，否则派生的 tiling data 字段会重名。
+  const std::string node_name =
+      GenUniqueNodeName(impl_graph, reduce_node->GetName() + "_" + std::to_string(output_index) + "_pad");
+  GELOGD("Insert pad node [%s] for compact reduce [%s] output [%d].", node_name.c_str(), reduce_node->GetNamePtr(),
+         output_index);
   af::ascir_op::Pad pad_op(node_name.c_str());
   const auto pad_node = impl_graph.AddNode(pad_op);
   GE_ASSERT_NOTNULL(pad_node);
@@ -456,7 +490,7 @@ af::Status BaseAlignmentStrategy::AddPadForAlignmentConflictOneNode(ascir::ImplG
       return af::UNSUPPORTED;
     }
     inserted = true;
-    const std::string node_name = node->GetName() + "_" + std::to_string(i) + "_pad";
+    const std::string node_name = GenUniqueNodeName(impl_graph, node->GetName() + "_" + std::to_string(i) + "_pad");
     af::ascir_op::Pad pad_op(node_name.c_str());
     const auto pad_node = impl_graph.AddNode(pad_op);
     GE_ASSERT_NOTNULL(pad_node);

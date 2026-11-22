@@ -44,7 +44,7 @@ class KernelDumpDirectory {
 };
 }  // namespace
 
-TEST_F(AotSystemTest, MixedKernelPipelineBuildsBothQueuesAndReportsUnpairedEarlyStartSync) {
+TEST_F(AotSystemTest, MixedKernelPipelineBuildsBothQueuesWithEarlyStart) {
   for (bool earlyStart : {false, true}) {
     for (uint32_t parallel : {0U, 1U}) {
       SCOPED_TRACE(earlyStart);
@@ -71,21 +71,14 @@ TEST_F(AotSystemTest, MixedKernelPipelineBuildsBothQueuesAndReportsUnpairedEarly
       values[1].autoOpParallel.enableAutoOpParallel = parallel;
       aclskOptions options{values, 2};
       const auto result = aclskOptimize(model.Handle(), &options);
-      if (earlyStart) {
-        // Current production rejects this mixed early-start chain because
-        // its generated sync has no related node. Preserve the reproducer.
-        EXPECT_EQ(result, ACL_ERROR_FAILURE);
-        EXPECT_EQ(model.UpdateAttempts(), 0U);
-        EXPECT_NE(ut_log::LogBuffer::Instance().GetContent().find("DispatchSyncTasks failed: related node is null"),
-                  std::string::npos);
-        continue;
-      }
       ASSERT_EQ(result, ACL_SUCCESS);
+      EXPECT_EQ(model.UpdateAttempts(), 1U);
+      const char *expectedEntry = earlyStart ? "sk_entry_mix12_early_start" : "sk_entry_mix12";
       size_t entries = 0;
       for (const auto &task : model.Tasks(stream)) {
         if (!task.disabled) {
           ++entries;
-          EXPECT_EQ(task.function, "sk_entry_mix12");
+          EXPECT_EQ(task.function, expectedEntry);
           EXPECT_EQ(task.numBlocks, 4U);
         }
       }

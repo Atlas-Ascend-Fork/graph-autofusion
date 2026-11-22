@@ -16,6 +16,7 @@
 #include "common/checker.h"
 #include "api_perf_register/utils/vf_perf_utils.h"
 #include "api_perf_register/utils/api_perf_utils.h"
+#include "api_perf_register/soc_perf_config.h"
 #include "api_perf_register/api_perf_factory.h"
 #include "utils/node_expr_id.h"
 #include "graph/compute_graph.h"
@@ -23,6 +24,13 @@
 namespace att {
 namespace {
 constexpr int32_t kMaxRecursiveNum = 10;
+bool IsV35SocPerfTarget() {
+  SocPerfTarget target;
+  bool required = false;
+  return ReadSocPerfTarget(target) == af::SUCCESS && RequiresFullSocVersion(target.npu_arch, required) == af::SUCCESS &&
+         required;
+}
+
 std::string GetContribDescription(const std::string &pipe_type, const std::string &contrib_suffix) {
   if (contrib_suffix == "core_contrib") {
     return pipe_type + " core contribution = node API perf * core exe time";
@@ -435,6 +443,9 @@ af::Status PipePerfExpr::GetNodePerf(const NodeInfo &node, std::map<PipeType, Ex
                     node_unit.c_str());
 
   if (perf_func(inputs, outputs, node, perf_res) != af::SUCCESS) {
+    if (IsV35SocPerfTarget()) {
+      return af::FAILED;
+    }
     GELOGW("Perf func failed for node[%s, %s], perf_res may be incomplete.", node.name.c_str(), node.node_type.c_str());
   }
   GELOGD("node[%s, %s] perf res: {%s}", node.name.c_str(), node.node_type.c_str(), perf_res.ToString().c_str());
@@ -567,7 +578,7 @@ af::Status PipePerfExpr::GetPerfExpr(std::map<PipeType, Expr> &pipe_costs,
                       node.name.c_str());
     Expr exe_var = node_exe_times.GetVariable();
     ternary_ops[exe_var] = node_exe_times;
-    GELOGD("Get node [%s] exe times %s=[%s]", node.name.c_str(), exe_var.Serialize().get(),
+    GELOGD("Get node [%s] exe times %s=[%s]", node.name.c_str(), exe_var.Str().get(),
            node_exe_times.GetTernaryOpStr().c_str());
 
     // 获取节点性能

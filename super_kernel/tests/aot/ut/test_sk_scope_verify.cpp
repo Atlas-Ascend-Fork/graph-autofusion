@@ -796,3 +796,32 @@ TEST_F(ScopeVerifyTest, ScheModeSplitBeforeDeadlockOnRefinedScope) {
   EXPECT_EQ(splitResults[0].extendType, 0);
   EXPECT_EQ(splitResults[0].extendInfo, nullptr);
 }
+
+TEST_F(ScopeVerifyTest, GraphBuilder_InterleavedStreamsKeepIndependentBoundaries) {
+  std::vector<aclskScopeVerifyNodeInfo> nodes = {
+      MakeScopeVerifyComputeNode(10, 100, 7, ACLSK_SCOPE_VERIFY_KERNEL_CUBE, 1, 1, 0, 0),
+      MakeScopeVerifyComputeNode(20, 900, 7, ACLSK_SCOPE_VERIFY_KERNEL_VECTOR, 1, 0, 1, 0),
+      MakeScopeVerifyComputeNode(11, 100, 7, ACLSK_SCOPE_VERIFY_KERNEL_CUBE, 1, 1, 0, 0),
+      MakeScopeVerifyComputeNode(21, 900, 7, ACLSK_SCOPE_VERIFY_KERNEL_VECTOR, 1, 0, 1, 0),
+  };
+  aclskScopeVerifyGraphInfo input{nodes.data(), nodes.size(), 0, nullptr};
+  std::vector<SuperKernelScopeInfo> scopes;
+  std::unordered_map<uint64_t, aclskScopeVerifyNodeInfo *> originalNodes;
+  ScopeVerifyGraphBuilder builder;
+  ASSERT_EQ(builder.Build(&input, graph, scopes, originalNodes), ACL_SUCCESS);
+  EXPECT_EQ(graph.GetHeadNodes(), (std::vector<uint64_t>{10, 20}));
+  EXPECT_EQ(graph.GetTailNodes(), (std::vector<uint64_t>{11, 21}));
+  EXPECT_EQ(graph.GetNodeSizeInStream(), (std::vector<uint64_t>{2, 2}));
+  for (uint64_t head : {10U, 20U}) {
+    auto *first = graph.GetNodeById(head);
+    auto *last = graph.GetNodeById(head + 1);
+    ASSERT_NE(first, nullptr);
+    ASSERT_NE(last, nullptr);
+    EXPECT_EQ(first->GetPreNodeId(), INVALID_TASK_ID);
+    EXPECT_EQ(first->GetNextNodeId(), head + 1);
+    EXPECT_EQ(last->GetPreNodeId(), head);
+    EXPECT_EQ(last->GetNextNodeId(), INVALID_TASK_ID);
+    EXPECT_EQ(first->GetStreamIdxInGraph(), last->GetStreamIdxInGraph());
+    EXPECT_EQ(last->GetNodeIdxInStream(), 1U);
+  }
+}

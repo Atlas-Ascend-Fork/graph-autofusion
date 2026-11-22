@@ -45,6 +45,14 @@ struct ScheduleTask {
   ReduceTemplateType reduce_type{ReduceTemplateType::kDefault};
   ::ascir::CubeTemplateType cube_type{::ascir::CubeTemplateType::kDefault};
   bool has_load_store_conversion{false};
+  std::string semantic_name{};
+  bool enable_workspace_alignment{false};
+  // [动态打分字段保活] score_func 按调度前 group 归属硬编码 tiling data 子结构字段引用(下标对齐
+  // grouped_graphs); 调度期图改写(零步长轴删除/合轴)会使符号失去表达式引用而被 size var 重建裁剪,
+  // AutoScheduler 据此将其并入对应组 runtime_shape_vars 保活(结构体字段存在 + 运行期值填充),
+  // 否则 host tiling 侧编译报 no member。
+  std::vector<SizeVarSet> score_group_shape_vars{};
+  std::unordered_set<size_t> matmul_m_common_group_ids{};
 };
 
 class Optimizer {
@@ -103,13 +111,27 @@ class Optimizer {
   static Status GetNonContinuousAxisPairBySpecialRule(::ascir::ImplGraph &impl_graph,
                                                       std::set<std::pair<int64_t, int64_t>> &non_continuous_pair);
   static bool IsReduceFirstStage(size_t index, ScheduleTask &schedule_task);
+  // R 轴分核第一阶段混合展开入口: phase_1 各 tiling case 的 var relation 表达式跨 case 一致
+  // (r_group 单轴, 或全规约退化为空 relation) 时, 各 case 装入同一 group 作为多 impl, 结果数不随
+  // case 数相乘; 不一致 (单 reduce 多 R 轴, 各 case 切分结构不同) 时, 回退调用
+  // ExpandReduceFirstStageResults 走逐 case 展开的既有流程, 保持正确性
+  Status AppendReduceFirstStageGroup(std::vector<autoschedule::AutoScheduleOutput> &schedule_outputs,
+                                     std::vector<::ascir::ScheduledResult> &scheduled_results_cur, size_t index,
+                                     ScheduleTask &schedule_task) const;
+  // 回退路径: 为每个 phase_1 tiling case 展开独立 ScheduledResult (携带该 case 自身的 var
+  // relation), 供 AppendReduceFirstStageGroup 在 relation 跨 case 不一致时调用
   Status ExpandReduceFirstStageResults(std::vector<autoschedule::AutoScheduleOutput> &schedule_outputs,
                                        std::vector<::ascir::ScheduledResult> &scheduled_results_cur, size_t index,
                                        ScheduleTask &schedule_task) const;
-  void RefreshGroupRelation(size_t index, std::map<std::string, af::Expression> &var_relations,
+  void RefreshGroupRelation(size_t index, const std::map<std::string, af::Expression> &var_relations,
                             ScheduleTask &schedule_task, ::ascir::ScheduledResult &schedule_result) const;
   static Status InitializeScheduledResults(std::vector<::ascir::ScheduledResult> &scheduled_results_cur,
-                                           ScheduleTask &schedule_task);
+                                           const ScheduleTask &schedule_task);
+  // 遍历task内各分组图做调度前预处理并执行auto schedule: cube图走ProcessCubeSchedules; 任一图
+  // 不支持时返回af::UNSUPPORTED由上层跳过该task; 组序号仅在非cube路径下递增, 供reduce first stage判定
+  Status ScheduleGroupedGraphs(ScheduleTask &schedule_task,
+                               std::vector<::ascir::ScheduledResult> &scheduled_results_cur,
+                               std::set<std::string> &scored_graph_names) const;
   Status AutoScheduler(const ::ascir::HintGraph &hint_graph, ScheduleTask &schedule_task,
                        std::vector<::ascir::ScheduledResult> &scheduled_results) const;
   static void TryEnableGroupParallel(::ascir::FusedScheduledResult &fused_scheduled_result);

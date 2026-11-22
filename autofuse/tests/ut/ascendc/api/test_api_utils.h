@@ -126,6 +126,8 @@ void UnaryTest(
   }
 
   EXPECT_EQ(diff_count, 0);
+  AscendC::GmFree(x);
+  AscendC::GmFree(y);
 }
 
 template <typename InT, typename OutT>
@@ -190,6 +192,8 @@ void UnaryTest(
   }
 
   EXPECT_EQ(diff_count, 0);
+  AscendC::GmFree(x);
+  AscendC::GmFree(y);
 }
 
 template <typename T, typename T_ONE>
@@ -253,6 +257,8 @@ void UnaryTest(int size,
   }
 
   EXPECT_EQ(diff_count, 0);
+  AscendC::GmFree(x);
+  AscendC::GmFree(y);
 }
 
 // 版本4: 单模板参数，类型一致的 expectGen/srcGen/compare，calc 参数顺序为 (y, x, tmp, size)
@@ -305,5 +311,7 @@ void UnaryTest(
   }
 
   EXPECT_EQ(diff_count, 0);
+  AscendC::GmFree(x);
+  AscendC::GmFree(y);
 }
 #endif

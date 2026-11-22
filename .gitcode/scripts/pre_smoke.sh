@@ -27,6 +27,13 @@ log() {
   echo "===================================================================="
 }
 
+package_slog() {
+  if [ ! -f "${WORKSPACE}/slog.tar.gz" ] && [ -d /root/ascend/log ]; then
+    tar -zcf "${WORKSPACE}/slog.tar.gz" -C /root/ascend log || true
+  fi
+}
+trap package_slog EXIT
+
 log "init test case, please wait ..."
 
 
@@ -40,6 +47,8 @@ wget -nv ${arm_run_url} && chmod 777 ${arm_package}
 /opt/conda/envs/python39/bin/python3 -m pip install packaging
 /opt/conda/envs/python39/bin/python3 -m pip install build
 /opt/conda/envs/python39/bin/python3 -m pip install 'setuptools>=68,<80'
+# A5 冒烟镜像 python39 环境缺 torch_npu 运行/编译链所需依赖(pyyaml/decorator 等), 先补齐
+/opt/conda/envs/python39/bin/python3 -m pip install pyyaml numpy decorator sympy scipy attrs psutil
 chmod +x ${arm_package}
 echo 'y' | bash ${arm_package} --full --quiet --pylocal
 echo "bash super_kernel/examples/run_example.sh --npu-arch=${NPU_ARCH}"

@@ -94,7 +94,7 @@ Status CompareApiCall::Generate(const TPipe &tpipe, const std::vector<ascir::Axi
                                                       : tpipe.tiler.ActualSize(param.cal_count))
           << ", " << tpipe.tiler.Size(param.input_second_to_last_stride) << ", "
           << tpipe.tiler.Size(param.output_second_to_last_stride) << ", " << tpipe.tmp_buf << "_" << std::to_string(id)
-          << ");" << std::endl;
+          << ", ONE_BLK_SIZE);" << std::endl;
       CreateComputeNodeOuterForIfRequired(outer_repeats_size, param, ss1, ss);
     }
   } else {
@@ -131,6 +131,8 @@ Status CompareApiCall::Generate(const TPipe &tpipe, const std::vector<ascir::Axi
 
       std::string dtype_size = "4";
       std::stringstream ss1;
+      // Use this tensor's storage requirement, before the queue/buffer takes the
+      // maximum size of all tensors sharing its allocation.
       ss1 << "CompareExtend<" << dtype_name << ", CMPMODE::" << this->api_name_ << ">(" << y << "["
           << output_inner_offset << "], " << x1 << "[" << input0_inner_offset << "], " << x2 << "["
           << input1_inner_offset << "], " << param.outer_repeats[outer_repeats_size - 1] << ", "
@@ -138,7 +140,7 @@ Status CompareApiCall::Generate(const TPipe &tpipe, const std::vector<ascir::Axi
                                                       : tpipe.tiler.ActualSize(param.cal_count))
           << ", " << tpipe.tiler.Size(param.input_second_to_last_stride) << ", "
           << tpipe.tiler.Size(param.output_second_to_last_stride) << ", " << tpipe.tmp_buf << "_" << std::to_string(id)
-          << ");" << std::endl;
+          << ", " << x2.size.Str() << " * sizeof(" << dtype_name << "));" << std::endl;
       CreateComputeNodeOuterForIfRequired(outer_repeats_size, param, ss1, ss);
     }
   }

@@ -50,6 +50,7 @@ The original design intent of SuperKernel is to fuse multiple sub-operators into
 
 ```text
 super_kernel/
+├── cmake                  # CMake build scripts
 ├── docs                   # Documentation
 ├── examples               # Example scripts or notebooks demonstrating typical usage
 ├── include                # Public SuperKernel headers

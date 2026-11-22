@@ -1,11 +1,12 @@
-/* Copyright (c) 2026 Huawei Technologies Co., Ltd.
- * This file is a part of the CANN Open Software.
- * Licensed under CANN Open Software License Agreement Version 1.0 (the "License").
+/**
+ * Copyright (c) 2026 Huawei Technologies Co., Ltd.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
  * Please refer to the License for details. You may not use this file except in compliance with the License.
- * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OR ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  * See LICENSE in the root of the software repository for the full text of the License.
- * ===================================================================================================================*/
+ */
 
 #include "asc_graph_builder.h"
 
@@ -34,6 +35,10 @@ void ComputeStrides(const std::vector<Expression> &repeats, std::vector<Expressi
 AscGraphBuilder::AscGraphBuilder(const std::string &name) : impl_(std::make_unique<Impl>(name)) {}
 
 AscGraphBuilder::~AscGraphBuilder() = default;
+
+Expression AscGraphBuilder::SizeVar(const std::string &name) {
+  return impl_->graph_.CreateSizeVar(name);
+}
 
 AscGraphBuilder &AscGraphBuilder::Loops(std::initializer_list<int64_t> sizes) {
   std::vector<Expression> expr_sizes;
@@ -121,13 +126,22 @@ AscGraphBuilder &AscGraphBuilder::ScalarData(const std::string &name, int64_t in
   impl_->nodes_[name] = node;
   return *this;
 }
-
 AscGraphBuilder &AscGraphBuilder::IndexExpr(const std::string &name, const std::string &expr, DataType dtype) {
   ascir_op::IndexExpr index_expr_op(name.c_str(), impl_->graph_);
   index_expr_op.ir_attr.SetExpr(Expression::Parse(expr.c_str()));
   index_expr_op.y.dtype = dtype;
   // 与真实前端一致：scalar-like 节点输出视图为空（不补 axis/repeats/strides），
   // 区别于 Scalar/ScalarData 为测试便利自动补齐 repeats 的行为。
+  auto node = impl_->graph_.FindNode(name.c_str());
+  assert(node != nullptr);
+  impl_->nodes_[name] = node;
+  return *this;
+}
+
+AscGraphBuilder &AscGraphBuilder::IndexExpr(const std::string &name, const Expression &expr, DataType dtype) {
+  ascir_op::IndexExpr index_expr_op(name.c_str(), impl_->graph_);
+  index_expr_op.ir_attr.SetExpr(expr);
+  index_expr_op.y.dtype = dtype;
   auto node = impl_->graph_.FindNode(name.c_str());
   assert(node != nullptr);
   impl_->nodes_[name] = node;
@@ -299,6 +313,20 @@ AscGraphBuilder &AscGraphBuilder::Broadcast(const std::string &name, const std::
 AscGraphBuilder &AscGraphBuilder::Broadcast(const std::string &name, const std::string &input,
                                             const std::vector<Expression> &shape) {
   return BroadcastImpl(name, input, shape);
+}
+
+AscGraphBuilder &AscGraphBuilder::BroadcastFromScalar(const std::string &name, const std::string &input) {
+  auto &input_tensor = GetInputOutputTensor(input);
+
+  ascir_op::Broadcast brc_op(name.c_str());
+  brc_op.attr.sched.axis = impl_->axis_ids_;
+  // 轴取图的循环轴，不跟源：标量源的输出视图是空的。
+  *brc_op.y.axis = impl_->axis_ids_;
+  brc_op.y.dtype = input_tensor.attr.dtype;
+  *brc_op.y.repeats = impl_->loop_repeats_;
+
+  CreateNodeAndConnect(name, brc_op, input);
+  return *this;
 }
 
 AscGraphBuilder &AscGraphBuilder::Transpose(const std::string &name, const std::string &input,
@@ -478,6 +506,8 @@ template AscGraphBuilder &AscGraphBuilder::Reduce<ascir_op::Max>(const std::stri
 
 template AscGraphBuilder &AscGraphBuilder::Reduce<ascir_op::Sum>(const std::string &, const std::string &,
                                                                  const std::vector<size_t> &);
+template AscGraphBuilder &AscGraphBuilder::Reduce<ascir_op::Prod>(const std::string &, const std::string &,
+                                                                  const std::vector<size_t> &);
 
 AscGraphBuilder &AscGraphBuilder::Cast(const std::string &name, const std::string &input, DataType dtype) {
   auto &input_tensor = GetInputOutputTensor(input);
@@ -489,6 +519,37 @@ AscGraphBuilder &AscGraphBuilder::Cast(const std::string &name, const std::strin
   *cast_op.y.repeats = input_tensor.attr.repeats;
 
   CreateNodeAndConnect(name, cast_op, input);
+  return *this;
+}
+
+namespace {
+template <typename OpT>
+void SetupPredicateOp(OpT &op, const std::vector<AxisId> &axis_ids, const af::AscTensorAttr &input_attr) {
+  op.attr.sched.axis = axis_ids;
+  op.y.dtype = af::DT_UINT8;
+  *op.y.axis = input_attr.axis;
+  *op.y.repeats = input_attr.repeats;
+}
+}  // namespace
+
+AscGraphBuilder &AscGraphBuilder::Isnan(const std::string &name, const std::string &input) {
+  ascir_op::Isnan op(name.c_str());
+  SetupPredicateOp(op, impl_->axis_ids_, GetInputOutputTensor(input).attr);
+  CreateNodeAndConnect(name, op, input);
+  return *this;
+}
+
+AscGraphBuilder &AscGraphBuilder::IsFinite(const std::string &name, const std::string &input) {
+  ascir_op::IsFinite op(name.c_str());
+  SetupPredicateOp(op, impl_->axis_ids_, GetInputOutputTensor(input).attr);
+  CreateNodeAndConnect(name, op, input);
+  return *this;
+}
+
+AscGraphBuilder &AscGraphBuilder::IsInf(const std::string &name, const std::string &input) {
+  ascir_op::IsInf op(name.c_str());
+  SetupPredicateOp(op, impl_->axis_ids_, GetInputOutputTensor(input).attr);
+  CreateNodeAndConnect(name, op, input);
   return *this;
 }
 
@@ -515,6 +576,30 @@ AscGraphBuilder &AscGraphBuilder::Split(const std::string &name, const std::stri
     // 注册输出端口，使下游可通过 "name:0", "name:1", ... 寻址
     impl_->output_ports_[name + ":" + std::to_string(i)] = {name, i};
   }
+
+  return *this;
+}
+
+AscGraphBuilder &AscGraphBuilder::Frexp(const std::string &name, const std::string &input, DataType mantissa_dtype,
+                                        DataType exponent_dtype) {
+  ascir_op::Frexp frexp_op(name.c_str());
+  frexp_op.attr.sched.axis = impl_->axis_ids_;
+
+  auto &input_tensor = GetInputOutputTensor(input);
+  frexp_op.mantissa.dtype = mantissa_dtype;
+  frexp_op.exponent.dtype = exponent_dtype;
+  *frexp_op.mantissa.axis = input_tensor.attr.axis;
+  *frexp_op.mantissa.repeats = input_tensor.attr.repeats;
+  *frexp_op.exponent.axis = input_tensor.attr.axis;
+  *frexp_op.exponent.repeats = input_tensor.attr.repeats;
+
+  auto node = impl_->graph_.AddNode(frexp_op);
+  impl_->nodes_[name] = node;
+
+  ConnectEdge(input, node, 0);
+  // 注册输出端口，使下游可通过 "name:0"(mantissa), "name:1"(exponent) 寻址
+  impl_->output_ports_[name + ":0"] = {name, 0};
+  impl_->output_ports_[name + ":1"] = {name, 1};
 
   return *this;
 }

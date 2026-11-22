@@ -352,6 +352,8 @@ GE uses a Host Tiling shared library to fill the structure at runtime. Inductor 
 
 PGO uses hardware feedback to correct model ranking. Candidate generation, compilation, and specialization are expensive, so only static Shape is currently supported: compile-time input and sampled input have a one-to-one relationship, allowing measured TilingData to be specialized deterministically into a static Kernel. With dynamic Shape, one symbolic range may have several optimal keys, while candidate collection, cache identity, and specialization rules remain undefined. Unsafe reuse could make an incorrect selection. CV is unsupported for the same reason. See S9.
 
+On the Inductor path, the global PGO switch can coexist with CV fusion. CV subgraphs use a local Codegen configuration with PGO disabled, retain fusion, and follow ordinary CV tiling; static non-CV subgraphs continue to use PGO. The local configuration preserves PGO for subsequent VV calls on the same object. This does not add PGO tuning for CV itself or change the PGO restriction on dynamic non-CV subgraphs.
+
 PGO result identity should at least include the chip model, hardware inputs that affect execution, and operator hash. The current implementation does not fully enforce this constraint and cannot promise safe cross-environment reuse. See S10.
 
 #### GE/TBE Path

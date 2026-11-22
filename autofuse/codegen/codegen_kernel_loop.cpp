@@ -9,6 +9,7 @@
  */
 
 #include "codegen_kernel_loop.h"
+#include <functional>
 #include "codegen_kernel.h"
 #include "codegen_api_param/codegen_api_param.h"
 #include "codegen/expression_convert_struct.h"
@@ -19,12 +20,16 @@
 #include "api_call/utils/api_call_factory.h"
 #include "graph/ascendc_ir/utils/asc_tensor_utils.h"
 #include "indirect_load_utils.h"
+#include "common/platform_context.h"
+#include "common/ub_expr/asc_graph_ub_expr_builder.h"
+#include "ascir_node_param/ascir_param_builder.h"
 
 using namespace std;
 using namespace af::ops;
 using namespace codegen;
 using namespace af::ascir_op;
 using namespace ascgen_utils;
+using ReduceCondition = ascir_param::ReduceCacheCondition;
 
 namespace {
 constexpr size_t kDoubleAxisSize = 2U;
@@ -56,6 +61,24 @@ ApiCall *FindIndirectLoadOpCall(Loop *loop, bool require_direct_gm) {
         return body.call;
       }
     } else if (ApiCall *call = FindIndirectLoadOpCall(body.loop, require_direct_gm); call != nullptr) {
+      return call;
+    }
+  }
+  return nullptr;
+}
+
+// [SIMT 融合组·成员 ApiCall 查找] 按节点名在循环树中递归查找（成员与 primary 同属
+// 一个 schedule group，但在循环树中的位置可能嵌套于子循环）。
+ApiCall *FindApiCallByNodeName(Loop *loop, const std::string &name) {
+  if (loop == nullptr) {
+    return nullptr;
+  }
+  for (const auto &body : loop->bodys) {
+    if (body.type == LoopType::CALL) {
+      if (body.call != nullptr && body.call->node_name == name) {
+        return body.call;
+      }
+    } else if (ApiCall *call = FindApiCallByNodeName(body.loop, name); call != nullptr) {
       return call;
     }
   }
@@ -350,11 +373,12 @@ static bool IsRemovePadLinkBroadcast(const ascir::NodeView &node) {
   return IsOps<RemovePad>(node) && node->GetInDataNodesSize() == 1UL && IsOps<Broadcast>(node->GetInDataNodes().at(0));
 }
 
-static bool IsLoadNodeSplitB(const ascir::NodeView &node, const Tiler &tiler, std::string &enable_cache_with_condition,
-                             bool is_ar, bool is_link_to_brc) {
+static bool IsLoadNodeSplitB(const ascir::NodeView &node, const Tiler &tiler,
+                             std::vector<ReduceCondition> &enable_cache_with_condition, bool is_ar,
+                             bool is_link_to_brc) {
   auto out = node->outputs[0];
   bool split_b = false;
-  std::ostringstream ss;
+  enable_cache_with_condition.clear();
   int32_t matching_counts = 0;
   int32_t matching_success_counts = 0;
   int32_t matching_success_current = 0;
@@ -375,17 +399,15 @@ static bool IsLoadNodeSplitB(const ascir::NodeView &node, const Tiler &tiler, st
   }
 
   if (matching_success_counts > 1) {
-    ss << kEnCacheR;
+    enable_cache_with_condition.push_back(ReduceCondition::kR);
   } else if (matching_success_counts == 1) {
     const bool enableCacheA = (matching_success_current == 1 && is_ar) || (matching_success_current != 1 && !is_ar);
 
-    ss << (enableCacheA ? kEnCacheA : kEnCacheR);
+    enable_cache_with_condition.push_back(enableCacheA ? ReduceCondition::kA : ReduceCondition::kR);
     if (enableCacheA) {
-      ss << " || control_dis_enable_cache_a";
+      enable_cache_with_condition.push_back(ReduceCondition::kControl);
     }
   }
-
-  enable_cache_with_condition = ss.str();
 
   if (is_link_to_brc) {
     return split_b;
@@ -397,40 +419,36 @@ static bool IsLoadNodeSplitB(const ascir::NodeView &node, const Tiler &tiler, st
 }
 
 // 多输入节点的缓存刷新条件按 “||” 语义取并集：任一输入到达自身刷新点就必须重新执行，复用仅在
-// 所有输入都保持不变的窗口内有效。按 “ || ” 拆分子项去重，避免嵌套多输入场景重复累加同一条件。
+// 所有输入都保持不变的窗口内有效。按条件类型去重并保留首次出现的顺序，供设备代码和 ATT 共用。
 // 示例：Add 的两个输入链分别缓存于 A 轴和 R 轴，输入0的条件为
 // "dis_enable_cache_a || control_dis_enable_cache_a"、输入1的条件为 "dis_enable_cache_r"，
 // 合并结果为 "dis_enable_cache_a || control_dis_enable_cache_a || dis_enable_cache_r"；
 // 若两个输入的条件相同（如均为 "dis_enable_cache_r"），去重后合并结果仍为 "dis_enable_cache_r"。
-static void MergeCacheACacheRCondition(const std::string &cur_input_cache_condition, std::string &merged) {
-  static const std::string kCondSep = " || ";
-  if (cur_input_cache_condition.empty()) {
-    return;
-  }
-  std::vector<std::string> merged_terms;
-  size_t pos = 0;
-  while (pos < merged.size()) {
-    size_t end = merged.find(kCondSep, pos);
-    merged_terms.emplace_back(merged.substr(pos, end == std::string::npos ? end : end - pos));
-    pos = (end == std::string::npos) ? end : end + kCondSep.size();
-  }
-  pos = 0;
-  while (pos < cur_input_cache_condition.size()) {
-    size_t end = cur_input_cache_condition.find(kCondSep, pos);
-    std::string term = cur_input_cache_condition.substr(pos, end == std::string::npos ? end : end - pos);
-    if (std::find(merged_terms.begin(), merged_terms.end(), term) == merged_terms.end()) {
-      if (!merged.empty()) {
-        merged += kCondSep;
-      }
-      merged += term;
-      merged_terms.emplace_back(term);
+static void MergeCacheACacheRCondition(const std::vector<ReduceCondition> &input,
+                                       std::vector<ReduceCondition> &merged) {
+  for (const auto term : input) {
+    if (std::find(merged.begin(), merged.end(), term) == merged.end()) {
+      merged.push_back(term);
     }
-    pos = (end == std::string::npos) ? end : end + kCondSep.size();
   }
 }
 
-static bool IsNodeSplitB(const ascir::NodeView &node, const Tiler &tiler, std::string &enable_cache_with_condition,
-                         bool is_ar, bool is_link_to_brc = false) {
+static std::string ReduceCacheConditionString(const std::vector<ReduceCondition> &conditions) {
+  std::string result;
+  for (const auto term : conditions) {
+    if (!result.empty()) {
+      result += " || ";
+    }
+    result += term == ReduceCondition::kA   ? kEnCacheA
+              : term == ReduceCondition::kR ? kEnCacheR
+                                            : "control_dis_enable_cache_a";
+  }
+  return result;
+}
+
+static bool IsNodeSplitB(const ascir::NodeView &node, const Tiler &tiler,
+                         std::vector<ReduceCondition> &enable_cache_with_condition, bool is_ar,
+                         bool is_link_to_brc = false) {
   if (IsOps<Data>(node) || node->GetInDataNodesSize() == 0U) {
     return false;
   }
@@ -447,12 +465,12 @@ static bool IsNodeSplitB(const ascir::NodeView &node, const Tiler &tiler, std::s
     return false;
   }
   // 各输入链的缓存刷新条件相互独立，必须取并集：任一输入数据变化都会使本节点的缓存失效。
-  std::string all_inputs_merged_cache_condition;
+  std::vector<ReduceCondition> all_inputs_merged_cache_condition;
   for (const auto &in_node : node->GetInDataNodes()) {
     GE_ASSERT_NOTNULL(in_node, "Input of node %s[%s] is null", node->GetTypePtr(), node->GetNamePtr());
     GE_ASSERT_NOTNULL(std::dynamic_pointer_cast<af::AscNode>(in_node));
     const auto &prev_node = std::dynamic_pointer_cast<af::AscNode>(in_node);
-    std::string cur_input_cache_condition;
+    std::vector<ReduceCondition> cur_input_cache_condition;
     if (!IsOps<Scalar>(prev_node) && !IsNodeSplitB(prev_node, tiler, cur_input_cache_condition, is_ar, true)) {
       return false;
     }
@@ -537,7 +555,8 @@ Status Loop::ConstructFromNodes(ascir::NodeViewVisitorConst nodes, const Tiler &
         "exec_condition[%u], reduce_cache_condition[%s]",
         node->GetNamePtr(), node->GetTypePtr(), static_cast<int32_t>(this->is_graph_has_reduce_node),
         static_cast<int32_t>(call->enable_cache), static_cast<int32_t>(is_fixed_indirect_load_parameter),
-        static_cast<uint32_t>(call->exec_condition), call->enable_cache_with_condition.c_str());
+        static_cast<uint32_t>(call->exec_condition),
+        ReduceCacheConditionString(call->enable_cache_with_condition).c_str());
     call->axis = current_loop->axis_id;
     call->depth = current_axis.size();
     InitApiCallContext(node, tpipe, call, lifecycle_edge);
@@ -670,7 +689,7 @@ static std::string GetCacheGuardCondition(const ApiCall &call, bool is_enable_ca
   }
   // 双 Tile Reduce 使用专用的 A/R 缓存条件。
   if (is_double_tile) {
-    return call.enable_cache_with_condition;
+    return ReduceCacheConditionString(call.enable_cache_with_condition);
   }
   // 普通 Reduce 的缓存刷新周期不能覆盖会改变 GM 地址的循环轴；无法证明地址不变时，
   // 返回空条件，调用方会在每个 Tile 正常执行 Load/Broadcast。
@@ -688,16 +707,228 @@ static std::string GetCacheGuardCondition(const ApiCall &call, bool is_enable_ca
   return "";
 }
 
+namespace {
+bool IsUnconditionalCall(const ApiCall &call) {
+  return call.node != nullptr && !call.enable_cache && !call.skip_api_emit &&
+         call.api_call_context.stage == ComputeStage::kDefault && call.node->GetInControlNodesSize() == 0U &&
+         call.node->GetOutControlNodesSize() == 0U;
+}
+
+bool IsSingleQueueTensor(const TQue &queue, const Tensor &tensor) {
+  const auto group = queue.share_group.find(tensor.reuse_id);
+  return group != queue.share_group.end() && group->second.size() == 1U && group->second.front() == tensor.id;
+}
+
+const ApiCall *GetCommonQueueSplitAnchor(const ApiCall &load, const TPipe &tpipe) {
+  if (load.type != Load::Type || load.unit != af::ComputeUnit::kUnitMTE2 || load.inputs.size() != 1U ||
+      load.outputs.size() != 1U || load.inputs[0]->id != tpipe.cube_output_tensor_id || !IsUnconditionalCall(load)) {
+    return nullptr;
+  }
+  const auto &output = load.outputs[0];
+  const auto *tensor = tpipe.GetTensor(output.id);
+  const auto *previous = output.reuse_from;
+  if (tensor == nullptr || tensor->dtype != ge::DT_FLOAT || tensor->alloc_type != af::AllocType::kAllocTypeQueue ||
+      tensor->position != af::Position::kPositionVecIn || tensor->is_ub_scalar || tensor->que_buf_num_value != 2U ||
+      previous == nullptr || previous->write == nullptr || previous->write->type != Load::Type ||
+      previous->write->unit != af::ComputeUnit::kUnitMTE2 || previous->write->axis != load.axis ||
+      previous->reads.size() != 1U || !IsUnconditionalCall(*previous->write) || output.share_prev != nullptr ||
+      output.share_next != nullptr || previous->share_prev != nullptr || previous->share_next != nullptr) {
+    return nullptr;
+  }
+  const auto *small = tpipe.GetTensor(previous->id);
+  const auto *queue = tpipe.GetQue(tensor->que_id);
+  const auto *anchor = previous->reads.front();
+  if (small == nullptr || queue == nullptr || queue->share_group.size() != 2U || queue->is_bind ||
+      queue->skip_init_for_simt_direct_gm || small->dtype != ge::DT_FLOAT ||
+      small->alloc_type != af::AllocType::kAllocTypeQueue || small->position != af::Position::kPositionVecIn ||
+      small->que_id != tensor->que_id || small->que_buf_num_value != 2U || small->is_ub_scalar ||
+      !IsSingleQueueTensor(*queue, *small) || !IsSingleQueueTensor(*queue, *tensor) ||
+      anchor->type != Broadcast::Type || anchor->unit != af::ComputeUnit::kUnitVector ||
+      !IsUnconditionalCall(*anchor) || anchor->axis != load.axis ||
+      std::any_of(output.reads.begin(), output.reads.end(),
+                  [&load](const ApiCall *reader) { return reader->depth != load.depth; })) {
+    return nullptr;
+  }
+  return anchor;
+}
+
+bool HasIndependentQueueLifetime(const Loop &loop, size_t begin, size_t end, const ApiCall &load, const TPipe &tpipe) {
+  const auto *tensor = tpipe.GetTensor(load.outputs[0].id);
+  for (size_t i = begin; i < end; ++i) {
+    const auto &body = loop.bodys[i];
+    if (body.type != LoopType::CALL || !IsUnconditionalCall(*body.call) ||
+        body.call->unit == af::ComputeUnit::kUnitMTE3) {
+      return false;
+    }
+    for (const auto &output : body.call->outputs) {
+      const auto *other = tpipe.GetTensor(output.id);
+      if (other == nullptr ||
+          (other->alloc_type == af::AllocType::kAllocTypeQueue && other->que_id == tensor->que_id)) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+std::map<const ApiCall *, const ApiCall *> GetCommonQueueSplitCandidates(const Loop &loop, const TPipe &tpipe) {
+  std::map<const ApiCall *, const ApiCall *> plan;
+  if (tpipe.cv_fusion_type != ascir::CubeTemplateType::kCommon || tpipe.is_conv2d ||
+      tpipe.cube_output_tensor_id == af::kIdNone || loop.is_graph_has_reduce_node) {
+    return plan;
+  }
+  std::set<ascir::QueId> used_queues;
+  for (size_t i = 0; i < loop.bodys.size(); ++i) {
+    const auto &body = loop.bodys[i];
+    if (body.type != LoopType::CALL || loop.used_calls.count(body.call) != 0U) {
+      continue;
+    }
+    const auto *anchor = GetCommonQueueSplitAnchor(*body.call, tpipe);
+    if (anchor == nullptr) {
+      continue;
+    }
+    if (std::any_of(body.call->outputs[0].reads.begin(), body.call->outputs[0].reads.end(),
+                    [&loop](const ApiCall *reader) {
+                      return std::none_of(loop.bodys.begin(), loop.bodys.end(), [reader](const LoopBody &entry) {
+                        return entry.type == LoopType::CALL && entry.call == reader;
+                      });
+                    })) {
+      continue;
+    }
+    const auto *tensor = tpipe.GetTensor(body.call->outputs[0].id);
+    if (used_queues.count(tensor->que_id) != 0U) {
+      continue;
+    }
+    const auto *source = body.call->outputs[0].reuse_from->write;
+    bool source_seen = false;
+    for (size_t j = 0; j < i; ++j) {
+      source_seen = source_seen || (loop.bodys[j].type == LoopType::CALL && loop.bodys[j].call == source);
+      if (source_seen && loop.bodys[j].type == LoopType::CALL && loop.bodys[j].call == anchor &&
+          HasIndependentQueueLifetime(loop, j, i, *body.call, tpipe)) {
+        plan.emplace(anchor, body.call);
+        used_queues.insert(tensor->que_id);
+        break;
+      }
+    }
+  }
+  return plan;
+}
+
+void CollectCommonQueueSplitCandidates(const Loop &loop, const TPipe &tpipe, std::vector<const ApiCall *> &loads) {
+  const auto candidates = GetCommonQueueSplitCandidates(loop, tpipe);
+  for (const auto &candidate : candidates) {
+    loads.push_back(candidate.second);
+  }
+  for (const auto &body : loop.bodys) {
+    if (body.type == LoopType::LOOP) {
+      CollectCommonQueueSplitCandidates(*body.loop, tpipe, loads);
+    }
+  }
+}
+
+bool BuildCommonQueueUbGuard(const TPipe &tpipe, const af::AscGraph &graph, CommonQueueSplitPlan &plan) {
+  ascir::UbExprContext context;
+  if (ascir::AscGraphUbExprBuilder().Build(graph, context) != af::SUCCESS || !context.ub_expr.IsValid()) {
+    return false;
+  }
+  std::set<std::string> known_containers;
+  for (const auto &entry : tpipe.ques) {
+    known_containers.insert("q" + std::to_string(entry.first) + "_size");
+  }
+  for (const auto &entry : tpipe.bufs) {
+    known_containers.insert("b" + std::to_string(entry.first) + "_size");
+  }
+  std::set<std::string> actual_containers;
+  for (const auto &entry : context.container_names) {
+    if (known_containers.count(entry.second) == 0U) {
+      return false;
+    }
+    actual_containers.insert(entry.second);
+  }
+  if (actual_containers != known_containers) {
+    return false;
+  }
+  std::vector<std::pair<af::Expression, af::Expression>> replacements;
+  for (const auto &symbol : context.ub_expr.FreeSymbols()) {
+    const auto name = context.container_names.find(symbol);
+    if (name == context.container_names.end()) {
+      return false;
+    }
+    replacements.emplace_back(symbol, af::Symbol((plan.QueueAliasName() + "_" + name->second).c_str()));
+  }
+  plan.ub_containers.assign(actual_containers.begin(), actual_containers.end());
+  plan.original_ub_expr = context.ub_expr.Subs(replacements).Simplify().Str().get();
+  return true;
+}
+
+std::unique_ptr<TPipe> MakeCommonMmQueuePipe(const TPipe &tpipe) {
+  if (tpipe.common_queue_split_plan == nullptr) {
+    return nullptr;
+  }
+  const auto &plan = *tpipe.common_queue_split_plan;
+  const auto *queue = tpipe.GetQue(plan.queue_id);
+  if (queue == nullptr) {
+    return nullptr;
+  }
+  auto view = std::make_unique<TPipe>(tpipe);
+  TQue alias(*queue, plan.QueueAliasName(), plan.BufferAliasName());
+  view->ques.erase(queue->id);
+  view->ques.emplace(queue->id, alias);
+  return view;
+}
+}  // namespace
+
+void TPipe::PrepareCommonQueueSplitPlan(const Loop &loop, const af::AscGraph &graph) {
+  common_queue_split_plan.reset();
+  if (cv_fusion_type != ascir::CubeTemplateType::kCommon || is_conv2d || !using_att_calc_qbt_size_ ||
+      using_global_tpipe_ || cube_output_tensor_id == af::kIdNone) {
+    return;
+  }
+  std::vector<const ApiCall *> candidates;
+  CollectCommonQueueSplitCandidates(loop, *this, candidates);
+  if (candidates.size() != 1U) {
+    return;
+  }
+  const auto *platform = optimize::PlatformFactory::GetInstance().GetPlatform();
+  ge::PlatformInfo info;
+  if (platform == nullptr || !ge::PlatformContext::GetInstance().TryGetInitializedPlatformInfo(info) ||
+      info.ub_size <= 0) {
+    return;
+  }
+  const auto vecin_count = std::count_if(ques.begin(), ques.end(), [](const auto &entry) {
+    return entry.second.position == af::Position::kPositionVecIn;
+  });
+  if (static_cast<size_t>(vecin_count) >= platform->GetPlatformConfig().max_que_num) {
+    return;
+  }
+  const auto &load = *candidates.front();
+  const auto *tensor = GetTensor(load.outputs[0].id);
+  auto plan = std::make_shared<CommonQueueSplitPlan>();
+  plan->queue_id = tensor->que_id;
+  plan->mm_tensor_id = tensor->id;
+  plan->small_tensor_id = load.outputs[0].reuse_from->id;
+  int64_t override_size = 0;
+  if (ge::PlatformContext::GetInstance().TryGetUbSizeOverride(override_size) && override_size > 0) {
+    info.ub_size = std::min(info.ub_size, override_size);
+  }
+  plan->ub_limit = static_cast<uint64_t>(info.ub_size);
+  if (BuildCommonQueueUbGuard(*this, graph, *plan)) {
+    common_queue_split_plan = std::move(plan);
+  }
+}
+
 Status Loop::GenerateBody(const Tiler &tiler, const TPipe &tpipe, std::vector<ascir::AxisId> &current_axis,
-                          std::stringstream &ss) {
+                          std::stringstream &ss, CacheContext &cache_context) {
   std::map<ascir::AxisId, std::map<Loop *, std::vector<ApiCall *>>> api_calls_cross_loop;
   if (this->bodys.size() > 1) {
     CollectTensorCrossLoop(api_calls_cross_loop);
   }
   auto &cross_loop_map = api_calls_cross_loop[this->axis_id];
   static const std::vector<ApiCall *> kEmptyCrossLoopCalls;
+  const auto mm_queue_pipe = MakeCommonMmQueuePipe(tpipe);
 
-  for (const auto &body : this->bodys) {
+  for (size_t body_index = 0UL; body_index < this->bodys.size(); ++body_index) {
+    const auto &body = this->bodys[body_index];
     if ((body.type == LoopType::CALL) && (body.call->api_call_context.scene == ApiScene::kCVFuseUBLoad ||
                                           body.call->api_call_context.stage != this->compute_stage)) {
       continue;
@@ -710,7 +941,11 @@ Status Loop::GenerateBody(const Tiler &tiler, const TPipe &tpipe, std::vector<as
         used_calls.insert(call);
       }
       body.loop->compute_stage = this->compute_stage;
-      GE_CHK_STATUS_RET(body.loop->GenerateLoop(tiler, tpipe, current_axis, ss), "Generate loop for body failed");
+      auto nested_cache_context = cache_context;
+      GE_CHK_STATUS_RET(body.loop->GenerateLoop(tiler, tpipe, current_axis, ss, nested_cache_context),
+                        "Generate loop for body failed");
+      // A/R 的绑定随循环退出；control 保留内层对外层可变标志的最后一次更新。
+      cache_context.bindings[ReduceCondition::kControl] = nested_cache_context.bindings[ReduceCondition::kControl];
       for (auto call : cross_loop_calls) {
         GE_CHK_BOOL_RET_STATUS(call->SyncOutputs(tpipe, ss), af::FAILED, "Func SyncOutputs return false");
       }
@@ -719,17 +954,118 @@ Status Loop::GenerateBody(const Tiler &tiler, const TPipe &tpipe, std::vector<as
       if (body.call->unit == af::ComputeUnit::kUnitNone || body.call->skip_api_emit) {
         continue;
       }
+      const auto &call_tpipe =
+          mm_queue_pipe != nullptr && tpipe.common_queue_split_plan->UsesMmQueue(*body.call) ? *mm_queue_pipe : tpipe;
       const auto behavior =
           ascgen_utils::indirect_load::GetTemplateBehavior(std::dynamic_pointer_cast<af::AscNode>(body.call->node));
       // SIMT IndirectLoad 的 input0/input1 不进入通用 Wait/Free；输出生命周期仍由 skips_ub_lifecycle 单独控制。
       if (!behavior.skips_input_lifecycle) {
-        GE_CHK_BOOL_RET_STATUS(body.call->WaitInputs(tpipe, ss), af::FAILED, "Func WaitInputs return false");
+        GE_CHK_BOOL_RET_STATUS(body.call->WaitInputs(call_tpipe, ss), af::FAILED, "Func WaitInputs return false");
       }
       if (!IsFindInUsedCalls(body.call) && !behavior.skips_ub_lifecycle) {
-        GE_CHK_STATUS_RET(body.call->AllocOutputs(tpipe, ss), "Codegen alloc outputs failed");
+        GE_CHK_STATUS_RET(body.call->AllocOutputs(call_tpipe, ss), "Codegen alloc outputs failed");
+      }
+      // [SIMT 融合组·循环体发射路径] 非提升形态（如共享 Reduce 终端的 L3：post-Reduce
+      // 使 primary 行为复位、不可被 FindIndirectLoadOpCall 发现，不经 hoist 点）下
+      // fused 调用经本路径发射，ftgt 逐成员引用 UB 局部目标——拓扑序在 primary 之后
+      // 的成员声明落在其自身循环体位置（fused 调用之后，use-before-declaration）；
+      // 在前者依赖前导段/祖先 cross-loop 归类。成员的独立执行由 IsSimtFusedMemberEmitted
+      // 抑制（其 Generate 仅输出注释，与 SetSimtFusedPrimary 同点原子设置），全组唯一
+      // 执行者是 fused 调用；skip_api_emit 在此基础上抑制成员循环体发射的冗余生命
+      // 周期文本。在 primary 发射点统一补声明：位置在后的成员补声明并置 skip——
+      // 抑制其循环体发射（亦防重复 AllocOutputs——redefinition）；位置在前的成员
+      // 仅当 skips_ub_lifecycle（通用 AllocOutputs 未覆盖）时补声明。buf 型 UB 目标
+      // 无 que 生命周期、SIMT 输入不进通用 Wait/Free，跳过成员循环体发射无泄漏。
+      // L2（寄存器归并）value 不落 UB、OutputTargets 走 GM 输出链，整块跳过。
+      const auto fused_primary_node = std::dynamic_pointer_cast<af::AscNode>(body.call->node);
+      if (fused_primary_node != nullptr && af::ops::IsOps<af::ascir_op::IndirectLoad>(fused_primary_node) &&
+          ascgen_utils::indirect_load::IsSimtFusedPrimary(fused_primary_node) &&
+          !ascgen_utils::indirect_load::GetSimtFusedMergeInfo(fused_primary_node).register_merge) {
+        if (behavior.skips_ub_lifecycle && !IsFindInUsedCalls(body.call)) {
+          GE_CHK_STATUS_RET(body.call->AllocOutputs(call_tpipe, ss),
+                            "Codegen alloc SIMT fused primary[%s] outputs failed.", body.call->node_name.c_str());
+        }
+        const auto member_names = ascgen_utils::indirect_load::GetSimtFusedMemberNames(fused_primary_node);
+        const size_t primary_body_index = body_index;
+        std::set<const ApiCall *> unique_members;
+        for (const auto &member_name : member_names) {
+          if (member_name == body.call->node_name) {
+            continue;
+          }
+          ApiCall *member_call = nullptr;
+          size_t member_body_index = 0UL;
+          for (size_t scan_index = 0UL; scan_index < this->bodys.size(); ++scan_index) {
+            if (this->bodys[scan_index].type == LoopType::CALL) {
+              if (this->bodys[scan_index].call != nullptr && this->bodys[scan_index].call->node_name == member_name) {
+                member_call = this->bodys[scan_index].call;
+                member_body_index = scan_index;
+                break;
+              }
+            } else if (ApiCall *call = FindApiCallByNodeName(this->bodys[scan_index].loop, member_name);
+                       call != nullptr) {
+              member_call = call;
+              member_body_index = scan_index;
+              break;
+            }
+          }
+          if (member_call == nullptr) {
+            // 不在本循环子树内的成员沿用前导段/祖先 cross-loop 机制（与 hoist 点同口径，
+            // 不作硬性约束——同一张图不应因提升与否改变可编译性）
+            GELOGW(
+                "SIMT fused group: member[%s] of primary[%s] is not found in the current loop subtree; its "
+                "outputs are left to the ancestor cross-loop mechanism.",
+                member_name.c_str(), body.call->node_name.c_str());
+            continue;
+          }
+          // 名表重复名/多名同解析：同一 ApiCall 被多次 AllocOutputs 会 redefinition，
+          // 与 hoist 点同口径校验
+          GE_ASSERT_TRUE(unique_members.emplace(member_call).second,
+                         "SIMT fused group of primary[%s]: member[%s] resolves to a duplicate call.",
+                         body.call->node_name.c_str(), member_name.c_str());
+          if (IsFindInUsedCalls(member_call)) {
+            // 祖先 cross-loop 已声明：跳过本点声明，skip 抑制该成员循环体发射
+            member_call->skip_api_emit = true;
+            continue;
+          }
+          // 成员 AllocOutputs 按成员自身判定 MM queue（不借用 primary 的 call_tpipe，
+          // 防将来 MM-queue 分裂覆盖 IndirectLoad 时从错误 queue 分配）
+          const auto &member_tpipe =
+              mm_queue_pipe != nullptr && tpipe.common_queue_split_plan->UsesMmQueue(*member_call) ? *mm_queue_pipe
+                                                                                                   : tpipe;
+          if (member_body_index < primary_body_index) {
+            // 位置在前的成员已发射完毕：post-Reduce 形态通用 AllocOutputs 已声明；
+            // skips_ub_lifecycle 形态其通用路径未声明，此处补齐。适用范围：生产形态
+            // 成员按拓扑序位于 primary 之后（GetAllNodes 首个 IndirectLoad 为 primary），
+            // 出现本分支即该约定被破坏——记录可见；同层更早兄弟循环的 cross-loop 声明
+            // 因 used_calls 逐 body 清空无法回查，该形态下可能重复声明（当前无覆盖场景）。
+            GELOGW(
+                "SIMT fused group: member[%s] is emitted before primary[%s] (unexpected topological order); its "
+                "execution is suppressed by the fused primary, only a duplicate declaration is at risk.",
+                member_name.c_str(), body.call->node_name.c_str());
+            const auto member_behavior = ascgen_utils::indirect_load::GetTemplateBehavior(
+                std::dynamic_pointer_cast<af::AscNode>(member_call->node));
+            if (member_behavior.skips_ub_lifecycle) {
+              GE_CHK_STATUS_RET(member_call->AllocOutputs(member_tpipe, ss),
+                                "Codegen alloc SIMT fused member[%s] outputs failed.", member_name.c_str());
+              GELOGI("SIMT fused group: member[%s] outputs declared before primary[%s] in loop body.",
+                     member_name.c_str(), body.call->node_name.c_str());
+            }
+            continue;
+          }
+          // 位置在后的成员：本点统一补声明并置 skip。成员执行本身已由 IsSimtFusedMemberEmitted
+          // 抑制（其 Generate 仅输出注释，fused 调用是全组唯一执行者）；置 skip 只为抑制本成员
+          // 循环体位置重复的 Wait/AllocOutputs（redefinition）与冗余生命周期文本
+          GE_CHK_STATUS_RET(member_call->AllocOutputs(member_tpipe, ss),
+                            "Codegen alloc SIMT fused member[%s] outputs failed.", member_name.c_str());
+          member_call->skip_api_emit = true;
+          GELOGI("SIMT fused group: member[%s] declared at primary[%s] emission point (order after).",
+                 member_name.c_str(), body.call->node_name.c_str());
+        }
       }
       std::string call;
       std::string cache_guard;
+      using Mode = ascir_param::CacheExecutionMode;
+      Mode cache_mode = Mode::kNoGuard;
 
       if (this->axis_id != af::kIdNone && this->compute_stage == ComputeStage::kDefault) {
         auto axis = tiler.GetAxis(this->axis_id);
@@ -747,10 +1083,19 @@ Status Loop::GenerateBody(const Tiler &tiler, const TPipe &tpipe, std::vector<as
                  body.call->node_name.c_str(), body.call->type.c_str(), this->axis_id);
         }
         if (!cache_guard.empty()) {
+          cache_mode = is_double_tile
+                           ? Mode::kReduceDoubleTile
+                           : (body.call->exec_condition == af::ExecuteCondition::kCacheBlockSplitOriginBroadcastAxis
+                                  ? Mode::kOriginBroadcast
+                                  : Mode::kFusedBroadcast);
           ss << "if (" << cache_guard << ") {" << std::endl;
         }
       }
-      GE_CHK_STATUS_RET(body.call->Generate(tpipe, current_axis, call), "Codegen generate call failed");
+      GE_CHK_STATUS_RET(body.call->Generate(call_tpipe, current_axis, call), "Codegen generate call failed");
+      // 调用生成成功后发布实际条件；无 guard 时也记录 kNoGuard，避免 ATT 自行推断缓存。
+      GE_CHK_STATUS_RET(ascir_param::CollectCacheExecution(cache_context, body.call->node, current_axis, this->axis_id,
+                                                           cache_mode, body.call->enable_cache_with_condition),
+                        "Record cache execution failed");
       ss << call;
 
       if (!cache_guard.empty()) {
@@ -760,12 +1105,13 @@ Status Loop::GenerateBody(const Tiler &tiler, const TPipe &tpipe, std::vector<as
       // post-reduce SIMT 需要保留输出 Alloc/Sync/Free，因此不能与输入生命周期共用一个开关。
       if (!behavior.skips_ub_lifecycle) {
         if (!IsFindInUsedCalls(body.call)) {
-          GE_CHK_BOOL_RET_STATUS(body.call->SyncOutputs(tpipe, ss), af::FAILED, "Func SyncOutputs return false");
+          GE_CHK_BOOL_RET_STATUS(body.call->SyncOutputs(call_tpipe, ss), af::FAILED, "Func SyncOutputs return false");
         }
         if (!behavior.skips_input_lifecycle) {
-          GE_CHK_BOOL_RET_STATUS(body.call->FreeInputs(tpipe, ss), af::FAILED, "Func FreeInputs return false");
+          GE_CHK_BOOL_RET_STATUS(body.call->FreeInputs(call_tpipe, ss), af::FAILED, "Func FreeInputs return false");
         }
-        GE_CHK_BOOL_RET_STATUS(body.call->FreeUnusedOutputs(tpipe, ss), af::FAILED, "Func FreeUnusedOutputs fails");
+        GE_CHK_BOOL_RET_STATUS(body.call->FreeUnusedOutputs(call_tpipe, ss), af::FAILED,
+                               "Func FreeUnusedOutputs fails");
       }
       ss << std::endl;
     }
@@ -860,9 +1206,9 @@ static void CreateInnerLoopSizeAndActualSize(const TPipe &tpipe, const Tiler &ti
 }
 
 Status Loop::GenerateLoop(const Tiler &tiler, const TPipe &tpipe, std::vector<ascir::AxisId> &current_axis,
-                          std::stringstream &ss) {
+                          std::stringstream &ss, CacheContext &cache_context) {
   if (this->axis_id == af::kIdNone) {
-    GE_CHK_STATUS_RET(this->GenerateBody(tiler, tpipe, current_axis, ss),
+    GE_CHK_STATUS_RET(this->GenerateBody(tiler, tpipe, current_axis, ss, cache_context),
                       "Codegen generate body failed when axis id is none");
     return af::SUCCESS;
   }
@@ -871,7 +1217,7 @@ Status Loop::GenerateLoop(const Tiler &tiler, const TPipe &tpipe, std::vector<as
   current_axis.push_back(this->axis_id);
   if (axis.type == Axis::Type::kAxisTypeBlockOuter) {
     CreateInnerLoopSizeAndActualSize(tpipe, tiler, axis, ss);
-    GE_CHK_STATUS_RET(this->GenerateBody(tiler, tpipe, current_axis, ss),
+    GE_CHK_STATUS_RET(this->GenerateBody(tiler, tpipe, current_axis, ss, cache_context),
                       "Codegen generate body failed when axis type is block outer");
   } else {
     if (axis.type == Axis::Type::kAxisTypeTileInner && FindIndirectLoadOpCall(this, false) != nullptr) {
@@ -882,6 +1228,7 @@ Status Loop::GenerateLoop(const Tiler &tiler, const TPipe &tpipe, std::vector<as
       ss << "uint32_t " << reduce_dim_a << ";" << std::endl;
     }
     if (axis.type != Axis::Type::kAxisTypeBlockInner && this->is_graph_has_reduce_node) {
+      cache_context.bindings[ReduceCondition::kControl].loop_extent = axis.size;
       ss << "control_dis_enable_cache_a = true;" << std::endl;
       ss << "if ( " << axis.loop_size.Str() << " == 1) {" << std::endl;
       ss << "control_dis_enable_cache_a = false;" << std::endl;
@@ -896,8 +1243,61 @@ Status Loop::GenerateLoop(const Tiler &tiler, const TPipe &tpipe, std::vector<as
             ascgen_utils::indirect_load::GetTemplateBehavior(std::dynamic_pointer_cast<af::AscNode>(call->node));
         const auto indirect_load = std::dynamic_pointer_cast<af::AscNode>(call->node);
         const bool has_post_reduce = ascgen_utils::indirect_load::GetPostReduceConsumer(indirect_load) != nullptr;
-        if (!behavior.skips_ub_lifecycle || has_post_reduce) {
+        const bool primary_alloc_at_hoist = !behavior.skips_ub_lifecycle || has_post_reduce;
+        if (primary_alloc_at_hoist && !IsFindInUsedCalls(call)) {
           GE_CHK_STATUS_RET(call->AllocOutputs(tpipe, ss), "Codegen alloc hoisted IndirectLoad outputs failed");
+        }
+        // [SIMT 融合组·全组成员声明先于 fused 引用] L3（UB 归并）fused 调用的
+        // OutputTargets 逐成员引用 UB 局部目标（含 primary 自身的输出）。primary 的
+        // 声明存在空窗：kSimtOp 无 post-Reduce 的提升形态（L3 不要求链上有 Reduce，
+        // 见 PlanSimtFusedEmission 的降级判定）上方守卫不触发，声明完全依赖祖先
+        // cross-loop 归类——正是成员侧已消除的调度位置依赖。故 primary 与成员统一
+        // 收口到组路径：上方守卫或祖先 cross-loop 已声明时跳过，否则与成员同点补
+        // 声明。本提升点以提前返回替换整个子树的循环体发射，成员（含 primary）
+        // 不再有各自的循环体发射点；skip_api_emit 抑制该成员的独立发射（fused 调用
+        // 统一承担全组发射，亦防止后续结构变化后循环体内重复 AllocOutputs）。
+        // L2（寄存器归并）value 不落 UB、OutputTargets 走 GM 输出链，无需成员 UB
+        // 声明，整块跳过。
+        if (indirect_load != nullptr && ascgen_utils::indirect_load::IsSimtFusedPrimary(indirect_load)) {
+          const auto member_names = ascgen_utils::indirect_load::GetSimtFusedMemberNames(indirect_load);
+          const auto merge_info = ascgen_utils::indirect_load::GetSimtFusedMergeInfo(indirect_load);
+          // 名表契约：SetSimtFusedPrimary 写入含 primary 在内的全组成员名（primary 为
+          // 首成员）；空表即名表契约破坏（fused 发射侧同口径断言）。名表重复名会使
+          // 同一 ApiCall 被多次 AllocOutputs（redefinition），与名表契约同点校验。
+          GE_ASSERT_TRUE(!member_names.empty(), "SIMT fused group of primary[%s] has an empty member list.",
+                         call->node_name.c_str());
+          GE_ASSERT_TRUE(std::find(member_names.begin(), member_names.end(), call->node_name) != member_names.end(),
+                         "SIMT fused group member list of primary[%s] does not contain the primary itself.",
+                         call->node_name.c_str());
+          if (!merge_info.register_merge) {
+            std::set<const ApiCall *> unique_members;
+            for (const auto &member_name : member_names) {
+              ApiCall *member_call = FindApiCallByNodeName(this, member_name);
+              if (member_call == nullptr) {
+                // 不在本提升子树内的成员沿用前导段/祖先 cross-loop 机制——与循环体
+                // 发射路径同口径（同一张图不应因提升与否改变可编译性，不作硬性约束）
+                GELOGW(
+                    "SIMT fused group: member[%s] of primary[%s] is not found in the hoisted loop subtree; its "
+                    "outputs are left to the ancestor cross-loop mechanism.",
+                    member_name.c_str(), call->node_name.c_str());
+                continue;
+              }
+              GE_ASSERT_TRUE(unique_members.emplace(member_call).second,
+                             "SIMT fused group of primary[%s]: member[%s] resolves to a duplicate call.",
+                             call->node_name.c_str(), member_name.c_str());
+              const bool is_primary = member_call == call;
+              if ((is_primary && primary_alloc_at_hoist) || IsFindInUsedCalls(member_call)) {
+                // primary 已由上方守卫声明，或该成员已由祖先循环的 cross-loop 路径声明
+                member_call->skip_api_emit = true;
+                continue;
+              }
+              GE_CHK_STATUS_RET(member_call->AllocOutputs(tpipe, ss), "Codegen alloc SIMT fused %s[%s] outputs failed.",
+                                is_primary ? "primary" : "member", member_name.c_str());
+              member_call->skip_api_emit = true;
+              GELOGI("SIMT fused group: %s[%s] outputs declared at the hoist point (skip_api_emit set).",
+                     is_primary ? "primary" : "member", member_name.c_str());
+            }
+          }
         }
         std::string call_code;
         GE_CHK_STATUS_RET(call->Generate(tpipe, current_axis, call_code), "Codegen generate hoisted call failed");
@@ -907,7 +1307,10 @@ Status Loop::GenerateLoop(const Tiler &tiler, const TPipe &tpipe, std::vector<as
         return af::SUCCESS;
       }
     }
-    if (tpipe.cv_fusion_type == ascir::CubeTemplateType::kUBFuse && axis.type == Axis::Type::kAxisTypeTileOuter) {
+    if (tpipe.cv_fusion_type == ascir::CubeTemplateType::kUBFuse &&
+        (axis.type == Axis::Type::kAxisTypeTileOuter ||
+         (tpipe.cv_output_broadcast && axis.type == Axis::Type::kAxisTypeOriginal) ||
+         (tpipe.is_dynamic && !tpipe.is_conv2d && !tpipe.is_inductor))) {
       ss << axis.loop_size.AsArg() << " = 1;" << std::endl;
     }
     ss << "for (" << axis.AsArg() << " = 0; " << axis << " < " << axis.loop_size.Str() << "; " << axis << "++) "
@@ -916,7 +1319,7 @@ Status Loop::GenerateLoop(const Tiler &tiler, const TPipe &tpipe, std::vector<as
       ss << tiler.CalcFromAxis(axis.id);
     }
     if (this->compute_stage == ComputeStage::kDefault) {
-      GenerateEnCacheCondition(tiler, tpipe, axis, ss);
+      GenerateEnCacheCondition(tiler, tpipe, axis, ss, cache_context);
     }
     if (tpipe.cv_fusion_type != ascir::CubeTemplateType::kUBFuse) {
       std::set<ascir::AxisId> vectorized_axis;
@@ -932,16 +1335,22 @@ Status Loop::GenerateLoop(const Tiler &tiler, const TPipe &tpipe, std::vector<as
       const auto &tile_inner = tiler.GetAxis(axis.split_pair_other_id);
       af::Expression actual_size = af::Symbol(tile_inner.actual_size.name.c_str());
       tpipe.tiler.actual_sizes.emplace_back(std::make_pair(tile_inner.size_expr, actual_size));
-      ss << tile_inner.actual_size.AsArg() << " = stageSize;"
-         << std::endl;  // 多轮循环不能使用curAivM * curAivN，否则奇数尾块计算有精度问题
+      if (tpipe.cv_output_broadcast) {
+        ss << tile_inner.actual_size.AsArg() << " = "
+           << (tiler.IsFrom(tile_inner.id, tpipe.cv_n_axis) ? "curAivN" : "curAivM") << ";\n";
+      } else {
+        ss << tile_inner.actual_size.AsArg() << " = stageSize;" << std::endl;
+      }
       auto ub_tensor = tpipe.GetTensor(tpipe.cube_output_tensor_id);
       GE_CHK_BOOL_RET_STATUS(ub_tensor != nullptr, af::FAILED,
                              "Codegen CV Fusion MatmulOutput UB tensor id[%ld] "
                              "not found",
                              tpipe.cube_output_tensor_id);
-      ss << ub_tensor->Str() << "_actual_size = " << tile_inner.actual_size.Str() << ";" << std::endl;
+      ss << ub_tensor->Str() << "_actual_size = "
+         << (tpipe.cv_output_broadcast ? tpipe.CvColumns(*ub_tensor) : tile_inner.actual_size.Str()) << ";"
+         << std::endl;
     }
-    GE_CHK_STATUS_RET(this->GenerateBody(tiler, tpipe, current_axis, ss),
+    GE_CHK_STATUS_RET(this->GenerateBody(tiler, tpipe, current_axis, ss, cache_context),
                       "Codegen generate body failed for normal loop");
     ss << "}" << std::endl;
     if (IsReduceDoubleTile(tiler, tpipe, this->is_graph_has_reduce_node) && GetReduceType() == "Mean") {
@@ -1015,17 +1424,19 @@ static const Axis &GetTileOutAxis(const Tiler &tiler, const Axis &axis) {
   return axis;
 }
 
-void Loop::GenerateEnCacheCondition(const Tiler &tiler, const TPipe &tpipe, const Axis &axis,
-                                    std::stringstream &ss) const {
+void Loop::GenerateEnCacheCondition(const Tiler &tiler, const TPipe &tpipe, const Axis &axis, std::stringstream &ss,
+                                    CacheContext &cache_context) const {
   (void)tpipe;
   if (!axis.is_split_b) {
     return;
   }
   af::Expression block_in_size = Zero;
+  af::Expression block_in_extent = One;
   for (auto &[id, cur_axis] : tiler.axis_map) {
     (void)id;
     if (cur_axis.type == ascir::Axis::Type::kAxisTypeBlockInner) {
       block_in_size = af::Symbol(cur_axis.axis_size.name.c_str());
+      block_in_extent = cur_axis.size;
       break;
     }
   }
@@ -1037,6 +1448,7 @@ void Loop::GenerateEnCacheCondition(const Tiler &tiler, const TPipe &tpipe, cons
     Axis thile_out_axis_another = GetTileOutAxisAnother(tiler, axis);
     for (auto body : this->bodys) {
       if (body.type == LoopType::LOOP) {
+        ascir_param::BindCacheCondition(cache_context, ReduceCondition::kA, axis, tile_out_axis, block_in_extent);
         ss << "bool " << kEnCacheA << " = (" << axis << " < 1) || ((" << tiler.block_dim << " * "
            << block_in_size.Str().get() << " + " << axis << ") % " << tile_out_axis.loop_size << " < 1);" << std::endl;
         break;
@@ -1046,6 +1458,7 @@ void Loop::GenerateEnCacheCondition(const Tiler &tiler, const TPipe &tpipe, cons
         continue;
       }
 
+      ascir_param::BindCacheCondition(cache_context, ReduceCondition::kR, axis, thile_out_axis_another, One);
       ss << "bool " << kEnCacheR << " = (" << axis << " < 1) || ((" << axis << ") % "
          << thile_out_axis_another.loop_size << " < 1);" << std::endl;
       break;
@@ -1059,6 +1472,8 @@ void Loop::GenerateEnCacheCondition(const Tiler &tiler, const TPipe &tpipe, cons
       }
       if (body.call->exec_condition == af::ExecuteCondition::kCacheBlockSplitFusedBroadcastAxis &&
           need_create_fused_cond) {
+        ascir_param::BindCacheCondition(cache_context, ascir_param::CacheExecutionMode::kFusedBroadcast, axis,
+                                        tile_out_axis, block_in_size == Zero ? Zero : block_in_extent);
         ss << "bool " << kEnCacheFusedBroadcastAxis << " = (" << axis << " < 1) || ((" << tiler.block_dim << " * "
            << block_in_size.Str().get() << " + " << axis << ") % " << tile_out_axis.loop_size << " < 1);" << std::endl;
         need_create_fused_cond = false;
@@ -1066,6 +1481,8 @@ void Loop::GenerateEnCacheCondition(const Tiler &tiler, const TPipe &tpipe, cons
       }
       if (body.call->exec_condition == af::ExecuteCondition::kCacheBlockSplitOriginBroadcastAxis &&
           need_create_origin_cond) {
+        ascir_param::BindCacheCondition(cache_context, ascir_param::CacheExecutionMode::kOriginBroadcast, axis,
+                                        tile_out_axis, block_in_extent);
         ss << "bool " << kEnCacheOriginBroadcastAxis << " = (" << axis << " < 1);" << std::endl;
         need_create_origin_cond = false;
         continue;
@@ -1077,11 +1494,37 @@ void Loop::GenerateEnCacheCondition(const Tiler &tiler, const TPipe &tpipe, cons
 Status Loop::Generate(const Tiler &tiler, const TPipe &tpipe, std::string &result, ComputeStage stage) {
   std::vector<ascir::AxisId> current_axis;
   this->compute_stage = stage;
+  CacheContext::AxisMap cache_axes;
+  for (const auto &[id, axis] : tiler.axis_map) {
+    cache_axes.emplace(id, &axis);
+  }
+  CacheContext cache_context{cache_axes, static_cast<uint32_t>(stage), {}, {}};
+  cache_context.bindings[ReduceCondition::kControl].loop_extent = af::Symbol(2U);  // control 初始为 true。
+  // 当前 Loop 树定义本次发射范围；记录的 stage 清理由公共采集层处理。
+  std::function<void(Loop &)> reset = [&](Loop &loop) {
+    for (const auto &body : loop.bodys) {
+      if (body.type == LoopType::LOOP) {
+        reset(*body.loop);
+      } else {
+        ascir_param::ResetCacheExecutions(body.call->node, cache_context.stage);
+      }
+    }
+  };
+  reset(*this);
   stringstream ss;
+  if (tpipe.cv_output_broadcast && axis_id == af::kIdNone) {
+    for (const auto &entry : tiler.axis_map) {
+      const auto &axis = entry.second;
+      if (axis.type == Axis::Type::kAxisTypeOriginal || axis.type == Axis::Type::kAxisTypeTileInner) {
+        ss << axis.actual_size.AsArg() << " = " << (tiler.IsFrom(axis.id, tpipe.cv_n_axis) ? "curAivN" : "curAivM")
+           << ";\n";
+      }
+    }
+  }
   if (this->is_graph_has_reduce_node) {
     ss << "bool control_dis_enable_cache_a = true;" << std::endl;
   }
-  GE_CHK_STATUS_RET(this->GenerateLoop(tiler, tpipe, current_axis, ss), "Generate loop failed");
+  GE_CHK_STATUS_RET(this->GenerateLoop(tiler, tpipe, current_axis, ss, cache_context), "Generate loop failed");
   result = ss.str();
   return af::SUCCESS;
 }
@@ -1248,7 +1691,7 @@ Status ApiCall::PostProcess(const TPipe &tpipe, const std::vector<ascir::AxisId>
         std::string tmp;
         GE_CHK_STATUS_RET(ub.InitUbScalar(tmp));
         ss << tmp;
-        if (ub.need_duplicate_value_of_ub_scalar) {
+        if (ub.need_duplicate_value_of_ub_scalar && !is_all_outputs_ub_scalar) {
           GE_CHK_STATUS_RET(ub.GenDuplicateValueOfUbScalar(tmp));
           ss << tmp;
         }
@@ -1258,6 +1701,16 @@ Status ApiCall::PostProcess(const TPipe &tpipe, const std::vector<ascir::AxisId>
 
   if (is_all_outputs_ub_scalar && !current_axis.empty()) {
     ss << "}" << std::endl;
+    // The scalar value is cached in a register, but its UB allocation can be
+    // reused by other tensors between loop iterations. Restore the block each time.
+    for (const auto &output : outputs) {
+      const auto &ub = output.get();
+      if (ub.need_gen_get_value_of_ub_scalar && ub.need_duplicate_value_of_ub_scalar) {
+        std::string tmp;
+        GE_CHK_STATUS_RET(ub.GenDuplicateValueOfUbScalar(tmp));
+        ss << tmp;
+      }
+    }
   }
 
   result = ss.str();
@@ -1462,7 +1915,21 @@ bool ApiCall::WaitInputVector(const TPipe &tpipe, const ApiTensor *in, const Ten
   } else if (t.position == af::Position::kPositionVecCalc && IsFirstRead(*this, *in)) {
     ss << "AscendC::PipeBarrier<PIPE_V>();" << std::endl;
   } else if (t.position == af::Position::kPositionVecOut && IsUnitFirstRead(*this, *in)) {
-    ss << "AscendC::PipeBarrier<PIPE_V>();" << std::endl;
+    if (this->type == IndirectLoad::Type) {
+      // IndirectLoad SIMD 以标量循环（S 管道）读取 index，VecOut 生产者为向量写入时构成
+      // 跨执行单元 V→S 读取，程序序不可见，PIPE_V 屏障不覆盖 S 单元。3510/9201/9202 上
+      // 队列机制独占固定事件号，运行时申请事件号与固定号冲突时硬件以 set/wait 失配报核
+      // 错误，故排空全部流水线；其余架构沿用 PIPE_V 屏障。
+      ss << "#if defined(__NPU_ARCH__) && ((__NPU_ARCH__ == 3510) || (__NPU_ARCH__ == 9201) || "
+            "(__NPU_ARCH__ == 9202))"
+         << std::endl;
+      ss << "  AscendC::PipeBarrier<PIPE_ALL>();" << std::endl;
+      ss << "#else" << std::endl;
+      ss << "  AscendC::PipeBarrier<PIPE_V>();" << std::endl;
+      ss << "#endif" << std::endl;
+    } else {
+      ss << "AscendC::PipeBarrier<PIPE_V>();" << std::endl;
+    }
   }
   return true;
 }
@@ -1532,6 +1999,22 @@ static bool IsInplaceOutput(const ApiCall &call, const ApiTensor &tensor) {
   return false;
 }
 
+// 被复用的 buffer 是否还有 Store(MTE3) 读者。向量算子覆盖写该 buffer 前需等待其读完。
+static bool HasMte3StoreReader(const ApiTensor &reuse_from) {
+  return std::any_of(reuse_from.reads.begin(), reuse_from.reads.end(),
+                     [](const ApiCall *read) { return read != nullptr && read->type == Store::Type; });
+}
+
+// 复用若通过 FreeTensor->AllocTensor 的 que 途径完成（复用来源为 VecOut），que 的 free 事件
+// 已保证 MTE3 读者完成；仅原地覆盖（TBuf 复用、复用来源非 VecOut 的 que 复用）需要显式同步。
+static bool IsQueProtectedReuse(const TPipe &tpipe, const ApiTensor &out, const Tensor &t) {
+  if (t.alloc_type != af::AllocType::kAllocTypeQueue || out.reuse_from == nullptr) {
+    return false;
+  }
+  auto reused = tpipe.GetTensor(out.reuse_from->id);
+  return reused != nullptr && reused->position == af::Position::kPositionVecOut;
+}
+
 Status ApiCall::HandleVecOutAlloc(const TPipe &tpipe, const ApiTensor &out, const Tensor &t, std::stringstream &ss,
                                   bool with_define) const {
   if (IsInplaceOutput(*this, out)) {
@@ -1568,6 +2051,13 @@ Status ApiCall::AllocOutputs(const TPipe &tpipe, std::stringstream &ss) const {
     auto tensor_ptr = tpipe.GetTensor(out.id);
     GE_CHK_BOOL_RET_STATUS(tensor_ptr != nullptr, af::FAILED, "Check[Param] tensor_ptr is nullptr");
     auto t = *tensor_ptr;
+
+    // 向量算子以原地覆盖方式复用某 buffer 时，若该 buffer 仍有 Store(MTE3) 读者未完成，
+    // 覆盖写之前需要插入 MTE3->V 同步，避免 Store 读取到被改写的 buffer。
+    if (this->unit == af::ComputeUnit::kUnitVector && out.reuse_from != nullptr &&
+        HasMte3StoreReader(*out.reuse_from) && !IsQueProtectedReuse(tpipe, out, t)) {
+      ss << tpipe.SyncMte3ToVec(t) << std::endl;
+    }
 
     if (t.alloc_type == af::AllocType::kAllocTypeBuffer) {
       if (out.reuse_from != nullptr) {
@@ -1637,7 +2127,7 @@ Status ApiCall::AllocOutputs(const TPipe &tpipe, std::stringstream &ss) const {
 }
 
 bool ApiCall::SyncOutputs(const TPipe &tpipe, std::stringstream &ss) const {
-  for (auto out : this->outputs) {
+  for (auto &out : this->outputs) {
     auto tensor_ptr = tpipe.GetTensor(out.id);
     GE_CHK_BOOL_EXEC(tensor_ptr != nullptr, return false, "tensor_ptr nullptr");
     auto t = *tensor_ptr;
@@ -1649,8 +2139,15 @@ bool ApiCall::SyncOutputs(const TPipe &tpipe, std::stringstream &ss) const {
           ss << t_que->EnqueBuf();
         }
       }
+    } else if (t.alloc_type == af::AllocType::kAllocTypeBuffer && this->unit == af::ComputeUnit::kUnitMTE2) {
+      // TBuf输出的MTE2搬运（如HoistInvariantLoads外提的Load）无队列同步语义，
+      // 需显式MTE2->V事件同步，保证后续Vector消费在搬运完成后进行
+      ss << tpipe.SyncMte2ToVec(t);
+    } else {
+      // do nothing
     }
   }
+
   return true;
 }
 
@@ -1803,6 +2300,16 @@ af::Status ApiCall::RegisterBasicDumpParam(const std::string &api_name,
   }
 
   GE_CHK_STATUS_RET(CodegenApiParam::Register(this->node, api_param));
+  return af::SUCCESS;
+}
+
+af::Status ApiCall::SetSemanticFeature(const std::string &semantic_feature) const {
+  GE_ASSERT_NOTNULL(this->node);
+  auto api_param = CodegenApiParam::TryGetNodeApiParam(this->node);
+  if (api_param == nullptr) {
+    return af::SUCCESS;
+  }
+  api_param->semantic_feature = semantic_feature;
   return af::SUCCESS;
 }
 

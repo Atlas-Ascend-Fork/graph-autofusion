@@ -93,14 +93,14 @@ std::unique_ptr<BackendSpec> PlatformV2::GetBackendSpec() const {
 
 Status PlatformV2::GenerateTasks(ascir::ImplGraph &optimize_graph, const OptimizerOptions &options,
                                  std::vector<ScheduleTask> &tasks) const {
+  GE_ASSERT_SUCCESS(ConcatFusionCaseGenerator().GeneratorTask(optimize_graph, tasks, options),
+                    "Failed to generate tasks for concat");
   GE_ASSERT_SUCCESS(IndirectLoadScheduleCaseGenerator().GeneratorTask(optimize_graph, tasks, options),
                     "Failed to generate tasks for IndirectLoad");
   GE_ASSERT_SUCCESS(SplitFusionCaseGenerator().GeneratorTask(optimize_graph, tasks, options),
                     "Failed to generate tasks for split");
   GE_ASSERT_SUCCESS(CubeFusionCaseGenerator().GeneratorTask(optimize_graph, tasks, options),
                     "Failed to generate tasks for cube");
-  GE_ASSERT_SUCCESS(ConcatFusionCaseGenerator().GeneratorTask(optimize_graph, tasks, options),
-                    "Failed to generate tasks for concat");
   GE_ASSERT_SUCCESS(TransposeFusionCaseGeneratorV2().GeneratorTask(optimize_graph, tasks, options),
                     "Failed to generate tasks for Transpose");
   GE_ASSERT_SUCCESS(ReducePartitionCaseGenerator().GeneratorTask(optimize_graph, tasks, options),

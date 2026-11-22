@@ -21,9 +21,11 @@ using namespace AscendC;
 namespace af {
 namespace {
 
-constexpr std::array<float, 18> kSigmoidInputs = {
-    -20.0F, -10.0F, -5.0F, -1.0F, -0.5F,  -0.0F, 0.0F,  0.5F, 1.0F,
-    5.0F,   10.0F,  20.0F, 80.0F, -80.0F, 0.1F,  -0.1F, 2.0F, -2.0F,
+// 覆盖正侧饱和区（x ≥ 88 时 e^-x 落入 fp32 次正规，--cce-ftz=false 下 Reg::Exp 误返回 ~1）
+// 与负侧次正规区（x = -88 时 golden ≈ 6e-39 为次正规值）。
+constexpr std::array<float, 21> kSigmoidInputs = {
+    -20.0F, -10.0F, -5.0F,  -1.0F, -0.5F, -0.0F, 0.0F,  0.5F,  1.0F,   5.0F,   10.0F,
+    20.0F,  80.0F,  -80.0F, 0.1F,  -0.1F, 2.0F,  -2.0F, 88.0F, -88.0F, 100.0F,
 };
 
 template <typename T>

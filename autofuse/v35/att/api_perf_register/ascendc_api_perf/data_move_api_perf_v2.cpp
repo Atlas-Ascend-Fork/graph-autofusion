@@ -8,8 +8,9 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
+#include <algorithm>
+#include <limits>
 #include <string>
-#include <numeric>
 #include "common/checker.h"
 #include "v35/att/api_perf_register/perf_param_v2.h"
 #include "api_perf_register/ascendc_api_perf.h"
@@ -18,6 +19,12 @@
 #include "v35/att/api_perf_register/ascendc_regbase_perf.h"
 namespace att {
 namespace ascendcapi_v2 {
+namespace {
+constexpr size_t kCodegenDmaMaxLen = 2U;
+constexpr size_t kCodegenLoopModeMaxLen = 2U;
+// Load单核独立参数生效的block_dim（AIV核数）边界值
+constexpr int32_t kSingleCoreBlockDim = 1;
+}  // namespace
 // 获取 CacheLine 大小，与 TilingScheduleConfigTable 保持一致
 uint32_t GetCacheLineSize() {
   return TilingScheduleConfigTableV2().GetCacheLineSize();
@@ -46,6 +53,80 @@ af::Status InitBlockLenExpandParams(const NodeDetail &node_info, const std::vect
   return af::SUCCESS;
 }
 
+// 在编译期计算一组维度的乘积字节数。IsConstExpr 只对常量原子为真，常量之间的乘法
+// 仍是 kExprOperation，不能直接 GetConstValue；这里逐个求整数常量并在溢出时退回符号表达式。
+// 返回空表达式表示维度不可用。
+Expr GetStaticBytes(const std::vector<Expr> &dims, const Expr &dtype_size) {
+  if (dims.empty()) {
+    return Expr();
+  }
+  int64_t total_bytes = 1;
+  bool is_static = true;
+  int64_t size_value = 0;
+  if (!dtype_size.GetConstValue(size_value) || size_value <= 0) {
+    is_static = false;
+  } else {
+    total_bytes = size_value;
+  }
+  for (const auto &dim : dims) {
+    int64_t dim_value = 0;
+    if (!is_static || !dim.GetConstValue(dim_value) || dim_value < 0 ||
+        (dim_value != 0 && total_bytes > std::numeric_limits<int64_t>::max() / dim_value)) {
+      is_static = false;
+      break;
+    }
+    total_bytes *= dim_value;
+  }
+  if (is_static) {
+    return CreateExpr(total_bytes);
+  }
+  Expr symbolic_bytes = CreateExpr(1);
+  for (const auto &dim : dims) {
+    symbolic_bytes = af::sym::Mul(symbolic_bytes, dim);
+  }
+  return af::sym::Mul(symbolic_bytes, dtype_size);
+}
+
+// 一个 tile 内的总字节数（合轴后各维乘积 * dtype 字节数）。它表达"单个 tile 至少覆盖一条 cache line"，
+// 是 develop 版本一直使用的判据；tile 变大时该式自然变大，因此对大张量几乎不构成约束。
+Expr GetWholeTileBytes(const NodeDetail &node_info, const Expr &dtype_size) {
+  return GetStaticBytes(node_info.input_dims, dtype_size);
+}
+
+// 整张张量字节数：取未经过 tail 切分的原始 shape，保证门控结果不随候选 tiling 变化。
+// 返回空表达式表示原始 shape 不可用，此时求解器退回 develop 判据。
+Expr GetWholeTensorBytes(const NodeDetail &node_info, const Expr &dtype_size) {
+  return GetStaticBytes(node_info.origin_repeats, dtype_size);
+}
+
+// 单次 burst 字节：只有 tile 内层轴放大后，单次 burst 才可能覆盖一个 cache line。
+// 这是运行期 DataCopyPad blockLen 的同义量，也是"多核在同一 cache line 上争抢"最直接的判据。
+// 当 codegen 尾轴是编译期常量时，burst 不随分块变化（例如 Reduce 输出合轴为 {blockCount, 1}，
+// 每条 burst 恒为 1 个元素）：此时该判据对分块没有任何约束力，恒真则无需约束，
+// 恒假则求解器无可行解，而直接省略又等价于关闭 cache line 约束，会让分块退化为"核数用满"的极值解。
+// 这类场景回退为块内总字节数，继续表达"单个 tile 至少搬运一个 cache line"。
+void FillSolverCacheLineExprs(const NodeDetail &node_info, const Expr &burst_bytes, const Expr &dtype_size,
+                              CacheLineConfig &cfg) {
+  Expr whole_tile_bytes = GetWholeTileBytes(node_info, dtype_size);
+  if (!whole_tile_bytes.IsConstExpr()) {
+    cfg.fallback_cache_line_expr = whole_tile_bytes;
+  }
+  cfg.whole_tensor_bytes = GetWholeTensorBytes(node_info, dtype_size);
+  if (!burst_bytes.IsConstExpr()) {
+    cfg.solver_cache_line_expr = burst_bytes;
+    cfg.solver_uses_burst = true;
+    return;
+  }
+  int64_t burst_value = 0;
+  if (!burst_bytes.GetConstValue(burst_value) || burst_value >= static_cast<int64_t>(GetCacheLineSize())) {
+    // burst 是常量且已覆盖整条 cache line，判据恒真，无需约束。
+    return;
+  }
+  // burst 恒定小于 cache line，对分块没有约束力，两种判据等价为块内总字节数。
+  cfg.solver_cache_line_expr = cfg.fallback_cache_line_expr;
+  cfg.fallback_cache_line_expr = Expr();
+}
+
 af::Status AppendCacheLineConfig(const NodeDetail &node_info, CacheLineDirection direction,
                                  vector<CacheLineConfig> *cache_line_config) {
   if (cache_line_config != nullptr) {
@@ -54,15 +135,15 @@ af::Status AppendCacheLineConfig(const NodeDetail &node_info, CacheLineDirection
     auto data_type_size = kDataTypeSizeMap.find(node_info.input_dtype[0]);
     GE_ASSERT_TRUE(data_type_size != kDataTypeSizeMap.end(), "Check data type size failed, node[%s]",
                    node_info.ToString().c_str());
-    const Expr &transfer_len = node_info.repeats.empty() ? node_info.input_dims.back() : node_info.repeats.back();
+    // codegen 的 DataCopyPad 一次调用 = blockCount 个 blockLen 的 burst；blockLen 取 codegen 实际尾轴
+    // （与 GetLoadCase/InitBlockLenExpandParams 等一致），而不是合轴前的 repeats 尾轴
+    // （后者可能已把 blockCount 合进尾轴，得到整块字节数）。
+    // 求解器判据必须与运行期冲突检测同义：都按单次连续 burst 的字节数比较 cache line，
+    // 否则判据对整块恒真，等价于关闭 cache line 约束，求解器会退化成"核数用满、tile 贴地"的极值解。
+    const Expr &transfer_len = GetCodegenTailAxis(node_info, node_info.input_dims);
     Expr cache_line_expr = af::sym::Mul(transfer_len, data_type_size->second);
     CacheLineConfig cfg{node_info.name, cache_line_expr, GetCacheLineSize(), direction};
-    Expr dim_product = accumulate(node_info.input_dims.begin(), node_info.input_dims.end(), CreateExpr(1),
-                                  [](const Expr &a, const Expr &b) { return a * b; });
-    Expr total_bytes = af::sym::Mul(dim_product, data_type_size->second);
-    if (!total_bytes.IsConstExpr()) {
-      cfg.solver_cache_line_expr = std::move(total_bytes);
-    }
+    FillSolverCacheLineExprs(node_info, cache_line_expr, data_type_size->second, cfg);
     cache_line_config->push_back(std::move(cfg));
   }
   return af::SUCCESS;
@@ -169,17 +250,39 @@ af::Status ExpandLoadBlockLen(const NodeDetail &node_info, PerfOutputInfo &perf,
     } else {
       dims[dims.size() - 1UL] = block_len_ref_actual;
     }
-    GELOGD("Load block len checker[%s], need_expand[%d], block_len[%s]", need_expand_checker.Serialize().get(),
-           need_expand, block_len_ref_actual.Serialize().get());
+    GELOGD("Load block len checker[%s], need_expand[%d], block_len[%s]", need_expand_checker.Str().get(), need_expand,
+           block_len_ref_actual.Str().get());
   }
   return af::SUCCESS;
+}
+
+// 按一套Load参数组装单次MTE2表达式：blocklen>256B走normal，否则走small_blk；动态shape生成内层三元表达式
+Expr AssembleLoadBranch(const Expr &res_normal, const Expr &res_small_blk, const Expr &res_stride, const Expr &blk,
+                        int32_t use_case, const std::string &ternary_var_name, PerfOutputInfo &perf) {
+  if (use_case == kCaseOne) {
+    return res_normal + res_stride;
+  }
+  if (use_case == kCaseTwo) {
+    return res_small_blk + res_stride;
+  }
+  Expr res = CreateExpr(ternary_var_name.c_str());
+  std::shared_ptr<IfCase> branch_a = std::make_shared<IfCase>(res_normal + res_stride);
+  std::shared_ptr<IfCase> branch_b = std::make_shared<IfCase>(res_small_blk + res_stride);
+  // blocklen < 256B时走branch_b；否则走branch_a
+  TernaryOp ternary_op = TernaryOp(CondType::K_LT, blk, CreateExpr(0), std::move(branch_b), std::move(branch_a));
+  ternary_op.SetVariable(res);
+  perf.ternary_ops[res] = ternary_op;
+  return res;
 }
 
 af::Status LoadPerf(const NodeDetail &node_info, PerfOutputInfo &perf) {
   Expr res_normal;
   Expr res_small_blk;
+  Expr res_normal_single_core;
+  Expr res_small_blk_single_core;
   Expr blk;
   Expr res_stride;
+  Expr res_stride_single_core;
   int32_t use_case;
   GELOGD("Dma with Load: %s", node_info.ToString().c_str());
   // 非连续且block_len小于cache line时，扩展block_len到cache line大小
@@ -194,24 +297,35 @@ af::Status LoadPerf(const NodeDetail &node_info, PerfOutputInfo &perf) {
   GE_ASSERT_SUCCESS(GetPerf({kMoveGmToUb + "Stride", node_info.input_dtype[0], node_info.output_dtype[0], expanded_dims,
                              node_info.gm_stride, node_info.block_count_idx},
                             res_stride));
+  // 单核(block_dim==1)无带宽抢占，多核拟合参数外推单核失真，切换独立参数条目；
+  // 参数待按上板实测拟合替换(归档autofuse/att/modeling/mte2/load/)，当前占位值与多核一致保证行为等价
+  GE_ASSERT_SUCCESS(GetPerf(
+      {kMoveGmToUb + "SingleCore", node_info.input_dtype[0], node_info.output_dtype[0], expanded_dims, CreateExpr(0)},
+      res_normal_single_core));
+  GE_ASSERT_SUCCESS(GetPerf({kMoveGmToUb + "SmallBlkSingleCore", node_info.input_dtype[0], node_info.output_dtype[0],
+                             expanded_dims, CreateExpr(0)},
+                            res_small_blk_single_core));
+  GE_ASSERT_SUCCESS(GetPerf({kMoveGmToUb + "StrideSingleCore", node_info.input_dtype[0], node_info.output_dtype[0],
+                             expanded_dims, node_info.gm_stride, node_info.block_count_idx},
+                            res_stride_single_core));
   GE_ASSERT_SUCCESS(GetLoadCase(node_info, blk, use_case));
   GE_ASSERT_SUCCESS(AppendCacheLineConfig(node_info, CacheLineDirection::kGmToUb, perf.cache_line_config));
-  if (use_case == kCaseOne) {
-    perf.pipe_res[PipeType::AIV_MTE2] = res_normal + res_stride;
-  } else if (use_case == kCaseTwo) {
-    perf.pipe_res[PipeType::AIV_MTE2] = res_small_blk + res_stride;
-  } else {
-    Expr res = CreateExpr("load_node");
-    std::shared_ptr<IfCase> branch_a = std::make_shared<IfCase>(res_normal + res_stride);
-    GE_ASSERT_NOTNULL(branch_a);
-    std::shared_ptr<IfCase> branch_b = std::make_shared<IfCase>(res_small_blk + res_stride);
-    GE_ASSERT_NOTNULL(branch_b);
-    // blocklen < 512B时走branch_b；否则走branch_a
-    TernaryOp ternary_op = TernaryOp(CondType::K_LT, blk, CreateExpr(0), std::move(branch_b), std::move(branch_a));
-    ternary_op.SetVariable(res);
-    perf.ternary_ops[res] = ternary_op;
-    perf.pipe_res[PipeType::AIV_MTE2] = res;
-  }
+  const Expr multi_core_branch =
+      AssembleLoadBranch(res_normal, res_small_blk, res_stride, blk, use_case, "load_node", perf);
+  const Expr single_core_branch =
+      AssembleLoadBranch(res_normal_single_core, res_small_blk_single_core, res_stride_single_core, blk, use_case,
+                         "load_single_core_node", perf);
+  // block_dim==1时切换单核参数公式；block_dim为tiling求解变量，条件以三元表达式进入求解
+  Expr res = CreateExpr("load_core_case_node");
+  std::shared_ptr<IfCase> single_core_case = std::make_shared<IfCase>(single_core_branch);
+  GE_ASSERT_NOTNULL(single_core_case);
+  std::shared_ptr<IfCase> multi_core_case = std::make_shared<IfCase>(multi_core_branch);
+  GE_ASSERT_NOTNULL(multi_core_case);
+  TernaryOp ternary_op = TernaryOp(CondType::K_EQ, CreateExpr("block_dim"), CreateExpr(kSingleCoreBlockDim),
+                                   std::move(single_core_case), std::move(multi_core_case));
+  ternary_op.SetVariable(res);
+  perf.ternary_ops[res] = ternary_op;
+  perf.pipe_res[PipeType::AIV_MTE2] = res;
   return af::SUCCESS;
 }
 
@@ -227,9 +341,13 @@ af::Status StorePerf(const NodeDetail &node_info, PerfOutputInfo &perf) {
                     node_info.ToString().c_str());
   GE_ASSERT_SUCCESS(GetPerf(
       {kMoveUbToGm, node_info.input_dtype[0], node_info.output_dtype[0], padded_dims, CreateExpr(0)}, res_normal));
-  GE_ASSERT_SUCCESS(GetPerf({kMoveUbToGm + "Stride", node_info.input_dtype[0], node_info.output_dtype[0],
-                             node_info.repeats, node_info.gm_stride, node_info.block_count_idx},
-                            res_stride));
+  GE_ASSERT_SUCCESS(
+      GetPerf({kMoveUbToGm + "Stride", node_info.input_dtype[0], node_info.output_dtype[0], node_info.repeats,
+               node_info.gm_stride, node_info.block_count_idx,
+               static_cast<int32_t>(node_info.repeats.size() > kCodegenDmaMaxLen
+                                        ? std::min(node_info.repeats.size() - kCodegenDmaMaxLen, kCodegenLoopModeMaxLen)
+                                        : 0U)},
+              res_stride));
   GE_ASSERT_SUCCESS(AppendCacheLineConfig(node_info, CacheLineDirection::kUbToGm, perf.cache_line_config));
   perf.pipe_res[PipeType::AIV_MTE3] = res_normal + res_stride;
   return af::SUCCESS;
@@ -277,8 +395,8 @@ af::Status ExpandBlockLen(const NodeDetail &node_info, PerfOutputInfo &perf, std
     } else {
       dims[dims.size() - 1UL] = block_len_ref_actual;
     }
-    GELOGD("Block len checker[%s], is_small_block_len[%d], block_len[%s]", is_small_block_len_checker.Serialize().get(),
-           is_small_block_len, block_len_ref_actual.Serialize().get());
+    GELOGD("Block len checker[%s], is_small_block_len[%d], block_len[%s]", is_small_block_len_checker.Str().get(),
+           is_small_block_len, block_len_ref_actual.Str().get());
   }
   return af::SUCCESS;
 }
@@ -318,8 +436,8 @@ af::Status ExpandMTE3BlockLen(const NodeDetail &node_info, PerfOutputInfo &perf,
       perf.ternary_ops[res] = ternary_op;
       block_len_ref_actual = res;
     }
-    GELOGD("MTE3 Block len padding checker[%s], need_padding[%d], block_len[%s]",
-           need_padding_checker.Serialize().get(), need_padding, block_len_ref_actual.Serialize().get());
+    GELOGD("MTE3 Block len padding checker[%s], need_padding[%d], block_len[%s]", need_padding_checker.Str().get(),
+           need_padding, block_len_ref_actual.Str().get());
   }
   return af::SUCCESS;
 }

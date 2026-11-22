@@ -12,6 +12,8 @@
 #define ATT_MODEL_INFO_H
 #include <memory>
 #include <map>
+#include <set>
+#include <string>
 #include "base/arch_param.h"
 #include "base/base_types.h"
 #include "base/perf_breakdown.h"
@@ -73,6 +75,10 @@ struct AttAxis {
   // 分核轴类型标记（用于Store冲突检测）
   bool is_reduce_split_axis{false};     // 该轴是否是Reduce分核轴
   bool is_broadcast_split_axis{false};  // 该轴是否是Broadcast分核轴
+
+  // 动态shape分段缓存标记（打在原始轴上，用于生成侧收集分段key公式的轴变量）
+  bool is_reduce_related{false};        // 该原始轴是否是Reduce轴（含分块/分tile两种来源）
+  bool is_load_store_innermost{false};  // 该原始轴是否是load/store节点最内切分轴
 };
 
 using AttAxisPtr = std::shared_ptr<AttAxis>;
@@ -215,13 +221,26 @@ struct CacheLineConfig {
         solver_cache_line_expr(solver_expr) {}
 
   std::string node_name;
-  // Single transfer bytes (repeats.back() * data_type_size), used by conflict detection
+  // Single burst bytes (DMA blockLen * data_type_size), used by conflict detection
   Expr cache_line_expr;
   uint32_t cache_line_size;
   CacheLineDirection direction{CacheLineDirection::kUnknown};
-  // Total block bytes (accumulate(input_dims) * data_type_size), used by solver UB constraint.
-  // Empty when total bytes is a compile-time constant (solver should skip).
+  // Single burst bytes used by solver UB constraint, same semantic as cache_line_expr.
+  // When the burst is a compile-time constant below one cache line it cannot constrain tiling at all,
+  // so this falls back to the whole-tile bytes; empty means the constraint is either trivial or unusable.
   Expr solver_cache_line_expr;
+  // Whole-tile bytes (product of merged input dims * dtype size). This is the criterion used when the
+  // tensor is large enough that every core owns whole cache lines, i.e. when burst alignment cannot help.
+  // Empty means the expression is constant (no constraint needed) or unavailable.
+  Expr fallback_cache_line_expr;
+  // Whole-tensor bytes (product of the original graph shape * dtype size). It is invariant across tiling
+  // candidates and is used to decide whether several cores can share one cache line.
+  // Empty means the expression is unavailable.
+  Expr whole_tensor_bytes;
+  // Whether solver_cache_line_expr is a genuine single-burst criterion that changes with tiling.
+  // When the burst is a compile-time constant below one cache line it cannot constrain tiling,
+  // solver_cache_line_expr is overwritten with the develop criterion and this flag stays false.
+  bool solver_uses_burst{false};
   std::string ToString() const {
     return "node: " + node_name + ", expr: " + Str(cache_line_expr) + ", size: " + std::to_string(cache_line_size);
   }
@@ -280,6 +299,8 @@ struct ModelInfo {
   uint32_t tiling_case_id;
   std::string graph_name;
   std::string score_func;
+  std::string semantic_name;
+  bool enable_workspace_alignment{false};
   std::string sub_case_tag;                    // Reduce切R，优先切R轴的模板
   std::map<int64_t, Expr> workspace_size_map;  // 用于描述每个tensor_id的workspace大小
   std::map<HardwareDef, Expr> hardware_cons;   // 用于描述硬件约束
@@ -308,9 +329,13 @@ struct ModelInfo {
   std::vector<Expr> sizes{};                  // 图原始Sizes信息
   vector<CacheLineConfig> cache_line_config;  // ub->gm/gm->ub节点的cache配置信息
   const TilingScheduleConfigTable *tiling_schedule_config_table{nullptr};
+  bool enable_matmul_m_common_tradeoff{false};
   TilingScheduleConfig tiling_schedule_config;            // Model 级别的 Tiling 调度配置
   bool is_enable_equal_order_tiling{false};               // 使能等order tiling算法
   std::vector<RuntimeReorderRule> runtime_reorder_rules;  // 运行时按shape调整单模板内轴优先级
+  // 前端动态 shape 符号（GetFrontendShapeVars + !IsConstExpr）。命中该集合的 tiling data 字段为
+  // int64_t，与 host AutofuseTiling 形参一致。
+  std::set<std::string> dynamic_size_var_names;
 };
 
 using TilingModelInfo = std::vector<ModelInfo>;

@@ -1,0 +1,261 @@
+{
+  "model": "NDDMA2_ROUND3_ARBITRARY_DIMENSION_MULTICORE_UNIFIED",
+  "formula": {
+    "source": "NDDMA arbitrary-dimensional multicore unified formula",
+    "n_base": "B is bytes per core per call; N_base=B/T_1+H_1 for k<=2; N_base=B/T_2+H_2 for k>2",
+    "axis_bytes": "B_j = B / prod_{t=0}^{j-1}(ls_t)",
+    "effective_input_stride": "is_hat_j = abs(is_j - sum_{t=0}^{j-1}(ls_t*is_t)) + 1, j>=1; is_hat_0=is_0",
+    "effective_output_stride": "os_hat_j = abs(os_j - sum_{t=0}^{j-1}(ls_t*os_t)) + 1, j>=1; os_hat_0=os_0",
+    "per_axis": "N_1'=N_G+N_GU for k<=2; N_1'=(N_G+N_GU)*rho for k>2",
+    "N_G": "N_G=(a1+a2*B_j)*s",
+    "N_GU": "N_GU=((b1+b2*s)+(b3+b4*s)*B_j)*min(1,os_hat_j-1)",
+    "rho": "rho=(c1+c2*s)+min(1,os_hat_j-1)*(c3+c4*s)",
+    "prediction": "N_D = N_base + sum_j(N_1'(B_j,is_hat_j,os_hat_j,k))",
+    "round3_fitted_parameters": "none; all one-dimensional parameters are inherited from Round2",
+    "dimensions": [
+      2,
+      3,
+      4,
+      5
+    ]
+  },
+  "round2_model_source": "Modeling/Ana/round2/round2_1d_noncontiguous_model.json",
+  "parameters": {
+    "int8_t": {
+      "base": {
+        "T_1": 11.7626,
+        "H_1": 194.421,
+        "T_2": 6.05735,
+        "H_2": 373.274
+      },
+      "N_G": {
+        "a1": 2.2901165,
+        "a2": 0.014561351
+      },
+      "N_GU": {
+        "b1": -69.410121,
+        "b2": -2.0861213,
+        "b3": 6.9111296,
+        "b4": -0.014567499
+      },
+      "rho": {
+        "c1": 2.2823982,
+        "c2": 0.0054381207,
+        "c3": -0.29869463,
+        "c4": -0.0054311976
+      }
+    },
+    "int16_t": {
+      "base": {
+        "T_1": 25.7579,
+        "H_1": 204.604,
+        "T_2": 13.259,
+        "H_2": 399.909
+      },
+      "N_G": {
+        "a1": 1.9720487,
+        "a2": 0.0073653238
+      },
+      "N_GU": {
+        "b1": -65.754578,
+        "b2": -1.7626747,
+        "b3": 3.4565828,
+        "b4": -0.0073719789
+      },
+      "rho": {
+        "c1": 1.6501023,
+        "c2": 0.016002982,
+        "c3": 0.33029872,
+        "c4": -0.015981633
+      }
+    },
+    "int32_t": {
+      "base": {
+        "T_1": 57.2624,
+        "H_1": 235.137,
+        "T_2": 29.4096,
+        "H_2": 453.859
+      },
+      "N_G": {
+        "a1": 1.2140303,
+        "a2": 0.0037227686
+      },
+      "N_GU": {
+        "b1": 31.174096,
+        "b2": -0.83730451,
+        "b3": 0.21970194,
+        "b4": -0.0032801415
+      },
+      "rho": {
+        "c1": 1.9774169,
+        "c2": 0.0056400644,
+        "c3": -0.61376163,
+        "c4": 0.021569482
+      }
+    },
+    "int64_t": {
+      "base": {
+        "T_1": 57.2346,
+        "H_1": 243.205,
+        "T_2": 29.3906,
+        "H_2": 468.971
+      },
+      "N_G": {
+        "a1": 1.7169033,
+        "a2": 0.0015857085
+      },
+      "N_GU": {
+        "b1": 63.566231,
+        "b2": -1.4367614,
+        "b3": 0.090304855,
+        "b4": -0.0012246069
+      },
+      "rho": {
+        "c1": 0.76071525,
+        "c2": 0.02630908,
+        "c3": 0.89945693,
+        "c4": -0.015756802
+      }
+    }
+  },
+  "fit_scope": {
+    "sample_count": 17996,
+    "dimensions": [
+      2,
+      3,
+      4,
+      5
+    ],
+    "source_rounds": [
+      "round4_2d",
+      "round6",
+      "round7"
+    ]
+  },
+  "metrics": {
+    "int16_t": {
+      "2": {
+        "count": 216,
+        "rmse_cycles": 18316.749517365144,
+        "mae_cycles": 8357.552473064103,
+        "mape_percent": 405.14353986146864,
+        "max_ape_percent": 1433.4455893522984
+      },
+      "3": {
+        "count": 730,
+        "rmse_cycles": 12970.522857807868,
+        "mae_cycles": 4849.8313174418445,
+        "mape_percent": 230.07462354833316,
+        "max_ape_percent": 2022.0966808786416
+      },
+      "4": {
+        "count": 1047,
+        "rmse_cycles": 24061.57263415566,
+        "mae_cycles": 9104.948911439908,
+        "mape_percent": 275.2555915964429,
+        "max_ape_percent": 1648.832556260199
+      },
+      "5": {
+        "count": 2922,
+        "rmse_cycles": 41341.81839072,
+        "mae_cycles": 21495.21782742858,
+        "mape_percent": 467.4169844787641,
+        "max_ape_percent": 3085.783783490084
+      }
+    },
+    "int32_t": {
+      "2": {
+        "count": 216,
+        "rmse_cycles": 18176.00513218712,
+        "mae_cycles": 8581.841432318331,
+        "mape_percent": 419.1280833192829,
+        "max_ape_percent": 1433.4663937559578
+      },
+      "3": {
+        "count": 700,
+        "rmse_cycles": 13570.558766057484,
+        "mae_cycles": 5030.742711957333,
+        "mape_percent": 251.19490276212642,
+        "max_ape_percent": 1704.8760799419572
+      },
+      "4": {
+        "count": 951,
+        "rmse_cycles": 12595.751028660326,
+        "mae_cycles": 5714.749433200337,
+        "mape_percent": 274.52488993539987,
+        "max_ape_percent": 1650.0468002962652
+      },
+      "5": {
+        "count": 2304,
+        "rmse_cycles": 24071.79756665348,
+        "mae_cycles": 14431.867324488405,
+        "mape_percent": 519.2346386108625,
+        "max_ape_percent": 2527.9168587774393
+      }
+    },
+    "int64_t": {
+      "2": {
+        "count": 210,
+        "rmse_cycles": 14728.392981179633,
+        "mae_cycles": 7086.447479666443,
+        "mape_percent": 276.60407400767735,
+        "max_ape_percent": 877.6848790784852
+      },
+      "3": {
+        "count": 650,
+        "rmse_cycles": 11898.545608480264,
+        "mae_cycles": 4418.731556201992,
+        "mape_percent": 153.1054329974464,
+        "max_ape_percent": 1016.4104580395398
+      },
+      "4": {
+        "count": 819,
+        "rmse_cycles": 13359.934750670913,
+        "mae_cycles": 5370.37666377646,
+        "mape_percent": 147.30543059961693,
+        "max_ape_percent": 1131.010641988454
+      },
+      "5": {
+        "count": 1686,
+        "rmse_cycles": 34647.36942257864,
+        "mae_cycles": 17899.132712200313,
+        "mape_percent": 53.20133183718085,
+        "max_ape_percent": 97.78309054840818
+      }
+    },
+    "int8_t": {
+      "2": {
+        "count": 216,
+        "rmse_cycles": 17906.888014123007,
+        "mae_cycles": 7846.8597485968385,
+        "mape_percent": 372.8345701402454,
+        "max_ape_percent": 1511.4637655347149
+      },
+      "3": {
+        "count": 745,
+        "rmse_cycles": 24288.41707959691,
+        "mae_cycles": 7763.384684729963,
+        "mape_percent": 287.9174600718209,
+        "max_ape_percent": 2366.5244914283776
+      },
+      "4": {
+        "count": 1107,
+        "rmse_cycles": 42326.41648706335,
+        "mae_cycles": 13918.316535750613,
+        "mape_percent": 339.17851270712805,
+        "max_ape_percent": 2119.961190671283
+      },
+      "5": {
+        "count": 3477,
+        "rmse_cycles": 74603.5519212733,
+        "mae_cycles": 33839.63567020151,
+        "mape_percent": 466.8020838024572,
+        "max_ape_percent": 3213.8404341242044
+      }
+    }
+  },
+  "snapshot": {
+    "metrics_valid": false,
+    "reason": "Historical measurements do not validate the current fitting workflow or aligned parameters; recollect/refit before reporting accuracy."
+  }
+}

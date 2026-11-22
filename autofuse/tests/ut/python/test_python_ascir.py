@@ -16,6 +16,7 @@ import time
 import os
 import shutil
 import sys
+from pathlib import Path
 from autofuse.pyautofuse import ascir, Autofuser, AutofuserOptions, Schedule, CodeGen
 
 try:
@@ -25,12 +26,125 @@ except ImportError:
 from ascir import Max, Min, Mod
 
 PYF_PATH = os.path.dirname(os.path.realpath(__file__))
+RUNTIME_ERROR_TILING_LIB = (
+    Path(__file__).resolve().parents[4]
+    / "build"
+    / "autofuse"
+    / "tests"
+    / "libpyautofuse_runtime_error_tiling.so"
+)
 
 ascir.utils.set_platform("2201", 1, 245760)
 
 
 # pyascir 构图能力暂不支持
 class TestAscir:
+    @staticmethod
+    def test_rand_and_randn_seed_offset_api():
+        import pyautofuse
+
+        origin_pyautofuse = sys.modules.get("autofuse.pyautofuse")
+        sys.modules["autofuse.pyautofuse"] = pyautofuse
+        ascir_mod = pyautofuse.ascir
+        ascir_mod.utils.set_platform("3510", 1, 245760)
+        try:
+            source_path = os.path.abspath(
+                os.path.join(PYF_PATH, "../../..", "compiler", "python", "ascir_api.py")
+            )
+            spec = importlib.util.spec_from_file_location(
+                "source_ascir_api", source_path
+            )
+            source_ascir_api = importlib.util.module_from_spec(spec)
+            try:
+                spec.loader.exec_module(source_ascir_api)
+            finally:
+                if origin_pyautofuse is None:
+                    sys.modules.pop("autofuse.pyautofuse", None)
+                else:
+                    sys.modules["autofuse.pyautofuse"] = origin_pyautofuse
+
+            graph = ascir_mod.HintGraph("rand_seed_offset")
+            size = graph.create_size("size")
+            axis = graph.create_axis("axis", size)
+            seed_data = source_ascir_api.Data(graph, dtype=ascir_mod.dtypes.int64)
+            seed = source_ascir_api.Load(
+                graph,
+                seed_data,
+                axis=[axis],
+                size=[size],
+                stride=[ascir_mod.SizeExpr(1)],
+            )
+            offset_data = source_ascir_api.Data(graph, dtype=ascir_mod.dtypes.int32)
+            offset = source_ascir_api.Load(
+                graph,
+                offset_data,
+                axis=[axis],
+                size=[size],
+                stride=[ascir_mod.SizeExpr(1)],
+            )
+            for dtype in (
+                ascir_mod.dtypes.uint32,
+                ascir_mod.dtypes.int32,
+                ascir_mod.dtypes.float16,
+                ascir_mod.dtypes.bfloat16,
+                ascir_mod.dtypes.float32,
+            ):
+                rand = source_ascir_api.Rand(
+                    graph,
+                    dtype=dtype,
+                    axis=[axis],
+                    size=[size],
+                    stride=[ascir_mod.SizeExpr(1)],
+                    seed=seed,
+                    offset=offset,
+                )
+                randn = source_ascir_api.Randn(
+                    graph,
+                    dtype=dtype,
+                    axis=[axis],
+                    size=[size],
+                    stride=[ascir_mod.SizeExpr(1)],
+                    seed=seed,
+                    offset=offset,
+                )
+                assert rand.dtype == dtype
+                assert randn.dtype == dtype
+                assert "Rand" in ascir_mod.utils.debug_str(graph)
+
+            rand = source_ascir_api.Rand(
+                graph,
+                dtype=ascir_mod.dtypes.float32,
+                axis=[axis],
+                size=[size],
+                stride=[ascir_mod.SizeExpr(1)],
+            )
+            randn = source_ascir_api.Randn(
+                graph,
+                dtype=ascir_mod.dtypes.uint32,
+                axis=[axis],
+                size=[size],
+                stride=[ascir_mod.SizeExpr(1)],
+            )
+            assert rand.dtype == ascir_mod.dtypes.float32
+            assert randn.dtype == ascir_mod.dtypes.uint32
+
+            with pytest.raises(ValueError):
+                source_ascir_api.Rand(
+                    graph,
+                    dtype=ascir_mod.dtypes.float32,
+                    axis=[axis],
+                    seed=seed,
+                )
+            with pytest.raises(ValueError):
+                source_ascir_api.Randn(
+                    graph,
+                    dtype=ascir_mod.dtypes.uint32,
+                    axis=[axis],
+                    offset=offset,
+                )
+        finally:
+            ascir_mod.utils.set_platform("2201", 1, 245760)
+
     @staticmethod
     def test_graph_create_size_expr_by_long():
         s0 = ascir.SizeExpr()
@@ -174,8 +288,141 @@ class TestAscir:
             )
 
     @staticmethod
-    def test_index_expr_and_arange_api():
+    def test_graph_create_node_with_argmax_with_value_api():
         ascir.utils.set_platform("3510", 1, 245760)
+        graph = ascir.HintGraph("test")
+        size = graph.create_size("size")
+        axis = graph.create_axis("axis", size)
+
+        x = ascir_api.Data(graph, dtype=ascir.dtypes.float32)
+        value, index = ascir_api.ArgmaxWithValue(
+            graph, x, axis=[axis], size=[size], stride=[ascir.SizeExpr(1)]
+        )
+        assert value.dtype == ascir.dtypes.float32
+        assert index.dtype == ascir.dtypes.int64
+        assert value.axis == [axis.id]
+        assert index.axis == [axis.id]
+        assert value.size == [size]
+        assert index.size == [size]
+
+        debug_str = ascir.utils.debug_str(graph)
+        assert debug_str
+
+    @staticmethod
+    def test_graph_create_node_with_argmax_with_value_int64_api():
+        # FR13：前端支持 INT64 输入，value 输出跟随输入 dtype，index 由参数指定
+        ascir.utils.set_platform("3510", 1, 245760)
+        graph = ascir.HintGraph("test_int64")
+        size = graph.create_size("size")
+        axis = graph.create_axis("axis", size)
+
+        x = ascir_api.Data(graph, dtype=ascir.dtypes.int64)
+        value, index = ascir_api.ArgmaxWithValue(
+            graph, x, axis=[axis], size=[size], stride=[ascir.SizeExpr(1)]
+        )
+        assert value.dtype == ascir.dtypes.int64
+        assert index.dtype == ascir.dtypes.int64
+        assert value.axis == [axis.id]
+        assert index.axis == [axis.id]
+        assert value.size == [size]
+        assert index.size == [size]
+
+        debug_str = ascir.utils.debug_str(graph)
+        assert debug_str
+
+    @staticmethod
+    def test_graph_create_node_with_argmin_api():
+        ascir.utils.set_platform("3510", 1, 245760)
+        try:
+            for dtype in (ascir.dtypes.float32, ascir.dtypes.int32):
+                graph = ascir.HintGraph("argmin_api")
+                size = graph.create_size("size")
+                axis = graph.create_axis("axis", size)
+                x = ascir_api.Data(graph, dtype=dtype)
+                index = ascir_api.Argmin(
+                    graph, x, axis=[axis], size=[size], stride=[ascir.SizeExpr(1)]
+                )
+                assert index.dtype == ascir.dtypes.int64
+                assert index.axis == [axis.id]
+                assert index.size == [size]
+                assert "Argmin" in ascir.utils.debug_str(graph)
+        finally:
+            ascir.utils.set_platform("2201", 1, 245760)
+
+    @staticmethod
+    def test_graph_create_node_with_argmin_with_value_api():
+        ascir.utils.set_platform("3510", 1, 245760)
+        try:
+            for dtype in (ascir.dtypes.float32, ascir.dtypes.int32, ascir.dtypes.int64):
+                graph = ascir.HintGraph("argmin_value_api")
+                size = graph.create_size("size")
+                axis = graph.create_axis("axis", size)
+                x = ascir_api.Data(graph, dtype=dtype)
+                value, index = ascir_api.ArgminWithValue(
+                    graph, x, axis=[axis], size=[size], stride=[ascir.SizeExpr(1)]
+                )
+                assert value.dtype == dtype
+                assert index.dtype == ascir.dtypes.int64
+                assert value.axis == index.axis == [axis.id]
+                assert value.size == index.size == [size]
+                assert "ArgminWithValue" in ascir.utils.debug_str(graph)
+        finally:
+            ascir.utils.set_platform("2201", 1, 245760)
+
+    @staticmethod
+    def test_argmin_rejects_unregistered_input_dtype():
+        ascir.utils.set_platform("3510", 1, 245760)
+        try:
+            graph = ascir.HintGraph("argmin_invalid_dtype")
+            size = graph.create_size("size")
+            axis = graph.create_axis("axis", size)
+            x = ascir_api.Data(graph, dtype=ascir.dtypes.int64)
+            with pytest.raises(Exception, match="dtype"):
+                ascir_api.Argmin(
+                    graph, x, axis=[axis], size=[size], stride=[ascir.SizeExpr(1)]
+                )
+        finally:
+            ascir.utils.set_platform("2201", 1, 245760)
+
+    @staticmethod
+    def test_graph_create_node_with_prod_int8_api():
+        ascir.utils.set_platform("3510", 1, 245760)
+        try:
+            graph = ascir.HintGraph("test_prod_int8_api")
+            s0 = graph.create_size("s0")
+            axis = graph.create_axis("axis", s0)
+
+            x = ascir_api.Data(graph, dtype=ascir.dtypes.int8)
+            output = ascir_api.Prod(graph, x, axis=[axis])
+
+            assert output.dtype == ascir.dtypes.int8
+            debug_str = ascir.utils.debug_str(graph)
+            assert "data_0: Data" in debug_str
+            assert ".y: int8_t" in debug_str
+            assert "cast_0: Cast" in debug_str
+            assert ".y: int16_t" in debug_str
+            assert "prod_0: Prod" in debug_str
+            assert "cast_1: Cast" in debug_str
+            assert ".y: uint8_t" in debug_str
+            assert "cast_2: Cast" in debug_str
+            assert ".x = cast_1.y" in debug_str
+            assert ".y: int8_t" in debug_str
+
+            stored = ascir_api.Store(
+                graph,
+                output,
+                axis=[axis],
+                size=[s0],
+                stride=[ascir.SizeExpr(1)],
+            )
+            ascir_api.Output(graph, stored, dtype=ascir.dtypes.int8)
+            Autofuser(AutofuserOptions()).schedule(graph)
+        finally:
+            ascir.utils.set_platform("2201", 1, 245760)
+
+    @staticmethod
+    def test_index_expr_and_arange_api():
+        ascir.utils.set_platform("3510", 1, 245760, "SOC_EMPTY")
         try:
             graph = ascir.HintGraph("index_expr_arange_api")
             size = graph.create_size("size")
@@ -536,6 +783,17 @@ class TestAscir:
             assert e.args[0] == "target param is invalid"
 
 
+def assert_graph_debug_string(graph):
+    debug_str = ascir.utils.debug_str(graph)
+    assert debug_str
+
+
+def schedule_graph(graph):
+    options = AutofuserOptions()
+    fuser = Autofuser(options)
+    return fuser.schedule(graph)
+
+
 class TestAutofuseLoadAbsStore:
     @staticmethod
     def construct_graph():
@@ -610,16 +868,10 @@ class TestAutofuseLoadAbsStore:
         return graph
 
     def test_construct_graph(self):
-        graph = self.construct_graph()
-        debug_str = ascir.utils.debug_str(graph)
-        assert debug_str
+        assert_graph_debug_string(self.construct_graph())
 
     def test_optimize(self):
-        options = AutofuserOptions()
-        fuser = Autofuser(options)
-
-        hint_graph = self.construct_graph()
-        schedule_results = fuser.schedule(hint_graph)
+        schedule_results = schedule_graph(self.construct_graph())
         schedule_results.get_name()
         schedule_results.get_input_num()
         schedule_results.get_output_num()
@@ -691,6 +943,187 @@ class TestAutofuseLoadAbsStore:
 
         hint_graph = self.construct_graph()
         tiling_def, host_tiling, op_kernel = fuser.autofuse_backend(hint_graph)
+
+    def test_autofuse_backend_runtime_error_does_not_return_partial_result(self):
+        assert RUNTIME_ERROR_TILING_LIB.is_file(), (
+            f"missing runtime error tiling library: {RUNTIME_ERROR_TILING_LIB}"
+        )
+        options = AutofuserOptions(
+            tiling_lib_path=str(RUNTIME_ERROR_TILING_LIB),
+            tiling_lib_codegen_symbol="CodegenTiling",
+        )
+        fuser = Autofuser(options)
+
+        hint_graph = self.construct_graph()
+        with pytest.raises(
+            RuntimeError,
+            match=r"^Codegen generate kernel failed: pyautofuse runtime error test$",
+        ):
+            fuser.autofuse_backend(hint_graph)
+
+
+def configure_concrete_op(op, axis, size):
+    op.attr.sched.axis = [axis]
+    op.y.dtype = ascir.dtypes.float16
+    op.y.axis = [axis]
+    op.y.size = [ascir.SizeExpr(size)]
+    op.y.strides = [ascir.SizeExpr(1)]
+
+
+def make_concrete_data(graph, name, index, axis, size):
+    op = ascir.ops.Data(name, graph)
+    op.attr.ir_attr.index = index
+    configure_concrete_op(op, axis, size)
+    return op
+
+
+def make_concrete_load(name, source, axis, size):
+    op = ascir.ops.Load(name)
+    op.attr.ir_attr.offset = ascir.SizeExpr(0)
+    op.x = source
+    configure_concrete_op(op, axis, size)
+    return op
+
+
+class TestAutofuseLoadAddStore:
+    # 与 TestAutofuseLoadAbsStore 同构，但算子换成二元 Add：
+    # Data(arg0)+Data(arg1) → Load → Add → Store → Output，计算 y = x0 + x1。
+    # 用于让真实 Autofuser.schedule 对 binary elementwise 也产出 AFIR（ScheduleToAfir）。
+    @staticmethod
+    def construct_graph():
+        graph = ascir.HintGraph("LoadAddStore")
+        s0 = graph.create_size("s0")
+        s1 = graph.create_size("s1")
+        s2 = graph.create_size("s2")
+
+        z0 = graph.create_axis("z0", s0 + 100)
+        assert z0.size.expression == "(100 + s0)"
+        z1 = graph.create_axis("z1", s1)
+        z2 = graph.create_axis("z2", s2)
+        buf_z0 = graph.create_axis("buf_z0", 100)
+        buf_z1 = graph.create_axis("buf_z1", s1)
+        buf_z2 = graph.create_axis("buf_z2", s2)
+
+        # 两个输入 Data（index 0 / 1）
+        arg0 = ascir.ops.Data("arg0", graph)
+        arg0.attr.ir_attr.index = 0
+        arg0.attr.sched.axis = [z0, z1, z2]
+        arg0.y.dtype = ascir.dtypes.float16
+        arg0.y.axis = [z0, z1, z2]
+        arg0.y.size = [100 + s0, s1, s2]
+        arg0.y.strides = [s1 * s2, s2, ascir.SizeExpr(1)]
+
+        arg1 = ascir.ops.Data("arg1", graph)
+        arg1.attr.ir_attr.index = 1
+        arg1.attr.sched.axis = [z0, z1, z2]
+        arg1.y.dtype = ascir.dtypes.float16
+        arg1.y.axis = [z0, z1, z2]
+        arg1.y.size = [100 + s0, s1, s2]
+        arg1.y.strides = [s1 * s2, s2, ascir.SizeExpr(1)]
+
+        offset_of_0 = ascir.SizeExpr(0)
+
+        load0 = ascir.ops.Load("load0")
+        load0.attr.ir_attr.offset = offset_of_0
+        load0.x = arg0
+        load0.attr.sched.axis = [z0, z1, z2]
+        load0.y.dtype = ascir.dtypes.float16
+        load0.y.axis = [z0, z1, z2]
+        load0.y.size = [100 + s0, s1, s2]
+        load0.y.strides = [s1 * s2, s2, ascir.SizeExpr(1)]
+
+        load1 = ascir.ops.Load("load1")
+        load1.attr.ir_attr.offset = offset_of_0
+        load1.x = arg1
+        load1.attr.sched.axis = [z0, z1, z2]
+        load1.y.dtype = ascir.dtypes.float16
+        load1.y.axis = [z0, z1, z2]
+        load1.y.size = [100 + s0, s1, s2]
+        load1.y.strides = [s1 * s2, s2, ascir.SizeExpr(1)]
+
+        add_op = ascir.ops.Add("add")
+        add_op.x1 = load0
+        add_op.x2 = load1
+        add_op.attr.sched.axis = [z0, z1, z2]
+        add_op.y.dtype = ascir.dtypes.float16
+        add_op.y.axis = [z0, z1, z2]
+        add_op.y.size = [100 + s0, s1, s2]
+        add_op.y.strides = [s1 * s2, s2, ascir.SizeExpr(1)]
+
+        store = ascir.ops.Store("store")
+        store.attr.ir_attr.offset = offset_of_0 + 1
+        assert store.attr.ir_attr.offset.expression == "1"
+        store.x = add_op
+        store.attr.sched.axis = [z0, z1, z2]
+        store.y.dtype = ascir.dtypes.float16
+        store.y.axis = [z0, z1, z2]
+        store.y.size = [100 + s0, s1, s2]
+        store.y.strides = [s1 * s2, s2, ascir.SizeExpr(1)]
+
+        buf1 = ascir.ops.Output("buf1", graph)
+        buf1.attr.ir_attr.index = 0
+        assert buf1.attr.ir_attr.index == 0
+        buf1.x = store
+        buf1.attr.sched.axis = [z0, z1, z2]
+        buf1.y.dtype = ascir.dtypes.float16
+        buf1.y.axis = [z0, z1, z2]
+        buf1.y.size = [100 + s0, s1, s2]
+        buf1.y.strides = [s1 * s2, s2, ascir.SizeExpr(1)]
+        graph.set_axis_map({z0: [buf_z0], z1: [buf_z1], z2: [buf_z2]})
+        return graph
+
+    # --- 具体 shape 变体：单轴 size=32，用于让真实调度产出可执行（count 非 0）的 AFIR ---
+    @staticmethod
+    def construct_graph_concrete(n=32):
+        graph = ascir.HintGraph("LoadAddStoreConcrete")
+        z0 = graph.create_axis("z0", ascir.SizeExpr(n))
+        buf_z0 = graph.create_axis("buf_z0", ascir.SizeExpr(n))
+
+        arg0 = make_concrete_data(graph, "arg0", 0, z0, n)
+        arg1 = make_concrete_data(graph, "arg1", 1, z0, n)
+        load0 = make_concrete_load("load0", arg0, z0, n)
+        load1 = make_concrete_load("load1", arg1, z0, n)
+
+        add_op = ascir.ops.Add("add")
+        add_op.x1 = load0
+        add_op.x2 = load1
+        configure_concrete_op(add_op, z0, n)
+
+        store = ascir.ops.Store("store")
+        store.attr.ir_attr.offset = ascir.SizeExpr(0)
+        store.x = add_op
+        configure_concrete_op(store, z0, n)
+
+        output = ascir.ops.Output("buf1", graph)
+        output.attr.ir_attr.index = 0
+        output.x = store
+        configure_concrete_op(output, z0, n)
+        graph.set_axis_map({z0: [buf_z0]})
+        return graph
+
+    def test_construct_graph(self):
+        assert_graph_debug_string(self.construct_graph())
+
+    def test_optimize(self):
+        schedule_results = schedule_graph(self.construct_graph())
+        assert schedule_results.get_input_num() == 2
+        assert schedule_results.get_output_num() == 1
+
+    def test_codegen(self):
+        options = AutofuserOptions()
+        fuser = Autofuser(options)
+
+        hint_graph = self.construct_graph()
+        impl_graphs = fuser.schedule(hint_graph)
+        tiling_def, host_tiling, op_kernel = fuser.codegen(impl_graphs)
+
+    def test_codegen_concrete(self):
+        options = AutofuserOptions()
+        fuser = Autofuser(options)
+
+        hint_graph = self.construct_graph_concrete()
+        impl_graphs = fuser.schedule(hint_graph)
+        tiling_def, host_tiling, op_kernel = fuser.codegen(impl_graphs)
 
 
 class TestAutofuseLoadMatMulStore:

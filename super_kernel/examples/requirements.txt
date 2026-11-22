@@ -3,5 +3,6 @@ protobuf>=3.13,<4
 numpy>=1.21.6
 PyYAML>=5.1
 packaging>=20.0
+decorator>=5.1.0
 tqdm>=4.0.0
 wheel>=0.30.0

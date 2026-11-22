@@ -107,7 +107,7 @@ bool IsReduceSumDtype(const std::string &dtype) {
 }
 
 bool IsReduceProdDtype(const std::string &dtype) {
-  return dtype == kFloat32;
+  return dtype == kInt8 || dtype == kInt16 || dtype == kInt32 || dtype == kInt64 || dtype == kFloat32;
 }
 
 bool IsReduceMeanDtype(const std::string &dtype) {
@@ -115,11 +115,24 @@ bool IsReduceMeanDtype(const std::string &dtype) {
 }
 
 bool IsLogicalReduceDtype(const std::string &dtype) {
-  return dtype == kUInt8 || dtype == kFloat32;
+  return dtype == kBool || dtype == kUInt8 || dtype == kInt8 || dtype == kInt16 || dtype == kInt32 || dtype == kInt64 ||
+         dtype == kFloat32;
+}
+
+std::string GetLogicalReduceExecDtype(const std::string &dtype) {
+  return dtype == kBool ? kUInt8 : dtype;
+}
+
+std::string GetProdReduceExecDtype(const std::string &dtype) {
+  return dtype == kInt8 ? kInt16 : dtype;
 }
 
 bool IsLogicalReduce(const ReduceOpCostModel &model) {
   return model.op_kind == ReduceOpKind::kAny || model.op_kind == ReduceOpKind::kAll;
+}
+
+bool IsProdReduce(const ReduceOpCostModel &model) {
+  return model.op_kind == ReduceOpKind::kProd;
 }
 
 bool IsMinMaxReduce(const ReduceOpCostModel &model) {
@@ -1524,15 +1537,72 @@ af::Status BuildLogicalReduceCost(const ReduceApiPerfContext &context, const Red
   }
   return BuildRaNormalAlignedCost(context, model, perf, cost);
 }
-}  // namespace
 
-af::Status ReduceApiPerf(const ReduceApiPerfContext &context, const ReduceOpCostModel &model, PerfOutputInfo &perf) {
+af::Status BuildValidatedReduceExecContext(const ReduceApiPerfContext &context, const ReduceOpCostModel &model,
+                                           ReduceApiPerfContext &exec_context) {
   GE_ASSERT_SUCCESS(ValidateReduceContext(context));
-  const af::Status dtype_status = ValidateReduceDtype(context, model);
+  exec_context = context;
+  if (IsLogicalReduce(model) || IsProdReduce(model)) {
+    const auto &input_exec_dtype = IsProdReduce(model) ? GetProdReduceExecDtype(context.node_detail.input_dtype[0])
+                                                       : GetLogicalReduceExecDtype(context.node_detail.input_dtype[0]);
+    const auto &output_exec_dtype = IsProdReduce(model)
+                                        ? GetProdReduceExecDtype(context.node_detail.output_dtype[0])
+                                        : GetLogicalReduceExecDtype(context.node_detail.output_dtype[0]);
+    exec_context.node_detail.input_dtype[0] = input_exec_dtype;
+    exec_context.node_detail.output_dtype[0] = output_exec_dtype;
+  }
+  const af::Status dtype_status = ValidateReduceDtype(exec_context, model);
   if (dtype_status != af::SUCCESS) {
     return dtype_status;
   }
-  const auto &nd = context.node_detail;
+  return af::SUCCESS;
+}
+
+af::Status BuildReduceApiBodyCost(const ReduceApiPerfContext &exec_context, const ReduceOpCostModel &model, bool is_b64,
+                                  PerfOutputInfo &perf, Expr &cost) {
+  const auto &nd = exec_context.node_detail;
+  if (IsLogicalReduce(model) && !is_b64) {
+    GELOGD("[ATT Reduce] ReduceApiPerf: branch logical-%s, node[%s].",
+           exec_context.pattern == ReducePattern::kAR ? "AR" : "RA", nd.name.c_str());
+    return BuildLogicalReduceCost(exec_context, model, perf, cost);
+  }
+  if (exec_context.pattern == ReducePattern::kAR && is_b64) {
+    GELOGD("[ATT Reduce] ReduceApiPerf: branch AR-B64, node[%s].", nd.name.c_str());
+    return BuildArB64Cost(exec_context, model, perf, cost);
+  }
+  if (exec_context.pattern == ReducePattern::kAR) {
+    GELOGD("[ATT Reduce] ReduceApiPerf: branch AR-normal, node[%s].", nd.name.c_str());
+    return BuildArNormalCost(exec_context, model, perf, cost);
+  }
+  if (is_b64) {
+    GELOGD("[ATT Reduce] ReduceApiPerf: branch RA-B64, node[%s].", nd.name.c_str());
+    return BuildRaB64Cost(exec_context, model, perf, cost);
+  }
+  GELOGD("[ATT Reduce] ReduceApiPerf: branch RA-normal, node[%s].", nd.name.c_str());
+  return BuildRaNormalCost(exec_context, model, perf, cost);
+}
+
+af::Status AddReduceMergeCost(const ReduceApiPerfContext &exec_context, ElementwisePerf elementwise_perf,
+                              PerfOutputInfo &perf, Expr &total) {
+  if (exec_context.merge_mode == ReduceMergeMode::kNone) {
+    AddReduceBreakdown(perf, "reduce_merge_perf", CreateExpr(0), "multi-reduce merge perf, disabled", 0U);
+    return af::SUCCESS;
+  }
+  Expr merge_cost = CreateExpr(0);
+  GE_ASSERT_SUCCESS(BuildMergeCost(exec_context, elementwise_perf, merge_cost));
+  GELOGD("[ATT Reduce] ReduceApiPerf: merge_mode[%d], merge_size[%s], merge_times[%s], node[%s].",
+         static_cast<int32_t>(exec_context.merge_mode), exec_context.merge_size.Str().get(),
+         exec_context.merge_times.Str().get(), exec_context.node_detail.name.c_str());
+  AddReduceBreakdown(perf, "reduce_merge_perf", merge_cost, "multi-reduce merge perf", 0U);
+  total = total + merge_cost;
+  return af::SUCCESS;
+}
+}  // namespace
+
+af::Status ReduceApiPerf(const ReduceApiPerfContext &context, const ReduceOpCostModel &model, PerfOutputInfo &perf) {
+  ReduceApiPerfContext exec_context = context;
+  GE_ASSERT_SUCCESS(BuildValidatedReduceExecContext(context, model, exec_context));
+  const auto &nd = exec_context.node_detail;
   const bool is_b64 = IsB64Dtype(nd.input_dtype[0]);
   GELOGD(
       "[ATT Reduce] ReduceApiPerf: dtype[%s], dims[%s], pattern[%s], b64[%d], reuse[%d], merge[%d], "
@@ -1541,36 +1611,10 @@ af::Status ReduceApiPerf(const ReduceApiPerfContext &context, const ReduceOpCost
       static_cast<int32_t>(is_b64), static_cast<int32_t>(context.is_reuse_source),
       static_cast<int32_t>(context.merge_mode), context.merge_times.Str().get(), nd.name.c_str());
   Expr total = CreateExpr(0);
-  if (IsLogicalReduce(model)) {
-    GELOGD("[ATT Reduce] ReduceApiPerf: branch logical-%s, node[%s].",
-           context.pattern == ReducePattern::kAR ? "AR" : "RA", nd.name.c_str());
-    GE_ASSERT_SUCCESS(BuildLogicalReduceCost(context, model, perf, total));
-  } else if (context.pattern == ReducePattern::kAR && is_b64) {
-    GELOGD("[ATT Reduce] ReduceApiPerf: branch AR-B64, node[%s].", nd.name.c_str());
-    GE_ASSERT_SUCCESS(BuildArB64Cost(context, model, perf, total));
-  } else if (context.pattern == ReducePattern::kAR) {
-    GELOGD("[ATT Reduce] ReduceApiPerf: branch AR-normal, node[%s].", nd.name.c_str());
-    GE_ASSERT_SUCCESS(BuildArNormalCost(context, model, perf, total));
-  } else if (is_b64) {
-    GELOGD("[ATT Reduce] ReduceApiPerf: branch RA-B64, node[%s].", nd.name.c_str());
-    GE_ASSERT_SUCCESS(BuildRaB64Cost(context, model, perf, total));
-  } else {
-    GELOGD("[ATT Reduce] ReduceApiPerf: branch RA-normal, node[%s].", nd.name.c_str());
-    GE_ASSERT_SUCCESS(BuildRaNormalCost(context, model, perf, total));
-  }
+  GE_ASSERT_SUCCESS(BuildReduceApiBodyCost(exec_context, model, is_b64, perf, total));
   const Expr body_cost = total;
   AddReduceBreakdown(perf, "reduce_body_perf", body_cost, "single Reduce API body perf", 0U);
-  if (context.merge_mode != ReduceMergeMode::kNone) {
-    Expr merge_cost = CreateExpr(0);
-    GE_ASSERT_SUCCESS(BuildMergeCost(context, model.elementwise_perf, merge_cost));
-    GELOGD("[ATT Reduce] ReduceApiPerf: merge_mode[%d], merge_size[%s], merge_times[%s], node[%s].",
-           static_cast<int32_t>(context.merge_mode), context.merge_size.Str().get(), context.merge_times.Str().get(),
-           nd.name.c_str());
-    AddReduceBreakdown(perf, "reduce_merge_perf", merge_cost, "multi-reduce merge perf", 0U);
-    total = total + merge_cost;
-  } else {
-    AddReduceBreakdown(perf, "reduce_merge_perf", CreateExpr(0), "multi-reduce merge perf, disabled", 0U);
-  }
+  GE_ASSERT_SUCCESS(AddReduceMergeCost(exec_context, model.elementwise_perf, perf, total));
   total.Simplify();
   AddReduceBreakdown(perf, "reduce_total_perf", total, "Reduce API total perf = body + merge", 0U);
   perf.pipe_res[PipeType::AIV_VEC] = total;

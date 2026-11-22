@@ -1,0 +1,13 @@
+# Generated measurements, analysis, profiling and local builds
+/Modeling/Ana/*
+!/Modeling/Ana/round[1-4]/
+/Modeling/Ana/round[1-4]/*
+!/Modeling/Ana/round1/round1_1d_single_multi_core_model.json
+!/Modeling/Ana/round2/round2_1d_noncontiguous_model.json
+!/Modeling/Ana/round3/round3_multidim_model.json
+!/Modeling/Ana/round4/round4_2d_ub_contiguous_ng2_model.json
+/Modeling/Data_collection/common/results_analysis/
+/Modeling/Data_collection/common/results/
+build/
+__pycache__/
+*.py[cod]

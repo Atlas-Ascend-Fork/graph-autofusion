@@ -224,9 +224,25 @@ static void AddBasicKernelParams(Json &kernelParamsJson, const aclmdlRIKernelTas
   }
   kernelParamsJson["funcHandle"] = PtrToHexString(kernelParams.funcHandle);
   kernelParamsJson["numBlocks"] = kernelParams.numBlocks;
-  kernelParamsJson["devargs"] = PtrToHexString(kernelParams.args);
-  kernelParamsJson["argsSize"] = kernelParams.argsSize;
-  kernelParamsJson["isHostArgs"] = kernelParams.isHostArgs;
+  kernelParamsJson["argsType"] = static_cast<uint32_t>(kernelParams.argsType);
+  switch (static_cast<uint32_t>(kernelParams.argsType)) {
+    case ACL_RT_KERNEL_ARGS_HOST_BUFFER:
+      kernelParamsJson["hostBuffer"]["hostArgs"] = PtrToHexString(kernelParams.hostBuffer.hostArgs);
+      kernelParamsJson["hostBuffer"]["hostArgsSize"] = kernelParams.hostBuffer.hostArgsSize;
+      kernelParamsJson["hostBuffer"]["placeHolderArray"] = PtrToHexString(kernelParams.hostBuffer.placeHolderArray);
+      kernelParamsJson["hostBuffer"]["placeHolderNum"] = kernelParams.hostBuffer.placeHolderNum;
+      break;
+    case ACL_RT_KERNEL_ARGS_DEVICE_BUFFER:
+      kernelParamsJson["deviceBuffer"]["deviceArgs"] = PtrToHexString(kernelParams.deviceBuffer.deviceArgs);
+      kernelParamsJson["deviceBuffer"]["deviceArgsSize"] = kernelParams.deviceBuffer.deviceArgsSize;
+      break;
+    case ACL_RT_KERNEL_ARGS_ARRAY:
+      kernelParamsJson["argsArray"] = PtrToHexString(kernelParams.argsArray);
+      break;
+    default:
+      SK_LOGE("Unsupported kernel argsType in task JSON: argsType=%u", static_cast<uint32_t>(kernelParams.argsType));
+      return;
+  }
   kernelParamsJson["launchKernelCfg"] = PtrToHexString(kernelParams.cfg);
 
   // Get binary handle

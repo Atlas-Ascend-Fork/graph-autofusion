@@ -937,39 +937,39 @@ inline Tensor ApproximateEqual(const Tensor &x1, const Tensor &x2, float toleran
   auto out = EsApproximateEqual(x1.GetEsbTensor(), x2.GetEsbTensor(), tolerance);
   return out;
 }
-inline Tensor ArgMaxD(const Tensor &x, int64_t dimension, af::DataType dtype = af::DT_INT64) {
-  auto out = EsArgMaxD(x.GetEsbTensor(), dimension, dtype);
+inline Tensor ArgmaxD(const Tensor &x, int64_t dimension, af::DataType dtype = af::DT_INT64) {
+  auto out = EsArgmaxD(x.GetEsbTensor(), dimension, dtype);
   return out;
 }
-inline Tensor ArgMaxGrad(const Tensor &var, const Tensor &indices, const Tensor &updates, int64_t dimension) {
-  auto out = EsArgMaxGrad(var.GetEsbTensor(), indices.GetEsbTensor(), updates.GetEsbTensor(), dimension);
+inline Tensor ArgmaxGrad(const Tensor &var, const Tensor &indices, const Tensor &updates, int64_t dimension) {
+  auto out = EsArgmaxGrad(var.GetEsbTensor(), indices.GetEsbTensor(), updates.GetEsbTensor(), dimension);
   return out;
 }
-inline Tensor ArgMaxGradD(const Tensor &var, const Tensor &indices, const Tensor &updates, const Tensor &assist,
+inline Tensor ArgmaxGradD(const Tensor &var, const Tensor &indices, const Tensor &updates, const Tensor &assist,
                           int64_t dimension) {
-  auto out = EsArgMaxGradD(var.GetEsbTensor(), indices.GetEsbTensor(), updates.GetEsbTensor(), assist.GetEsbTensor(),
+  auto out = EsArgmaxGradD(var.GetEsbTensor(), indices.GetEsbTensor(), updates.GetEsbTensor(), assist.GetEsbTensor(),
                            dimension);
   return out;
 }
-inline Tensor ArgMaxV2(const Tensor &x, const Tensor &dimension, af::DataType dtype = af::DT_INT64) {
-  auto out = EsArgMaxV2(x.GetEsbTensor(), dimension.GetEsbTensor(), dtype);
+inline Tensor ArgmaxV2(const Tensor &x, const Tensor &dimension, af::DataType dtype = af::DT_INT64) {
+  auto out = EsArgmaxV2(x.GetEsbTensor(), dimension.GetEsbTensor(), dtype);
   return out;
 }
-struct ArgMaxWithKOutput {
+struct ArgmaxWithKOutput {
   Tensor indices;
   Tensor values;
 };
-inline ArgMaxWithKOutput ArgMaxWithK(const Tensor &x, int64_t axis = 10000, bool out_max_val = false,
+inline ArgmaxWithKOutput ArgmaxWithK(const Tensor &x, int64_t axis = 10000, bool out_max_val = false,
                                      int64_t topk = 1) {
-  auto out = EsArgMaxWithK(x.GetEsbTensor(), axis, out_max_val, topk);
+  auto out = EsArgmaxWithK(x.GetEsbTensor(), axis, out_max_val, topk);
   return {out.indices, out.values};
 }
-struct ArgMaxWithValueOutput {
+struct ArgmaxWithValueOutput {
   Tensor indice;
   Tensor values;
 };
-inline ArgMaxWithValueOutput ArgMaxWithValue(const Tensor &x, int64_t dimension, bool keep_dims = false) {
-  auto out = EsArgMaxWithValue(x.GetEsbTensor(), dimension, keep_dims);
+inline ArgmaxWithValueOutput ArgmaxWithValue(const Tensor &x, int64_t dimension, bool keep_dims = false) {
+  auto out = EsArgmaxWithValue(x.GetEsbTensor(), dimension, keep_dims);
   return {out.indice, out.values};
 }
 inline Tensor ArgMin(const Tensor &x, const Tensor &dimension, af::DataType dtype = af::DT_INT64) {
@@ -8611,24 +8611,24 @@ inline Tensor RoiExtractor(const std::vector<Tensor> &features, const Tensor &ro
                             pool_mode, aligned);
   return out;
 }
-inline Tensor RoiPoolingGradWithArgMax(const Tensor &grad, const Tensor &x, const Tensor &rois,
+inline Tensor RoiPoolingGradWithArgmax(const Tensor &grad, const Tensor &x, const Tensor &rois,
                                        const Tensor &roi_actual_num, const Tensor &argmax, int64_t pooled_h,
                                        int64_t pooled_w, float spatial_scale_h, float spatial_scale_w,
                                        int64_t pool_channel) {
-  auto out = EsRoiPoolingGradWithArgMax(grad.GetEsbTensor(), x.GetEsbTensor(), rois.GetEsbTensor(),
+  auto out = EsRoiPoolingGradWithArgmax(grad.GetEsbTensor(), x.GetEsbTensor(), rois.GetEsbTensor(),
                                         roi_actual_num.GetEsbTensor(), argmax.GetEsbTensor(), pooled_h, pooled_w,
                                         spatial_scale_h, spatial_scale_w, pool_channel);
   return out;
 }
-struct RoiPoolingWithArgMaxOutput {
+struct RoiPoolingWithArgmaxOutput {
   Tensor y;
   Tensor argmax;
 };
-inline RoiPoolingWithArgMaxOutput RoiPoolingWithArgMax(const Tensor &x, const Tensor &rois,
+inline RoiPoolingWithArgmaxOutput RoiPoolingWithArgmax(const Tensor &x, const Tensor &rois,
                                                        const Tensor &roi_actual_num, int64_t pooled_h, int64_t pooled_w,
                                                        float spatial_scale_h, float spatial_scale_w,
                                                        int64_t pool_channel) {
-  auto out = EsRoiPoolingWithArgMax(x.GetEsbTensor(), rois.GetEsbTensor(), roi_actual_num.GetEsbTensor(), pooled_h,
+  auto out = EsRoiPoolingWithArgmax(x.GetEsbTensor(), rois.GetEsbTensor(), roi_actual_num.GetEsbTensor(), pooled_h,
                                     pooled_w, spatial_scale_h, spatial_scale_w, pool_channel);
   return {out.y, out.argmax};
 }

@@ -848,6 +848,452 @@ def test_compile_device_obj_includes_machine_asc_headers(
     assert "/usr/local/Ascend/cann/aarch64-linux/asc/include" in cmd
 
 
+def _defined_macros(cmd):
+    return {cmd[i + 1] for i, item in enumerate(cmd[:-1]) if item == "-D"}
+
+
+def _make_device_args(graph_name):
+    return type(
+        "Args",
+        (),
+        {
+            "device_files": f"/tmp/build/device/{graph_name}_op_kernel.cpp",
+            "soc_version": "Ascend910B",
+            "stage": "device",
+            "graph_name": graph_name,
+        },
+    )()
+
+
+def _write_device_source(tmpdir, base_name, rt_launch_form):
+    device_dir = tmpdir.mkdir("device")
+    content = (
+        "#ifndef AF_AIV_UNIT\n#endif\n#ifndef AF_MIX_UNIT\n#endif\n"
+        if rt_launch_form
+        else 'extern "C" void legacy_kernel() {}\n'
+    )
+    device_file = device_dir.join(base_name)
+    device_file.write(content)
+    return str(tmpdir)
+
+
+def test_build_device_compile_command_unit_macro_follows_source_form(
+    ascendc_compile_module, tmpdir
+):
+    args = _make_device_args("graph")
+
+    legacy_temp_dir = _write_device_source(
+        tmpdir.mkdir("legacy"), "graph_op_kernel.cpp", False
+    )
+    off_cmd = ascendc_compile_module.build_device_compile_command(
+        args, legacy_temp_dir, "graph_op_kernel.cpp"
+    )
+    assert not _defined_macros(off_cmd) & {"AF_AIV_UNIT", "AF_MIX_UNIT"}
+
+    rt_temp_dir = _write_device_source(tmpdir.mkdir("rt"), "graph_op_kernel.cpp", True)
+    main_cmd = ascendc_compile_module.build_device_compile_command(
+        args, rt_temp_dir, "graph_op_kernel.cpp"
+    )
+    assert "AF_MIX_UNIT" in _defined_macros(main_cmd)
+    assert "AF_AIV_UNIT" not in _defined_macros(main_cmd)
+
+    rt_temp_dir = _write_device_source(
+        tmpdir.mkdir("rt_aiv"), "graph_op_kernel_aiv.cpp", True
+    )
+    aiv_cmd = ascendc_compile_module.build_device_compile_command(
+        args, rt_temp_dir, "graph_op_kernel_aiv.cpp"
+    )
+    assert "AF_AIV_UNIT" in _defined_macros(aiv_cmd)
+    assert "AF_MIX_UNIT" not in _defined_macros(aiv_cmd)
+
+
+def test_build_device_compile_command_unit_macro_rejects_aiv_substring_in_graph_name(
+    ascendc_compile_module, tmpdir
+):
+    # graph 名内嵌 _aiv 子串（fx 节点名渗入）时，主单元不得被误判为 AIV 单元：
+    # 误注入 -D AF_AIV_UNIT 会裁空主单元 fusion==0 的 UB 分支体 → 静默算错。
+    args = _make_device_args("aiv_2")
+
+    rt_temp_dir = _write_device_source(
+        tmpdir.mkdir("rt_main"), "aiv_2_op_kernel.cpp", True
+    )
+    main_cmd = ascendc_compile_module.build_device_compile_command(
+        args, rt_temp_dir, "aiv_2_op_kernel.cpp"
+    )
+    assert "AF_MIX_UNIT" in _defined_macros(main_cmd)
+    assert "AF_AIV_UNIT" not in _defined_macros(main_cmd)
+
+    rt_temp_dir = _write_device_source(
+        tmpdir.mkdir("rt_aiv"), "aiv_2_op_kernel_aiv.cpp", True
+    )
+    aiv_cmd = ascendc_compile_module.build_device_compile_command(
+        args, rt_temp_dir, "aiv_2_op_kernel_aiv.cpp"
+    )
+    assert "AF_AIV_UNIT" in _defined_macros(aiv_cmd)
+    assert "AF_MIX_UNIT" not in _defined_macros(aiv_cmd)
+
+
+def _make_dual_unit_args(tmpdir, graph_name="graph", with_aiv=True, bin_mode=False):
+    device_dir = tmpdir.mkdir("device")
+    main_src = device_dir.join(f"{graph_name}_op_kernel.cpp")
+    main_src.write("#ifndef AF_AIV_UNIT\n#endif\n")
+    args = type(
+        "Args",
+        (),
+        {
+            "device_files": str(main_src),
+            "device_files_aiv": None,
+            "host_files": None,
+            "soc_version": "Ascend910B",
+            "stage": "device_obj",
+            "graph_name": graph_name,
+            "bin_mode": bin_mode,
+            "kernel_obj_path_aiv": "",
+            "const_tiling_baked": False,
+            "tiling_repr": None,
+            "output_file": str(tmpdir.join("kernel.so")),
+        },
+    )()
+    if with_aiv:
+        aiv_src = device_dir.join(f"{graph_name}_op_kernel_aiv.cpp")
+        aiv_src.write("#ifndef AF_AIV_UNIT\n#endif\n")
+    return args, str(tmpdir)
+
+
+def _write_static_tiling_header(root, content):
+    device_dir = root.mkdir("device")
+    device_dir.join("autofuse_tiling_data.h").write(content)
+    return str(root)
+
+
+def test_find_aiv_device_source_prefers_explicit_arg(ascendc_compile_module, tmpdir):
+    args = type(
+        "Args",
+        (),
+        {
+            "device_files_aiv": "/build/device/explicit_aiv.cpp",
+            "device_files": "/build/device/main.cpp",
+        },
+    )()
+
+    assert (
+        ascendc_compile_module.find_aiv_device_source(args, str(tmpdir))
+        == "/build/device/explicit_aiv.cpp"
+    )
+
+
+def test_find_aiv_device_source_falls_back_to_sibling_naming(
+    ascendc_compile_module, tmpdir
+):
+    args, temp_dir = _make_dual_unit_args(tmpdir, with_aiv=True)
+    found = ascendc_compile_module.find_aiv_device_source(args, temp_dir)
+    assert found is not None
+    assert found.endswith("graph_op_kernel_aiv.cpp")
+
+    args_none, temp_dir_none = _make_dual_unit_args(
+        tmpdir.mkdir("no_aiv"), with_aiv=False
+    )
+    assert (
+        ascendc_compile_module.find_aiv_device_source(args_none, temp_dir_none) is None
+    )
+
+    no_files_args = type("Args", (), {"device_files_aiv": None, "device_files": None})()
+    assert (
+        ascendc_compile_module.find_aiv_device_source(no_files_args, temp_dir) is None
+    )
+
+    non_cpp_args = type(
+        "Args", (), {"device_files_aiv": None, "device_files": "/d/kernel.cc"}
+    )()
+    assert ascendc_compile_module.find_aiv_device_source(non_cpp_args, temp_dir) is None
+
+
+def test_get_static_mix_mode_parses_const_six_tuple(ascendc_compile_module, tmpdir):
+    mix_two = _write_static_tiling_header(
+        tmpdir.mkdir("mix_two"),
+        "#define INDUCTOR_CONST_TILING_DATA\n"
+        "constexpr CVAutofuseTilingData kConstTilingData = {{1, 1, 0, 2, 0, 2},"
+        " {0x01, 0x02}};\n",
+    )
+    assert ascendc_compile_module.get_static_mix_mode(mix_two) == 2
+
+    mix_one = _write_static_tiling_header(
+        tmpdir.mkdir("mix_one"),
+        "#define INDUCTOR_CONST_TILING_DATA\n"
+        "constexpr CVAutofuseTilingData kConstTilingData = {1, 1, 0, 0, 0, 1};\n",
+    )
+    assert ascendc_compile_module.get_static_mix_mode(mix_one) == 1
+
+
+def test_get_static_mix_mode_returns_none_for_dynamic_or_malformed(
+    ascendc_compile_module, tmpdir
+):
+    dynamic = _write_static_tiling_header(
+        tmpdir.mkdir("dynamic"), "#pragma once\nstruct AutofuseTilingData { int x; };\n"
+    )
+    assert ascendc_compile_module.get_static_mix_mode(dynamic) is None
+
+    missing = tmpdir.mkdir("missing")
+    missing.join("placeholder").write("")
+    assert ascendc_compile_module.get_static_mix_mode(str(missing)) is None
+
+    malformed = _write_static_tiling_header(
+        tmpdir.mkdir("malformed"),
+        "#define INDUCTOR_CONST_TILING_DATA\nconstexpr int other = 1;\n",
+    )
+    assert ascendc_compile_module.get_static_mix_mode(malformed) is None
+
+
+def test_compile_aiv_device_obj_skips_when_static_mix_not_two(
+    ascendc_compile_module, tmpdir
+):
+    args, temp_dir = _make_dual_unit_args(tmpdir, with_aiv=True)
+    ascendc_compile_module.module.get_static_mix_mode = lambda unused_temp_dir: 1
+
+    def _fail_compile(cmd, stage_name):
+        pytest.fail("AIV unit must be skipped when static mix_mode != 2")
+
+    ascendc_compile_module.module.run_compile_command = _fail_compile
+    assert ascendc_compile_module.compile_aiv_device_obj(args, temp_dir) is None
+
+
+def test_compile_aiv_device_obj_reuses_fresh_object(ascendc_compile_module, tmpdir):
+    args, temp_dir = _make_dual_unit_args(tmpdir, with_aiv=True)
+    ascendc_compile_module.module.get_static_mix_mode = lambda unused_temp_dir: None
+
+    aiv_obj = tmpdir.join("device", "graph_op_kernel_aiv.cpp.o")
+    aiv_obj.write("obj")
+    aiv_src = tmpdir.join("device", "graph_op_kernel_aiv.cpp")
+    os.utime(str(aiv_obj), (time.time() + 10, time.time() + 10))
+    assert os.path.getmtime(str(aiv_obj)) >= os.path.getmtime(str(aiv_src))
+
+    def _fail_compile(cmd, stage_name):
+        pytest.fail("fresh AIV object should be reused without recompiling")
+
+    ascendc_compile_module.module.run_compile_command = _fail_compile
+    assert ascendc_compile_module.compile_aiv_device_obj(args, temp_dir) == str(aiv_obj)
+
+
+def test_compile_aiv_device_obj_compiles_stale_with_aiv_unit_macro(
+    ascendc_compile_module, tmpdir
+):
+    args, temp_dir = _make_dual_unit_args(tmpdir, with_aiv=True)
+    ascendc_compile_module.module.get_static_mix_mode = lambda unused_temp_dir: None
+
+    calls = []
+
+    def fake_run_compile_command(cmd, stage_name):
+        calls.append((cmd, stage_name))
+
+    ascendc_compile_module.module.run_compile_command = fake_run_compile_command
+    obj = ascendc_compile_module.compile_aiv_device_obj(args, temp_dir)
+
+    assert obj == str(tmpdir.join("device", "graph_op_kernel_aiv.cpp.o"))
+    assert len(calls) == 1
+    cmd, stage_name = calls[0]
+    assert stage_name == "DeviceAiv"
+    assert "AF_AIV_UNIT" in _defined_macros(cmd)
+    assert "AF_MIX_UNIT" not in _defined_macros(cmd)
+
+
+def test_compile_dual_device_objs_single_without_aiv_source(
+    ascendc_compile_module, tmpdir
+):
+    args, temp_dir = _make_dual_unit_args(tmpdir, with_aiv=False)
+    ascendc_compile_module.module.find_aiv_device_source = (
+        lambda unused_args, unused_temp_dir: None
+    )
+    ascendc_compile_module.module.compile_device_obj = (
+        lambda unused_args, unused_temp_dir: "/tmp/main.o"
+    )
+
+    def _fail_aiv(unused_args, unused_temp_dir):
+        pytest.fail("AIV compile must not run when no AIV source exists")
+
+    ascendc_compile_module.module.compile_aiv_device_obj = _fail_aiv
+    main_obj, aiv_obj = ascendc_compile_module.compile_dual_device_objs(args, temp_dir)
+    assert main_obj == "/tmp/main.o"
+    assert aiv_obj is None
+
+
+def test_compile_dual_device_objs_compiles_both_units(ascendc_compile_module, tmpdir):
+    args, temp_dir = _make_dual_unit_args(tmpdir, with_aiv=True)
+    ascendc_compile_module.module.find_aiv_device_source = (
+        lambda unused_args, unused_temp_dir: "/tmp/aiv.cpp"
+    )
+    ascendc_compile_module.module.compile_device_obj = (
+        lambda unused_args, unused_temp_dir: "/tmp/main.o"
+    )
+    ascendc_compile_module.module.compile_aiv_device_obj = (
+        lambda unused_args, unused_temp_dir: "/tmp/aiv.o"
+    )
+
+    main_obj, aiv_obj = ascendc_compile_module.compile_dual_device_objs(args, temp_dir)
+    assert main_obj == "/tmp/main.o"
+    assert aiv_obj == "/tmp/aiv.o"
+
+
+def test_is_cv_fusion_compile_link_stage_fallbacks(ascendc_compile_module, tmpdir):
+    module = ascendc_compile_module.module
+
+    # link 阶段形态：host_files/device_files 均未设置（getattr 走默认），
+    # 仅 tiling_def_content 携带 CV 结构——判定必须命中（GetKernelBinAic 导出名依赖）。
+    link_args = type(
+        "Args",
+        (),
+        {
+            "host_files": None,
+            "device_files": None,
+            "tiling_def_content": "struct CVAutofuseTilingData { ... };",
+            "temp_dir": str(tmpdir),
+        },
+    )
+    assert module.is_cv_fusion_compile(link_args) is True
+
+    # 非 CV tiling 定义：三级判定均不命中。
+    vv_args = type(
+        "Args",
+        (),
+        {
+            "host_files": None,
+            "device_files": None,
+            "tiling_def_content": "struct AutofuseTilingData { ... };",
+            "temp_dir": str(tmpdir),
+        },
+    )
+    assert module.is_cv_fusion_compile(vv_args) is False
+
+    # 无 tiling_def_content 时回退盘上 tiling 文件（temp_dir/device/autofuse_tiling_data.h）。
+    device_dir = tmpdir.mkdir("device")
+    device_dir.join("autofuse_tiling_data.h").write("CVAutofuseTilingData t;")
+    disk_args = type(
+        "Args",
+        (),
+        {
+            "host_files": None,
+            "device_files": None,
+            "temp_dir": str(tmpdir),
+        },
+    )
+    assert module.is_cv_fusion_compile(disk_args) is True
+
+
+def test_link_kernel_so_bin_mode_dual_bin_exports(ascendc_compile_module, tmpdir):
+    args, temp_dir = _make_dual_unit_args(tmpdir, bin_mode=True)
+    ascendc_compile_module.module.is_cv_fusion_compile = lambda unused_args: True
+
+    export_names = []
+
+    def fake_generate_get_kernel_obj(
+        unused_args, unused_temp_dir, kernel_obj_path, export_name
+    ):
+        export_names.append(export_name)
+        return [
+            f"/tmp/{export_name.lower()}_func.o",
+            f"/tmp/{export_name.lower()}_data.o",
+        ]
+
+    link_calls = []
+
+    def fake_link_shared(
+        target_file, obj_files, link_libraries=None, extra_link_options=None
+    ):
+        link_calls.append(obj_files)
+        return target_file
+
+    ascendc_compile_module.module.generate_get_kernel_obj = fake_generate_get_kernel_obj
+    ascendc_compile_module.module.link_shared = fake_link_shared
+
+    ascendc_compile_module.link_kernel_so(
+        args, ["/tmp/tiling.o"], temp_dir, "/tmp/main.o", "/tmp/aiv.o"
+    )
+    assert export_names == ["GetKernelBinAic", "GetKernelBinAiv"]
+    assert link_calls == [
+        [
+            "/tmp/tiling.o",
+            "/tmp/getkernelbinaic_func.o",
+            "/tmp/getkernelbinaic_data.o",
+            "/tmp/getkernelbinaiv_func.o",
+            "/tmp/getkernelbinaiv_data.o",
+        ]
+    ]
+
+    # 静态收敛单 bin：AIV 缺失时 CV 仅导出 GetKernelBinAic。
+    export_names.clear()
+    link_calls.clear()
+    ascendc_compile_module.link_kernel_so(
+        args, ["/tmp/tiling.o"], temp_dir, "/tmp/main.o", None
+    )
+    assert export_names == ["GetKernelBinAic"]
+
+
+def test_build_kernel_target_from_objects_compiles_aiv_in_bin_mode(
+    ascendc_compile_module, tmpdir
+):
+    args, temp_dir = _make_dual_unit_args(tmpdir, bin_mode=True)
+    args.kernel_obj_path_aiv = ""
+    ascendc_compile_module.module.is_cv_fusion_compile = lambda unused_args: True
+    ascendc_compile_module.module.is_device_const_tiling_baked = (
+        lambda unused_temp_dir: False
+    )
+    ascendc_compile_module.module.try_static_shape_compile = lambda *unused_args: False
+
+    aiv_calls = []
+
+    def fake_compile_aiv(unused_args, unused_temp_dir):
+        aiv_calls.append(True)
+        return "/tmp/aiv.o"
+
+    link_calls = []
+
+    def fake_link_kernel_so(
+        compile_args, tiling_objs, temp_dir_arg, kernel_obj, aiv_obj
+    ):
+        link_calls.append((kernel_obj, aiv_obj))
+        return "/tmp/kernel.so"
+
+    ascendc_compile_module.module.compile_aiv_device_obj = fake_compile_aiv
+    ascendc_compile_module.module.link_kernel_so = fake_link_kernel_so
+
+    result = ascendc_compile_module.build_kernel_target_from_objects(
+        args, ["/tmp/tiling.o"], "/tmp/main.o", temp_dir
+    )
+    assert result == "/tmp/kernel.so"
+    assert aiv_calls == [True]
+    assert link_calls == [("/tmp/main.o", "/tmp/aiv.o")]
+
+    # bin_mode 关闭（legacy 链路）：不触发 AIV 兜底编译。
+    aiv_calls.clear()
+    link_calls.clear()
+    args.bin_mode = False
+    args.kernel_obj_path_aiv = ""
+    result = ascendc_compile_module.build_kernel_target_from_objects(
+        args, ["/tmp/tiling.o"], "/tmp/main.o", temp_dir
+    )
+    assert result == "/tmp/kernel.so"
+    assert aiv_calls == []
+    assert link_calls == [("/tmp/main.o", None)]
+
+
+def test_main_device_obj_returns_aiv_artifact(ascendc_compile_module, tmpdir):
+    args, temp_dir = _make_dual_unit_args(tmpdir, with_aiv=True)
+    args.temp_dir = temp_dir
+    ascendc_compile_module.module.bake_const_tiling_before_device_compile = (
+        lambda *unused_args, **unused_kwargs: True
+    )
+    ascendc_compile_module.module.compile_dual_device_objs = (
+        lambda unused_args, unused_temp_dir: ("/tmp/main.o", "/tmp/aiv.o")
+    )
+
+    out = ascendc_compile_module.main(args)
+
+    assert out["stage"] == "device_obj"
+    assert out["kernel_obj_path"] == "/tmp/main.o"
+    assert out["kernel_obj_path_aiv"] == "/tmp/aiv.o"
+    assert out["kernel_source_path"] == args.device_files
+    assert out["baked"] is True
+
+
 def test_try_static_shape_compile_records_stage_when_force_unknown(
     ascendc_compile_module, tmpdir
 ):
@@ -1212,6 +1658,61 @@ def test_expand_inductor_const_tiling_data_selects_const_branch_with_tiling_repr
     ]
 
 
+def _make_cv_all_stage_args():
+    return type(
+        "Args",
+        (),
+        {"stage": "all", "tiling_def_content": "struct CVAutofuseTilingData {};"},
+    )()
+
+
+def _make_cv_dispatch_entry_lines():
+    return [
+        '#include "kernel_common.h"\n',
+        'extern "C" __global__ __aicore__ void sub_graph(GM_ADDR input0, GM_ADDR workspace\n',
+        "#ifndef INDUCTOR_CONST_TILING_DATA\n",
+        ", CVAutofuseTilingData tiling_data\n",
+        "#endif\n",
+        ")\n",
+        "{\n",
+        "#ifdef INDUCTOR_CONST_TILING_DATA\n",
+        "  const CVAutofuseTilingData &cv_tiling = kConstTilingData;\n",
+        "#else\n",
+        "  const CVAutofuseTilingData &cv_tiling = tiling_data;\n",
+        "#endif\n",
+        "}\n",
+    ]
+
+
+def test_expand_inductor_const_tiling_data_keeps_cv_tiling_param_guard(
+    ascendc_compile_module,
+):
+    args = _make_cv_all_stage_args()
+    lines = _make_cv_dispatch_entry_lines()
+
+    result = ascendc_compile_module.expand_inductor_const_tiling_data(args, lines, None)
+    text = "".join(result)
+
+    assert "#ifndef INDUCTOR_CONST_TILING_DATA" in text
+    assert ", CVAutofuseTilingData tiling_data" in text
+    assert "const CVAutofuseTilingData &cv_tiling = kConstTilingData;" in text
+    # stage=all + CV 时 const 分支被物理选中（bake 流），动态绑定行删除
+    assert "cv_tiling = tiling_data;" not in text
+
+
+def test_expand_inductor_const_tiling_data_keeps_cv_param_guard_when_no_cv(
+    ascendc_compile_module,
+):
+    args = _make_device_stage_args()
+    lines = _make_cv_dispatch_entry_lines()
+
+    result = ascendc_compile_module.expand_inductor_const_tiling_data(args, lines, None)
+    text = "".join(result)
+
+    assert "#ifndef INDUCTOR_CONST_TILING_DATA" in text
+    assert ", CVAutofuseTilingData tiling_data" in text
+
+
 def _make_compile_args(host_files=None):
     return type(
         "Args",
@@ -1331,8 +1832,9 @@ def test_compile_host_objs_compiles_single_file_serially(
     monkeypatch.setattr(
         ascendc_compile_module.module,
         "compile_host_obj_file",
-        lambda args, temp_dir, source_file, pch_state: compiled.append(source_file)
-        or source_file + ".o",
+        lambda args, temp_dir, source_file, pch_state: (
+            compiled.append(source_file) or source_file + ".o"
+        ),
     )
 
     args = _make_compile_args(host_files[0])
@@ -2060,7 +2562,13 @@ def test_build_kernel_target_reuses_host_objects_for_static_recompile(
     def fake_compile_device_obj(compile_args, temp_dir):
         return f"/tmp/build/device/kernel_{len(calls) + 1}.o"
 
-    def fake_link_kernel_so(compile_args, tiling_obj_paths, temp_dir, kernel_obj_path):
+    def fake_link_kernel_so(
+        compile_args,
+        tiling_obj_paths,
+        temp_dir,
+        kernel_obj_path,
+        aiv_kernel_obj_path=None,
+    ):
         calls.append((list(tiling_obj_paths), kernel_obj_path))
         return f"/tmp/build/kernel_{len(calls)}.so"
 
@@ -2076,3 +2584,266 @@ def test_build_kernel_target_reuses_host_objects_for_static_recompile(
         ["a.o", "b.o"],
         ["a.o", "b.o"],
     ]
+
+
+def test_bake_const_tiling_before_device_compile_skips_non_cv(
+    ascendc_compile_module,
+):
+    args = _make_compile_args()
+    args.force_unknown = False
+    link_calls = []
+    ascendc_compile_module.module.link_tiling_so = (
+        lambda *unused_args, **unused_kwargs: link_calls.append(unused_args)
+    )
+
+    assert (
+        ascendc_compile_module.bake_const_tiling_before_device_compile(
+            args, ["a.o"], "/tmp/build"
+        )
+        is False
+    )
+    assert link_calls == []
+
+
+def test_bake_const_tiling_before_device_compile_keeps_dynamic_when_not_static(
+    ascendc_compile_module, tmpdir
+):
+    device_dir = tmpdir.mkdir("device")
+    device_dir.join("kernel_op.cpp").write("int main() { return 0; }")
+    args = _make_compile_args()
+    args.force_unknown = False
+    args.device_files = str(device_dir.join("kernel_op.cpp"))
+    rewrite_calls = []
+    ascendc_compile_module.module.link_tiling_so = lambda *unused_args: "tiling.so"
+    fake_lib = types.SimpleNamespace(
+        AutofuseIsStaticShape=lambda: False,
+    )
+    ascendc_compile_module.module.ctypes.CDLL = lambda path: fake_lib
+    ascendc_compile_module.module.rewrite_device_kernel_with_const_tiling = (
+        lambda *unused_args: rewrite_calls.append(unused_args)
+    )
+
+    assert (
+        ascendc_compile_module.bake_const_tiling_before_device_compile(
+            args, ["a.o"], str(tmpdir)
+        )
+        is False
+    )
+    assert rewrite_calls == []
+
+
+def test_bake_const_tiling_before_device_compile_bakes_const_tiling(
+    ascendc_compile_module, tmpdir
+):
+    device_dir = tmpdir.mkdir("device")
+    device_dir.join("kernel_op.cpp").write("CVAutofuseTilingData")
+    device_dir.join("autofuse_tiling_data.h").write("old tiling")
+    args = _make_compile_args()
+    args.force_unknown = False
+    args.device_files = str(device_dir.join("kernel_op.cpp"))
+    args.config_file = "config.txt"
+    link_calls = []
+    rewrite_calls = []
+    ascendc_compile_module.module.link_tiling_so = (
+        lambda compile_args, tiling_obj_paths, temp_dir: (
+            link_calls.append((list(tiling_obj_paths), temp_dir)) or "tiling.so"
+        )
+    )
+    fake_lib = types.SimpleNamespace(
+        AutofuseIsStaticShape=lambda: True,
+        GenConstTilingData=lambda *unused_args: b"const tiling",
+    )
+    ascendc_compile_module.module.ctypes.CDLL = lambda path: fake_lib
+    ascendc_compile_module.module.static_shape_kernel_proc = lambda *unused_args: (
+        rewrite_calls.append("proc")
+    )
+    ascendc_compile_module.module.init_torch_npu_for_const_tiling = lambda: None
+
+    assert (
+        ascendc_compile_module.bake_const_tiling_before_device_compile(
+            args, ["a.o", "b.o"], str(tmpdir)
+        )
+        is True
+    )
+    assert link_calls == [(["a.o", "b.o"], str(tmpdir))]
+    assert rewrite_calls == ["proc"]
+    assert device_dir.join("autofuse_tiling_data.h").read() == "const tiling"
+
+
+def test_build_kernel_target_compiles_device_once_when_const_tiling_baked(
+    ascendc_compile_module,
+):
+    compile_calls = []
+    args = _make_compile_args()
+    args.force_unknown = False
+    ascendc_compile_module.module.bake_const_tiling_before_device_compile = (
+        lambda unused_args, unused_paths, unused_temp_dir: True
+    )
+    ascendc_compile_module.module.try_static_shape_compile = lambda *unused_args: (
+        pytest.fail("try_static_shape_compile should be skipped")
+    )
+
+    def fake_compile_device_obj(unused_args, unused_temp_dir):
+        compile_calls.append("compile")
+        return "/tmp/build/device/kernel.o"
+
+    ascendc_compile_module.module.compile_device_obj = fake_compile_device_obj
+    ascendc_compile_module.module.link_kernel_so = lambda *unused_args: (
+        "/tmp/build/kernel.so"
+    )
+
+    assert (
+        ascendc_compile_module.build_kernel_target(args, ["a.o"], "/tmp/build")
+        == "/tmp/build/kernel.so"
+    )
+    assert compile_calls == ["compile"]
+
+
+def test_bake_skips_device_obj_without_tiling_paths(ascendc_compile_module):
+    args = _make_compile_args()
+    args.stage = "device_obj"
+    args.force_unknown = False
+    link_calls = []
+    ascendc_compile_module.module.link_tiling_so = (
+        lambda *unused_args, **unused_kwargs: link_calls.append(unused_args)
+    )
+
+    assert (
+        ascendc_compile_module.bake_const_tiling_before_device_compile(
+            args, [], "/tmp/build"
+        )
+        is False
+    )
+    assert link_calls == []
+
+
+def test_bake_const_tiling_in_device_obj_stage(ascendc_compile_module, tmpdir):
+    device_dir = tmpdir.mkdir("device")
+    device_dir.join("kernel_op.cpp").write("CVAutofuseTilingData")
+    device_dir.join("autofuse_tiling_data.h").write("old tiling")
+    args = _make_compile_args()
+    args.stage = "device_obj"
+    args.force_unknown = False
+    args.device_files = str(device_dir.join("kernel_op.cpp"))
+    args.config_file = "config.txt"
+    ascendc_compile_module.module.link_tiling_so = lambda *unused_args: "tiling.so"
+    fake_lib = types.SimpleNamespace(
+        AutofuseIsStaticShape=lambda: True,
+        GenConstTilingData=lambda *unused_args: b"const tiling",
+    )
+    ascendc_compile_module.module.ctypes.CDLL = lambda path: fake_lib
+    ascendc_compile_module.module.static_shape_kernel_proc = lambda *unused_args: None
+    ascendc_compile_module.module.init_torch_npu_for_const_tiling = lambda: None
+
+    assert (
+        ascendc_compile_module.bake_const_tiling_before_device_compile(
+            args, ["a.o"], str(tmpdir)
+        )
+        is True
+    )
+    assert device_dir.join("autofuse_tiling_data.h").read() == "const tiling"
+
+
+def test_build_kernel_target_from_objects_skips_recompile_when_baked(
+    ascendc_compile_module,
+):
+    args = _make_compile_args()
+    args.const_tiling_baked = True
+    ascendc_compile_module.module.link_kernel_so = lambda *unused_args: (
+        "/tmp/build/kernel.so"
+    )
+    ascendc_compile_module.module.try_static_shape_compile = lambda *unused_args: (
+        pytest.fail("try_static_shape_compile should be skipped when baked")
+    )
+
+    assert (
+        ascendc_compile_module.build_kernel_target_from_objects(
+            args, ["a.o"], "/tmp/build/device/kernel.o", "/tmp/build"
+        )
+        == "/tmp/build/kernel.so"
+    )
+
+
+def test_main_device_obj_returns_baked_flag(ascendc_compile_module, tmpdir):
+    work = tmpdir.mkdir("work")
+    args = _make_compile_args()
+    args.stage = "device_obj"
+    args.temp_dir = str(work)
+    args.device_files = str(work.join("k_op_kernel.cpp"))
+    args.tiling_obj_paths = "a.o;b.o"
+    ascendc_compile_module.module.bake_const_tiling_before_device_compile = (
+        lambda *unused_args, **unused_kwargs: True
+    )
+    ascendc_compile_module.module.compile_device_obj = lambda *unused_args: "/tmp/k.o"
+
+    out = ascendc_compile_module.main(args)
+
+    assert out["stage"] == "device_obj"
+    assert out["kernel_obj_path"] == "/tmp/k.o"
+    assert out["kernel_source_path"] == args.device_files
+    assert out["baked"] is True
+
+
+def test_build_kernel_target_from_objects_derives_baked_from_const_header(
+    ascendc_compile_module, tmpdir
+):
+    device_dir = tmpdir.mkdir("device")
+    device_dir.join("autofuse_tiling_data.h").write(
+        "#define INDUCTOR_CONST_TILING_DATA\n"
+        "constexpr CVAutofuseTilingData kConstTilingData = {};\n"
+    )
+    args = _make_compile_args()
+    args.const_tiling_baked = False
+    ascendc_compile_module.module.link_kernel_so = lambda *unused_args: "/tmp/kernel.so"
+    ascendc_compile_module.module.try_static_shape_compile = lambda *unused_args: (
+        pytest.fail(
+            "try_static_shape_compile should be skipped when const header present"
+        )
+    )
+
+    assert (
+        ascendc_compile_module.build_kernel_target_from_objects(
+            args, ["a.o"], "/tmp/build/device/kernel.o", str(tmpdir)
+        )
+        == "/tmp/kernel.so"
+    )
+
+
+def test_main_link_stage_skips_recompile_when_baked(ascendc_compile_module, tmpdir):
+    work = tmpdir.mkdir("work")
+    work.mkdir("device")
+    tiling_obj = work.join("t.o")
+    tiling_obj.write("obj")
+    kernel_obj = work.join("k.o")
+    kernel_obj.write("obj")
+    kernel_src = work.join("k_op_kernel.cpp")
+    kernel_src.write("src")
+    so_file = work.join("kernel.so")
+    so_file.write("so")
+    out_file = work.join("out.so")
+
+    link_calls = []
+    ascendc_compile_module.module.link_kernel_so = lambda *unused_args: (
+        link_calls.append(1) or str(so_file)
+    )
+    ascendc_compile_module.module.try_static_shape_compile = lambda *unused_args: (
+        pytest.fail("try_static_shape_compile must be skipped when baked")
+    )
+
+    args = _make_compile_args()
+    args.stage = "link"
+    args.temp_dir = str(work)
+    args.tiling_obj_paths = str(tiling_obj)
+    args.kernel_obj_path = str(kernel_obj)
+    args.kernel_source_path = str(kernel_src)
+    args.tiling_source_paths = ""
+    args.shared_cv_wrapper_so = ""
+    args.const_tiling_baked = True
+    args.output_file = str(out_file)
+    args.device_files = str(kernel_src)
+    args.host_files = None
+
+    ascendc_compile_module.main(args)
+
+    assert link_calls == [1]
+    assert out_file.check()

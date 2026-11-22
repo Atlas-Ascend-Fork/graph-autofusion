@@ -10,7 +10,87 @@
 
 #include "base_template_generator.h"
 
+#include <map>
+#include <string>
+
+#include "optimize/graph_pass/pass_utils.h"
+
 namespace optimize {
+namespace {
+
+constexpr char kNddmaSuffix[] = "_nddma";
+constexpr char kLoadToNddmaSuffix[] = "_load_to_nddma";
+
+bool HasSuffix(const std::string &value, const std::string &suffix) {
+  return value.size() > suffix.size() && value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+bool IsSameNddmaTemplate(const af::AscGraph &lhs, const af::AscGraph &rhs) {
+  std::vector<af::AscNodePtr> lhs_nodes;
+  for (const auto &node : lhs.GetAllNodes()) {
+    lhs_nodes.push_back(node);
+  }
+  std::vector<af::AscNodePtr> rhs_nodes;
+  for (const auto &node : rhs.GetAllNodes()) {
+    rhs_nodes.push_back(node);
+  }
+  if (lhs_nodes.size() != rhs_nodes.size()) {
+    return false;
+  }
+  for (size_t i = 0UL; i < lhs_nodes.size(); ++i) {
+    if (lhs_nodes[i] == nullptr || rhs_nodes[i] == nullptr) {
+      return false;
+    }
+    if (lhs_nodes[i]->GetType() != rhs_nodes[i]->GetType()) {
+      return false;
+    }
+    const auto lhs_outputs = lhs_nodes[i]->outputs();
+    const auto rhs_outputs = rhs_nodes[i]->outputs();
+    if (lhs_outputs.size() != rhs_outputs.size()) {
+      return false;
+    }
+    if (!lhs_outputs.empty() &&
+        !PassUtils::IsExprVectorEqual(lhs_outputs[0]->attr.repeats, rhs_outputs[0]->attr.repeats)) {
+      return false;
+    }
+  }
+  GELOGD("Nddma templates are the same, lhs [%s], rhs [%s], node count %zu.", lhs.GetName().c_str(),
+         rhs.GetName().c_str(), lhs_nodes.size());
+  return true;
+}
+
+void DedupNddmaTemplates(const std::vector<autoschedule::AutoScheduleOutput> &generated_cases,
+                         std::unordered_set<std::string> &drop_case_names) {
+  GELOGD("Start to dedup nddma templates, generated cases: %zu.", generated_cases.size());
+  std::map<std::string, const af::AscGraph *> nddma_templates;
+  std::map<std::string, const af::AscGraph *> load_to_nddma_templates;
+  for (const auto &generated_case : generated_cases) {
+    const std::string &name = generated_case.scheduled_graph.GetName();
+    if (HasSuffix(name, kLoadToNddmaSuffix)) {
+      const std::string key = name.substr(0UL, name.size() - (sizeof(kLoadToNddmaSuffix) - 1UL));
+      load_to_nddma_templates.emplace(key, &generated_case.scheduled_graph);
+    } else if (HasSuffix(name, kNddmaSuffix)) {
+      const std::string key = name.substr(0UL, name.size() - (sizeof(kNddmaSuffix) - 1UL));
+      nddma_templates.emplace(key, &generated_case.scheduled_graph);
+    }
+  }
+  GELOGD("Collected nddma templates: %zu, load_to_nddma templates: %zu.", nddma_templates.size(),
+         load_to_nddma_templates.size());
+  for (const auto &entry : load_to_nddma_templates) {
+    const auto nddma_it = nddma_templates.find(entry.first);
+    if (nddma_it == nddma_templates.end()) {
+      continue;
+    }
+    if (!IsSameNddmaTemplate(*entry.second, *nddma_it->second)) {
+      continue;
+    }
+    GELOGD("Drop duplicated nddma template [%s], same as load_to_nddma template [%s], key [%s].",
+           nddma_it->second->GetName().c_str(), entry.second->GetName().c_str(), entry.first.c_str());
+    drop_case_names.emplace(nddma_it->second->GetName());
+  }
+}
+
+}  // namespace
 
 std::vector<autoschedule::AutoScheduleOutput> BaseTemplateGenerator::GetBasedCasesByGenMode(
     const GenerationMode mode, const std::vector<autoschedule::AutoScheduleOutput> &tiling_cases,
@@ -79,6 +159,8 @@ af::Status BaseTemplateGenerator::GenerateTemplates(const af::AscGraph &origin_g
   if (generated_cases.empty() && drop_case_names.empty()) {
     return af::SUCCESS;
   }
+
+  DedupNddmaTemplates(generated_cases, drop_case_names);
 
   // 拼接生成的新模板
   tiling_cases.insert(tiling_cases.end(), generated_cases.begin(), generated_cases.end());

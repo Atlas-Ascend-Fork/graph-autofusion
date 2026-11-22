@@ -1,0 +1,231 @@
+{
+  "model": "NDDMA_ROUND2_1D_NONCONTIGUOUS_NG_NGU_MULTICORE",
+  "formula": {
+    "base": {
+      "name": "arbitrary_dim_multicore_1d_contiguous_base",
+      "split_block_dim": 2,
+      "le2": "cycles = bytes_per_core / T_1(dtype) + H_1(dtype)",
+      "gt2": "cycles = bytes_per_core / T_2(dtype) + H_2(dtype)",
+      "metric": "cycles is single-core/per-block cycles",
+      "bytes_definition": "bytes_per_core = logical_total_bytes / block_dim",
+      "fitting_dataset": "HW_GE_ATT round2 group A stage1 representative points plus group C all-block-dim points",
+      "fitting_method": "joint least-squares fit of cycles = bytes_per_core / T + H for each dtype and branch"
+    },
+    "N_G": "N_G=(a1+a2*B)*s",
+    "N_GU": "N_GU=((b1+b2*s)+(b3+b4*s)*B)*min(1,os-1)",
+    "rho": "rho=(c1+c2*s)+min(1,os-1)*(c3+c4*s)",
+    "final": "N_1=N_base+N_G+N_GU (k<=2); N_base+rho*(N_G+N_GU) (k>2)",
+    "definitions": {
+      "B": "bytes_per_core = logical_total_bytes / block_dim",
+      "s": "min(input_stride*dtype_size,128)",
+      "os_gate": "min(1,output_stride-1)"
+    },
+    "fit_order": [
+      "inherit_round1_base",
+      "N_G",
+      "N_GU",
+      "multicore_rho"
+    ],
+    "base_source": "Modeling/Ana/round1/round1_1d_single_multi_core_model.json",
+    "base_parameters": "parameters.<dtype>.base is copied from round1.parameters.<dtype>"
+  },
+  "parameters": {
+    "int8_t": {
+      "base": {
+        "T_1": 11.7626,
+        "H_1": 194.421,
+        "T_2": 6.05735,
+        "H_2": 373.274
+      },
+      "N_G": {
+        "a1": 2.2901165,
+        "a2": 0.014561351
+      },
+      "N_GU": {
+        "b1": -69.410121,
+        "b2": -2.0861213,
+        "b3": 6.9111296,
+        "b4": -0.014567499
+      },
+      "rho": {
+        "c1": 2.2823982,
+        "c2": 0.0054381207,
+        "c3": -0.29869463,
+        "c4": -0.0054311976
+      }
+    },
+    "int16_t": {
+      "base": {
+        "T_1": 25.7579,
+        "H_1": 204.604,
+        "T_2": 13.259,
+        "H_2": 399.909
+      },
+      "N_G": {
+        "a1": 1.9720487,
+        "a2": 0.0073653238
+      },
+      "N_GU": {
+        "b1": -65.754578,
+        "b2": -1.7626747,
+        "b3": 3.4565828,
+        "b4": -0.0073719789
+      },
+      "rho": {
+        "c1": 1.6501023,
+        "c2": 0.016002982,
+        "c3": 0.33029872,
+        "c4": -0.015981633
+      }
+    },
+    "int32_t": {
+      "base": {
+        "T_1": 57.2624,
+        "H_1": 235.137,
+        "T_2": 29.4096,
+        "H_2": 453.859
+      },
+      "N_G": {
+        "a1": 1.2140303,
+        "a2": 0.0037227686
+      },
+      "N_GU": {
+        "b1": 31.174096,
+        "b2": -0.83730451,
+        "b3": 0.21970194,
+        "b4": -0.0032801415
+      },
+      "rho": {
+        "c1": 1.9774169,
+        "c2": 0.0056400644,
+        "c3": -0.61376163,
+        "c4": 0.021569482
+      }
+    },
+    "int64_t": {
+      "base": {
+        "T_1": 57.2346,
+        "H_1": 243.205,
+        "T_2": 29.3906,
+        "H_2": 468.971
+      },
+      "N_G": {
+        "a1": 1.7169033,
+        "a2": 0.0015857085
+      },
+      "N_GU": {
+        "b1": 63.566231,
+        "b2": -1.4367614,
+        "b3": 0.090304855,
+        "b4": -0.0012246069
+      },
+      "rho": {
+        "c1": 0.76071525,
+        "c2": 0.02630908,
+        "c3": 0.89945693,
+        "c4": -0.015756802
+      }
+    }
+  },
+  "metrics": {
+    "all": {
+      "count": 7221,
+      "rmse_cycles": 794.0300970602967,
+      "mae_cycles": 312.12228142352706,
+      "mape_percent": 21.003534701409485,
+      "max_absolute_error_cycles": 13881.224774130042
+    },
+    "by_dtype": {
+      "int8_t": {
+        "count": 1908,
+        "rmse_cycles": 658.2325710080795,
+        "mae_cycles": 248.00804618691026,
+        "mape_percent": 13.851991768005224,
+        "max_absolute_error_cycles": 11022.09852318828
+      },
+      "int16_t": {
+        "count": 1854,
+        "rmse_cycles": 475.4287762706725,
+        "mae_cycles": 196.28919165303918,
+        "mape_percent": 14.102432490966306,
+        "max_absolute_error_cycles": 10944.991252662465
+      },
+      "int32_t": {
+        "count": 1780,
+        "rmse_cycles": 1255.8761162744502,
+        "mae_cycles": 586.7801729114543,
+        "mape_percent": 38.9111305311127,
+        "max_absolute_error_cycles": 13881.224774130042
+      },
+      "int64_t": {
+        "count": 1679,
+        "rmse_cycles": 545.4449564257757,
+        "mae_cycles": 221.7074287835244,
+        "mape_percent": 17.766052175040087,
+        "max_absolute_error_cycles": 9031.628764661162
+      }
+    },
+    "by_group": {
+      "A": {
+        "count": 398,
+        "rmse_cycles": 248.32391786911455,
+        "mae_cycles": 156.32732796055603,
+        "mape_percent": 16.807665128309033,
+        "max_absolute_error_cycles": 1520.9095807089489
+      },
+      "B": {
+        "count": 329,
+        "rmse_cycles": 289.50758907275093,
+        "mae_cycles": 136.61606428491913,
+        "mape_percent": 16.41371156394574,
+        "max_absolute_error_cycles": 2136.2211597133446
+      },
+      "C": {
+        "count": 3385,
+        "rmse_cycles": 493.50530571738733,
+        "mae_cycles": 207.41234588630977,
+        "mape_percent": 18.709531544621335,
+        "max_absolute_error_cycles": 6363.562074369063
+      },
+      "F": {
+        "count": 476,
+        "rmse_cycles": 542.6304422081334,
+        "mae_cycles": 275.8057895198526,
+        "mape_percent": 24.830648330059706,
+        "max_absolute_error_cycles": 6056.1687402538955
+      },
+      "G": {
+        "count": 840,
+        "rmse_cycles": 1014.8166813346012,
+        "mae_cycles": 400.2258693862629,
+        "mape_percent": 24.11791117116812,
+        "max_absolute_error_cycles": 11065.65599249414
+      },
+      "H": {
+        "count": 1344,
+        "rmse_cycles": 1351.550611499527,
+        "mae_cycles": 594.2727741736585,
+        "mape_percent": 23.5013677061719,
+        "max_absolute_error_cycles": 13881.224774130042
+      },
+      "I": {
+        "count": 448,
+        "rmse_cycles": 693.5300880005535,
+        "mae_cycles": 396.78701470327934,
+        "mape_percent": 28.061324318023356,
+        "max_absolute_error_cycles": 6052.933906041697
+      },
+      "J": {
+        "count": 1,
+        "rmse_cycles": 642.7644837101125,
+        "mae_cycles": 642.7644837101125,
+        "mape_percent": 9.452494271114691,
+        "max_absolute_error_cycles": 642.7644837101125
+      }
+    }
+  },
+  "snapshot": {
+    "metrics_valid": false,
+    "reason": "Historical measurements do not validate the current fitting workflow or aligned parameters; recollect/refit before reporting accuracy."
+  }
+}

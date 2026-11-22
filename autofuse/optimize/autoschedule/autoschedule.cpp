@@ -23,6 +23,7 @@
 #include "node_utils.h"
 #include "ascendc_ir/core/ascendc_ir_impl.h"
 #include "graph/symbolizer/symbolic_utils.h"
+#include "base/arch_param.h"
 
 #include "autoschedule/template_generator_handler.h"
 
@@ -30,6 +31,33 @@ namespace {
 constexpr int64_t kDefaultAxisId = -1;
 constexpr int64_t kMaxBroadcastAxisSize = 16LL;
 constexpr int64_t kMinNonBroadcastAxisSize = 256LL * 1024LL;
+
+Status AlignRCoreWorkspaceLoads(ascir::ImplGraph &graph) {
+  for (const auto &workspace : graph.GetAllNodes()) {
+    if (!af::ops::IsOps<af::ascir_op::Workspace>(workspace) || workspace->GetInDataNodesSize() != 0UL) {
+      continue;
+    }
+    auto &workspace_attr = workspace->outputs[0].attr;
+    GE_ASSERT_TRUE(workspace_attr.strides.size() == 2UL, "RCore phase-2 workspace must have Rm and A axes.");
+    const auto dtype_size = ge::GetSizeByDataType(workspace_attr.dtype);
+    GE_ASSERT_TRUE(dtype_size > 0, "Invalid dtype size for [%s]'s output tensor.", workspace->GetNamePtr());
+    const auto cacheline_bytes = att::arch_param::kV2ArchHardwareConfig.cache_line_size;
+    GE_ASSERT_TRUE(cacheline_bytes % dtype_size == 0, "Unsupported dtype size[%ld] for RCore workspace alignment.",
+                   dtype_size);
+    workspace_attr.strides[0] =
+        af::sym::Align(workspace_attr.strides[0], cacheline_bytes / static_cast<uint32_t>(dtype_size));
+    for (const auto &consumer : workspace->GetOutDataNodes()) {
+      auto load = std::dynamic_pointer_cast<af::AscNode>(consumer);
+      GE_ASSERT_NOTNULL(load);
+      GE_ASSERT_TRUE(optimize::ScheduleUtils::IsLoad(load), "RCore workspace consumer must be a Load.");
+      auto &load_attr = load->outputs[0].attr;
+      GE_ASSERT_TRUE(load_attr.axis == workspace_attr.axis && load_attr.strides.size() == 2UL,
+                     "RCore workspace and Load axes must match before tiling.");
+      load_attr.strides[0] = workspace_attr.strides[0];
+    }
+  }
+  return af::SUCCESS;
+}
 
 // 判断节点输出在该轴上是否仍有数据流动（stride 非零）：真正的归约塌缩轴在
 // Reduce 输出上 stride 必为 0；而元素算子直接消费标量参数 Load（空间轴全退化）
@@ -170,6 +198,11 @@ void PartitionLoopAxes(const ascir::ImplGraph &impl_graph, const std::unordered_
 }
 
 void ReorderBroadcastAxesInner(ascir::ImplGraph &impl_graph) {
+  for (const auto &node : impl_graph.GetAllNodes()) {
+    if (ascir::IsCvMBroadcast(*node)) {
+      return;  // Preserve logical M/N order for the full-M CV callback.
+    }
+  }
   optimize::GraphPropertiesCache cache(impl_graph);
   if (cache.HasReduce() || cache.HasGather() || cache.HasCube() || cache.HasTranspose() || cache.HasConcat() ||
       cache.HasSplit()) {
@@ -255,6 +288,20 @@ Status AutoSchedule::SelectLoopAxis(ascir::ImplGraph &impl_graph, bool is_reduce
     auto it = std::find_if(axis.rbegin(), axis.rend(), [](const auto &val) { return val != af::kIdNone; });
     if (it != axis.rend()) {
       node->attr.sched.loop_axis = *it;
+    }
+    if (node->attr.sched.loop_axis == af::kIdNone && !axis.empty()) {
+      // 打印原始 sched 轴列表（axis 副本中的被滤轴已被置为 kIdNone，不可用），
+      // 供 not_loop 判定与 from 链排查。
+      std::string sched_axis_ids;
+      for (const auto &sched_axis_id : node->attr.sched.axis) {
+        sched_axis_ids += std::to_string(sched_axis_id);
+        sched_axis_ids += ",";
+      }
+      GELOGD("[IndirectLoad] SelectLoopAxis: node[%s] all axes filtered, sched_axes[%s], not_loop_set_size=%zu.",
+             node->GetNamePtr(), sched_axis_ids.c_str(), not_loop_axis_set.size());
+      for (const auto &entry : not_loop_axis_set) {
+        GELOGD("[IndirectLoad] SelectLoopAxis: node[%s] not_loop_axis[%ld].", node->GetNamePtr(), entry);
+      }
     }
     GE_ASSERT_TRUE((node->attr.sched.loop_axis != af::kIdNone), "Cannot find loop axis for node: [%s].",
                    node->GetNamePtr());
@@ -378,6 +425,10 @@ Status BuildIndirectLoadAxisGroup(const ascir::ImplGraph &graph, const AxisGroup
 
 Status AutoSchedule::DoAutoSchedule() {
   graph_.SetGraphType(af::AscGraphType::kImplGraph);
+  if (enable_workspace_alignment_ && reduce_template_ == optimize::ReduceTemplateType::kRCore &&
+      !is_reduce_first_stage_ && ScheduleUtils::HasComputeType(graph_, af::ComputeType::kComputeReduce)) {
+    GE_CHK_STATUS_RET(AlignRCoreWorkspaceLoads(graph_), "Failed to align RCore workspace loads.");
+  }
   ReorderBroadcastAxesInner(graph_);
 
   // 生成通用模版
@@ -432,7 +483,7 @@ Status AutoSchedule::ProcessOneTilingCase(TilingCase &tiling_case, size_t index,
                     "Failed to build scheduler axis group for tiling case %zu in graph: [%s]", index,
                     graph_name.c_str());
   Scheduler scheduler(output.scheduled_graph, axis_group, tiling_case, is_last_axis_reduce, reduce_template_,
-                      cube_template_);
+                      cube_template_, enable_workspace_alignment_);
 
   auto ret = scheduler.DoScheduler();
   if (ret == af::UNSUPPORTED) {

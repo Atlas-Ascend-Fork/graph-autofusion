@@ -159,6 +159,51 @@ def _copy_host_source_files(src_dir, dst_dir):
             _copy_host_source_files(src_path, os.path.join(dst_dir, item))
 
 
+# GE 运行时对交付 so 实际 dlsym 的对外 ABI 符号（清单单一来源见
+# docs/zh/autofuse/design/features/auto_tiling.md S11："正式 ABI 以 GE/TorchAir 实际加载的符号为准"）。
+# codegen 新增 GE 消费接口或 CV 场景纳入瘦身时必须同步此清单
+# （注意 TilingFuncVec/GetTilingDataSizeVec 当前仅在 CV 分支生成，见 codegen_tiling.cpp GenExternTilingFunc）
+VV_SLIM_EXPORT_SYMBOLS = [
+    "TilingFunc",
+    "TilingParse",
+    "InferShape",
+    "GetSymbolTilingCacheKey",
+    "DfxInputSymbolInfo",
+    "GetTilingDataSize",
+    "GetKernelBin",
+]
+
+
+def generate_export_map(host_build_dir):
+    lines = ["{"]
+    lines.append("  global:")
+    lines.extend("    %s;" % sym for sym in VV_SLIM_EXPORT_SYMBOLS)
+    lines.append("  local: *;")
+    lines.append("};")
+    with open(os.path.join(host_build_dir, "export.map"), "w") as map_file:
+        map_file.write("\n".join(lines) + "\n")
+
+
+def strip_slim_so(so_path, cross_compiler_prefix=None):
+    strip_tool = (cross_compiler_prefix or "") + "strip"
+    try:
+        size_before = os.path.getsize(so_path)
+        ret = subprocess.run([strip_tool, so_path], capture_output=True, text=True)
+    except OSError as e:
+        # so 缺失或 strip 工具（含交叉前缀）不在 PATH：告警降级为未瘦身交付，不阻断编译
+        _log_warning("[SOSIZE] strip %s failed: %s", so_path, str(e))
+        return
+    if ret.returncode != 0:
+        _log_warning("[SOSIZE] strip %s failed: %s", so_path, ret.stderr)
+        return
+    logger.info(
+        "[SOSIZE] strip %s: %d -> %d",
+        so_path,
+        size_before,
+        os.path.getsize(so_path),
+    )
+
+
 def compile_native_host_so(host_ctx):
     (
         graph_name,
@@ -237,7 +282,7 @@ CV_COMMON_BMM_MIX_WHITE_LIST = [
 ]
 
 
-def generate_cmake_lists(host_ctx, cross_info=None):
+def generate_cmake_lists(host_ctx, cross_info=None, slim_export=None):
     (
         graph_name,
         kernel_name,
@@ -246,6 +291,10 @@ def generate_cmake_lists(host_ctx, cross_info=None):
         is_static_shape,
         is_cube,
     ) = host_ctx
+    if slim_export is None:
+        # 仅交付编译（VV 第二次 host 编译产物拷入 kernel_meta）收敛导出符号；
+        # PGO 等临时 so 需 dlsym GetTilingKeyCount/PgoTilingSearch 等，不得收敛
+        slim_export = not is_cube and is_last_compile
     is_cross_compile_flag = cross_info.is_cross_compile_flag if cross_info else False
     target_machine = cross_info.target_machine if cross_info else None
     source = f"################ {kernel_name}.so ################\n"
@@ -270,6 +319,8 @@ def generate_cmake_lists(host_ctx, cross_info=None):
         source += "    *get_kernel*.cpp\n"
     source += ")\n\n"
     source += f"add_library({kernel_name} SHARED ${{ALL_CPP_SRCS}})\n\n"
+    if not is_static_shape and is_cube:
+        source += f"target_compile_definitions({kernel_name} PRIVATE _GLIBCXX_USE_CXX11_ABI=0)\n\n"
 
     opt_level = "-O0" if is_static_shape else "-O2"
     source += (
@@ -277,6 +328,12 @@ def generate_cmake_lists(host_ctx, cross_info=None):
         f"    {opt_level} -fno-common -Werror -Wextra -Wfloat-equal -fvisibility=default -DLOG_CPP"
         f" -ffile-prefix-map=${{CMAKE_CURRENT_SOURCE_DIR}}/=\n)\n\n"
     )
+    if slim_export:
+        generate_export_map(host_build_dir)
+        source += (
+            f"target_link_options({kernel_name} PRIVATE"
+            f" -Wl,--version-script=${{CMAKE_CURRENT_SOURCE_DIR}}/export.map)\n\n"
+        )
     source += f'message(STATUS "Using environment variable ASCEND_INSTALL_PATH: {ASCEND_PATH}")\n'
     # 交叉编译场景仅有libgraph.so的桩文件，libgraph桩已包含graph_base的符号，故link graph；
     # 非交叉编译场景保持link graph_base不变
@@ -285,10 +342,15 @@ def generate_cmake_lists(host_ctx, cross_info=None):
         f"target_link_libraries({kernel_name} PRIVATE c_sec ascendalog platform error_manager"
         f" tiling_api {graph_lib} register)\n"
     )
+    if not is_static_shape and is_cube:
+        source += f"target_link_libraries({kernel_name} PRIVATE opp_registry)\n"
     source += f"target_include_directories({kernel_name} PRIVATE\n"
     source += f"    {ASCEND_PATH}/include\n"
     source += f"    {ASCEND_PATH}/include/base\n"
     source += f"    {ASCEND_PATH}/include/experiment\n"
+    if not is_static_shape and is_cube:
+        source += f"    {ASCEND_PATH}/pkg_inc\n"
+        source += f"    {ASCEND_PATH}/include/external\n"
     source += f"    {ASCEND_PATH}/{machine}-linux/include\n"
     source += f"    {ASCEND_PATH}/{machine}-linux/pkg_inc/base\n"
     source += f"    {ASCEND_PATH}/{machine}-linux/ascendc/include/highlevel_api/tiling/platform\n"
@@ -313,7 +375,7 @@ def generate_file(dst_dir, file_name, text, append=False):
         file.write(text)
 
 
-def ascbc_host_compile(host_ctx, cross_info=None):
+def ascbc_host_compile(host_ctx, cross_info=None, slim_export=None):
     (
         graph_name,
         kernel_name,
@@ -323,7 +385,7 @@ def ascbc_host_compile(host_ctx, cross_info=None):
         is_cube,
     ) = host_ctx
     cross_compiler_prefix = cross_info.cross_compiler_prefix if cross_info else None
-    generate_cmake_lists(host_ctx, cross_info=cross_info)
+    generate_cmake_lists(host_ctx, cross_info=cross_info, slim_export=slim_export)
     ori_directory = os.getcwd()
     # 切换到临时工作目录
     os.chdir(host_build_dir)
@@ -572,6 +634,26 @@ def get_codegen_compile_context():
     )
 
 
+def _set_platform_from_compile_target(codegen_context):
+    npu_arch = get_soc_spec("NpuArch")
+    if not npu_arch:
+        raise RuntimeError("NpuArch is empty in compile target")
+
+    requires_full_soc_version = ascir.utils.requires_full_soc_version(npu_arch)
+    soc_version = ""
+    if requires_full_soc_version:
+        soc_version = get_soc_spec("SOC_VERSION") or ""
+
+    ub_size = int(get_soc_spec("ub_size"))
+    ascir.utils.set_platform(
+        npu_arch,
+        codegen_context.static_compile_vector_core_num,
+        ub_size,
+        soc_version,
+    )
+    return npu_arch
+
+
 def log_core_limit_info(codegen_context):
     CommonUtility.print_compile_log(
         "",
@@ -708,14 +790,14 @@ def dynamic_shape_compile(
         host_build_dir = os.path.join(temp_dir, "host")
     ascbc_host_compile(
         HostCompileContext(
-            graph_name, kernel_name, host_build_dir, False, True, is_cube
+            graph_name, kernel_name, host_build_dir, False, False, is_cube
         ),
         cross_info=cross_info,
     )
     if is_cross_compile_flag:
         compile_native_host_so(
             HostCompileContext(
-                graph_name, kernel_name, host_build_dir, False, True, is_cube
+                graph_name, kernel_name, host_build_dir, False, False, is_cube
             )
         )
 
@@ -757,8 +839,11 @@ def dynamic_shape_compile(
 
     # 备份原tilingdata文件
     shutil.copy(tiling_data, tiling_data_bak)
+    with open(tiling_data_bak) as file:
+        original_tiling_data = file.read()
     with open(tiling_data, "w") as file:
         file.write(const_tiling_data)
+        file.write(original_tiling_data)
 
 
 def _compile_and_load_cv_host_so(
@@ -831,7 +916,12 @@ def get_cv_ub_fusion_stage_size_name(kernel_name, temp_dir, graph_name, host_so)
 
 
 def static_shape_cv_common_compile(
-    kernel_name, temp_dir, graph_name, vector_core_num=None, cross_info=None
+    kernel_name,
+    temp_dir,
+    graph_name,
+    vector_core_num=None,
+    cross_info=None,
+    cube_tiling_key=0,
 ):
     host_build_dir = os.path.join(temp_dir, "host", "cv_common")
     lib, pgo_config_path = _compile_and_load_cv_host_so(
@@ -839,6 +929,8 @@ def static_shape_cv_common_compile(
     )
     vec_block_dim = -1
     wss = -1
+    is_aiv_only = False
+    use_launch_aic_num = False
     if hasattr(lib, "GenTilingDataValueBlockDimAndWss"):
         import ctypes
 
@@ -856,7 +948,15 @@ def static_shape_cv_common_compile(
         if ret != -1:
             vec_block_dim = block_dim.value
             wss = workspace_size.value
-    return vec_block_dim, wss
+            lib.IsCVSafetyAivOnly.argtypes = [ctypes.c_int64]
+            lib.IsCVSafetyAivOnly.restype = ctypes.c_bool
+            is_aiv_only = bool(lib.IsCVSafetyAivOnly(ctypes.c_int64(cube_tiling_key)))
+            lib.IsCVSafetyBlockIdxScheduled.argtypes = [ctypes.c_int64]
+            lib.IsCVSafetyBlockIdxScheduled.restype = ctypes.c_bool
+            use_launch_aic_num = bool(
+                lib.IsCVSafetyBlockIdxScheduled(ctypes.c_int64(cube_tiling_key))
+            )
+    return vec_block_dim, wss, is_aiv_only, use_launch_aic_num
 
 
 def is_static_compile(params, tiling_func_srcs):
@@ -1036,7 +1136,8 @@ def pgo_kernel_compile(*args, temp_dir, params, op_kernel_src, code_gen):
     get_kernel_src = code_gen.get_kernel_and_json_generator(kernel_file, json_file)
     generate_file(host_build_dir, graph_name + "_get_kernel.cpp", get_kernel_src)
     ascbc_host_compile(
-        HostCompileContext(graph_name, kernel_name, host_build_dir, True, False, False)
+        HostCompileContext(graph_name, kernel_name, host_build_dir, True, False, False),
+        slim_export=False,
     )
     source_lib_path = os.path.join(host_build_dir, f"lib{kernel_name}.so")
     target_lib_path = os.path.join(pgo_dir, f"lib{graph_name}.so")
@@ -1548,6 +1649,51 @@ def asc_pgo_exec(*args, temp_dir, params, op_kernel_src, code_gen):
     pgo_cleanup_kernel_and_json(pgo_temp_files)
 
 
+def _resolve_static_mm_args(args_list, input_num, input_shapes):
+    resolved = list(args_list)
+    for i, arg in enumerate(args_list[:input_num]):
+        desc = arg[0] if isinstance(arg, (list, tuple)) else arg
+        if desc is None or all(dim >= 0 for dim in desc["shape"]):
+            continue
+        if input_shapes is None or len(input_shapes) != input_num:
+            raise ValueError("Static MatMul tiling requires specialized input shapes")
+        shape = list(input_shapes[i])
+        original_shape = desc["shape"]
+        # Lowering may pad leading singleton axes for batch/loop alignment.
+        padding = len(shape) - len(original_shape)
+        if padding > 0 and all(dim == 1 for dim in shape[:padding]):
+            shape = shape[padding:]
+        if len(shape) != len(original_shape) or any(
+            dim < 0 or (original >= 0 and original != dim)
+            for original, dim in zip(original_shape, shape)
+        ):
+            raise ValueError(
+                "Specialized MatMul input shape disagrees with its descriptor"
+            )
+        replacement = dict(desc, shape=tuple(shape), ori_shape=tuple(shape))
+        resolved[i] = (
+            [replacement, *arg[1:]] if isinstance(arg, (list, tuple)) else replacement
+        )
+    return resolved
+
+
+def _matmul_batch_shape(shape_a, shape_b):
+    rank = max(len(shape_a), len(shape_b)) - 2
+    batch_a = (1,) * (rank - len(shape_a) + 2) + tuple(shape_a[:-2])
+    batch_b = (1,) * (rank - len(shape_b) + 2) + tuple(shape_b[:-2])
+    batch = []
+    for a, b in zip(batch_a, batch_b):
+        if a == b or a == 1:
+            batch.append(b)
+        elif b == 1:
+            batch.append(a)
+        elif a < 0 or b < 0:
+            batch.append(-1)
+        else:
+            raise ValueError("MatMul input batch dimensions cannot broadcast")
+    return batch
+
+
 def _build_mm_args(args_list, input_num, mm_attr1, mm_attr2):
     _inputs_ = []
     _origin_inputs_ = []
@@ -1575,7 +1721,6 @@ def _build_mm_args(args_list, input_num, mm_attr1, mm_attr2):
         _inputs_[-1]["shape"] = shape
         _inputs_[-1]["ori_shape"] = shape
         if i == 0:
-            write_shape = list(shape)
             if mm_attr1["value"]:  # a矩阵是否有transpose
                 _m = shape[-1]
             else:
@@ -1589,10 +1734,11 @@ def _build_mm_args(args_list, input_num, mm_attr1, mm_attr2):
     msg = "Processing output " + ":" + str(args_list[-2])
     logger.info("CV fusion op, matmul output info: %s", msg)
     CommonUtility.print_compile_log("", msg, AscendCLogLevel.LOG_INFO)
-    _origin_outputs_.append(args_list[-2])
+    # Cube output batches follow both inputs, independently of epilogue broadcasts.
+    write_shape = _matmul_batch_shape(_inputs_[0]["shape"], _inputs_[1]["shape"])
+    write_shape.extend((_m, _n))
+    _origin_outputs_.append(dict(args_list[-2]))
     _origin_outputs_[-1]["param_name"] = "output0"
-    write_shape[-1] = _n
-    write_shape[-2] = _m
     _origin_outputs_[-1]["shape"] = tuple(write_shape)
     _origin_outputs_[-1]["dtype"] = _inputs_[-1]["dtype"]
     _origin_outputs_[-1]["ori_shape"] = tuple(write_shape)
@@ -1700,6 +1846,7 @@ def _process_tiling_info(
     )
     tiling_info.tiling_data = run_info["tiling_data"]
     tiling_info.tiling_key = run_info["tiling_key"]
+    tiling_info.static_workspace_size = sum(run_info["workspaces"])
     tiling_key_list[0] = tiling_info.tiling_key
     cube_block_dim = run_info["block_dim"]
     tiling_info.file_content = gen_static_shape_v2(
@@ -1788,7 +1935,14 @@ def _should_use_safety_fusion(
     """判断是否需要走safety兜底模式"""
     if tiling_key == -1:
         return True
-    if cube_tiling_key_ub != 1:
+    tensor_bfull_ub = (
+        cube_tiling_key_ub == 0x20002
+        and cube_info is not None
+        and len(cube_info) > 1
+        and cube_info[0] == 4
+        and not cube_info[1]
+    )
+    if cube_tiling_key_ub not in (1, 2, 0x20001) and not tensor_bfull_ub:
         return True
     return is_fp32_large_k_matmul(tiling_info, cube_info, enable_hf32)
 
@@ -1796,9 +1950,13 @@ def _should_use_safety_fusion(
 def _apply_safety_fusion(ctx):
     """safety兜底融合模式: 走common模板"""
     tiling_info = ctx.tiling_info
+    # Tensor API changes the API-level bits; the native strategy keeps its MIX requirements.
+    strategy_key = tiling_info.tiling_key
+    if strategy_key & 0xF == 2:
+        strategy_key -= 1
     is_in_mix_white_list = (
-        ctx.is_batch and tiling_info.tiling_key in CV_COMMON_BMM_MIX_WHITE_LIST
-    ) or (not ctx.is_batch and tiling_info.tiling_key in CV_COMMON_MIX_WHITE_LIST)
+        ctx.is_batch and strategy_key in CV_COMMON_BMM_MIX_WHITE_LIST
+    ) or (not ctx.is_batch and strategy_key in CV_COMMON_MIX_WHITE_LIST)
     if is_in_mix_white_list:
         tiling_info.file_content += "\n#define CV_SAFETY_FUSION_MIX_MODE 1\n"
     logger.info(
@@ -1809,27 +1967,36 @@ def _apply_safety_fusion(ctx):
     )
     tiling_info.file_content += "\n#define CV_SAFETY_FUSION 1\n"
     ctx.use_cv_common[0] = True
-    vec_block_dim, wss = static_shape_cv_common_compile(
-        **ctx.compile_kwargs, cross_info=ctx.cross_info
+    vec_block_dim, wss, is_aiv_only, use_launch_aic_num = (
+        static_shape_cv_common_compile(
+            **ctx.compile_kwargs,
+            cross_info=ctx.cross_info,
+            cube_tiling_key=tiling_info.tiling_key,
+        )
     )
+    if is_aiv_only:
+        tiling_info.file_content += "\n#define CV_SAFETY_FUSION_AIV_ONLY 1\n"
+        new_block_dim = max(ctx.cube_block_dim, vec_block_dim)
+    else:
+        new_block_dim = (
+            (vec_block_dim + 1) // 2
+            if ctx.cube_block_dim * 2 < vec_block_dim
+            else ctx.cube_block_dim
+        )
+    cv_aic_num = new_block_dim if use_launch_aic_num else ctx.cube_block_dim
     logger.info(
         "CV fusion op, CV_AIC_NUM=[%s] CV_AIV_NUM=[%s] CV_VEC_WSS=[%s]",
-        str(ctx.cube_block_dim),
+        str(cv_aic_num),
         str(vec_block_dim),
         str(wss),
     )
     for name, value in [
-        ("CV_AIC_NUM", ctx.cube_block_dim),
+        ("CV_AIC_NUM", cv_aic_num),
         ("CV_AIV_NUM", vec_block_dim),
         ("CV_VEC_WSS", wss),
     ]:
         if value >= 0:
             tiling_info.file_content += f"\n#define {name} {value}\n"
-    new_block_dim = (
-        (vec_block_dim + 1) // 2
-        if ctx.cube_block_dim * 2 < vec_block_dim
-        else ctx.cube_block_dim
-    )
     return f"#define CUBE_BLOCK_DIM {new_block_dim}\n"
 
 
@@ -1867,7 +2034,8 @@ def template_decider(
         target_machine=compile_context.target_machine,
     )
     tiling_key = static_shape_cv_compile(**compile_kwargs, cross_info=cross_info)
-    host_tiling_content = f"#define CUBE_TILING_KEY {tiling_key}\n"
+    # Host dispatch must use the native Cube kernel entry key.
+    host_tiling_content = f"#define CUBE_TILING_KEY {tiling_info.tiling_key}\n"
     logger.info("CV fusion op, get vector tilingkey(%s)", tiling_key)
     use_cv_common = use_cv_common or [False]
     cube_tiling_key_ub = tiling_info.tiling_key & ~0xF0
@@ -1981,6 +2149,7 @@ def create_matmul_tiling_data(
     # 生成host端tiling数据
     host_tiling_data = f"""
 #include "arch35/mat_mul_tiling_data.h"
+#define CUBE_WORKSPACE_SIZE {tiling_info.static_workspace_size}ULL
 const int32_t cube_output_type_size = {cube_output_type_size};
 GET_TILING_DATA_PTR_WITH_STRUCT({struct_name}, tmpTilingData, tmpTilingGM);
 """
@@ -2022,15 +2191,45 @@ def create_matmul_dynamic_tiling_data(temp_dir, cube_info):
         use_cv_common[0] if isinstance(use_cv_common, list) else bool(use_cv_common)
     )
     # 生成host端tiling数据
-    struct_name = (
-        "BatchMatMulV3BasicTilingData" if is_batch else "MatMulV3BasicTilingData"
+    # The runtime key may select a different native template on each shape.
+    # Preserve the complete tiling payload, including Common fallbacks.
+    tiling_types = (
+        (
+            "BatchMatMulV3BasicTilingData",
+            "BatchMatMulV3TilingData",
+            "BatchMatMulV3IterBatchBasicTilingData",
+            "BatchMatMulV3MergeBatchBasicTilingData",
+            "BatchMatMulToMulBasicTilingData",
+            "MatMulV3KEqZeroBasicTilingData",
+        )
+        if is_batch
+        else (
+            "MatMulV3BasicTilingData",
+            "MatMulV3TilingDataCopy",
+            "MatMulV3TilingData",
+            "MatMulToMulBasicTilingData",
+            "MatMulV3KEqZeroBasicTilingData",
+        )
     )
+    capacity = f"sizeof({tiling_types[0]})"
+    for tiling_type in tiling_types[1:]:
+        capacity = f"CV_DYNAMIC_TILING_MAX_SIZE({capacity}, sizeof({tiling_type}))"
+    tiling_storage = f"uint8_t matmul_tiling_data[{capacity}];"
+    storage_macros = (
+        "#define CV_DYNAMIC_TILING_MAX_SIZE(lhs, rhs) ((lhs) > (rhs) ? (lhs) : (rhs))\n"
+    )
+    # Both views share the vector prefix. Device dispatch need not copy the native MM payload.
+    vector_tiling_fields = """    AutofuseTilingData tiling_data;
+    CVTilingData cv_tiling_data;
+    uint32_t stage_size_name;
+    uint32_t cube_ub_stage_size;
+    uint32_t cube_m_stage_size;"""
     head_tiling_data = f"""
 #ifndef DYNAMIC_MM_TILING_DATA
 #define DYNAMIC_MM_TILING_DATA
 #include "arch35/mat_mul_tiling_data.h"
 #include "autofuse_tiling_data.h"
-struct CVTilingData {{
+{storage_macros}struct CVTilingData {{
     uint32_t fusion_mode; // 0:ub; 1:safety
     uint32_t ub_mode; // 0:no db; 1:db
     uint32_t cv_aic_num;
@@ -2038,11 +2237,15 @@ struct CVTilingData {{
     uint32_t cv_vec_wss;
     uint32_t mix_mode;
 }};
-struct CVAutofuseTilingData {{
-    AutofuseTilingData tiling_data;
-    CVTilingData  cv_tiling_data;
-    {struct_name} matmul_tiling_data;
+struct alignas(8) CVVectorTilingData {{
+{vector_tiling_fields}
 }};
+struct CVAutofuseTilingData {{
+{vector_tiling_fields}
+    alignas(8) {tiling_storage}
+}};
+static_assert(sizeof(CVVectorTilingData) == __builtin_offsetof(CVAutofuseTilingData, matmul_tiling_data),
+              "CV vector prefix must preserve the native tiling offset");
 """
 
     # 写入host端文件
@@ -2403,7 +2606,6 @@ def ascbc_matmul_kernel_tiling_pro(
         "dtype": "bool",
         "value": cube_attributes.get("transpose_x2", False),
     }
-    mm_attr3 = {"name": "offset_x", "dtype": "int", "value": 0x80}
     if is_batch:
         mm_attr4 = {
             "name": "enable_hf32",
@@ -2418,6 +2620,14 @@ def ascbc_matmul_kernel_tiling_pro(
         }
 
     mm_input_num = cube_attributes.get("input_num", 0)
+    mm_attr3 = {
+        "name": "offset_x",
+        "dtype": "int",
+        "value": cube_attributes.get("offset_x", 0),
+    }
+    args_list = _resolve_static_mm_args(
+        args_list, mm_input_num, cube_attributes.get("input_shapes")
+    )
     _origin_inputs_, _origin_outputs_, _inputs_ = _build_mm_args(
         args_list, input_num=mm_input_num, mm_attr1=mm_attr1, mm_attr2=mm_attr2
     )
@@ -2564,6 +2774,7 @@ def asc_graph_compile_post(
 
     # 重新编译host so
     timestamp_set(True, graph_name, "CompileSecondHost")
+    slim_delivery = not is_cube
     ascbc_host_compile(
         HostCompileContext(
             graph_name, kernel_name, host_build_dir, True, static_compile_flag, is_cube
@@ -2571,6 +2782,7 @@ def asc_graph_compile_post(
         cross_info=CrossCompileInfo(
             is_cross_compile_flag, cross_compiler_prefix, target_machine
         ),
+        slim_export=slim_delivery,
     )
     if is_cross_compile_flag:
         compile_native_host_so(
@@ -2585,10 +2797,11 @@ def asc_graph_compile_post(
         )
     timestamp_set(False, graph_name, "CompileSecondHost", True)
 
-    # 拷贝so和json
     host_so = os.path.join(host_build_dir, f"lib{kernel_name}.so")
     kernel_meta_dir = get_current_build_config("kernel_meta_parent_dir")
     dest = os.path.join(kernel_meta_dir, "kernel_meta")
+    if slim_delivery:
+        strip_slim_so(host_so, cross_compiler_prefix)
     shutil.copy(host_so, dest)
     if is_cross_compile_flag:
         native_host_so = os.path.join(
@@ -2858,18 +3071,12 @@ def asc_codegen_compile(*args, **kwargs):
         log_core_limit_info(codegen_context)
 
         # 设置 platform 到 context
-        npu_arch = get_soc_spec("NpuArch")
-        if npu_arch:
-            ascir.utils.set_platform(
-                npu_arch,
-                codegen_context.static_compile_vector_core_num,
-                int(get_soc_spec("ub_size")),
-            )
-            CommonUtility.print_compile_log(
-                "",
-                f"Set platform from get_soc_spec: {npu_arch}",
-                AscendCLogLevel.LOG_DEBUG,
-            )
+        npu_arch = _set_platform_from_compile_target(codegen_context)
+        CommonUtility.print_compile_log(
+            "",
+            f"Set platform from get_soc_spec: {npu_arch}",
+            AscendCLogLevel.LOG_DEBUG,
+        )
 
         CommonUtility.print_compile_log(
             "",

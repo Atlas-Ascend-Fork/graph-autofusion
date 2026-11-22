@@ -188,3 +188,18 @@ TEST_F(TestBackendInductorTopnSplitCompile, SplitCompileChainWorks) {
 
   CompileAndVerifyKernels(tiling_def, device_code, tiling_repr);
 }
+
+TEST_F(TestBackendInductorTopnSplitCompile, EmptyTensorFallbackHostCompilesWithWerror) {
+  const std::string tiling_def = ReadFile(EMPTY_TILING_DEF_FILE);
+  const std::string host_code = ReadFile(EMPTY_HOST_CODE_FILE);
+  ASSERT_FALSE(tiling_def.empty());
+  ASSERT_FALSE(host_code.empty());
+  EXPECT_EQ(host_code.find("TemplateSemanticInfo"), std::string::npos);
+  EXPECT_EQ(host_code.find("GetTemplateSemanticInfos"), std::string::npos);
+  EXPECT_EQ(host_code.find("GetTilingCore(default_tiling, -1)"), std::string::npos);
+  EXPECT_EQ(host_code.find("EmitFinalTilingByCase"), std::string::npos);
+  EXPECT_EQ(host_code.find("ShouldEmitFinalTiling()"), std::string::npos);
+  const std::string host_bin = OUTPUT_DIR "/inductor_topn_empty_host.so";
+  ASSERT_EQ(RunHostCompile(tiling_def, host_code, host_bin), 0);
+  ASSERT_TRUE(FileExists(host_bin)) << "empty-tensor host so not found: " << host_bin;
+}

@@ -26,6 +26,7 @@ add_library(test_regbase_ascendc OBJECT
     ./test_reduce_init.cpp
     ./test_reduce_extend.cpp
     ./test_argmax.cpp
+    ./test_argmin.cpp
     ./test_add.cpp
     ./test_airy_ai.cpp
     ./test_bitwise_and.cpp
@@ -33,6 +34,7 @@ add_library(test_regbase_ascendc OBJECT
     ./test_bitwise_or.cpp
     ./test_bitwise_xor.cpp
     ./test_rshift.cpp
+    ./test_shift.cpp
     ./test_sin.cpp
     ./test_pow.cpp
     ./test_reciprocal.cpp
@@ -98,6 +100,7 @@ add_library(test_regbase_ascendc OBJECT
     ./test_hypot.cpp
     ./test_softmax.cpp
     ./test_randn.cpp
+    ./test_rand_seed_offset.cpp
     )
 target_link_libraries(test_regbase_ascendc
     ascendc_api_regbase_extend

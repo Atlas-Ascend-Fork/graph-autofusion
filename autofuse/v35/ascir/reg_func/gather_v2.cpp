@@ -61,6 +61,11 @@ Expression CalOneAxisTempSize(Expression param_size, Expression index_size, Expr
   if (SymbolicUtils::StaticCheckGt(judge_tmp, critical_point) == TriBool::kTrue) {
     TempSize = sym::Add(sym::Mul(sym::Mul(sym::Div(param_div, Symbol(TEN)), param_type_size), param_size),
                         sym::Mul(indices_add, Symbol(ONE_UNIT)));
+    // The heuristic can reserve less than the params payload for 8-byte values.
+    // Use the existing SIMT path instead of reserving an unusable full-load buffer.
+    if (SymbolicUtils::StaticCheckLt(TempSize, param_tmp + Symbol(EXTRA_REDUNDANCY)) == TriBool::kTrue) {
+      return Symbol(MIN_TEMP_SIZE);
+    }
   }
   return TempSize;
 }

@@ -13,6 +13,7 @@
 #include "ascir_ops.h"
 #include "common/platform_context.h"
 #include "common_utils.h"
+#include "arg_reduce_utils.h"
 #include "indirect_load_utils.h"
 
 namespace codegen {
@@ -115,6 +116,12 @@ bool CollectInputDtypes(const ascir::NodeView &node, std::vector<ge::DataType> &
         GE_ASSERT_TRUE(ProcessDynamicInput(node, index, count, input_dtypes), "ProcessDynamicInput failed, node = %s",
                        node->GetNamePtr());
         break;
+      case af::IrInputType::kIrInputOptional:
+        if (count != 0U) {
+          GE_ASSERT_TRUE(ProcessRequiredInput(node, index, count, input_dtypes),
+                         "ProcessRequiredInput failed, node = %s", node->GetNamePtr());
+        }
+        break;
       default:
         GELOGE(af::FAILED, "%s %s unsupported input type %ld at ir index %zu", op_desc->GetNamePtr(),
                op_desc->GetTypePtr(), static_cast<int64_t>(ir_input_type), ir_input_index);
@@ -132,8 +139,8 @@ bool CollectOutputDtypes(const ascir::NodeView &node, std::vector<ge::DataType> 
     return true;
   }
 
-  // ArgMaxMultiRPhase1有两个输出（value和index），dtype不同，直接收集所有输出
-  if (node->GetType() == "ArgMaxMultiRPhase1" || node->GetType() == af::ascir_op::Frexp::Type) {
+  // ArgMaxMultiRPhase1/ArgmaxWithValue/ArgMaxMultiRPhase2WithValue有两个输出（value和index），dtype不同，直接收集所有输出
+  if (ascgen_utils::HasArgReduceValueOutput(node->GetType()) || node->GetType() == af::ascir_op::Frexp::Type) {
     for (auto output : node->outputs()) {
       if (output->attr.dtype == ge::DT_UNDEFINED) {
         return true;

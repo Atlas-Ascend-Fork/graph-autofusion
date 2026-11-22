@@ -48,10 +48,14 @@ af::ExecuteCondition NodeCacheMarker::DoesNodeNeedCache(const std::vector<int64_
                                                         const std::vector<int64_t> &out_axis,
                                                         const std::vector<af::Expression> &in_repeats,
                                                         const std::vector<af::Expression> &out_repeats) const {
-  GE_ASSERT_EQ(in_axis.size(), out_axis.size());
-  GE_ASSERT_EQ(in_repeats.size(), out_repeats.size());
-  GE_ASSERT_EQ(in_axis.size(), in_repeats.size());
-  GE_ASSERT_TRUE(!out_axis.empty());
+  if (in_axis.size() != out_axis.size() || in_repeats.size() != out_repeats.size() ||
+      in_axis.size() != in_repeats.size() || out_axis.empty()) {
+    GELOGD(
+        "NodeCacheMarker skips cache analysis: in/out views are not positionally comparable (in rank %zu, out rank "
+        "%zu).",
+        in_axis.size(), out_axis.size());
+    return af::ExecuteCondition::kNoCache;
+  }
 
   // 构造 <轴id，是否广播轴> Map
   std::map<int64_t, bool> axis_id_brc_map;

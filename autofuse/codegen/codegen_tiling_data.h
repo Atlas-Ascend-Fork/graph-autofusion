@@ -11,6 +11,7 @@
 #ifndef __CODEGEN_TILING_DATA_H__
 #define __CODEGEN_TILING_DATA_H__
 
+#include <set>
 #include <string>
 
 #include "ascir.h"
@@ -35,7 +36,6 @@ class TilingData {
   static std::string transposeApiTilingData;
   static std::string macros_and_includes;
 
-  static std::string common_tiling_filed;
   static std::string pgo_perf_struct;
 
   std::string ClassBegin(const std::string &begin_kernel_name, const std::string &begin_class_name) const;
@@ -44,10 +44,11 @@ class TilingData {
   std::string StructDataFiledDefine(const std::string &type_name, const std::string &filed_name) const;
   std::string ClassEnd() const;
   std::string ClassRegister();
-  void ProcessSingleGroup(const ascir::ScheduleGroup &schedule_group, std::stringstream &ss);
-  void ProcessMultiGroup(uint64_t pos, const int graph_id, const std::vector<ascir::ScheduleGroup> &schedule_groups,
-                         std::stringstream &ss1, std::stringstream &ss2);
-  void AddApiTilingData(const af::AscGraph &graph, std::stringstream &ss, uint32_t tiling_case_id);
+  af::Status ProcessSingleGroup(const ascir::ScheduleGroup &schedule_group, std::stringstream &ss);
+  af::Status ProcessMultiGroup(uint64_t pos, const int graph_id,
+                               const std::vector<ascir::ScheduleGroup> &schedule_groups, std::stringstream &ss1,
+                               std::stringstream &ss2);
+  af::Status AddApiTilingData(const af::AscGraph &graph, std::stringstream &ss, uint32_t tiling_case_id);
 
  private:
   std::string ConstApiTilingDataFiledDefine(std::string &type_name, std::string &field_name,
@@ -68,6 +69,8 @@ class TilingData {
 
   std::string GenTilingDataFieldConstDefFunc(std::string &dtype, std::string &filed_name);
   std::string GetCommonTilingField(bool is_group, const ascir::FusedScheduledResult &fused_schedule_result);
+  std::string GenConstCommonTilingField(const std::vector<std::string> &tiling_key_fileds,
+                                        const std::vector<ascir::TensorId> &workspace_tensor_id);
 
   std::string TqueOrTbufDataFieldDefine(int64_t index, const std::string &que_or_buf) const;
   std::string TqueOrTbufDataFieldConstDefine(int64_t index, const std::string &que_or_buf);
@@ -85,6 +88,9 @@ class TilingData {
   std::vector<std::string> field_var_defs_;
 
   bool const_mode_ = false;  // const模式下生成字段都为const的，且有初值
+  // 前端动态 shape 符号（GetFrontendShapeVars + !IsConstExpr）。命中该集合的字段宽 int64_t，
+  // 与 host AutofuseTiling 的 int64 形参保持一致。
+  std::set<std::string> dynamic_size_var_names_;
 };
 };  // namespace codegen
 

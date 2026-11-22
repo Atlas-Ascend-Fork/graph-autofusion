@@ -9,6 +9,7 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # ----------------------------------------------------------------------------
+import hashlib
 import os
 import tempfile
 import argparse
@@ -62,6 +63,19 @@ CANN_ROOT_ENV_NAMES = ("ASCEND_TOOLKIT_HOME", "ASCEND_HOME_PATH", "ASCEND_HOME")
 # 当 host 拆分后的 cpp 段数量达到该阈值时，保留多文件拆分并并发编译，
 # 否则合并为单个 cpp 文件串行编译（默认路径）。
 HOST_SPLIT_COMPILE_THRESHOLD = 10
+# 常见文件系统（ext4/xfs/overlayfs）单个文件名（路径分量）上限为 255 字节。
+# autofuse 会把 kernel 名直接当作源文件名前缀（如 {graph_name}_tiling_func_{key}.cpp），
+# 融合算子较多的场景下 kernel 名本身就可能超过 200 字节，拼上后缀后触发
+# OSError: [Errno 36] File name too long，因此在拼文件名之前先裁剪 kernel 名。
+FILE_NAME_MAX_BYTES = 255
+# 裁剪 kernel 名中的算子名段时插入的标记，避免裁剪后的名字被误认为完整算子名。
+KERNEL_NAME_TRUNCATE_MARKER = "cut"
+# kernel 名末尾的 32 位哈希（torchair 生成，用于区分同前缀的不同 kernel），裁剪时保留。
+_KERNEL_HASH_SUFFIX_RE = re.compile(r"_[0-9a-fA-F]{32}$")
+# rtLaunch 双 bin 的 AIV 编译单元源文件名后缀，与 codegen split marker key 约定一致。
+DEVICE_AIV_FILE_SUFFIX = "_op_kernel_aiv.cpp"
+# 编译产物对象文件名在源文件名后追加 ".o"，裁剪源文件名时需一并预留。
+OBJECT_FILE_SUFFIX = ".o"
 
 
 def str2bool(v):
@@ -138,7 +152,14 @@ def parse_compile_args(argv):
     parser.add_argument("--tiling_source_paths", default="", type=str)
     parser.add_argument("--kernel_obj_path", default="", type=str)
     parser.add_argument("--kernel_source_path", default="", type=str)
+    parser.add_argument(
+        "--kernel_obj_path_aiv",
+        default="",
+        type=str,
+        help="AIV dispatch-entry device object (rtLaunch dual-bin CV).",
+    )
     parser.add_argument("--shared_cv_wrapper_so", default="", type=str)
+    parser.add_argument("--const_tiling_baked", default=False, type=str2bool)
     # 使用 parse_known_args 容忍上层透传的未声明参数，避免触发 SystemExit 终止编译。
     args, unknown = parser.parse_known_args(argv)
     if unknown:
@@ -151,6 +172,84 @@ def generate_file(dst_dir, file_name, text):
     file_path = os.path.join(dst_dir, file_name)
     with open(file_path, "w") as file:
         file.write(text)
+
+
+def split_kernel_name(graph_name):
+    """把 kernel 名拆成 (保留前缀, 算子名段, 哈希段) 三部分。
+
+    torchair 生成的融合 kernel 名为 ``autofused_<op1>_<op2>_..._<md5>``：
+    前缀 ``autofused_`` 和末尾哈希都不能裁，只有中间的算子名段可以按需删除。
+    非该形式的 graph_name 也按同样思路处理：能识别出末尾 32 位哈希就保留，
+    识别不到时用原名的短摘要作为哈希段，避免不同长名裁剪后塌缩为同名。
+    """
+    if graph_name.startswith("autofused_"):
+        prefix = "autofused_"
+        prefix_len = len(prefix)
+        body = graph_name[prefix_len:]
+    else:
+        prefix = ""
+        body = graph_name
+    match = _KERNEL_HASH_SUFFIX_RE.search(body)
+    if match is not None:
+        match_start = match.start()
+        return prefix, body[:match_start], match.group(0)
+    digest = "_" + hashlib.sha256(graph_name.encode("utf-8")).hexdigest()[:8]
+    return prefix, body, digest
+
+
+def fit_kernel_name_for_file_name(
+    graph_name, file_name_suffix, max_bytes=FILE_NAME_MAX_BYTES
+):
+    """在拼文件名之前裁剪 kernel 名，保证 ``kernel 名 + 后缀 + .o`` 不超过字节上限。
+
+    裁剪规则：
+    - 保留 ``autofused_`` 前缀与末尾哈希段（哈希保证文件名仍然唯一）；
+    - 只整段删除中间的算子名段，不会切出半个算子名；
+    - 截断位置插入 ``_cut`` 标记；
+    - 为下游对象文件名追加的 ``.o`` 预留空间，避免源文件合规但 ``.o`` 仍超限。
+
+    名字本身没有超限时原样返回，行为与裁剪前完全一致。
+    """
+    allowed = (
+        max_bytes - len(file_name_suffix.encode()) - len(OBJECT_FILE_SUFFIX.encode())
+    )
+    if len(graph_name.encode()) <= allowed:
+        return graph_name
+
+    prefix, op_part, hash_part = split_kernel_name(graph_name)
+    marker = "_" + KERNEL_NAME_TRUNCATE_MARKER
+    budget = (
+        allowed - len(prefix.encode()) - len(marker.encode()) - len(hash_part.encode())
+    )
+    budget = max(budget, 0)
+
+    kept = []
+    used = 0
+    for op_name in op_part.split("_"):
+        if not op_name:
+            continue
+        cost = len(op_name.encode()) + (1 if kept else 0)
+        if used + cost > budget:
+            break
+        kept.append(op_name)
+        used += cost
+
+    body = "_".join(kept)
+    if not body:
+        # 连第一个算子名都放不下：退化为 <前缀>_cut_<哈希>；后缀极端长时再按预算硬裁。
+        fitted = f"{prefix.rstrip('_')}{marker}{hash_part}"
+        if len(fitted.encode()) > allowed:
+            fitted = fitted.encode()[: max(allowed, 0)].decode("utf-8", "ignore")
+        return fitted
+    return f"{prefix}{body}{marker}{hash_part}"
+
+
+def fitted_device_aiv_file_name(graph_name):
+    """rtLaunch AIV 编译单元源文件名：与主 device 源同源裁剪，后缀更长需单独预留空间。"""
+    return (
+        fit_kernel_name_for_file_name(graph_name, DEVICE_AIV_FILE_SUFFIX)
+        + DEVICE_AIV_FILE_SUFFIX
+    )
 
 
 def has_split_host_marker(host_impl_code):
@@ -271,10 +370,19 @@ def write_split_source_files(
         generate_file(host_file_path, SPLIT_HEADER_FILES[key], content)
     source_files = {}
     is_split_format = is_versioned_split_format(headers)
-    for key, cpp_content in cpp_sources:
-        if key in excluded_keys:
-            continue
-        file_name = f"{graph_name}_tiling_func_{key}.cpp"
+    writable_sources = [
+        (key, cpp_content)
+        for key, cpp_content in cpp_sources
+        if key not in excluded_keys
+    ]
+    # 同一 kernel 的所有拆分文件共用一个裁剪后的名字前缀：按最长的一段算预算，
+    # 保证每个文件的文件名都在上限内，且裁剪次数最少（只在真正需要时才裁）。
+    longest_key = max((key for key, _ in writable_sources), key=len, default="")
+    file_graph_name = fit_kernel_name_for_file_name(
+        graph_name, f"_tiling_func_{longest_key}.cpp"
+    )
+    for key, cpp_content in writable_sources:
+        file_name = f"{file_graph_name}_tiling_func_{key}.cpp"
         content = (
             cpp_content if is_split_format else add_split_header_include(cpp_content)
         )
@@ -320,7 +428,9 @@ def write_inductor_pgo_sources(host_dir, device_dir, graph_name, host_impl_code)
         {SPLIT_PGO_DEVICE_SOURCE_KEY},
     )
     runner_file = source_files.pop(SPLIT_PGO_RUNNER_KEY)
-    device_name = f"{graph_name}_pgo_device.cpp"
+    device_name = (
+        fit_kernel_name_for_file_name(graph_name, "_pgo_device.cpp") + "_pgo_device.cpp"
+    )
     generate_file(device_dir, device_name, device_content)
     return (
         list(source_files.values()),
@@ -451,11 +561,15 @@ def get_pgo_env_flag():
     return result.get("autofuse_enable_pgo", "false").lower() == "true"
 
 
-def prepare_compile_context(argv, stage, tiling_repr, bin_mode=False):
+def prepare_compile_context(
+    argv, stage, tiling_repr, bin_mode=False, bin_file_mode=False
+):
     args = parse_compile_args(argv)
     args.stage = stage
     args.tiling_repr = tiling_repr
     args.bin_mode = bin_mode
+    args.bin_file_mode = bin_file_mode
+    args.device_files_aiv = None
     get_pgo_cache_root = getattr(ascendc_compile, "get_pgo_cache_root", None)
     args.pgo_cache_root = (
         get_pgo_cache_root(args.output_file)
@@ -505,17 +619,87 @@ def write_compile_host_sources(sources, args, tiling_def_file, base_host_file):
     )
 
 
+def split_device_sources(kernel_impl_code):
+    """拆分 device 源中 split marker 标记的并列编译单元（rtLaunch 分派入口）。
+
+    与 host 侧 split marker 的差异：device 主内容在 marker 段之外（主编译单元 =
+    公共部分 + MIX 入口），marker 段内为 AIV 编译单元（同一份公共部分 + AIV 入口，
+    独立 bisheng 编译保证 .aicore_binary 内核型单一）。
+    """
+    main_lines = []
+    split_files = {}
+    current_key = None
+    current_lines = []
+    for line in kernel_impl_code.splitlines(keepends=True):
+        begin_key = parse_split_marker(line, SPLIT_BEGIN_PREFIX)
+        end_key = parse_split_marker(line, SPLIT_END_PREFIX)
+        if begin_key is not None:
+            if current_key is not None:
+                raise ascendc_compile.CompileError(
+                    f"split device source marker is nested: {begin_key}"
+                )
+            current_key = begin_key
+            current_lines = []
+            continue
+        if end_key is not None:
+            if current_key is None or current_key != end_key:
+                raise ascendc_compile.CompileError(
+                    f"split device source marker mismatch: {end_key}"
+                )
+            split_files[current_key] = "".join(current_lines)
+            current_key = None
+            current_lines = []
+            continue
+        if current_key is None:
+            main_lines.append(line)
+        else:
+            current_lines.append(line)
+    if current_key is not None:
+        raise ascendc_compile.CompileError(
+            f"split device source marker is not closed: {current_key}"
+        )
+    return "".join(main_lines), split_files
+
+
 def write_compile_device_sources(sources, args, tiling_def_file, base_device_file):
     device_file_path = os.path.join(args.temp_dir, "device")
     generate_file(device_file_path, tiling_def_file, sources[SOURCES_TILING_STRUCT])
-    generate_file(device_file_path, base_device_file, sources[SOURCES_KERNEL_IMPL])
+    main_code, split_files = split_device_sources(sources[SOURCES_KERNEL_IMPL])
+    generate_file(device_file_path, base_device_file, main_code)
     args.device_files = os.path.join(device_file_path, base_device_file)
+    # rtLaunch 双 bin：AIV 编译单元与主单元并列落盘。AIV 后缀比主文件名更长，
+    # 需单独按该后缀裁剪，否则超长 kernel 名在此仍会触发 File name too long。
+    aiv_file_name = fitted_device_aiv_file_name(args.graph_name)
+    args.device_files_aiv = None
+    for split_name, content in split_files.items():
+        file_name = (
+            aiv_file_name if split_name.endswith(DEVICE_AIV_FILE_SUFFIX) else split_name
+        )
+        generate_file(device_file_path, file_name, content)
+        args.device_files_aiv = os.path.join(device_file_path, file_name)
+    if not split_files and base_device_file.endswith(".cpp"):
+        # 无 split marker（开关 off / 非 CV）时清理残留的 stale AIV 编译单元源，
+        # 避免复用 temp_dir 时旧 AIV 源被误编进双 bin 链路。
+        stale_aiv = os.path.join(device_file_path, aiv_file_name)
+        if os.path.exists(stale_aiv):
+            os.remove(stale_aiv)
 
 
 def execute_compile(sources, args):
     tiling_def_file = "autofuse_tiling_data.h"
-    base_host_file = args.graph_name + "_tiling_func.cpp"
-    base_device_file = args.graph_name + "_op_kernel.cpp"
+    base_host_file = (
+        fit_kernel_name_for_file_name(args.graph_name, "_tiling_func.cpp")
+        + "_tiling_func.cpp"
+    )
+    # AIV 后缀比主 device 源更长，主/AIV 共用同一裁剪前缀，保证
+    # ascendc_compile.find_aiv_device_source 按「主源名 + _aiv」反推仍能命中。
+    device_graph_name = fit_kernel_name_for_file_name(
+        args.graph_name, DEVICE_AIV_FILE_SUFFIX
+    )
+    base_device_file = device_graph_name + "_op_kernel.cpp"
+    # 供 is_cv_fusion_compile 判定：link 阶段不重写源文件（host_files/device_files
+    # 未设置），tiling 定义内容是跨阶段最可靠的 CV 判定源。
+    args.tiling_def_content = sources.get(SOURCES_TILING_STRUCT) or ""
     if args.stage in ["all", "host", "host_obj"]:
         with InductorCompileDuration(
             args.trace_stage, "WriteHostSource", args.graph_name
@@ -554,7 +738,9 @@ def _compile_result(args, result):
             "version": 1,
             "stage": args.stage,
             "kernel_obj_path": result["kernel_obj_path"],
+            "kernel_obj_path_aiv": result.get("kernel_obj_path_aiv"),
             "kernel_source_path": result["kernel_source_path"],
+            "baked": result.get("baked", False),
         }
     return result
 
@@ -566,13 +752,14 @@ def compile_core(
     tiling_repr=None,
     trace_stage=None,
     bin_mode=False,
+    bin_file_mode=False,
 ):
     args = None
     total_start = time.time_ns()
     try:
         prepare_start = time.time_ns()
         args, temp_dir_ctx, auto_cleanup = prepare_compile_context(
-            argv, stage, tiling_repr, bin_mode
+            argv, stage, tiling_repr, bin_mode, bin_file_mode
         )
         args.trace_stage = trace_stage if trace_stage is not None else stage
         prepare_end = time.time_ns()
@@ -631,6 +818,24 @@ def jit_compile_bin(tiling_def, host_tiling, op_kernel, argv: List[str]):
     )
 
 
+def jit_compile_v2(tiling_def, host_tiling, op_kernel, argv: List[str]):
+    """jit 编译的 rtLaunch「外置 bin 文件」接口（v2）：直接产 bin，不生成 GetKernelBin。
+
+    链接阶段抽出 device .o 的 .aicore_binary 发布为 output_file 同目录固定名 bin 文件，
+    host tiling objs 仍链成 kernel.so（仅导出 AutofuseTiling）。
+    """
+    return compile_core(
+        {
+            SOURCES_TILING_STRUCT: tiling_def,
+            SOURCES_HOST_IMPL: host_tiling,
+            SOURCES_KERNEL_IMPL: op_kernel,
+        },
+        argv,
+        trace_stage="jit_compile_v2",
+        bin_file_mode=True,
+    )
+
+
 def host_compile(tiling_def_code, tiling_impl_code, argv: List[str]):
     return compile_core(
         {
@@ -679,6 +884,28 @@ def kernel_compile_bin(
         tiling_repr,
         trace_stage="kernel_compile_bin",
         bin_mode=True,
+    )
+
+
+def kernel_compile_v2(
+    tiling_def_code, kernel_impl_code, argv: List[str], *, tiling_repr=None
+):
+    """静态 shape（TopN）kernel 编译的 rtLaunch「外置 bin 文件」接口（v2）。
+
+    无 host tiling，tiling 已由 ``tiling_repr`` 固化进 device 代码；只把 .aicore_binary
+    发布到 output_file（即 bin 路径），不产 .so。
+    """
+    return compile_core(
+        {
+            SOURCES_TILING_STRUCT: tiling_def_code,
+            SOURCES_HOST_IMPL: None,
+            SOURCES_KERNEL_IMPL: kernel_impl_code,
+        },
+        argv,
+        "device",
+        tiling_repr,
+        trace_stage="kernel_compile_v2",
+        bin_file_mode=True,
     )
 
 
@@ -746,6 +973,26 @@ def build_kernel_so_bin(tiling_def_code, argv: List[str], *, tiling_repr=None):
         tiling_repr,
         trace_stage="build_kernel_so_bin",
         bin_mode=True,
+    )
+
+
+def build_kernel_so_v2(tiling_def_code, argv: List[str], *, tiling_repr=None):
+    """链接 host.o（仅 tiling），产出导出 AutofuseTiling 的 kernel.so，并把 device .o
+    的 .aicore_binary 发布为 output_file 同目录固定名 bin 文件。
+
+    对应 ``build_kernel_so_bin`` 的 rtLaunch「外置 bin 文件」v2 接口。
+    """
+    return compile_core(
+        {
+            SOURCES_TILING_STRUCT: tiling_def_code,
+            SOURCES_HOST_IMPL: None,
+            SOURCES_KERNEL_IMPL: None,
+        },
+        argv,
+        "link",
+        tiling_repr,
+        trace_stage="build_kernel_so_v2",
+        bin_file_mode=True,
     )
 
 

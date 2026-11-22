@@ -26,8 +26,10 @@
 #include "platform/platform_factory.h"
 #include "util/mem_utils.h"
 #include "task_generator/cast_optimization_pass.h"
+#include "common_utils.h"
 
 namespace optimize {
+namespace semantic = ascgen_utils::template_semantic;
 namespace {
 constexpr uint32_t kMaxInputNum = 48U;
 constexpr size_t kTemplateSizeAll = 3UL;
@@ -234,9 +236,10 @@ std::vector<af::AscNodePtr> ConcatFusionCaseGenerator::FindConcatNodes(const asc
       concat_nodes.emplace_back(node);
     } else if (has_unsupported_op != nullptr && (!*has_unsupported_op)) {
       const auto asc_node = std::dynamic_pointer_cast<af::AscNode>(node);
-      if ((asc_node != nullptr) && (ScheduleUtils::IsTranspose(asc_node) || ScheduleUtils::IsReduce(asc_node))) {
+      if ((asc_node != nullptr) && (ScheduleUtils::IsTranspose(asc_node) || ScheduleUtils::IsReduce(asc_node) ||
+                                    af::ops::IsOps<af::ascir_op::IndirectLoad>(node))) {
         *has_unsupported_op = true;
-        GELOGI("graph contains Transpose/Reduce node %s", node->GetNamePtr());
+        GELOGI("graph contains unsupported node %s, type = %s", node->GetNamePtr(), node->GetTypePtr());
       }
     } else {
       // do nothing
@@ -284,6 +287,7 @@ Status ConcatFusionCaseGenerator::ConvertConcatToStores(ascir::HintGraph &owner_
   GE_CHK_STATUS_RET(RemoveUnusedNodes(concat_node, post_concat_nodes_), "RemoveUnusedNodes failed");
   GE_CHK_STATUS_RET(PassUtils::PruneGraph(owner_graph), "Prune graph failed");
   GE_ASSERT_GRAPH_SUCCESS(ScheduleUtils::TopologicalSorting(owner_graph));
+  GE_ASSERT_SUCCESS(ascgen_utils::SetTemplateSemanticNameForGraph(owner_graph, semantic::kConcatOffsetStore));
   ascir::utils::DumpGraph(owner_graph, "AfterConvertConcatToStore");
   return af::SUCCESS;
 }
@@ -317,6 +321,9 @@ Status ConcatFusionCaseGenerator::SplitConcats(ascir::HintGraph &owner_graph, co
   GE_CHK_STATUS_RET(RemoveUnusedNodes(concat_node, post_concat_nodes_), "RemoveUnusedNodes failed");
   GE_CHK_STATUS_RET(PassUtils::PruneGraph(owner_graph), "Prune graph failed");
   GE_ASSERT_GRAPH_SUCCESS(ScheduleUtils::TopologicalSorting(owner_graph));
+  if (split) {
+    GE_ASSERT_SUCCESS(ascgen_utils::SetTemplateSemanticNameForGraph(owner_graph, semantic::kConcatOffsetStore));
+  }
   ascir::utils::DumpGraph(owner_graph, "AfterSplitConcat");
   split = true;
   return af::SUCCESS;
@@ -573,17 +580,29 @@ Status ConcatFusionCaseGenerator::CloneNonConcatNodes(const af::Axis &new_axis, 
 
 Status ConcatFusionCaseGenerator::UpdateOffsetAttr(const af::AscNodePtr &dst_new_node, size_t index) {
   if (dst_new_node->GetType() == af::ascir_op::Store::Type) {
-    const auto offset = concat_dim_offsets_[index] * dst_new_node->outputs[0].attr.strides[concat_dim_];
+    if (dst_new_node->attr.ir_attr == nullptr) {
+      return af::SUCCESS;
+    }
     const auto ir_attr = dst_new_node->attr.ir_attr->DownCastTo<af::ascir_op::Store::AscStoreIrAttrDef>();
     GE_ASSERT_NOTNULL(ir_attr);
+    af::Expression original_offset = af::ops::Zero;
+    (void)ir_attr->GetOffset(original_offset);
+    const auto offset =
+        original_offset + concat_dim_offsets_[index] * dst_new_node->outputs[0].attr.strides[concat_dim_];
     GE_CHK_STATUS_RET(ir_attr->SetOffset(offset), "Failed to set offset to %s", dst_new_node->GetNamePtr());
-    GELOGI("Store node: %s added, offset = %s", dst_new_node->GetName().c_str(), offset.Serialize().get());
+    GELOGI("Store node: %s added, offset = %s", dst_new_node->GetName().c_str(), offset.Str().get());
   } else if (dst_new_node->GetType() == af::ascir_op::Load::Type) {
-    const auto offset = concat_dim_offsets_[index] * dst_new_node->outputs[0].attr.strides[concat_dim_];
+    if (dst_new_node->attr.ir_attr == nullptr) {
+      return af::SUCCESS;
+    }
     const auto ir_attr = dst_new_node->attr.ir_attr->DownCastTo<af::ascir_op::Load::AscLoadIrAttrDef>();
     GE_ASSERT_NOTNULL(ir_attr);
+    af::Expression original_offset = af::ops::Zero;
+    (void)ir_attr->GetOffset(original_offset);
+    const auto offset =
+        original_offset + concat_dim_offsets_[index] * dst_new_node->outputs[0].attr.strides[concat_dim_];
     GE_CHK_STATUS_RET(ir_attr->SetOffset(offset), "Failed to set offset to %s", dst_new_node->GetNamePtr());
-    GELOGI("Load node: %s added, offset = %s", dst_new_node->GetName().c_str(), offset.Serialize().get());
+    GELOGI("Load node: %s added, offset = %s", dst_new_node->GetName().c_str(), offset.Str().get());
   } else {
     // do nothing
   }

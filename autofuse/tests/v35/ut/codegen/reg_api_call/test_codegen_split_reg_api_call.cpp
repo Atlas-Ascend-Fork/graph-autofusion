@@ -150,6 +150,9 @@ TEST_F(SplitRegApiCallUTest, AllAligned) {
 
   std::string result;
   EXPECT_EQ(call.Generate(tpipe, vector<af::AxisId>{}, result), af::SUCCESS);
+  const auto api_param = CodegenApiParam::GetNodeApiParam(split);
+  ASSERT_NE(api_param, nullptr);
+  EXPECT_EQ(api_param->semantic_feature, "UB/AllAligned");
   EXPECT_EQ(result,
             "constexpr SplitTilingAllAligned<2> split_tiling {\n"
             "  .src_col_size = 48,\n"
@@ -188,7 +191,8 @@ TEST_F(SplitRegApiCallUTest, Unaligned_B8) {
   EXPECT_EQ(
       result,
       "const split::SplitTiling<2> split_tiling {\n  .num_rows = static_cast<uint32_t>(t->s0), \n  .num_src_cols = "
-      "(((16 + t->s2_1) * 3))/(1), \n  .num_dsts_cols = {((3 * t->s2_1))/(1), 48, }\n};\n__ubuf__ int8_t "
+      "static_cast<uint32_t>((((16 + t->s2_1) * 3))/(1)), \n  .num_dsts_cols = {static_cast<uint32_t>(((3 * "
+      "t->s2_1))/(1)), 48, }\n};\n__ubuf__ int8_t "
       "*split_dst_addrs[] { (__ubuf__ int8_t *)local_2.GetPhyAddr(), (__ubuf__ int8_t *)local_3.GetPhyAddr(), "
       "};\nsplit::SplitExtend<int8_t, 2>((__ubuf__ int8_t *)local_0.GetPhyAddr(), split_dst_addrs, tmp_buf_0, "
       "split_tiling);\n");
@@ -222,7 +226,8 @@ TEST_F(SplitRegApiCallUTest, Unaligned_B8ToB16) {
   EXPECT_EQ(
       result,
       "const split::SplitTiling<2> split_tiling {\n  .num_rows = static_cast<uint32_t>(t->s0), \n  .num_src_cols "
-      "= ((16 + t->s2_1))/(1), \n  .num_dsts_cols = {(t->s2_1)/(1), 16, }\n};\n__ubuf__ uint16_t "
+      "= static_cast<uint32_t>(((16 + t->s2_1))/(1)), \n  .num_dsts_cols = {static_cast<uint32_t>((t->s2_1)/(1)), "
+      "16, }\n};\n__ubuf__ uint16_t "
       "*split_dst_addrs[] { (__ubuf__ uint16_t *)local_2.GetPhyAddr(), (__ubuf__ uint16_t *)local_3.GetPhyAddr(), "
       "};\nsplit::SplitExtend<uint16_t, 2>((__ubuf__ uint16_t *)local_0.GetPhyAddr(), split_dst_addrs, "
       "tmp_buf_0, split_tiling);\n");
@@ -256,7 +261,8 @@ TEST_F(SplitRegApiCallUTest, Unaligned_B16) {
   EXPECT_EQ(
       result,
       "const split::SplitTiling<2> split_tiling {\n  .num_rows = static_cast<uint32_t>(t->s0), \n  .num_src_cols = "
-      "(((16 + t->s2_1) * 2))/(1), \n  .num_dsts_cols = {((2 * t->s2_1))/(1), 32, }\n};\n__ubuf__ half "
+      "static_cast<uint32_t>((((16 + t->s2_1) * 2))/(1)), \n  .num_dsts_cols = {static_cast<uint32_t>(((2 * "
+      "t->s2_1))/(1)), 32, }\n};\n__ubuf__ half "
       "*split_dst_addrs[] { (__ubuf__ half *)local_2.GetPhyAddr(), (__ubuf__ half *)local_3.GetPhyAddr(), "
       "};\nsplit::SplitExtend<half, 2>((__ubuf__ half *)local_0.GetPhyAddr(), split_dst_addrs, tmp_buf_0, "
       "split_tiling);\n");
@@ -290,7 +296,8 @@ TEST_F(SplitRegApiCallUTest, Unaligned_B32) {
   EXPECT_EQ(
       result,
       "const split::SplitTiling<2> split_tiling {\n  .num_rows = static_cast<uint32_t>(t->s0), \n  .num_src_cols = "
-      "(((16 + t->s2_1) * 2))/(1), \n  .num_dsts_cols = {((2 * t->s2_1))/(1), 32, }\n};\n__ubuf__ int32_t "
+      "static_cast<uint32_t>((((16 + t->s2_1) * 2))/(1)), \n  .num_dsts_cols = {static_cast<uint32_t>(((2 * "
+      "t->s2_1))/(1)), 32, }\n};\n__ubuf__ int32_t "
       "*split_dst_addrs[] { (__ubuf__ int32_t *)local_2.GetPhyAddr(), (__ubuf__ int32_t *)local_3.GetPhyAddr(), "
       "};\nsplit::SplitExtend<int32_t, 2>((__ubuf__ int32_t *)local_0.GetPhyAddr(), split_dst_addrs, tmp_buf_0, "
       "split_tiling);\n");
@@ -324,7 +331,8 @@ TEST_F(SplitRegApiCallUTest, Unalign_B64) {
   EXPECT_EQ(
       result,
       "const split::SplitTiling<2> split_tiling {\n  .num_rows = static_cast<uint32_t>(t->s0), \n  .num_src_cols = "
-      "(((16 + t->s2_1) * 4))/(1), \n  .num_dsts_cols = {((4 * t->s2_1))/(1), 64, }\n};\n__ubuf__ uint32_t "
+      "static_cast<uint32_t>((((16 + t->s2_1) * 4))/(1)), \n  .num_dsts_cols = {static_cast<uint32_t>(((4 * "
+      "t->s2_1))/(1)), 64, }\n};\n__ubuf__ uint32_t "
       "*split_dst_addrs[] { (__ubuf__ uint32_t *)local_2.GetPhyAddr(), (__ubuf__ uint32_t *)local_3.GetPhyAddr(), "
       "};\nsplit::SplitExtend<uint32_t, 2>((__ubuf__ uint32_t *)local_0.GetPhyAddr(), split_dst_addrs, tmp_buf_0, "
       "split_tiling);\n");

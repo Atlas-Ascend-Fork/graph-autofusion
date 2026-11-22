@@ -32,8 +32,8 @@ bool RunScopeVerifyScheModeSplitPass(SuperKernelGraph &graph, std::vector<SuperK
                                      std::vector<ScopeVerifySplitRecord> &splitRecords);
 
 // Run deadlock refinement pass and append scope verify split records.
-bool RunScopeVerifyDeadlockRefinePass(SuperKernelGraph &graph, SuperKernelOptionsManager &opts,
-                                      std::vector<SuperKernelScopeInfo> &scopes,
-                                      std::vector<ScopeVerifySplitRecord> &splitRecords);
+bool RunScopeVerifySingleScopeDeadlockRefinePass(SuperKernelGraph &graph, SuperKernelOptionsManager &opts,
+                                                 std::vector<SuperKernelScopeInfo> &scopes,
+                                                 std::vector<ScopeVerifySplitRecord> &splitRecords);
 
 #endif  // __SK_VERIFY_SCOPE_SPLIT_H__

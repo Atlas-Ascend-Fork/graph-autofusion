@@ -4253,14 +4253,14 @@ EsbTensor *EsApproximateEqual(EsbTensor *x1, EsbTensor *x2, float tolerance) {
   GE_ASSERT_GRAPH_SUCCESS(af::GraphUtils::AddEdge(x2->GetAnchor(), node->GetInDataAnchor(1)));
   return graph.GetEsbTensorFromNode(std::move(node), 0);
 }
-EsbTensor *EsArgMaxD(EsbTensor *x, int64_t dimension, af::DataType dtype) {
+EsbTensor *EsArgmaxD(EsbTensor *x, int64_t dimension, af::DataType dtype) {
   GE_ASSERT_NOTNULL(x);
   auto &graph = x->GetOwner();
 
   auto desc =
       af::CompliantOpDescBuilder()
-          .OpType("ArgMaxD")
-          .Name(("ArgMaxD_" + std::to_string(graph.NextNodeIndex())).c_str())
+          .OpType("ArgmaxD")
+          .Name(("ArgmaxD_" + std::to_string(graph.NextNodeIndex())).c_str())
           .IrDefInputs({
               {"x", af::kIrInputRequired, ""},
           })
@@ -4279,7 +4279,7 @@ EsbTensor *EsArgMaxD(EsbTensor *x, int64_t dimension, af::DataType dtype) {
   GE_ASSERT_GRAPH_SUCCESS(af::GraphUtils::AddEdge(x->GetAnchor(), node->GetInDataAnchor(0)));
   return graph.GetEsbTensorFromNode(std::move(node), 0);
 }
-EsbTensor *EsArgMaxGrad(EsbTensor *var, EsbTensor *indices, EsbTensor *updates, int64_t dimension) {
+EsbTensor *EsArgmaxGrad(EsbTensor *var, EsbTensor *indices, EsbTensor *updates, int64_t dimension) {
   GE_ASSERT_NOTNULL(var);
   GE_ASSERT_NOTNULL(indices);
   GE_ASSERT_NOTNULL(updates);
@@ -4287,8 +4287,8 @@ EsbTensor *EsArgMaxGrad(EsbTensor *var, EsbTensor *indices, EsbTensor *updates, 
 
   auto desc =
       af::CompliantOpDescBuilder()
-          .OpType("ArgMaxGrad")
-          .Name(("ArgMaxGrad_" + std::to_string(graph.NextNodeIndex())).c_str())
+          .OpType("ArgmaxGrad")
+          .Name(("ArgmaxGrad_" + std::to_string(graph.NextNodeIndex())).c_str())
           .IrDefInputs({
               {"var", af::kIrInputRequired, ""},
               {"indices", af::kIrInputRequired, ""},
@@ -4310,7 +4310,7 @@ EsbTensor *EsArgMaxGrad(EsbTensor *var, EsbTensor *indices, EsbTensor *updates, 
   GE_ASSERT_GRAPH_SUCCESS(af::GraphUtils::AddEdge(updates->GetAnchor(), node->GetInDataAnchor(2)));
   return graph.GetEsbTensorFromNode(std::move(node), 0);
 }
-EsbTensor *EsArgMaxGradD(EsbTensor *var, EsbTensor *indices, EsbTensor *updates, EsbTensor *assist, int64_t dimension) {
+EsbTensor *EsArgmaxGradD(EsbTensor *var, EsbTensor *indices, EsbTensor *updates, EsbTensor *assist, int64_t dimension) {
   GE_ASSERT_NOTNULL(var);
   GE_ASSERT_NOTNULL(indices);
   GE_ASSERT_NOTNULL(updates);
@@ -4319,8 +4319,8 @@ EsbTensor *EsArgMaxGradD(EsbTensor *var, EsbTensor *indices, EsbTensor *updates,
 
   auto desc =
       af::CompliantOpDescBuilder()
-          .OpType("ArgMaxGradD")
-          .Name(("ArgMaxGradD_" + std::to_string(graph.NextNodeIndex())).c_str())
+          .OpType("ArgmaxGradD")
+          .Name(("ArgmaxGradD_" + std::to_string(graph.NextNodeIndex())).c_str())
           .IrDefInputs({
               {"var", af::kIrInputRequired, ""},
               {"indices", af::kIrInputRequired, ""},
@@ -4344,15 +4344,15 @@ EsbTensor *EsArgMaxGradD(EsbTensor *var, EsbTensor *indices, EsbTensor *updates,
   GE_ASSERT_GRAPH_SUCCESS(af::GraphUtils::AddEdge(assist->GetAnchor(), node->GetInDataAnchor(3)));
   return graph.GetEsbTensorFromNode(std::move(node), 0);
 }
-EsbTensor *EsArgMaxV2(EsbTensor *x, EsbTensor *dimension, af::DataType dtype) {
+EsbTensor *EsArgmaxV2(EsbTensor *x, EsbTensor *dimension, af::DataType dtype) {
   GE_ASSERT_NOTNULL(x);
   GE_ASSERT_NOTNULL(dimension);
   auto &graph = x->GetOwner();
 
   auto desc =
       af::CompliantOpDescBuilder()
-          .OpType("ArgMaxV2")
-          .Name(("ArgMaxV2_" + std::to_string(graph.NextNodeIndex())).c_str())
+          .OpType("ArgmaxV2")
+          .Name(("ArgmaxV2_" + std::to_string(graph.NextNodeIndex())).c_str())
           .IrDefInputs({
               {"x", af::kIrInputRequired, ""},
               {"dimension", af::kIrInputRequired, ""},
@@ -4372,14 +4372,14 @@ EsbTensor *EsArgMaxV2(EsbTensor *x, EsbTensor *dimension, af::DataType dtype) {
   GE_ASSERT_GRAPH_SUCCESS(af::GraphUtils::AddEdge(dimension->GetAnchor(), node->GetInDataAnchor(1)));
   return graph.GetEsbTensorFromNode(std::move(node), 0);
 }
-EsArgMaxWithKOutput EsArgMaxWithK(EsbTensor *x, int64_t axis, bool out_max_val, int64_t topk) {
+EsArgmaxWithKOutput EsArgmaxWithK(EsbTensor *x, int64_t axis, bool out_max_val, int64_t topk) {
   GE_ASSERT_NOTNULL(x);
   auto &graph = x->GetOwner();
 
   auto desc =
       af::CompliantOpDescBuilder()
-          .OpType("ArgMaxWithK")
-          .Name(("ArgMaxWithK_" + std::to_string(graph.NextNodeIndex())).c_str())
+          .OpType("ArgmaxWithK")
+          .Name(("ArgmaxWithK_" + std::to_string(graph.NextNodeIndex())).c_str())
           .IrDefInputs({
               {"x", af::kIrInputRequired, ""},
           })
@@ -4398,19 +4398,19 @@ EsArgMaxWithKOutput EsArgMaxWithK(EsbTensor *x, int64_t axis, bool out_max_val, 
   GE_ASSERT_NOTNULL(node);
 
   GE_ASSERT_GRAPH_SUCCESS(af::GraphUtils::AddEdge(x->GetAnchor(), node->GetInDataAnchor(0)));
-  return EsArgMaxWithKOutput{
+  return EsArgmaxWithKOutput{
       graph.GetEsbTensorFromNode(node, 0),
       graph.GetEsbTensorFromNode(node, 1),
   };
 }
-EsArgMaxWithValueOutput EsArgMaxWithValue(EsbTensor *x, int64_t dimension, bool keep_dims) {
+EsArgmaxWithValueOutput EsArgmaxWithValue(EsbTensor *x, int64_t dimension, bool keep_dims) {
   GE_ASSERT_NOTNULL(x);
   auto &graph = x->GetOwner();
 
   auto desc =
       af::CompliantOpDescBuilder()
-          .OpType("ArgMaxWithValue")
-          .Name(("ArgMaxWithValue_" + std::to_string(graph.NextNodeIndex())).c_str())
+          .OpType("ArgmaxWithValue")
+          .Name(("ArgmaxWithValue_" + std::to_string(graph.NextNodeIndex())).c_str())
           .IrDefInputs({
               {"x", af::kIrInputRequired, ""},
           })
@@ -4428,7 +4428,7 @@ EsArgMaxWithValueOutput EsArgMaxWithValue(EsbTensor *x, int64_t dimension, bool 
   GE_ASSERT_NOTNULL(node);
 
   GE_ASSERT_GRAPH_SUCCESS(af::GraphUtils::AddEdge(x->GetAnchor(), node->GetInDataAnchor(0)));
-  return EsArgMaxWithValueOutput{
+  return EsArgmaxWithValueOutput{
       graph.GetEsbTensorFromNode(node, 0),
       graph.GetEsbTensorFromNode(node, 1),
   };
@@ -41163,7 +41163,7 @@ EsbTensor *EsRoiExtractor(EsbTensor **features, int64_t features_num, EsbTensor 
   }
   return graph.GetEsbTensorFromNode(std::move(node), 0);
 }
-EsbTensor *EsRoiPoolingGradWithArgMax(EsbTensor *grad, EsbTensor *x, EsbTensor *rois, EsbTensor *roi_actual_num,
+EsbTensor *EsRoiPoolingGradWithArgmax(EsbTensor *grad, EsbTensor *x, EsbTensor *rois, EsbTensor *roi_actual_num,
                                       EsbTensor *argmax, int64_t pooled_h, int64_t pooled_w, float spatial_scale_h,
                                       float spatial_scale_w, int64_t pool_channel) {
   GE_ASSERT_NOTNULL(grad);
@@ -41174,8 +41174,8 @@ EsbTensor *EsRoiPoolingGradWithArgMax(EsbTensor *grad, EsbTensor *x, EsbTensor *
 
   auto desc =
       af::CompliantOpDescBuilder()
-          .OpType("RoiPoolingGradWithArgMax")
-          .Name(("RoiPoolingGradWithArgMax_" + std::to_string(graph.NextNodeIndex())).c_str())
+          .OpType("RoiPoolingGradWithArgmax")
+          .Name(("RoiPoolingGradWithArgmax_" + std::to_string(graph.NextNodeIndex())).c_str())
           .IrDefInputs({
               {"grad", af::kIrInputRequired, ""},
               {"x", af::kIrInputRequired, ""},
@@ -41210,7 +41210,7 @@ EsbTensor *EsRoiPoolingGradWithArgMax(EsbTensor *grad, EsbTensor *x, EsbTensor *
   GE_ASSERT_GRAPH_SUCCESS(af::GraphUtils::AddEdge(argmax->GetAnchor(), node->GetInDataAnchor(4)));
   return graph.GetEsbTensorFromNode(std::move(node), 0);
 }
-EsRoiPoolingWithArgMaxOutput EsRoiPoolingWithArgMax(EsbTensor *x, EsbTensor *rois, EsbTensor *roi_actual_num,
+EsRoiPoolingWithArgmaxOutput EsRoiPoolingWithArgmax(EsbTensor *x, EsbTensor *rois, EsbTensor *roi_actual_num,
                                                     int64_t pooled_h, int64_t pooled_w, float spatial_scale_h,
                                                     float spatial_scale_w, int64_t pool_channel) {
   GE_ASSERT_NOTNULL(x);
@@ -41219,8 +41219,8 @@ EsRoiPoolingWithArgMaxOutput EsRoiPoolingWithArgMax(EsbTensor *x, EsbTensor *roi
 
   auto desc =
       af::CompliantOpDescBuilder()
-          .OpType("RoiPoolingWithArgMax")
-          .Name(("RoiPoolingWithArgMax_" + std::to_string(graph.NextNodeIndex())).c_str())
+          .OpType("RoiPoolingWithArgmax")
+          .Name(("RoiPoolingWithArgmax_" + std::to_string(graph.NextNodeIndex())).c_str())
           .IrDefInputs({
               {"x", af::kIrInputRequired, ""},
               {"rois", af::kIrInputRequired, ""},
@@ -41250,7 +41250,7 @@ EsRoiPoolingWithArgMaxOutput EsRoiPoolingWithArgMax(EsbTensor *x, EsbTensor *roi
   if (roi_actual_num != nullptr) {
     GE_ASSERT_GRAPH_SUCCESS(af::GraphUtils::AddEdge(roi_actual_num->GetAnchor(), node->GetInDataAnchor(2)));
   }
-  return EsRoiPoolingWithArgMaxOutput{
+  return EsRoiPoolingWithArgmaxOutput{
       graph.GetEsbTensorFromNode(node, 0),
       graph.GetEsbTensorFromNode(node, 1),
   };

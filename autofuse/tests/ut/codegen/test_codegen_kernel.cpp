@@ -19,6 +19,11 @@
 #include "ascir_ops.h"
 #include "ascir_ops_utils.h"
 #include "codegen_kernel.h"
+#include "backend/backend_spec.h"
+#include "codegen_tiling_data.h"
+#include "optimize/schedule_utils.h"
+#include "codegen_api_param/codegen_api_param.h"
+#include "ascir_node_param/ascir_node_param.h"
 #include "graph/ascendc_ir/utils/asc_tensor_utils.h"
 #include "common_utils.h"
 #include "utils/api_call_factory.h"
@@ -38,9 +43,51 @@ using namespace af::ops;
 using namespace af::ascir_op;
 using namespace codegen;
 
+TEST(CodegenKernel, NBroadCastCallbackUsesCubeOffsetAndCompletesEveryVectorTile) {
+  af::AscGraph graph("cv_output_broadcast_callback");
+  const auto m = graph.CreateAxis("m", af::Symbol(128));
+  const auto n = graph.CreateAxis("n", af::Symbol(256));
+  Data data("data", graph);
+  Load load("load");
+  graph.AddNode(load);
+  load.x = data.y;
+  auto node = graph.FindNode("load");
+  node->outputs[0].attr.dtype = ge::DT_FLOAT16;
+  node->outputs[0].attr.axis = {m.id, n.id};
+  node->outputs[0].attr.repeats = {af::Symbol(128), af::Symbol(1)};
+  node->outputs[0].attr.strides = {af::Symbol(1), af::Symbol(0)};
+  node->outputs[0].attr.mem.tensor_id = 0;
+  Kernel kernel("cv_output_broadcast_callback");
+  ASSERT_EQ(kernel.tiler.AddAxis(m), af::SUCCESS);
+  ASSERT_EQ(kernel.tiler.AddAxis(n), af::SUCCESS);
+  ASSERT_EQ(kernel.tpipe.AddTensor(node->outputs[0]), af::SUCCESS);
+  kernel.tpipe.cv_fusion_type = ascir::CubeTemplateType::kUBFuse;
+  kernel.tpipe.cube_output_tensor_id = 0;
+  kernel.tpipe.cv_output_broadcast = true;
+  kernel.tpipe.cv_n_axis = n.id;
+  kernel.tpipe.cv_n_size_expr = "t->n";
+  kernel.tpipe.cv_n_tile_expr = "t->nt";
+  std::stringstream ss;
+  ASSERT_EQ(kernel.GenerateVecFuncOfCVFusion(ss, false, false, true, true, "CvNBroadcastCase"), af::SUCCESS);
+  const auto text = ss.str();
+  EXPECT_NE(text.find("row < curAivM"), std::string::npos);
+  EXPECT_NE(text.find("stageOffset + row * curAlignN"), std::string::npos);
+  EXPECT_NE(text.find("(offset / shapeN + row) * cv_n_size + column"), std::string::npos);
+  EXPECT_NE(text.find("column += cv_n_tile"), std::string::npos);
+  EXPECT_NE(text.find("auto_fusion_vector_stage1(vector_offset, 1, width"), std::string::npos);
+  EXPECT_NE(text.find("auto_fusion_vector_stage2(vector_offset, 1, width"), std::string::npos);
+  EXPECT_NE(text.find("if (stage == 2 ||"), std::string::npos);
+  EXPECT_EQ(text.find("src_stage_offset"), std::string::npos);
+  EXPECT_EQ(text.find("buf_n_broadcast_row"), std::string::npos);
+  std::stringstream address;
+  ASSERT_EQ(kernel.InitCVFusionAddr(address, false, true, true, false, "CvNBroadcastCase"), af::SUCCESS);
+  EXPECT_NE(address.str().find("kConstTilingData.tiling_data.n"), std::string::npos);
+  EXPECT_NE(address.str().find("t.tiling_data.nt"), std::string::npos);
+}
+
 namespace {
 std::string ToString(const af::Expression &e) {
-  return std::string(e.Serialize().get());
+  return std::string(e.Str().get());
 }
 
 template <typename BuildDownstream>
@@ -73,6 +120,62 @@ TEST(CodegenKernel, Type_StrWillReturnTypeName) {
   codegen::Type t{"int"};
 
   EXPECT_EQ(t.Str(), "int");
+}
+
+static ascir::ScheduledResult MakeIndependentReduceSummaryResult() {
+  ascir::ScheduledResult result;
+  result.schedule_groups.resize(3);
+  for (size_t i = 1; i < 3; ++i) {
+    af::AscGraph graph(("group" + std::to_string(i)).c_str());
+    Workspace workspace("workspace");
+    graph.AddNode(workspace);
+    graph.FindNode("workspace")->outputs[0].attr.mem.tensor_id = static_cast<int64_t>(i);
+    const auto semantic =
+        i == 1 ? ascgen_utils::template_semantic::kReducePhase2 : ascgen_utils::template_semantic::kReducePhase1;
+    EXPECT_EQ(ascgen_utils::SetTemplateSemanticNameForGraph(graph, semantic), af::SUCCESS);
+    result.schedule_groups[i].impl_graphs.push_back(graph);
+  }
+  return result;
+}
+
+TEST(CodegenKernel, IndependentReduceSummaryCanDeferSyncToNextGroup) {
+  auto result = MakeIndependentReduceSummaryResult();
+  EXPECT_TRUE(Kernel::CanSkipReduceGroupSync(result, 1));
+  EXPECT_FALSE(Kernel::CanSkipReduceGroupSync(result, 0));
+  EXPECT_FALSE(Kernel::CanSkipReduceGroupSync(result, 2));
+  result = MakeIndependentReduceSummaryResult();
+  result.schedule_groups[2].impl_graphs[0].FindNode("workspace")->outputs[0].attr.mem.tensor_id = 1;
+  EXPECT_FALSE(Kernel::CanSkipReduceGroupSync(result, 1));
+  result = MakeIndependentReduceSummaryResult();
+  af::AscGraph alternative("alternative");
+  Workspace shared("shared");
+  alternative.AddNode(shared);
+  alternative.FindNode("shared")->outputs[0].attr.mem.tensor_id = 2;
+  result.schedule_groups[1].impl_graphs.push_back(alternative);
+  EXPECT_FALSE(Kernel::CanSkipReduceGroupSync(result, 1));
+  result = MakeIndependentReduceSummaryResult();
+  Output output("visible_output");
+  result.schedule_groups[1].impl_graphs[0].AddNode(output);
+  EXPECT_FALSE(Kernel::CanSkipReduceGroupSync(result, 1));
+  result = MakeIndependentReduceSummaryResult();
+  result.schedule_groups[1].impl_graphs.clear();
+  EXPECT_FALSE(Kernel::CanSkipReduceGroupSync(result, 1));
+  result = MakeIndependentReduceSummaryResult();
+  result.schedule_groups[1].impl_graphs[0].FindNode("workspace")->outputs[0].attr.mem.tensor_id = -1;
+  EXPECT_FALSE(Kernel::CanSkipReduceGroupSync(result, 1));
+  result = MakeIndependentReduceSummaryResult();
+  EXPECT_EQ(ascgen_utils::SetTemplateSemanticNameForGraph(result.schedule_groups[1].impl_graphs[0],
+                                                          ascgen_utils::template_semantic::kReducePhase1),
+            af::SUCCESS);
+  EXPECT_FALSE(Kernel::CanSkipReduceGroupSync(result, 1));
+  result = MakeIndependentReduceSummaryResult();
+  auto &controlled_graph = result.schedule_groups[1].impl_graphs[0];
+  Scalar control_target("control_target");
+  controlled_graph.AddNode(control_target);
+  ASSERT_EQ(af::GraphUtils::AddEdge(controlled_graph.FindNode("workspace")->GetOutControlAnchor(),
+                                    controlled_graph.FindNode("control_target")->GetInControlAnchor()),
+            af::GRAPH_SUCCESS);
+  EXPECT_FALSE(Kernel::CanSkipReduceGroupSync(result, 1));
 }
 
 TEST(CodegenKernel, Variable_StrWillReturnVarName) {
@@ -714,10 +817,10 @@ TEST(CodegenKernel, ApiCallPreProcessUbScalarTest) {
                         "SetFlag<HardEvent::MTE2_S>(eventID);\n"
                         "WaitFlag<HardEvent::MTE2_S>(eventID);\n"
                         "global_1_ub_scalar = global_1.GetValue(0);\n"
+                        "}\n"
                         "AscendC::PipeBarrier<PIPE_ALL>();\n"
                         "Duplicate(global_1[0], global_1_ub_scalar, 32/sizeof(float));\n"
-                        "AscendC::PipeBarrier<PIPE_V>();\n"
-                        "}\n"});
+                        "AscendC::PipeBarrier<PIPE_V>();\n"});
 }
 
 TEST(CodegenKernel, ApiCallPreProcessLoadUbScalarTest) {
@@ -779,10 +882,135 @@ TEST(CodegenKernel, ApiCallPreProcessLoadUbScalarTest) {
                         "SetFlag<HardEvent::MTE2_S>(eventID);\n"
                         "WaitFlag<HardEvent::MTE2_S>(eventID);\n"
                         "global_1_ub_scalar = global_1.GetValue(0);\n"
+                        "}\n"
                         "AscendC::PipeBarrier<PIPE_ALL>();\n"
                         "Duplicate(global_1[0], global_1_ub_scalar, 32/sizeof(float));\n"
-                        "AscendC::PipeBarrier<PIPE_V>();\n"
-                        "}\n"});
+                        "AscendC::PipeBarrier<PIPE_V>();\n"});
+}
+
+TEST(CodegenKernel, ApiCallPostProcessLoadUbScalarInt64Test) {
+  af::SizeVar s0(af::Symbol("s0"));
+  af::SizeVar s1(af::Symbol("s1"));
+  af::SizeVar s2(af::Symbol("s2"));
+
+  af::Axis z0{.id = 0, .name = "z0", .type = af::Axis::Type::kAxisTypeTileOuter, .size = s0.expr};
+  af::Axis z1{.id = 1, .name = "z1", .type = af::Axis::Type::kAxisTypeTileInner, .size = s1.expr};
+  af::Axis z2{.id = 2, .name = "z2", .type = af::Axis::Type::kAxisTypeOriginal, .size = s2.expr};
+
+  codegen::Tiler tiler;
+  tiler.AddSizeVar(af::SizeVar(s0));
+  tiler.AddSizeVar(af::SizeVar(s1));
+  tiler.AddSizeVar(af::SizeVar(s2));
+
+  tiler.AddAxis(z0);
+  tiler.AddAxis(z1);
+  tiler.AddAxis(z2);
+
+  af::AscGraph graph("test");
+  Load load("load");
+  graph.AddNode(load);
+  auto node = graph.FindNode("load");
+  af::AscTensor tensor = node->outputs[0];
+  tensor.attr.dtype = ge::DT_INT64;
+  tensor.attr.axis = {z0.id, z1.id, z2.id};
+  tensor.attr.repeats = {One, One, One};
+  tensor.attr.strides = {One, One, One};
+  tensor.attr.vectorized_axis = {z1.id, z2.id};
+  tensor.attr.mem.tensor_id = 1;
+
+  vector<af::Expression> vectorized_strides{One, One};
+  tensor.attr.vectorized_strides = vectorized_strides;
+
+  std::string dtype_name;
+  codegen::Tensor::DtypeName(tensor.attr.dtype, dtype_name);
+  codegen::Tensor t(tensor, dtype_name, "t");
+  EXPECT_EQ(t.Init(), 0);
+
+  codegen::ApiCall call("Load");
+  EXPECT_EQ(call.Init(node), 0);
+  std::string result;
+  std::vector<std::reference_wrapper<const codegen::Tensor>> output_tensors;
+  t.need_gen_get_value_of_ub_scalar = true;
+  t.need_duplicate_value_of_ub_scalar = true;
+  output_tensors.emplace_back(t);
+  std::vector<::ascir::AxisId> current_axis = {z0.id};
+  codegen::TPipe tpipe("tpipe", tiler);
+
+  EXPECT_EQ(call.PostProcess(tpipe, current_axis, output_tensors, result), 0);
+  EXPECT_EQ(result,
+            std::string{"event_t eventID = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_S));\n"
+                        "SetFlag<HardEvent::MTE2_S>(eventID);\n"
+                        "WaitFlag<HardEvent::MTE2_S>(eventID);\n"
+                        "global_1_ub_scalar = global_1.GetValue(0);\n"
+                        "}\n"
+                        "AscendC::PipeBarrier<PIPE_ALL>();\n"
+                        "Duplicate(global_1[0], global_1_ub_scalar, 32/sizeof(int64_t), "
+                        "int64_dup_scratch_tensor);\n"
+                        "AscendC::PipeBarrier<PIPE_V>();\n"});
+}
+
+TEST(CodegenKernel, Int64DupScratchAllocTest) {
+  af::SizeVar s0(af::Symbol("s0"));
+  af::SizeVar s1(af::Symbol("s1"));
+  af::SizeVar s2(af::Symbol("s2"));
+
+  af::Axis z0{.id = 0, .name = "z0", .type = af::Axis::Type::kAxisTypeTileOuter, .size = s0.expr};
+  af::Axis z1{.id = 1, .name = "z1", .type = af::Axis::Type::kAxisTypeTileInner, .size = s1.expr};
+  af::Axis z2{.id = 2, .name = "z2", .type = af::Axis::Type::kAxisTypeOriginal, .size = s2.expr};
+
+  codegen::Tiler tiler;
+  tiler.AddSizeVar(af::SizeVar(s0));
+  tiler.AddSizeVar(af::SizeVar(s1));
+  tiler.AddSizeVar(af::SizeVar(s2));
+
+  tiler.AddAxis(z0);
+  tiler.AddAxis(z1);
+  tiler.AddAxis(z2);
+
+  af::AscGraph graph("test");
+  Load load("load");
+  graph.AddNode(load);
+  auto node = graph.FindNode("load");
+  af::AscTensor tensor = node->outputs[0];
+  tensor.attr.dtype = ge::DT_INT64;
+  tensor.attr.axis = {z0.id, z1.id, z2.id};
+  tensor.attr.repeats = {One, One, One};
+  tensor.attr.strides = {One, One, One};
+  tensor.attr.vectorized_axis = {z1.id, z2.id};
+  tensor.attr.mem.tensor_id = 1;
+
+  vector<af::Expression> vectorized_strides{One, One};
+  tensor.attr.vectorized_strides = vectorized_strides;
+
+  std::string dtype_name;
+  codegen::Tensor::DtypeName(tensor.attr.dtype, dtype_name);
+  codegen::Tensor t(tensor, dtype_name, "t");
+  EXPECT_EQ(t.Init(), 0);
+  t.is_ub_scalar = true;
+  t.need_gen_get_value_of_ub_scalar = true;
+  t.need_duplicate_value_of_ub_scalar = true;
+  codegen::Tensor t_blk(tensor, dtype_name, "t_blk");
+  EXPECT_EQ(t_blk.Init(), 0);
+
+  const std::string expected_alloc{
+      "TBuf<TPosition::VECCALC> int64_dup_scratch_tensor_buffer;\n"
+      "tpipe.InitBuffer(int64_dup_scratch_tensor_buffer, 16 * 16 * sizeof(uint16_t));\n"
+      "LocalTensor<uint8_t> int64_dup_scratch_tensor = int64_dup_scratch_tensor_buffer.Get<uint8_t>();\n"};
+
+  codegen::TPipe tpipe_empty("tpipe", tiler);
+  EXPECT_EQ(tpipe_empty.Int64DupScratchAlloc(), std::string{""});
+
+  codegen::TPipe tpipe_ub("tpipe", tiler);
+  EXPECT_EQ(tpipe_ub.AddTensor(t), 0);
+  EXPECT_EQ(tpipe_ub.Int64DupScratchAlloc(), expected_alloc);
+
+  codegen::TPipe tpipe_blk("tpipe", tiler);
+  EXPECT_EQ(tpipe_blk.AddTensor(t_blk), 0);
+  tpipe_blk.need_gen_blk_tensors.push_back(t_blk.id);
+  EXPECT_EQ(tpipe_blk.Int64DupScratchAlloc(), expected_alloc);
+  std::string blk_result;
+  EXPECT_EQ(tpipe_blk.BlkTensorAllocAndInit(blk_result), af::SUCCESS);
+  EXPECT_NE(blk_result.find(", int64_dup_scratch_tensor);"), std::string::npos);
 }
 
 TEST(CodegenKernel, kernelUbScalarVarDef) {
@@ -1187,6 +1415,48 @@ TEST(CodegenKernel, TPipe_TensorSizeAssignForCvUbFuseShouldUseStageSizeElements)
                                 "\n"});
 }
 
+TEST(CodegenKernel, TPipe_CvUbActualSizeRemainsWritableForStaticMmAndConv) {
+  af::AscGraph graph("test");
+  af::ascir_op::Data x("x", graph);
+  auto &tensor = graph.FindNode("x")->outputs[0];
+  af::Axis axis{.id = 0, .name = "z0t", .type = af::Axis::Type::kAxisTypeTileInner, .size = af::Symbol("stage_size")};
+  tensor.attr.axis = {axis.id};
+  tensor.attr.vectorized_axis = {axis.id};
+  tensor.attr.repeats = {axis.size};
+  tensor.attr.strides = {One};
+  tensor.attr.vectorized_strides = {One};
+  tensor.attr.dtype = ge::DT_FLOAT;
+  tensor.attr.mem.tensor_id = 1;
+  tensor.attr.mem.alloc_type = af::AllocType::kAllocTypeBuffer;
+  tensor.attr.mem.position = af::Position::kPositionVecCalc;
+  tensor.attr.opt.merge_scope = af::kIdNone;
+  tensor.attr.buf.id = 1;
+
+  codegen::Tiler tiler;
+  tiler.AddAxis(axis);
+  codegen::TPipe tpipe("tpipe", tiler);
+  ASSERT_EQ(tpipe.AddTensor(tensor), af::SUCCESS);
+  const auto *local_tensor = tpipe.GetTensor(1);
+  ASSERT_NE(local_tensor, nullptr);
+  const std::string original_size = tiler.TensorActualSize(*local_tensor);
+
+  tpipe.cv_fusion_type = ::ascir::CubeTemplateType::kUBFuse;
+  for (const bool is_dynamic : {false, true}) {
+    for (const bool is_conv2d : {false, true}) {
+      SCOPED_TRACE(::testing::Message() << "dynamic=" << is_dynamic << ", conv=" << is_conv2d);
+      tpipe.is_dynamic = is_dynamic;
+      tpipe.is_conv2d = is_conv2d;
+      const std::string expected_size =
+          is_dynamic && !is_conv2d ? "curAivM * ((curAivN + 8 - 1) / 8 * 8)" : original_size;
+      // CV APIs update actual_size for each fragment, including static-shape kernels.
+      EXPECT_EQ(tpipe.TensorActualSizeCalc(1), "local_1_actual_size = " + expected_size + ";\n");
+    }
+  }
+
+  tpipe.cv_fusion_type = ::ascir::CubeTemplateType::kDefault;
+  EXPECT_EQ(tpipe.TensorActualSizeCalc(1), "const uint32_t local_1_actual_size = " + original_size + ";\n");
+}
+
 TEST(CodegenKernel, TPipe_MergeScopeSizeCalc) {
   af::SizeVar s0(af::Symbol("s0"));
   af::SizeVar s1(af::Symbol("s1"));
@@ -1582,6 +1852,18 @@ TEST(CodegenKernel, ApiCall_Generate) {
   EXPECT_EQ(call.Generate(tpipe, {}, {}, {}, result), af::SUCCESS);
 }
 
+TEST(CodegenKernel, ApiCall_SetSemanticFeatureDoesNotCreateApiParam) {
+  af::AscGraph graph("test");
+  af::ascir_op::Data x("x", graph);
+  auto node = graph.FindNode("x");
+  codegen::ApiCall call("call");
+  ASSERT_EQ(call.Init(node), af::SUCCESS);
+  ASSERT_EQ(CodegenApiParam::TryGetNodeApiParam(node), nullptr);
+
+  ASSERT_EQ(call.SetSemanticFeature("SIMD/RegisterGather"), af::SUCCESS);
+  EXPECT_EQ(CodegenApiParam::TryGetNodeApiParam(node), nullptr);
+}
+
 TEST(CodegenKernel, Stage_AddCall_WillCollectInputOutputQues) {
   GTEST_SKIP();
 }
@@ -1615,6 +1897,8 @@ class CodegenKernel_CallSync : public ::testing::Test {
   af::AscNodePtr x;
   int tensor_id = 0;
   bool cv_ub_fuse_mode = false;
+  bool emit_queue_init = false;
+  std::shared_ptr<codegen::CommonQueueSplitPlan> split_plan;
 
   CodegenKernel_CallSync() : graph("test_graph"), x(nullptr) {
     Data x_op("x", graph);
@@ -1785,12 +2069,37 @@ class CodegenKernel_CallSync : public ::testing::Test {
       ++index;
     }
   }
-  std::string Generate() {
+  af::AscNodePtr CreateCommonBmmQueueGraph(uint32_t buffer_num = 2U) {
+    auto workspace = AddNode("Workspace");
+    workspace->attr.api.unit = af::ComputeUnit::kUnitNone;
+    workspace->outputs[0].attr.mem.alloc_type = af::AllocType::kAllocTypeGlobal;
+    workspace->outputs[0].attr.mem.position = af::Position::kPositionGM;
+    workspace->outputs[0].attr.dtype = ge::DT_FLOAT;
+    auto side = Load("SideLoad", x);
+    side->GetOpDesc()->SetType(af::ascir_op::Load::Type);
+    auto broadcast = Vec("Broadcast", {side});
+    auto mm = Load("MmLoad", workspace, side);
+    mm->GetOpDesc()->SetType(af::ascir_op::Load::Type);
+    Vec("Consume", {mm, broadcast});
+    for (const auto &node : {side, broadcast, mm}) {
+      node->outputs[0].attr.dtype = ge::DT_FLOAT;
+      node->outputs[0].attr.que.buf_num = buffer_num;
+    }
+    return workspace;
+  }
+
+  std::string Generate(::ascir::CubeTemplateType fusion_type = ::ascir::CubeTemplateType::kDefault,
+                       ::ascir::TensorId cube_output_id = af::kIdNone, bool is_conv = false) {
     codegen::Tiler tiler;
     codegen::TPipe tpipe("tpipe", tiler);
     if (cv_ub_fuse_mode) {
       tpipe.cv_fusion_type = ::ascir::CubeTemplateType::kUBFuse;
+    } else {
+      tpipe.cv_fusion_type = fusion_type;
     }
+    tpipe.cube_output_tensor_id = cube_output_id;
+    tpipe.is_conv2d = is_conv;
+    tpipe.common_queue_split_plan = split_plan;
     tpipe.CollectQues(graph);
 
     codegen::Loop loop(af::kIdNone);
@@ -1814,6 +2123,8 @@ class CodegenKernel_CallSync : public ::testing::Test {
       }
 
       auto [it, _] = calls.insert({node_to_order_[node.get()], MockApiCall(node, "")});
+      it->second.axis = af::kIdNone;
+      it->second.depth = 0;
 
       InitApiCallInputs(calls, node_to_order_, node, it->second);
 
@@ -1857,9 +2168,74 @@ class CodegenKernel_CallSync : public ::testing::Test {
 
     std::string result;
     loop.Generate(tiler, tpipe, result);
+    if (emit_queue_init) {
+      std::string init;
+      EXPECT_EQ(tpipe.LocalTQueAlloc(init), af::SUCCESS);
+      result = init + result;
+    }
     return result;
   }
 };
+
+TEST_F(CodegenKernel_CallSync, CommonQueueSplitPreservesCallOrderAndRoutesMmConsumers) {
+  const auto workspace = CreateCommonBmmQueueGraph();
+  split_plan = std::make_shared<codegen::CommonQueueSplitPlan>();
+  split_plan->queue_id = 2;
+  split_plan->small_tensor_id = 2;
+  split_plan->mm_tensor_id = 4;
+  const auto result = Generate(::ascir::CubeTemplateType::kCommon, workspace->outputs[0].attr.mem.tensor_id);
+  const auto broadcast = result.find("Broadcast();");
+  const auto mm_alloc = result.find("q2_mm_buf = q2_mm.AllocTensor<uint8_t>();");
+  ASSERT_NE(broadcast, std::string::npos);
+  ASSERT_NE(mm_alloc, std::string::npos);
+  EXPECT_LT(broadcast, mm_alloc);
+  EXPECT_NE(result.find("q2.FreeTensor(q2_buf);"), std::string::npos);
+  EXPECT_NE(result.find("q2_mm.EnQue(q2_mm_buf);"), std::string::npos);
+  EXPECT_NE(result.find("q2_mm_buf = q2_mm.DeQue<uint8_t>();"), std::string::npos);
+  EXPECT_NE(result.find("q2_mm.FreeTensor(q2_mm_buf);"), std::string::npos);
+}
+
+TEST_F(CodegenKernel_CallSync, CommonQueueSplitInitGuardsTotalUbAndKeepsOriginalFallback) {
+  const auto workspace = CreateCommonBmmQueueGraph();
+  split_plan = std::make_shared<codegen::CommonQueueSplitPlan>();
+  split_plan->queue_id = 2;
+  split_plan->small_tensor_id = 2;
+  split_plan->mm_tensor_id = 4;
+  split_plan->ub_limit = 256;
+  split_plan->ub_containers = {"q2_size", "b3_size", "b5_size"};
+  split_plan->original_ub_expr = "2 * q2_mm_q2_size + q2_mm_b3_size + q2_mm_b5_size";
+  emit_queue_init = true;
+  const auto result = Generate(::ascir::CubeTemplateType::kCommon, workspace->outputs[0].attr.mem.tensor_id);
+  EXPECT_NE(result.find("const uint64_t q2_mm_q2_size = t->q2_size;"), std::string::npos);
+  EXPECT_NE(result.find("q2_mm_original_ub <= 256ULL && q2_mm_extra_bytes <= 256ULL - q2_mm_original_ub"),
+            std::string::npos);
+  EXPECT_NE(result.find("tpipe.InitBuffer(q2_mm_storage, q2_buf_num, t->q2_size);"), std::string::npos);
+  EXPECT_NE(result.find("tpipe.InitBuffer(q2, q2_buf_num, t->q2_size);"), std::string::npos);
+  EXPECT_NE(result.find("auto &q2_mm = q2_mm_split ? q2_mm_storage : q2;"), std::string::npos);
+}
+
+TEST(CodegenKernel, CommonQueueSplitClearsPlanForVvAndConv) {
+  af::AscGraph graph("test_graph");
+  codegen::Tiler tiler;
+  codegen::TPipe tpipe("tpipe", tiler);
+  codegen::Loop loop(af::kIdNone);
+  tpipe.common_queue_split_plan = std::make_shared<codegen::CommonQueueSplitPlan>();
+  tpipe.PrepareCommonQueueSplitPlan(loop, graph);
+  EXPECT_EQ(tpipe.common_queue_split_plan, nullptr);
+  tpipe.cv_fusion_type = ::ascir::CubeTemplateType::kCommon;
+  tpipe.is_conv2d = true;
+  tpipe.common_queue_split_plan = std::make_shared<codegen::CommonQueueSplitPlan>();
+  tpipe.PrepareCommonQueueSplitPlan(loop, graph);
+  EXPECT_EQ(tpipe.common_queue_split_plan, nullptr);
+}
+
+TEST(CodegenKernel, CommonQueueSplitIgnoresAbsentOptionalInput) {
+  codegen::CommonQueueSplitPlan plan;
+  plan.mm_tensor_id = 4;
+  MockApiCall call("");
+  call.inputs.push_back(nullptr);
+  EXPECT_FALSE(plan.UsesMmQueue(call));
+}
 
 TEST_F(CodegenKernel_CallSync, Load_Store_BindQue_ShouldNotSyncMte2ToMte3) {
   auto load = Load("Load", x);
@@ -2255,6 +2631,46 @@ TEST_F(CodegenKernel_CallSync, LoadEnq_DeqVec1_Vec23_PipeVec4ReuseLoad) {
                                     "vec4();\n"
                                     "q1.FreeTensor(q1_buf);\n"
                                     "\n"});
+}
+
+// load 的输出被 store(MTE3) 读取，同时被 vec 原地复用(覆盖写)，
+// vec 写之前必须等 store 读完，即插入 MTE3->V 同步。
+// MTE3->V 同步是 vector 核专用指令，分核架构 cube pass 中 PIPE_V 非法，
+// 生成体必须被 #ifndef SPLIT_CORE_CUBE 裁剪。
+TEST_F(CodegenKernel_CallSync, Load_StoreReader_And_VecReuseLoad_ShouldSyncMte3ToVec) {
+  auto load = Load("Load", x);
+  load->attr.api.compute_type = af::ComputeType::kComputeLoad;
+  auto store = Store("Store", load);
+  auto vec4 = Vec("vec4", true, load);
+
+  auto res = Generate();
+  const auto guard_begin = res.find("#ifndef SPLIT_CORE_CUBE");
+  ASSERT_NE(guard_begin, std::string::npos) << res;
+  const auto sync = res.find("TQueSync<PIPE_MTE3, PIPE_V>");
+  ASSERT_NE(sync, std::string::npos) << res;
+  const auto guard_end = res.find("#endif", sync);
+  ASSERT_NE(guard_end, std::string::npos) << res;
+  EXPECT_LT(guard_begin, sync);
+  EXPECT_LT(sync, guard_end);
+  const auto store_pos = res.find("Store();");
+  const auto reuse_pos = res.find("uint32_t q1_reuse2_offset");
+  ASSERT_NE(store_pos, std::string::npos) << res;
+  ASSERT_NE(reuse_pos, std::string::npos) << res;
+  EXPECT_LT(store_pos, guard_begin);
+  EXPECT_LT(guard_end, reuse_pos);
+}
+
+// vec 输出被 Store 读取并 FreeTensor 后，下一个 vec 经 AllocTensor 复用该 que buffer，
+// que 的 free 事件已保证 MTE3 读者完成，不应重复插入 MTE3->V 同步。
+TEST_F(CodegenKernel_CallSync, VecOut_StoreRead_Free_AllocVecReuse_ShouldNotSyncMte3ToVec) {
+  auto vec1 = VecOut("vec1");
+  auto store = Store("Store", vec1);
+  auto vec2 = Vec("vec2", true, vec1);
+
+  auto res = Generate();
+  const auto reuse_pos = res.find("q1_reuse2_offset");
+  ASSERT_NE(reuse_pos, std::string::npos) << res;
+  EXPECT_EQ(res.find("MTE3_V"), std::string::npos) << res;
 }
 
 TEST_F(CodegenKernel_CallSync, AllocVec1Enq_DeqStore1_Stroe23Free_Vec2ReuseVec1) {
@@ -2873,7 +3289,7 @@ TEST(CodegenKernel, CompareApiCallThrowingFor) {
   call.Generate(tpipe, current_axis, result);
   EXPECT_EQ(result, std::string{"CompareExtend<int32_t, CMPMODE::GT>(local_3[0], local_0[0], local_1[0], t->s1, t->s2, "
                                 "((16 * Ceiling((Rational(1 , 16) * t->s2))))/(1), ((16 * Ceiling((Rational(1 , 16) * "
-                                "t->s2))))/(1), tmp_buf_0);\n"});
+                                "t->s2))))/(1), tmp_buf_0, local_1_size * sizeof(int32_t));\n"});
 }
 
 // 测试compare api需要外抛for循环的场景
@@ -2992,7 +3408,7 @@ TEST(CodegenKernel, CompareApiCallTwoAxis) {
   call.Generate(tpipe, current_axis, result);
   EXPECT_EQ(result, std::string{"CompareExtend<float, CMPMODE::GT>(local_3[0], local_0[0], local_1[0], t->s1, t->s2, "
                                 "((16 * Ceiling((Rational(1 , 16) * t->s2))))/(1), ((16 * Ceiling((Rational(1 , 16) * "
-                                "t->s2))))/(1), tmp_buf_0);\n"});
+                                "t->s2))))/(1), tmp_buf_0, local_1_size * sizeof(float));\n"});
 }
 
 // 测试compare api需要外抛for循环的场景
@@ -3119,11 +3535,10 @@ TEST(CodegenKernel, CompareApiCallThrowingForWithX2IsUbScalar) {
 
   std::string result;
   call.Generate(tpipe, current_axis, result);
-  EXPECT_EQ(
-      result,
-      std::string{
-          "CompareExtend<float, CMPMODE::GT>(local_3[0], local_0[0], local_1[0], t->s1, t->s2, ((8 * "
-          "Ceiling((Rational(1 , 8) * t->s2))))/(1), ((16 * Ceiling((Rational(1 , 16) * t->s2))))/(1), tmp_buf_0);\n"});
+  EXPECT_EQ(result,
+            std::string{"CompareExtend<float, CMPMODE::GT>(local_3[0], local_0[0], local_1[0], t->s1, t->s2, ((8 * "
+                        "Ceiling((Rational(1 , 8) * t->s2))))/(1), ((16 * Ceiling((Rational(1 , 16) * t->s2))))/(1), "
+                        "tmp_buf_0, ONE_BLK_SIZE);\n"});
 }
 
 // 测试compare api需要外抛for循环的场景
@@ -3250,11 +3665,10 @@ TEST(CodegenKernel, CompareApiCallThrowingForWithX2IsUbScalarForUint32) {
 
   std::string result;
   call.Generate(tpipe, current_axis, result);
-  EXPECT_EQ(
-      result,
-      std::string{
-          "CompareExtend<uint32_t, CMPMODE::GT>(local_3[0], local_0[0], local_1[0], t->s1, t->s2, ((8 * "
-          "Ceiling((Rational(1 , 8) * t->s2))))/(1), ((16 * Ceiling((Rational(1 , 16) * t->s2))))/(1), tmp_buf_0);\n"});
+  EXPECT_EQ(result,
+            std::string{"CompareExtend<uint32_t, CMPMODE::GT>(local_3[0], local_0[0], local_1[0], t->s1, t->s2, ((8 * "
+                        "Ceiling((Rational(1 , 8) * t->s2))))/(1), ((16 * Ceiling((Rational(1 , 16) * t->s2))))/(1), "
+                        "tmp_buf_0, ONE_BLK_SIZE);\n"});
 }
 
 // 测试compare api需要外抛for循环的场景
@@ -4003,6 +4417,574 @@ TEST(CodegenKernel, GlobalTensorInitShouldUseWorkspaceReuseOverride) {
                                 "(workspace1)));\n"});
 }
 
+class CodegenCommonOutputReuse : public ::testing::Test {
+ protected:
+  af::AscGraph cube{"cube"};
+  af::AscGraph vec{"vec"};
+  ::ascir::FusedScheduledResult fused;
+  ::ascir::ScheduledResult scheduled;
+
+  void BuildCube() {
+    Data a("a", cube);
+    Data b("b", cube);
+    a.ir_attr.SetIndex(0);
+    b.ir_attr.SetIndex(1);
+    MatMul mm("mm");
+    cube.AddNode(mm);
+    mm.x1 = a.y;
+    mm.x2 = b.y;
+    mm.attr.api.compute_type = af::ComputeType::kComputeCube;
+    Store store("mm_store");
+    cube.AddNode(store);
+    store.x = mm.y;
+    Workspace workspace("workspace");
+    cube.AddNode(workspace);
+    workspace.x = store.y;
+    fused.input_nodes = {cube.FindNode("a"), cube.FindNode("b")};
+    fused.workspace_nodes = {cube.FindNode("workspace")};
+  }
+
+  void BuildVector() {
+    Workspace workspace("workspace");
+    vec.AddNode(workspace);
+    Data side("side", vec);
+    side.ir_attr.SetIndex(2);
+    Load load("mm_load");
+    vec.AddNode(load);
+    load.x = workspace.y;
+    Store copy("copy");
+    vec.AddNode(copy);
+    copy.x = load.y;
+    Output original("original");
+    vec.AddNode(original);
+    original.ir_attr.SetIndex(0);
+    original.x = copy.y;
+    Add add("add");
+    vec.AddNode(add);
+    add.x1 = load.y;
+    add.x2 = side.y;
+    Store tail_store("tail_store");
+    vec.AddNode(tail_store);
+    tail_store.x = add.y;
+    Output tail("tail");
+    vec.AddNode(tail);
+    tail.ir_attr.SetIndex(1);
+    tail.x = tail_store.y;
+    fused.input_nodes.push_back(vec.FindNode("side"));
+    fused.output_nodes = {vec.FindNode("original"), vec.FindNode("tail")};
+  }
+
+  void SetUp() override {
+    BuildCube();
+    BuildVector();
+    for (auto *graph : {&cube, &vec}) {
+      int64_t id = 0;
+      for (const auto &node : graph->GetAllNodes()) {
+        for (auto *output : node->outputs()) {
+          output->attr.dtype = ge::DT_FLOAT;
+          output->attr.repeats = {af::Symbol(2), af::Symbol(8)};
+          output->attr.strides = {af::Symbol(8), One};
+          output->attr.mem.tensor_id = node->GetName() == "workspace" ? 42 : id++;
+        }
+      }
+    }
+    for (auto *graph : {&cube, &vec}) {
+      graph->FindNode("workspace")->outputs[0].attr.repeats.clear();
+      graph->FindNode("workspace")->outputs[0].attr.strides.clear();
+    }
+    cube.FindNode("b")->outputs[0].attr.repeats = {af::Symbol(8), af::Symbol(8)};
+    vec.FindNode("side")->outputs[0].attr.strides = {One, Zero};
+    fused.gm_tensor_sizes.input_sizes = {af::Symbol(64), af::Symbol(256), af::Symbol(8)};
+    fused.gm_tensor_sizes.output_sizes = {af::Symbol(64), af::Symbol(64)};
+    fused.gm_tensor_sizes.total_size = af::Symbol(456);
+    scheduled.cube_type = ::ascir::CubeTemplateType::kCommon;
+    scheduled.schedule_groups = {{{cube}}, {{vec}}};
+    fused.node_idx_to_scheduled_results = {{scheduled}};
+  }
+
+  std::shared_ptr<const CommonOutputReusePlan> Create() {
+    return CommonOutputReusePlan::Create(fused, scheduled, false);
+  }
+
+  void UseVectorOutput() {
+    const auto gm = vec.FindNode("workspace");
+    ASSERT_EQ(optimize::ScheduleUtils::RemoveNode(vec, vec.FindNode("original"), gm->GetOutDataAnchor(0)), af::SUCCESS);
+    ASSERT_EQ(optimize::ScheduleUtils::RemoveNode(vec, vec.FindNode("copy"), gm->GetOutDataAnchor(0)), af::SUCCESS);
+    fused.output_nodes = {vec.FindNode("tail")};
+    fused.gm_tensor_sizes.output_sizes = {af::Symbol(64)};
+    dynamic_cast<af::ascir_op::Output::AscOutputIrAttrDef &>(*vec.FindNode("tail")->attr.ir_attr).SetIndex(0);
+    for (const auto &node : vec.GetAllNodes()) {
+      node->attr.sched.axis = {0, 1};
+      node->attr.sched.loop_axis = 0;
+      for (auto *output : node->outputs()) {
+        output->attr.axis = {0, 1};
+      }
+    }
+  }
+};
+
+TEST_F(CodegenCommonOutputReuse, FindsFullCopyAlongsideOtherVectorConsumers) {
+  const auto plan = Create();
+  ASSERT_NE(plan, nullptr);
+  EXPECT_EQ(plan->output_name, "original");
+  EXPECT_EQ(plan->workspace_id, 42);
+  const std::set<std::pair<std::string, std::string>> expected_copies{{"vec", "copy"}};
+  EXPECT_EQ(plan->copy_stores, expected_copies);
+  EXPECT_EQ(plan->buffer_sizes.size(), 5U);
+}
+
+TEST_F(CodegenCommonOutputReuse, RejectsOffsetsAndDifferentLogicalLayout) {
+  auto copy = vec.FindNode("copy");
+  dynamic_cast<af::ascir_op::Store::AscStoreIrAttrDef &>(*copy->attr.ir_attr).SetOffset(One);
+  EXPECT_EQ(Create(), nullptr);
+  dynamic_cast<af::ascir_op::Store::AscStoreIrAttrDef &>(*copy->attr.ir_attr).SetOffset(Zero);
+  auto load = vec.FindNode("mm_load");
+  dynamic_cast<af::ascir_op::Load::AscLoadIrAttrDef &>(*load->attr.ir_attr).SetOffset(One);
+  EXPECT_EQ(Create(), nullptr);
+  dynamic_cast<af::ascir_op::Load::AscLoadIrAttrDef &>(*load->attr.ir_attr).SetOffset(Zero);
+  vec.FindNode("copy")->outputs[0].attr.strides = {One, af::Symbol(2)};
+  EXPECT_EQ(Create(), nullptr);
+}
+
+TEST_F(CodegenCommonOutputReuse, RejectsUnknownSpanAndMissingImplementationProof) {
+  fused.gm_tensor_sizes.input_sizes[2] = af::Symbol(4);
+  EXPECT_EQ(Create(), nullptr);
+  fused.gm_tensor_sizes.input_sizes[2] = af::Symbol(8);
+  scheduled.schedule_groups[1].impl_graphs.push_back(af::AscGraph("unknown"));
+  EXPECT_EQ(Create(), nullptr);
+}
+
+TEST_F(CodegenCommonOutputReuse, LeavesVvUbParallelAndListTensorPathsUnchanged) {
+  for (const auto type : {::ascir::CubeTemplateType::kDefault, ::ascir::CubeTemplateType::kUBFuse}) {
+    scheduled.cube_type = type;
+    EXPECT_EQ(Create(), nullptr);
+  }
+  scheduled.cube_type = ::ascir::CubeTemplateType::kCommon;
+  EXPECT_EQ(CommonOutputReusePlan::Create(fused, scheduled, true), nullptr);
+  scheduled.enable_group_parallel = true;
+  EXPECT_EQ(Create(), nullptr);
+}
+
+TEST_F(CodegenCommonOutputReuse, RejectsWorkspaceMismatchAndMissingMmProducer) {
+  vec.FindNode("workspace")->outputs[0].attr.mem.tensor_id = 43;
+  EXPECT_EQ(Create(), nullptr);
+  vec.FindNode("workspace")->outputs[0].attr.mem.tensor_id = 42;
+  cube.FindNode("mm")->attr.api.compute_type = af::ComputeType::kComputeElewise;
+  EXPECT_EQ(Create(), nullptr);
+}
+
+TEST_F(CodegenCommonOutputReuse, LeavesConvCommonOutputUnchanged) {
+  Conv2D conv("conv");
+  cube.AddNode(conv);
+  fused.node_idx_to_scheduled_results = {{scheduled}};
+  EXPECT_EQ(Create(), nullptr);
+}
+
+TEST_F(CodegenCommonOutputReuse, DynamicProofUsesFrontendSymbolsAndExpandsSquaredSizes) {
+  const auto m = cube.CreateSizeVar("m");
+  const auto n = cube.CreateSizeVar("n");
+  vec.CreateSizeVar("m");
+  vec.CreateSizeVar("n");
+  for (auto *graph : {&cube, &vec}) {
+    for (const auto &node : graph->GetAllNodes()) {
+      if (node->GetType() == "Workspace") {
+        continue;
+      }
+      for (auto *output : node->outputs()) {
+        output->attr.repeats = {m, n};
+        output->attr.strides = {n, One};
+      }
+    }
+  }
+  cube.FindNode("b")->outputs[0].attr.repeats = {n, n};
+  vec.FindNode("side")->outputs[0].attr.strides = {One, Zero};
+  fused.frontend_shape_vars = {m, n};
+  fused.frontend_shape_vars_collected = true;
+  const auto four = af::Symbol(4);
+  fused.gm_tensor_sizes.input_sizes = {four * m * n, four * n * n, four * m};
+  fused.gm_tensor_sizes.output_sizes = {four * m * n, four * m * n};
+  fused.gm_tensor_sizes.total_size = four * m * n * af::Symbol(3) + four * n * n + four * m;
+  const auto plan = Create();
+  ASSERT_NE(plan, nullptr);
+  const auto b = std::find_if(plan->buffer_sizes.begin(), plan->buffer_sizes.end(),
+                              [](const auto &size) { return size.first == "b"; });
+  ASSERT_NE(b, plan->buffer_sizes.end());
+  EXPECT_EQ(std::count(b->second.begin(), b->second.end(), n), 2);
+  fused.frontend_shape_vars = {m};
+  EXPECT_EQ(Create(), nullptr);
+}
+
+TEST_F(CodegenCommonOutputReuse, RejectsDifferentAxesEvenWhenSizesMatch) {
+  vec.FindNode("mm_load")->outputs[0].attr.axis = {0, 1};
+  vec.FindNode("copy")->outputs[0].attr.axis = {1, 0};
+  EXPECT_EQ(Create(), nullptr);
+}
+
+TEST_F(CodegenCommonOutputReuse, RejectsNonzeroMmStoreOffset) {
+  const auto store = cube.FindNode("mm_store");
+  dynamic_cast<af::ascir_op::Store::AscStoreIrAttrDef &>(*store->attr.ir_attr).SetOffset(One);
+  EXPECT_EQ(Create(), nullptr);
+}
+
+TEST_F(CodegenCommonOutputReuse, DirectOutputGraphIsPrivateAndPreservesOtherConsumers) {
+  const auto plan = Create();
+  ASSERT_NE(plan, nullptr);
+  af::AscGraph direct("vec_OutputReuse");
+  ASSERT_EQ(plan->CreateDirectOutputGraph(vec, direct), af::SUCCESS);
+  EXPECT_NE(vec.FindNode("copy"), nullptr);
+  EXPECT_NE(vec.FindNode("original"), nullptr);
+  EXPECT_EQ(direct.FindNode("copy"), nullptr);
+  EXPECT_EQ(direct.FindNode("original"), nullptr);
+  ASSERT_NE(direct.FindNode("mm_load"), nullptr);
+  ASSERT_NE(direct.FindNode("add"), nullptr);
+  EXPECT_EQ(direct.FindNode("add")->inputs[0].anchor.GetOwnerNodeBarePtr()->GetName(), "mm_load");
+  EXPECT_EQ(ascgen_utils::GetTemplateSemanticTransform(*vec.FindNode("workspace")), "");
+  EXPECT_EQ(ascgen_utils::GetTemplateSemanticTransform(*direct.FindNode("workspace")),
+            ascgen_utils::template_semantic::kOutputReuse);
+  EXPECT_EQ(direct.GetName(), "vec_OutputReuse");
+}
+
+TEST_F(CodegenCommonOutputReuse, KeepsOriginalPathWhenCopiedOutputHasAnotherReader) {
+  Load reader("another_reader");
+  vec.AddNode(reader);
+  ASSERT_EQ(af::GraphUtils::AddEdge(vec.FindNode("copy")->GetOutDataAnchor(0),
+                                    vec.FindNode("another_reader")->GetInDataAnchor(0)),
+            af::GRAPH_SUCCESS);
+  EXPECT_EQ(Create(), nullptr);
+}
+
+TEST_F(CodegenCommonOutputReuse, PrivateGraphKeepsVfHelpersDistinctFromFallback) {
+  const auto plan = Create();
+  ASSERT_NE(plan, nullptr);
+  VectorFunc vf("vec_VfNode_0");
+  vec.AddNode(vf);
+  af::AscGraph direct("vec_OutputReuse");
+  ASSERT_EQ(plan->CreateDirectOutputGraph(vec, direct), af::SUCCESS);
+  EXPECT_NE(vec.FindNode("vec_VfNode_0"), nullptr);
+  EXPECT_EQ(vec.FindNode("vec_VfNode_0_OutputReuse"), nullptr);
+  EXPECT_EQ(direct.FindNode("vec_VfNode_0"), nullptr);
+  EXPECT_NE(direct.FindNode("vec_VfNode_0_OutputReuse"), nullptr);
+  EXPECT_EQ(ascgen_utils::GetTemplateSemanticName(vec), "Pointwise/Common");
+  EXPECT_EQ(ascgen_utils::GetTemplateSemanticName(direct), "Pointwise/Common+OutputReuse");
+  EXPECT_EQ(ascgen_utils::RefineTemplateSemanticName(ascgen_utils::GetTemplateSemanticName(direct), direct),
+            "Pointwise/Common+OutputReuse");
+}
+
+TEST_F(CodegenCommonOutputReuse, DirectOutputGraphRequiresExactImplementationIdentity) {
+  const auto plan = Create();
+  ASSERT_NE(plan, nullptr);
+  af::AscGraph other("other_impl");
+  ASSERT_TRUE(other.CopyFrom(vec));
+  af::AscGraph direct("other_direct");
+  EXPECT_NE(plan->CreateDirectOutputGraph(other, direct), af::SUCCESS);
+  EXPECT_NE(other.FindNode("copy"), nullptr);
+}
+
+TEST_F(CodegenCommonOutputReuse, ReusesDependentVectorOutputWithoutRemovingItsComputation) {
+  UseVectorOutput();
+  const auto plan = Create();
+  ASSERT_NE(plan, nullptr);
+  EXPECT_EQ(plan->output_name, "tail");
+  EXPECT_TRUE(plan->reuses_vector_output);
+  EXPECT_TRUE(plan->copy_stores.empty());
+  af::AscGraph direct("vec_OutputReuse");
+  ASSERT_EQ(plan->CreateDirectOutputGraph(vec, direct), af::SUCCESS);
+  for (const auto *name : {"mm_load", "add", "tail_store", "tail"}) {
+    EXPECT_NE(vec.FindNode(name), nullptr);
+    EXPECT_NE(direct.FindNode(name), nullptr);
+  }
+  EXPECT_EQ(ascgen_utils::GetTemplateSemanticTransform(*vec.FindNode("workspace")), "");
+  EXPECT_EQ(ascgen_utils::GetTemplateSemanticTransform(*direct.FindNode("workspace")),
+            ascgen_utils::template_semantic::kOutputReuse);
+}
+
+TEST_F(CodegenCommonOutputReuse, RejectsVectorOutputWithoutReadBeforeWriteDependency) {
+  UseVectorOutput();
+  ASSERT_EQ(
+      af::GraphUtils::RemoveEdge(vec.FindNode("mm_load")->GetOutDataAnchor(0), vec.FindNode("add")->GetInDataAnchor(0)),
+      af::GRAPH_SUCCESS);
+  ASSERT_EQ(af::GraphUtils::AddEdge(vec.FindNode("side")->GetOutDataAnchor(0), vec.FindNode("add")->GetInDataAnchor(0)),
+            af::GRAPH_SUCCESS);
+  EXPECT_EQ(Create(), nullptr);
+}
+
+TEST_F(CodegenCommonOutputReuse, RejectsVectorOutputWhenAnotherWorkspaceReadMayRunLater) {
+  UseVectorOutput();
+  Load second("second_mm_load");
+  vec.AddNode(second);
+  ASSERT_EQ(af::GraphUtils::AddEdge(vec.FindNode("workspace")->GetOutDataAnchor(0),
+                                    vec.FindNode("second_mm_load")->GetInDataAnchor(0)),
+            af::GRAPH_SUCCESS);
+  EXPECT_EQ(Create(), nullptr);
+}
+
+TEST_F(CodegenCommonOutputReuse, RejectsDifferentVectorTileAndCachedReader) {
+  UseVectorOutput();
+  const auto load = vec.FindNode("mm_load");
+  const auto store = vec.FindNode("tail_store");
+  store->attr.sched.loop_axis = 1;
+  EXPECT_EQ(Create(), nullptr);
+  store->attr.sched.loop_axis = 0;
+  store->attr.sched.axis = {1, 0};
+  EXPECT_EQ(Create(), nullptr);
+  store->attr.sched.axis = {0, 1};
+  load->attr.sched.exec_condition = af::ExecuteCondition::kCacheBlockSplitOriginBroadcastAxis;
+  EXPECT_EQ(Create(), nullptr);
+}
+
+TEST_F(CodegenCommonOutputReuse, RejectsNonDenseVectorReadAndReorderedWrite) {
+  UseVectorOutput();
+  const auto load = vec.FindNode("mm_load");
+  const auto store = vec.FindNode("tail_store");
+  load->outputs[0].attr.strides = {One, af::Symbol(2)};
+  store->outputs[0].attr.strides = load->outputs[0].attr.strides;
+  EXPECT_EQ(Create(), nullptr);
+  load->outputs[0].attr.strides = {af::Symbol(8), One};
+  store->outputs[0].attr.strides = {af::Symbol(8), One};
+  store->outputs[0].attr.axis = {1, 0};
+  EXPECT_EQ(Create(), nullptr);
+}
+
+TEST_F(CodegenCommonOutputReuse, VectorOutputProofBelongsToItsImplementation) {
+  UseVectorOutput();
+  const auto plan = Create();
+  ASSERT_NE(plan, nullptr);
+  af::AscGraph unrelated("other");
+  ASSERT_TRUE(unrelated.CopyFrom(vec));
+  af::AscGraph target("target");
+  EXPECT_NE(plan->CreateDirectOutputGraph(unrelated, target), af::SUCCESS);
+}
+
+TEST_F(CodegenCommonOutputReuse, ProvesDenseTiledViewWithRationalOuterRepeat) {
+  UseVectorOutput();
+  const auto tile = vec.CreateSizeVar("tile");
+  for (const auto *name : {"mm_load", "tail_store"}) {
+    const auto node = vec.FindNode(name);
+    node->attr.sched.axis = {0, 1, 2};
+    node->attr.sched.loop_axis = 1;
+    auto &tensor = node->outputs[0].attr;
+    tensor.axis = {0, 1, 2};
+    tensor.repeats = {af::Symbol(2) / tile, tile, af::Symbol(8)};
+    tensor.strides = {tile * af::Symbol(8), af::Symbol(8), One};
+  }
+  const auto plan = Create();
+  ASSERT_NE(plan, nullptr);
+  EXPECT_EQ(plan->output_name, "tail");
+  EXPECT_TRUE(plan->reuses_vector_output);
+}
+
+TEST_F(CodegenCommonOutputReuse, ProvesAllTiledImplementationsIncludingRationalInnerRepeat) {
+  UseVectorOutput();
+  scheduled.schedule_groups[1].impl_graphs.clear();
+  for (int i = 0; i < 4; ++i) {
+    af::AscGraph graph(("vec_impl_" + std::to_string(i)).c_str());
+    ASSERT_TRUE(graph.CopyFrom(vec));
+    const auto tile = graph.CreateSizeVar("tile");
+    for (const auto *name : {"mm_load", "tail_store"}) {
+      const auto node = graph.FindNode(name);
+      node->attr.sched.axis = {3, 4, 2};
+      node->attr.sched.loop_axis = 4;
+      auto &tensor = node->outputs[0].attr;
+      tensor.axis = {0, 1, 2};
+      if (i % 2 == 0) {
+        tensor.repeats = {af::Symbol(2) / tile, tile, af::Symbol(8)};
+        tensor.strides = {tile * af::Symbol(8), af::Symbol(8), One};
+      } else {
+        tensor.repeats = {af::Symbol(2), af::Symbol(8) / tile, tile};
+        tensor.strides = {af::Symbol(8), tile, One};
+      }
+    }
+    scheduled.schedule_groups[1].impl_graphs.push_back(graph);
+  }
+  const auto plan = Create();
+  ASSERT_NE(plan, nullptr);
+  EXPECT_EQ(plan->output_name, "tail");
+  EXPECT_TRUE(plan->reuses_vector_output);
+  EXPECT_EQ(plan->vector_impl_names.size(), 4U);
+}
+
+TEST_F(CodegenCommonOutputReuse, ExistingVectorOutputReuseUsesTheNativeMixGuard) {
+  UseVectorOutput();
+  Scalar scalar("scalar");
+  vec.AddNode(scalar);
+  ASSERT_EQ(optimize::ScheduleUtils::RemoveNode(vec, vec.FindNode("side"), vec.FindNode("scalar")->GetOutDataAnchor(0)),
+            af::SUCCESS);
+  fused.input_nodes.resize(2);
+  fused.gm_tensor_sizes.input_sizes.resize(2);
+  const auto plan = Create();
+  ASSERT_NE(plan, nullptr);
+  ASSERT_TRUE(plan->reuses_vector_output);
+  EXPECT_TRUE(plan->uses_legacy_vector_output);
+  EXPECT_EQ(plan->output_name, "tail");
+  const auto code = plan->GenerateGuard(CodegenConfig{}, true);
+  EXPECT_EQ(code, "constexpr bool cv_reuse_common_output = MIX_MODE != 1;\n");
+  CodegenConfig config;
+  config.is_inductor = true;
+  EXPECT_EQ(plan->GenerateGuard(config, false), code);
+  config.launch_decouple = true;
+  EXPECT_EQ(plan->GenerateGuard(config, false), "const bool cv_reuse_common_output = cv_tiling_data.mix_mode != 1;\n");
+  RecordProperty("legacy_vector_output_guard", code);
+  const auto static_code = plan->GenerateGuard(CodegenConfig{}, false);
+  EXPECT_NE(static_code.find("!defined(CV_SAFETY_FUSION_AIV_ONLY)"), std::string::npos);
+  EXPECT_EQ(static_code.find("cv_output_tiling"), std::string::npos);
+  RecordProperty("legacy_vector_output_static_guard", static_code);
+}
+
+TEST_F(CodegenCommonOutputReuse, RetainsCubeOnlyDimensionForFullRuntimeInputRanges) {
+  UseVectorOutput();
+  const auto k = cube.CreateSizeVar("k");
+  const auto a = cube.FindNode("a");
+  const auto b = cube.FindNode("b");
+  a->outputs[0].attr.repeats = {af::Symbol(2), k};
+  a->outputs[0].attr.strides = {k, One};
+  b->outputs[0].attr.repeats = {k, af::Symbol(8)};
+  b->outputs[0].attr.strides = {af::Symbol(8), One};
+  fused.frontend_shape_vars = {k};
+  fused.frontend_shape_vars_collected = true;
+  fused.gm_tensor_sizes.input_sizes = {af::Symbol(8) * k, af::Symbol(32) * k, af::Symbol(8)};
+  fused.gm_tensor_sizes.total_size = af::Symbol(40) * k + af::Symbol(72);
+  const auto plan = Create();
+  ASSERT_NE(plan, nullptr);
+  EXPECT_NE(plan->GenerateGuard(CodegenConfig{}, true).find("cv_output_tiling.k"), std::string::npos);
+  auto derived = fused;
+  ASSERT_EQ(ascgen_utils::CreateCVFusionCommonResult(derived), af::SUCCESS);
+  CommonOutputReusePlan::PreserveShapeVars(fused, derived);
+  const auto &group = derived.node_idx_to_scheduled_results[0][0].schedule_groups[0];
+  EXPECT_EQ(group.runtime_shape_vars, std::vector<af::Expression>{k});
+  EXPECT_TRUE(scheduled.schedule_groups[1].runtime_shape_vars.empty());
+  EXPECT_TRUE(vec.GetAllSizeVar().empty());
+  CommonOutputReusePlan::PreserveShapeVars(fused, derived);
+  EXPECT_EQ(group.runtime_shape_vars.size(), 1U);
+  const auto header = TilingData("Autofuse").Generate(fused, false);
+  EXPECT_NE(header.find("TILING_DATA_FIELD_DEF_T(int64_t, k);"), std::string::npos);
+  const auto derived_header = TilingData("Autofuse").Generate(derived, false);
+  EXPECT_EQ(derived_header, header);
+  vec.CreateSizeVar("k");
+  derived = fused;
+  ASSERT_EQ(ascgen_utils::CreateCVFusionCommonResult(derived), af::SUCCESS);
+  CommonOutputReusePlan::PreserveShapeVars(fused, derived);
+  EXPECT_EQ(derived.node_idx_to_scheduled_results[0][0].schedule_groups[0].runtime_shape_vars,
+            std::vector<af::Expression>{k});
+}
+
+TEST_F(CodegenCommonOutputReuse, LeavesNestedTilingLayoutsOnTheOriginalPath) {
+  UseVectorOutput();
+  fused.node_idx_to_scheduled_results[0].push_back(scheduled);
+  EXPECT_EQ(Create(), nullptr);
+  fused.node_idx_to_scheduled_results.push_back({scheduled});
+  EXPECT_EQ(Create(), nullptr);
+}
+
+TEST_F(CodegenCommonOutputReuse, RetainsDeclaredButUnusedCopyGuardDimensions) {
+  const auto k = cube.CreateSizeVar("k");
+  vec.CreateSizeVar("k");
+  const auto a = cube.FindNode("a");
+  const auto b = cube.FindNode("b");
+  a->outputs[0].attr.repeats = {af::Symbol(2), k};
+  a->outputs[0].attr.strides = {k, One};
+  b->outputs[0].attr.repeats = {k, af::Symbol(8)};
+  b->outputs[0].attr.strides = {af::Symbol(8), One};
+  fused.frontend_shape_vars = {k};
+  fused.frontend_shape_vars_collected = true;
+  fused.gm_tensor_sizes.input_sizes = {af::Symbol(8) * k, af::Symbol(32) * k, af::Symbol(8)};
+  fused.gm_tensor_sizes.total_size = af::Symbol(40) * k + af::Symbol(136);
+  const auto plan = Create();
+  ASSERT_NE(plan, nullptr);
+  EXPECT_FALSE(plan->reuses_vector_output);
+  auto derived = fused;
+  ASSERT_EQ(ascgen_utils::CreateCVFusionCommonResult(derived), af::SUCCESS);
+  CommonOutputReusePlan::PreserveShapeVars(fused, derived);
+  EXPECT_EQ(derived.node_idx_to_scheduled_results[0][0].schedule_groups[0].runtime_shape_vars,
+            std::vector<af::Expression>{k});
+}
+
+TEST(CodegenKernel, CommonOutputReuseBindsWorkspaceAsReadOnlyInput) {
+  Kernel kernel("direct");
+  af::AscGraph graph("direct");
+  Workspace workspace("workspace");
+  graph.AddNode(workspace);
+  workspace.y.dtype = ge::DT_FLOAT;
+  graph.FindNode("workspace")->outputs[0].attr.mem.tensor_id = 42;
+  ASSERT_EQ(kernel.tpipe.AddTensor(graph.FindNode("workspace")->outputs[0]), af::SUCCESS);
+  kernel.workspaces.emplace_back(Uint64("workspace42"));
+  kernel.workspace_tensors.emplace(42, "0");
+  kernel.outputs.emplace_back(GM_ADDR("original"));
+  kernel.output_tensors.emplace_back(42);
+  ASSERT_EQ(kernel.BindWorkspaceInput(42, "original", 3U), af::SUCCESS);
+  EXPECT_TRUE(kernel.workspaces.empty());
+  EXPECT_TRUE(kernel.workspace_tensors.empty());
+  EXPECT_TRUE(kernel.outputs.empty());
+  ASSERT_EQ(kernel.inputs.size(), 1U);
+  EXPECT_EQ(kernel.inputs[0].Str(), "original");
+  std::string code;
+  ASSERT_EQ(kernel.GlobalTensorInit(code), af::SUCCESS);
+  EXPECT_NE(code.find("global_42.SetGlobalBuffer((__gm__ float*)original);"), std::string::npos);
+  EXPECT_EQ(code.find("workspace"), std::string::npos);
+}
+
+TEST(CodegenKernel, CommonOutputReuseGuardChecksFullRangesAndCheckedSizes) {
+  CommonOutputReusePlan plan;
+  plan.output_name = "original";
+  plan.workspace_id = 42;
+  const auto m = af::Symbol("m");
+  const auto n = af::Symbol("n");
+  plan.buffer_sizes = {{"original", {af::Symbol(4), m, n}},
+                       {"tail", {af::Symbol(4), m, n}},
+                       {"a", {af::Symbol(4), m, n}},
+                       {"b", {af::Symbol(4), n, n}},
+                       {"side", {af::Symbol(4), m}}};
+  CodegenConfig config;
+  const auto code = plan.GenerateGuard(config, false);
+  EXPECT_NE(code.find("cv_output_tiling.workspace42 == 0U"), std::string::npos);
+  EXPECT_NE(code.find("static_cast<uint64_t>(cv_output_bytes_0) * static_cast<uint32_t>("), std::string::npos);
+  EXPECT_NE(code.find("UINT64_MAX - cv_output_addr_0"), std::string::npos);
+  RecordProperty("common_output_alias_guard", code);
+}
+
+TEST_F(CodegenCommonOutputReuse, VectorOutputReuseRequiresAnAicOnlyNativeProducer) {
+  UseVectorOutput();
+  const auto plan = Create();
+  ASSERT_NE(plan, nullptr);
+  ASSERT_TRUE(plan->reuses_vector_output);
+  const auto static_code = plan->GenerateGuard(CodegenConfig{}, false);
+  EXPECT_NE(static_code.find("#ifdef CV_SAFETY_FUSION_MIX_MODE\ncv_reuse_common_output = false;"), std::string::npos);
+  RecordProperty("vector_output_static_guard", static_code);
+
+  const auto dynamic_code = plan->GenerateGuard(CodegenConfig{}, true);
+  EXPECT_NE(dynamic_code.find("MIX_MODE == 0"), std::string::npos);
+  EXPECT_EQ(dynamic_code.find("cv_tiling_data.mix_mode"), std::string::npos);
+  EXPECT_EQ(dynamic_code.find("CV_SAFETY_FUSION_MIX_MODE"), std::string::npos);
+  RecordProperty("vector_output_dynamic_guard", dynamic_code);
+
+  CodegenConfig config;
+  config.is_inductor = true;
+  const auto inductor_code = plan->GenerateGuard(config, false);
+  EXPECT_NE(inductor_code.find("MIX_MODE == 0"), std::string::npos);
+  EXPECT_EQ(inductor_code.find("cv_tiling_data.mix_mode"), std::string::npos);
+  EXPECT_EQ(inductor_code.find("CV_SAFETY_FUSION_MIX_MODE"), std::string::npos);
+  RecordProperty("vector_output_inductor_guard", inductor_code);
+  config.launch_decouple = true;
+  const auto runtime_code = plan->GenerateGuard(config, false);
+  EXPECT_NE(runtime_code.find("cv_tiling_data.mix_mode == 0"), std::string::npos);
+  EXPECT_EQ(runtime_code.find("MIX_MODE"), std::string::npos);
+}
+
+TEST_F(CodegenCommonOutputReuse, NativeMixDoesNotDisableOriginalMmOutputCopyElimination) {
+  const auto plan = Create();
+  ASSERT_NE(plan, nullptr);
+  ASSERT_FALSE(plan->reuses_vector_output);
+  CodegenConfig config;
+  for (const bool dynamic : {false, true}) {
+    const auto code = plan->GenerateGuard(config, dynamic);
+    EXPECT_EQ(code.find("mix_mode"), std::string::npos);
+    EXPECT_EQ(code.find("CV_SAFETY_FUSION_MIX_MODE"), std::string::npos);
+  }
+  config.is_inductor = true;
+  const auto code = plan->GenerateGuard(config, false);
+  EXPECT_EQ(code.find("mix_mode"), std::string::npos);
+  EXPECT_EQ(code.find("CV_SAFETY_FUSION_MIX_MODE"), std::string::npos);
+}
+
 TEST(CodegenKernel, GenCubeCommonTilingSingleFuncCallShouldUseOutputOverride) {
   codegen::Kernel kernel("cube_kernel");
   kernel.inputs.emplace_back(GM_ADDR("x"));
@@ -4012,6 +4994,19 @@ TEST(CodegenKernel, GenCubeCommonTilingSingleFuncCallShouldUseOutputOverride) {
 
   EXPECT_NE(result.find("y0, workspace + vec_wss, gm_tiling_data);"), std::string::npos);
   EXPECT_EQ(result.find("workspace, workspace + vec_wss, gm_tiling_data);"), std::string::npos);
+}
+
+TEST(CodegenKernel, CommonVectorWorkspaceOverrideOnlyChangesTheCallArgument) {
+  codegen::Kernel kernel("vector_kernel");
+  kernel.inputs.emplace_back(GM_ADDR("x"));
+  kernel.outputs.emplace_back(GM_ADDR("y"));
+  kernel.workspaces.emplace_back(Uint64("workspace0"));
+  const std::string selected_workspace = "(cv_reuse_common_output ? y : workspace)";
+  const auto result = kernel.GenTilingFuncCall("vector", "t", 0U, false, false, "t", selected_workspace);
+  EXPECT_NE(result.find("vector(x, y, " + selected_workspace + ", t.workspace0, &t);"), std::string::npos);
+  EXPECT_EQ(kernel.workspace_arg.Str(), "workspace");
+  EXPECT_NE(kernel.GenTilingFuncCall("vector", "t", 0U).find("vector(x, y, workspace, t.workspace0, &t);"),
+            std::string::npos);
 }
 
 TEST(CodegenKernel, WorkspaceReuseOutputAsInputCodegen) {
@@ -4939,6 +5934,92 @@ TEST(CodegenKernel, Kernel_GenerateKernel_Multi_ScheduleGroup) {
   EXPECT_TRUE(kernel_txt.find(expect_found) != std::string::npos);
 }
 
+TEST(CodegenKernel, Kernel_GenerateKernel_Multi_ScheduleGroup_SkipsEmptyGroupResult) {
+  af::AscGraph graph("test_kernel");
+  af::ascir_op::Data x_op("x", graph);
+  x_op.ir_attr.SetIndex(0);
+  af::ascir_op::Output y_op("y");
+  y_op.ir_attr.SetIndex(0);
+  af::ascir_op::Load load_op("load");
+  af::ascir_op::Store store_op("store");
+  graph.AddNode(load_op);
+  graph.AddNode(store_op);
+  graph.AddNode(y_op);
+
+  x_op.y.dtype = ge::DT_FLOAT16;
+  load_op.x = x_op.y;
+  load_op.y.dtype = ge::DT_FLOAT16;
+  store_op.x = load_op.y;
+  store_op.y.dtype = ge::DT_FLOAT16;
+  y_op.x = store_op.y;
+  store_op.attr.tmp_buffers = {{{af::Symbol(8192), -1}, af::MemAttr(), 0}};
+
+  auto x = graph.FindNode("x");
+  auto load = graph.FindNode("load");
+  auto store = graph.FindNode("store");
+  auto output = graph.FindNode("y");
+
+  x->attr.api.unit = af::ComputeUnit::kUnitNone;
+  load->attr.api.unit = af::ComputeUnit::kUnitNone;
+  store->attr.api.unit = af::ComputeUnit::kUnitNone;
+  output->attr.api.unit = af::ComputeUnit::kUnitNone;
+
+  x->outputs[0].attr.mem.alloc_type = af::AllocType::kAllocTypeGlobal;
+  x->outputs[0].attr.mem.tensor_id = 0;
+  x->outputs[0].attr.opt.merge_scope = 0;
+  load->outputs[0].attr.mem.alloc_type = af::AllocType::kAllocTypeBuffer;
+  load->outputs[0].attr.mem.tensor_id = 1;
+  load->outputs[0].attr.buf.id = 0;
+  load->outputs[0].attr.opt.merge_scope = 0;
+  store->outputs[0].attr.mem.alloc_type = af::AllocType::kAllocTypeGlobal;
+  store->outputs[0].attr.mem.tensor_id = 2;
+  store->outputs[0].attr.opt.merge_scope = 0;
+
+  ::ascir::ScheduleGroup empty_result_group0 = {{af::AscGraph("empty_result_0"), af::AscGraph("empty_result_1")}};
+  ::ascir::ScheduleGroup empty_result_group1;
+  ::ascir::ScheduleGroup kept_result_group0 = {{af::AscGraph("kept_result_0"), af::AscGraph("kept_result_1")}};
+
+  ::ascir::ScheduledResult empty_result;
+  empty_result.schedule_groups.push_back(empty_result_group0);
+  empty_result.schedule_groups.push_back(empty_result_group1);
+
+  ::ascir::ScheduledResult kept_result;
+  kept_result.schedule_groups.push_back(kept_result_group0);
+
+  std::vector<::ascir::ScheduledResult> schedule_results;
+  schedule_results.push_back(empty_result);
+  schedule_results.push_back(kept_result);
+
+  for (auto &scheduled_result : schedule_results) {
+    for (auto &schedule_group : scheduled_result.schedule_groups) {
+      for (auto &impl_graph : schedule_group.impl_graphs) {
+        impl_graph.CopyFrom(graph);
+      }
+    }
+  }
+
+  ::ascir::FusedScheduledResult fused_schedule_result;
+  fused_schedule_result.fused_graph_name = af::AscendString(graph.GetName().c_str());
+  fused_schedule_result.node_idx_to_scheduled_results.push_back(schedule_results);
+  fused_schedule_result.input_nodes.push_back(x);
+  fused_schedule_result.output_nodes.push_back(output);
+
+  std::stringstream ss;
+  ASSERT_EQ(codegen::Kernel::GenKernelFuncByTilingKey(fused_schedule_result, ss), af::SUCCESS);
+  const auto kernel_txt = ss.str();
+  EXPECT_NE(kernel_txt.find("TILING_KEY_IS(0)"), std::string::npos);
+  EXPECT_NE(kernel_txt.find("TILING_KEY_IS(1)"), std::string::npos);
+  EXPECT_EQ(kernel_txt.find("TILING_KEY_IS(2)"), std::string::npos);
+  EXPECT_EQ(kernel_txt.find("empty_result"), std::string::npos);
+  EXPECT_NE(kernel_txt.find("kept_result"), std::string::npos);
+
+  auto all_empty = fused_schedule_result;
+  all_empty.node_idx_to_scheduled_results[0][1].schedule_groups[0].impl_graphs.clear();
+  std::stringstream all_empty_ss;
+  ASSERT_EQ(codegen::Kernel::GenKernelFuncByTilingKey(all_empty, all_empty_ss), af::SUCCESS);
+  EXPECT_EQ(all_empty_ss.str().find("TILING_KEY_IS"), std::string::npos);
+}
+
 TEST(CodegenKernel, Kernel_GenerateKernel_Single_ScheduleGroup) {
   af::AscGraph graph("test_kernel");
   af::ascir_op::Data x_op("x", graph);
@@ -5143,6 +6224,80 @@ TEST(CodegenKernel, Kernel_GenerateKernel_Single_ScheduleGroup) {
           "}\n"});
 }
 
+// 纯 vector kernel（AIV_ONLY / MIX_AIV_1_0）在分核架构上仍会编译 cube pass，
+// cube 核无 V pipe 且不执行 vector 代码，入口需对 AIC 直接返回；
+// CV/AIC task type 的 cube 侧要执行 cube 代码，不得加该返回。
+TEST(CodegenKernel, Kernel_Prologue_AivOnlyTaskType_ShouldGuardAicEntry) {
+  af::AscGraph graph("test_kernel");
+  af::ascir_op::Data x_op("x", graph);
+  x_op.ir_attr.SetIndex(0);
+  af::ascir_op::Output y_op("y");
+  y_op.ir_attr.SetIndex(0);
+  af::ascir_op::Load load_op("load");
+  af::ascir_op::Store store_op("store");
+  graph.AddNode(load_op);
+  graph.AddNode(store_op);
+  graph.AddNode(y_op);
+
+  x_op.y.dtype = ge::DT_FLOAT16;
+  load_op.x = x_op.y;
+  load_op.y.dtype = ge::DT_FLOAT16;
+  store_op.x = load_op.y;
+  store_op.y.dtype = ge::DT_FLOAT16;
+  y_op.x = store_op.y;
+  store_op.attr.tmp_buffers = {{{af::Symbol(8192), -1}, af::MemAttr(), 0}};
+
+  auto x = graph.FindNode("x");
+  auto y = graph.FindNode("y");
+
+  x->outputs[0].attr.mem.alloc_type = af::AllocType::kAllocTypeGlobal;
+  x->outputs[0].attr.mem.tensor_id = 0;
+
+  ::ascir::ScheduledResult schedule_result0;
+  schedule_result0.schedule_groups.resize(1);
+  schedule_result0.schedule_groups[0].impl_graphs.emplace_back(graph);
+
+  std::vector<::ascir::ScheduledResult> schedule_results;
+  schedule_results.push_back(schedule_result0);
+
+  ::ascir::FusedScheduledResult fused_schedule_result;
+  fused_schedule_result.fused_graph_name = af::AscendString(graph.GetName().c_str());
+  fused_schedule_result.node_idx_to_scheduled_results.push_back(schedule_results);
+  fused_schedule_result.input_nodes.push_back(x);
+  fused_schedule_result.output_nodes.push_back(y);
+
+  const std::string aic_entry_guard = "    if (g_coreType == AIC) { return; }\n";
+  for (const auto &task_type : {ascgen_utils::kKernelTaskTypeAIVOnly, ascgen_utils::kKernelTaskTypeMixAIVOneZero}) {
+    std::stringstream aiv_ss;
+    codegen::Kernel::GenKernelFuncByTilingKey(fused_schedule_result, aiv_ss, false, CodegenConfig{}, task_type);
+    const auto kernel_txt = aiv_ss.str();
+    // 非 inductor：防护必须是函数体第一条语句（先于 REGISTER_TILING_DEFAULT）。
+    const auto prologue_pos = kernel_txt.find("gm_tiling_data) {");
+    ASSERT_NE(prologue_pos, std::string::npos) << kernel_txt;
+    const auto guard_pos = kernel_txt.find(aic_entry_guard, prologue_pos);
+    ASSERT_NE(guard_pos, std::string::npos) << kernel_txt;
+    EXPECT_LT(guard_pos, kernel_txt.find("REGISTER_TILING_DEFAULT")) << kernel_txt;
+  }
+  {
+    // inductor：防护同样必须是函数体第一条语句（先于 KERNEL_TASK_TYPE_DEFAULT）。
+    codegen::CodegenConfig inductor_config{};
+    inductor_config.is_inductor = true;
+    std::stringstream inductor_ss;
+    codegen::Kernel::GenKernelFuncByTilingKey(fused_schedule_result, inductor_ss, false, inductor_config,
+                                              ascgen_utils::kKernelTaskTypeMixAIVOneZero);
+    const auto kernel_txt = inductor_ss.str();
+    const auto task_type_pos = kernel_txt.find("KERNEL_TASK_TYPE_DEFAULT(");
+    ASSERT_NE(task_type_pos, std::string::npos) << kernel_txt;
+    const auto guard_pos = kernel_txt.find(aic_entry_guard);
+    ASSERT_NE(guard_pos, std::string::npos) << kernel_txt;
+    EXPECT_LT(guard_pos, task_type_pos) << kernel_txt;
+  }
+  std::stringstream cv_ss;
+  codegen::Kernel::GenKernelFuncByTilingKey(fused_schedule_result, cv_ss, false, CodegenConfig{},
+                                            ascgen_utils::kKernelTaskTypeMixAICOneTwo);
+  EXPECT_EQ(cv_ss.str().find("if (g_coreType == AIC) { return; }"), std::string::npos) << cv_ss.str();
+}
+
 TEST(CodegenKernel, DynamicInputsAndOutputs) {
   af::AscGraph graph("test_graph");
   auto s0 = graph.CreateSizeVar("s0");
@@ -5332,6 +6487,87 @@ TEST(CodegenKernel, PackingFunctionCalls) {
   EXPECT_TRUE(result.find("if TILING_KEY_VAR == 20000002") != std::string::npos);
   EXPECT_TRUE(result.find("if TILING_KEY_VAR == 20000003") != std::string::npos);
   EXPECT_TRUE(result.find("if TILING_KEY_VAR == 20000004") == std::string::npos);
+}
+
+TEST(CodegenKernel, SerialVectorGroupsDoNotPackAtCompileUnitBoundary) {
+  af::AscGraph graph("packing_boundary");
+  const auto axis = graph.CreateAxis("z0", af::Symbol(128));
+  Data data("input", graph);
+  Load load_op("load");
+  Store store_op("store");
+  Output output_op("output");
+  data.ir_attr.SetIndex(0);
+  output_op.ir_attr.SetIndex(0);
+  data.y.dtype = ge::DT_FLOAT;
+  load_op.y.dtype = ge::DT_FLOAT;
+  store_op.y.dtype = ge::DT_FLOAT;
+  output_op.y.dtype = ge::DT_FLOAT;
+  graph.AddNode(load_op);
+  graph.AddNode(store_op);
+  graph.AddNode(output_op);
+  auto input = graph.FindNode("input");
+  auto load = graph.FindNode("load");
+  auto store = graph.FindNode("store");
+  auto output = graph.FindNode("output");
+  ASSERT_EQ(af::GraphUtils::AddEdge(input->GetOutDataAnchor(0), load->GetInDataAnchor(0)), af::GRAPH_SUCCESS);
+  ASSERT_EQ(af::GraphUtils::AddEdge(load->GetOutDataAnchor(0), store->GetInDataAnchor(0)), af::GRAPH_SUCCESS);
+  ASSERT_EQ(af::GraphUtils::AddEdge(store->GetOutDataAnchor(0), output->GetInDataAnchor(0)), af::GRAPH_SUCCESS);
+  input->attr.api.unit = af::ComputeUnit::kUnitNone;
+  output->attr.api.unit = af::ComputeUnit::kUnitNone;
+  input->outputs[0].attr.mem.alloc_type = af::AllocType::kAllocTypeGlobal;
+  input->outputs[0].attr.mem.tensor_id = 0;
+  auto &tensor = load->outputs[0].attr;
+  tensor.axis = {axis.id};
+  tensor.vectorized_axis = {axis.id};
+  tensor.vectorized_strides = {One};
+  tensor.repeats = {axis.size};
+  tensor.strides = {One};
+  tensor.mem.position = af::Position::kPositionVecIn;
+  tensor.mem.alloc_type = af::AllocType::kAllocTypeQueue;
+  tensor.mem.tensor_id = 1;
+  tensor.mem.reuse_id = 0;
+  tensor.que.id = 0;
+  tensor.que.depth = 2;
+  tensor.que.buf_num = 2;
+  tensor.opt.merge_scope = af::kIdNone;
+  store->outputs[0].attr.mem.alloc_type = af::AllocType::kAllocTypeGlobal;
+  store->outputs[0].attr.mem.tensor_id = 2;
+
+  const auto backend_spec = optimize::BackendSpec::GetInstance();
+  ASSERT_NE(backend_spec, nullptr);
+  const auto limit = static_cast<int64_t>(backend_spec->max_group_num_per_compile_unit);
+  ASSERT_GT(limit, 0);
+  ASSERT_LE(limit, 64);
+  for (const bool is_inductor : {false, true}) {
+    for (const auto count : {limit - 1, limit, limit + 1, limit + 2, limit * 2}) {
+      ascir::FusedScheduledResult fused;
+      fused.fused_graph_name = af::AscendString("packing_boundary");
+      fused.input_nodes = {input};
+      fused.output_nodes = {output};
+      fused.node_idx_to_scheduled_results.resize(1);
+      fused.node_idx_to_scheduled_results[0].resize(1);
+      // Use the public entry's parsed-tiling branch for both compiler modes.
+      fused.node_idx_to_scheduled_results[0][0].enable_group_parallel = true;
+      auto &groups = fused.node_idx_to_scheduled_results[0][0].schedule_groups;
+      for (int64_t index = 0; index < count; ++index) {
+        af::AscGraph copy(("packing_group_" + std::to_string(index)).c_str());
+        ASSERT_TRUE(copy.CopyFrom(graph));
+        ascir::ScheduleGroup group;
+        group.impl_graphs.push_back(copy);
+        groups.push_back(std::move(group));
+      }
+      std::stringstream generated;
+      const CodegenConfig config{is_inductor, true, false};
+      ASSERT_EQ(Kernel::GenKernelFuncByTilingKey(fused, generated, false, config), af::SUCCESS);
+      const bool packed = generated.str().find("packed_functions_") != std::string::npos;
+      EXPECT_EQ(packed, count > limit) << "group_count=" << count;
+      if (is_inductor) {
+        EXPECT_NE(generated.str().find("_g" + std::to_string(count - 1) + "_tiling_data"), std::string::npos);
+      } else if (count > limit) {
+        EXPECT_NE(generated.str().find("#if TILING_KEY_VAR =="), std::string::npos);
+      }
+    }
+  }
 }
 
 TEST(CodegenKernel, TPipe_AllocTmpBuf) {
@@ -5954,9 +7190,9 @@ TEST(CodegenKernel, CalculateWorkspaceSize_Test) {
   std::vector<af::AscNodePtr> workspace_nodes = {workspace1, workspace2};
   auto ws_size = ascgen_utils::CalculateWorkspaceSize(workspace_nodes);
   EXPECT_EQ(ToString(ws_size),
-            "(Max(Max(0, (2 * Max(Max(1, s1), (s0 * s1)))), (2 * Max(Max(Max(1, s2), (s1 * s2)), (s0 * s1 * s2)))) + "
-            "Max(Max(0, (2 * Max(Max(Max(Max(1, s3), (s2 * s3)), (s0 * s1 * s2 * s3)), (s1 * s2 * s3)))), (2 * "
-            "Max(Max(1, s3), (s2 * s3)))))");
+            "((128 * Ceiling((Max(Max(0, (2 * Max(Max(1, s1), (s0 * s1)))), (2 * Max(Max(Max(1, s2), (s1 * s2)), "
+            "(s0 * s1 * s2)))) * Rational(1 , 128)))) + (128 * Ceiling((Max(Max(0, (2 * Max(Max(Max(Max(1, s3), (s2 * "
+            "s3)), (s0 * s1 * s2 * s3)), (s1 * s2 * s3)))), (2 * Max(Max(1, s3), (s2 * s3)))) * Rational(1 , 128)))))");
 }
 
 TEST(CodegenKernel, CalculateWorkspaceSize_Test2) {
@@ -6311,42 +7547,179 @@ TEST(CodegenKernel, CacheGuardPredicateUsesFirstMiddleAndLastTileForNineteen) {
   EXPECT_EQ(std::count(result.begin(), result.end(), '{'), std::count(result.begin(), result.end(), '}'));
 }
 
-TEST(CodegenKernel, ReduceDoubleTileUsesReduceSpecificCacheCondition) {
-  af::SizeVar outer_size(af::Symbol("outer_size"));
-  af::SizeVar tile0_size(af::Symbol("tile0_size"));
-  af::SizeVar tile1_size(af::Symbol("tile1_size"));
-  af::Axis outer{.id = 0, .name = "outer", .size = outer_size.expr};
-  af::Axis tile0{.id = 1, .name = "tile0", .type = af::Axis::Type::kAxisTypeTileInner, .size = tile0_size.expr};
-  af::Axis tile1{.id = 2, .name = "tile1", .type = af::Axis::Type::kAxisTypeTileInner, .size = tile1_size.expr};
+TEST(CodegenKernel, RecordsActualOriginAndFusedGuards) {
+  using Mode = ascir_param::CacheExecutionMode;
+  for (auto mode : {Mode::kNoGuard, Mode::kOriginBroadcast, Mode::kFusedBroadcast}) {
+    af::Axis axis{.id = 0, .name = "guarded", .size = af::Symbol(20)};
+    af::Axis tile{.id = 1, .name = "tile", .type = af::Axis::Type::kAxisTypeTileOuter, .size = af::Symbol(1116)};
+    af::Axis inner{.id = 2, .name = "inner", .type = af::Axis::Type::kAxisTypeBlockInner, .size = af::Symbol(20)};
+    codegen::Tiler tiler;
+    tiler.AddAxis(axis);
+    tiler.AddAxis(tile);
+    tiler.AddAxis(inner);
+    tiler.axis_map.at(axis.id).is_split_b = true;
+    af::AscGraph graph("cache_record");
+    af::ascir_op::Data input("input", graph);
+    MockApiCall call("mock");
+    call.node = graph.FindNode("input");
+    call.unit = af::ComputeUnit::kUnitVector;
+    call.enable_cache = mode != Mode::kNoGuard;
+    call.exec_condition = mode == Mode::kOriginBroadcast ? af::ExecuteCondition::kCacheBlockSplitOriginBroadcastAxis
+                                                         : af::ExecuteCondition::kCacheBlockSplitFusedBroadcastAxis;
+    codegen::Loop loop(axis.id);
+    loop.AddCall(&call);
+    codegen::TPipe tpipe("tpipe", tiler);
+    std::string source;
+    ASSERT_EQ(loop.Generate(tiler, tpipe, source), af::SUCCESS);
+    const auto params = ascir_param::GetAscirNodeParams(call.node);
+    ASSERT_NE(params, nullptr);
+    EXPECT_EQ(params->cache_executions.front().mode, mode);
+    EXPECT_EQ(params->cache_executions.front().call_loop_axis_id, axis.id);
+    if (mode == Mode::kNoGuard) {
+      EXPECT_EQ(source.find("if (enable_cache_"), std::string::npos);
+    } else {
+      EXPECT_NE(source.find(mode == Mode::kOriginBroadcast ? "if (enable_cache_origin_brc_axis)"
+                                                           : "if (enable_cache_fused_brc_axis)"),
+                std::string::npos);
+      EXPECT_EQ(params->cache_executions.front().guard.loop_extent, af::Symbol(20));
+      if (mode == Mode::kFusedBroadcast) {
+        EXPECT_EQ(params->cache_executions.front().guard.period, af::Symbol(1116));
+        EXPECT_EQ(params->cache_executions.front().guard.block_inner_extent, af::Symbol(20));
+      }
+    }
+  }
+}
+
+TEST(CodegenKernel, FusedCacheWithoutBlockInnerDoesNotInventExtent) {
+  af::Axis axis{.id = 0, .name = "guarded", .size = af::Symbol(20)};
   codegen::Tiler tiler;
-  tiler.AddSizeVar(outer_size);
-  tiler.AddSizeVar(tile0_size);
-  tiler.AddSizeVar(tile1_size);
-  tiler.AddAxis(outer);
-  tiler.AddAxis(tile0);
-  tiler.AddAxis(tile1);
-  tiler.axis_map.at(outer.id).is_split_b = true;
-  tiler.axis_map.at(tile0.id).is_split_b = true;
-  tiler.axis_map.at(tile1.id).is_split_b = true;
-
+  ASSERT_EQ(tiler.AddAxis(axis), af::SUCCESS);
+  tiler.axis_map.at(axis.id).is_split_b = true;
+  af::AscGraph graph("cache_without_block_inner");
+  af::ascir_op::Data input("input", graph);
+  MockApiCall call("mock");
+  call.node = graph.FindNode("input");
+  call.unit = af::ComputeUnit::kUnitVector;
+  call.enable_cache = true;
+  call.exec_condition = af::ExecuteCondition::kCacheBlockSplitFusedBroadcastAxis;
+  codegen::Loop loop(axis.id);
+  loop.AddCall(&call);
   codegen::TPipe tpipe("tpipe", tiler);
-  codegen::Loop loop(tile1.id);
-  loop.is_graph_has_reduce_node = true;
+  std::string source;
+  ASSERT_EQ(loop.Generate(tiler, tpipe, source), af::SUCCESS);
+  EXPECT_NE(source.find("if (enable_cache_fused_brc_axis)"), std::string::npos);
+  const auto params = ascir_param::GetAscirNodeParams(call.node);
+  ASSERT_NE(params, nullptr);
+  ASSERT_EQ(params->cache_executions.size(), 1U);
+  EXPECT_EQ(params->cache_executions.front().guard.block_inner_extent, Zero);
+}
 
-  auto cached_call = new MockApiCall("cached_call");
-  cached_call->enable_cache = true;
-  cached_call->enable_cache_with_condition = "dis_enable_cache_r";
-  cached_call->exec_condition = af::ExecuteCondition::kCacheBlockSplitFusedBroadcastAxis;
-  cached_call->unit = af::ComputeUnit::kUnitVector;
+TEST(CodegenKernel, ChangingGmOffsetRecordsNoGuardForReduceMovement) {
+  for (const auto *type : {"Load", "Nddma"}) {
+    SCOPED_TRACE(type);
+    af::Axis axis{.id = 0, .name = "tile", .size = af::Symbol(20)};
+    codegen::Tiler tiler;
+    tiler.AddAxis(axis);
+    tiler.axis_map.at(axis.id).is_split_b = true;
+    af::AscGraph graph("address_variant");
+    af::ascir_op::Load load("load");
+    graph.AddNode(load);
+    auto node = graph.FindNode("load");
+    node->GetOpDesc()->SetType(type);
+    node->attr.api.compute_type = af::ComputeType::kComputeLoad;
+    node->outputs[0].attr.axis = {axis.id};
+    node->outputs[0].attr.strides = {af::Symbol(235)};
+    MockApiCall call("mock");
+    call.node = node;
+    call.unit = af::ComputeUnit::kUnitVector;
+    call.enable_cache = true;
+    call.exec_condition = af::ExecuteCondition::kCacheBlockSplitFusedBroadcastAxis;
+    codegen::Loop loop(axis.id);
+    loop.is_graph_has_reduce_node = true;
+    loop.AddCall(&call);
+    codegen::TPipe tpipe("tpipe", tiler);
+    std::string source;
+    ASSERT_EQ(loop.Generate(tiler, tpipe, source), af::SUCCESS);
+    EXPECT_EQ(source.find("if (enable_cache_fused_brc_axis)"), std::string::npos);
+    ASSERT_NE(ascir_param::GetAscirNodeParams(node), nullptr);
+    EXPECT_EQ(ascir_param::GetAscirNodeParams(node)->cache_executions.front().mode,
+              ascir_param::CacheExecutionMode::kNoGuard);
+  }
+}
 
-  const auto &axis = tiler.GetAxis(tile1.id);
-  const bool is_split_b = axis.is_split_b;
-  const bool is_double_tile = true;
-  ASSERT_TRUE(is_split_b);
-  ASSERT_TRUE(is_double_tile);
-  EXPECT_EQ(cached_call->enable_cache_with_condition, "dis_enable_cache_r");
-  EXPECT_EQ(cached_call->exec_condition, af::ExecuteCondition::kCacheBlockSplitFusedBroadcastAxis);
-  delete cached_call;
+TEST(CodegenKernel, ReduceDoubleTileUsesReduceSpecificCacheCondition) {
+  af::Axis a{.id = 0, .name = "a", .size = af::Symbol(64)};
+  af::Axis r{.id = 1, .name = "r", .size = af::Symbol(64)};
+  af::Axis at{.id = 2, .name = "at", .type = af::Axis::Type::kAxisTypeTileOuter, .size = af::Symbol(4)};
+  af::Axis ai{.id = 3, .name = "ai", .type = af::Axis::Type::kAxisTypeTileInner, .size = af::Symbol(16)};
+  af::Axis rt{.id = 4, .name = "rt", .type = af::Axis::Type::kAxisTypeTileOuter, .size = af::Symbol(4)};
+  af::Axis ri{.id = 5, .name = "ri", .type = af::Axis::Type::kAxisTypeTileInner, .size = af::Symbol(16)};
+  af::Axis block{.id = 6, .name = "block", .type = af::Axis::Type::kAxisTypeBlockOuter, .size = af::Symbol(2)};
+  af::Axis inner{.id = 7, .name = "inner", .type = af::Axis::Type::kAxisTypeBlockInner, .size = af::Symbol(2)};
+  at.from = ai.from = {a.id};
+  rt.from = ri.from = {r.id};
+  block.from = inner.from = {at.id};
+  at.split_pair_other_id = ai.id;
+  ai.split_pair_other_id = at.id;
+  rt.split_pair_other_id = ri.id;
+  ri.split_pair_other_id = rt.id;
+  block.split_pair_other_id = inner.id;
+  inner.split_pair_other_id = block.id;
+  codegen::Tiler tiler;
+  for (const auto &axis : {a, r, at, ai, rt, ri, block, inner}) {
+    ASSERT_EQ(tiler.AddAxis(axis), af::SUCCESS);
+    tiler.axis_map.at(axis.id).is_split_b = true;
+  }
+  af::AscGraph graph("double_tile_cache");
+  af::ascir_op::Data input("input", graph);
+  auto node = graph.FindNode("input");
+  auto tensor = node->outputs[0];
+  tensor.attr.dtype = ge::DT_FLOAT;
+  tensor.attr.axis = {ai.id, ri.id};
+  tensor.attr.repeats = {ai.size, ri.size};
+  tensor.attr.strides = {ri.size, One};
+  tensor.attr.vectorized_axis = {ai.id, ri.id};
+  tensor.attr.vectorized_strides = {ri.size, One};
+  tensor.attr.mem.position = af::Position::kPositionVecIn;
+  codegen::TPipe tpipe("tpipe", tiler);
+  std::string dtype_name("float");
+  tpipe.tensors.emplace(0, codegen::Tensor(tensor, dtype_name));
+  codegen::Loop root(block.id);
+  codegen::Loop middle(inner.id);
+  codegen::Loop loop(rt.id);
+  for (auto *current : {&root, &middle, &loop}) {
+    current->is_graph_has_reduce_node = true;
+  }
+  MockApiCall call("cached_call");
+  call.node = node;
+  call.enable_cache = true;
+  call.enable_cache_with_condition = {ascir_param::ReduceCacheCondition::kR};
+  call.exec_condition = af::ExecuteCondition::kCacheBlockSplitFusedBroadcastAxis;
+  call.unit = af::ComputeUnit::kUnitVector;
+  root.AddLoop(&middle);
+  middle.AddLoop(&loop);
+  loop.AddCall(&call);
+  std::string source;
+  ASSERT_EQ(root.Generate(tiler, tpipe, source), af::SUCCESS);
+  EXPECT_NE(source.find("if (dis_enable_cache_r)"), std::string::npos);
+  const auto params = ascir_param::GetAscirNodeParams(node);
+  ASSERT_NE(params, nullptr);
+  EXPECT_EQ(params->cache_executions.front().mode, ascir_param::CacheExecutionMode::kReduceDoubleTile);
+  const auto &r_guard = params->cache_executions.front().reduce_guards.at(ascir_param::ReduceCacheCondition::kR);
+  EXPECT_EQ(r_guard.guard_axis, af::Symbol("rt"));
+  EXPECT_EQ(r_guard.period, af::Symbol(4));
+  EXPECT_FALSE(r_guard.clip_to_period);
+  call.enable_cache_with_condition = {ascir_param::ReduceCacheCondition::kA,
+                                      ascir_param::ReduceCacheCondition::kControl,
+                                      ascir_param::ReduceCacheCondition::kR};
+  ASSERT_EQ(root.Generate(tiler, tpipe, source), af::SUCCESS);
+  ASSERT_EQ(params->cache_executions.size(), 1U);
+  const auto &guards = params->cache_executions.front().reduce_guards;
+  ASSERT_EQ(guards.size(), 3U);
+  EXPECT_EQ(guards.at(ascir_param::ReduceCacheCondition::kA).guard_axis, af::Symbol("inner"));
+  EXPECT_EQ(guards.at(ascir_param::ReduceCacheCondition::kControl).loop_extent, af::Symbol(4));
+  EXPECT_NE(source.find("if (dis_enable_cache_a || control_dis_enable_cache_a || dis_enable_cache_r)"),
+            std::string::npos);
 }
 
 TEST(CodegenKernel, BroadcastInlineInCvStage_NoBlockDimCacheCondition) {
@@ -6732,6 +8105,93 @@ TEST_F(CodegenKernelConv2DTest, KernelFuncDeclare_ShouldGenerateMatMulTemplate_W
   EXPECT_EQ(declare.find("WeightTiling"), std::string::npos);
 }
 
+TEST_F(CodegenKernelConv2DTest, KernelFuncDeclare_InductorLegacyKeepsElevenParamsAndGlobal) {
+  af::AscGraph graph("matmul_graph");
+  codegen::Kernel kernel("matmul_kernel");
+
+  ::ascir::FusedScheduledResult fused_schedule_result;
+  fused_schedule_result.fused_graph_name = af::AscendString("matmul_fusion");
+  ::ascir::ScheduledResult scheduled_result;
+  scheduled_result.cube_type = ::ascir::CubeTemplateType::kUBFuse;
+  fused_schedule_result.node_idx_to_scheduled_results.push_back({scheduled_result});
+
+  std::string declare = kernel.KernelFuncDeclare("matmul_graph", fused_schedule_result, false, true, false, false);
+
+  // legacy（is_inductor=true, launch_decouple=false）：11 参数模板 + __global__ + 值参。
+  EXPECT_NE(declare.find("typename TILING_DATA_T"), std::string::npos);
+  EXPECT_NE(declare.find("int8_t FUSION_MODE"), std::string::npos);
+  EXPECT_NE(declare.find("int8_t UB_MODE"), std::string::npos);
+  EXPECT_NE(declare.find("int8_t MIX_MODE"), std::string::npos);
+  EXPECT_NE(declare.find("__global__"), std::string::npos);
+  EXPECT_NE(declare.find("TILING_DATA_T t"), std::string::npos);
+}
+
+TEST_F(CodegenKernelConv2DTest, KernelFuncDeclare_LaunchDecoupleDropsModeTemplateParams) {
+  af::AscGraph graph("matmul_graph");
+  codegen::Kernel kernel("matmul_kernel");
+
+  ::ascir::FusedScheduledResult fused_schedule_result;
+  fused_schedule_result.fused_graph_name = af::AscendString("matmul_fusion");
+  ::ascir::ScheduledResult scheduled_result;
+  scheduled_result.cube_type = ::ascir::CubeTemplateType::kUBFuse;
+  fused_schedule_result.node_idx_to_scheduled_results.push_back({scheduled_result});
+
+  std::string declare = kernel.KernelFuncDeclare("matmul_graph", fused_schedule_result, false, true, false, true);
+
+  // rtLaunch（launch_decouple=true）：7 参数模板（mode 三元组与 TILING_DATA_T 退出），
+  // 去 __global__（普通 __aicore__ 函数，由 extern "C" 分派入口调用），tiling 形参统一
+  // 为非模板 CVAutofuseTilingData 引用。
+  EXPECT_NE(declare.find("template <int8_t API_LEVEL, int8_t A_TRANS, int8_t B_TRANS, int8_t BATCH_MODEL, "
+                         "int8_t MODEL, int8_t FULL_LOAD, int8_t L0C2OUT_MODEL>"),
+            std::string::npos);
+  EXPECT_EQ(declare.find("typename TILING_DATA_T"), std::string::npos);
+  EXPECT_EQ(declare.find("int8_t FUSION_MODE"), std::string::npos);
+  EXPECT_EQ(declare.find("int8_t UB_MODE"), std::string::npos);
+  EXPECT_EQ(declare.find("int8_t MIX_MODE"), std::string::npos);
+  EXPECT_EQ(declare.find("__global__"), std::string::npos);
+  EXPECT_NE(declare.find("__aicore__ inline __attribute__((always_inline)) void"), std::string::npos);
+  EXPECT_NE(declare.find("const CVAutofuseTilingData &t"), std::string::npos);
+  EXPECT_EQ(declare.find("TILING_DATA_T t"), std::string::npos);
+}
+
+TEST_F(CodegenKernelConv2DTest, GenCvDispatch_TilingParamGuardedByConstMacro) {
+  ::ascir::FusedScheduledResult fused_scheduled_result;
+  fused_scheduled_result.fused_graph_name = af::AscendString("matmul_dusion");
+  ::ascir::ScheduledResult scheduled_result;
+  scheduled_result.cube_type = ::ascir::CubeTemplateType::kUBFuse;
+  fused_scheduled_result.node_idx_to_scheduled_results.push_back({scheduled_result});
+
+  const std::string entry =
+      codegen::Kernel::GenCvDispatchEntryForInductor(fused_scheduled_result, "KERNEL_TYPE_MIX_AIC_1_2", false);
+
+  EXPECT_NE(entry.find("#ifndef INDUCTOR_CONST_TILING_DATA"), std::string::npos);
+  EXPECT_NE(entry.find(", CVAutofuseTilingData tiling_data"), std::string::npos);
+  // 静态烧录形态去 (void)tiling_data：值参被 #ifndef 编译掉后不再需要消费标记
+  EXPECT_EQ(entry.find("(void)tiling_data"), std::string::npos);
+  EXPECT_NE(entry.find("const CVAutofuseTilingData &cv_tiling = kConstTilingData;"), std::string::npos);
+  EXPECT_NE(entry.find("const CVAutofuseTilingData &cv_tiling = tiling_data;"), std::string::npos);
+}
+
+TEST_F(CodegenKernelConv2DTest, GenCubeCommonTiling_TilingTypeArgFollowsLaunchDecouple) {
+  codegen::Kernel kernel("matmul_kernel");
+  kernel.tpipe.is_inductor = true;
+
+  {
+    std::stringstream ss;
+    EXPECT_EQ(kernel.GenCubeCommonTiling(ss, false, false, true, false, "", false), af::SUCCESS);
+    const std::string result = ss.str();
+    EXPECT_NE(result.find("mat_mul_v3_fusion<TILING_DATA_T, "), std::string::npos);
+    EXPECT_EQ(result.find("CVAutofuseTilingData"), std::string::npos);
+  }
+  {
+    std::stringstream ss;
+    EXPECT_EQ(kernel.GenCubeCommonTiling(ss, false, false, true, false, "", true), af::SUCCESS);
+    const std::string result = ss.str();
+    EXPECT_NE(result.find("mat_mul_v3_fusion<CVAutofuseTilingData, "), std::string::npos);
+    EXPECT_EQ(result.find("TILING_DATA_T"), std::string::npos);
+  }
+}
+
 TEST_F(CodegenKernelConv2DTest, GenCubeCommonTiling_ShouldGenerateConv2DAPI_WhenIsConv2dTrue) {
   codegen::Kernel kernel("conv2d_kernel");
 
@@ -6797,4 +8257,308 @@ TEST_F(CodegenKernelConv2DTest, SetUsingGlobalTpipe_ShouldSetFlagCorrectly) {
 
   // 通过设置验证功能正常工作
   EXPECT_TRUE(true);
+}
+
+TEST(CodegenKernel, CacheRecordStartsANewGeneration) {
+  af::Axis axis{.id = 0, .name = "tile", .size = af::Symbol(20)};
+  codegen::Tiler tiler;
+  tiler.AddAxis(axis);
+  tiler.axis_map.at(axis.id).is_split_b = true;
+  af::AscGraph graph("regenerate_cache");
+  af::ascir_op::Data input("input", graph);
+  MockApiCall call("mock");
+  call.node = graph.FindNode("input");
+  call.unit = af::ComputeUnit::kUnitVector;
+  call.enable_cache = true;
+  call.exec_condition = af::ExecuteCondition::kCacheBlockSplitOriginBroadcastAxis;
+  codegen::Loop loop(axis.id);
+  loop.AddCall(&call);
+  codegen::TPipe tpipe("tpipe", tiler);
+  std::string source;
+  ASSERT_EQ(loop.Generate(tiler, tpipe, source), af::SUCCESS);
+  call.enable_cache = false;
+  ASSERT_EQ(loop.Generate(tiler, tpipe, source), af::SUCCESS);
+  EXPECT_EQ(ascir_param::GetAscirNodeParams(call.node)->cache_executions.front().mode,
+            ascir_param::CacheExecutionMode::kNoGuard);
+}
+
+TEST(CodegenKernel, CacheRecordsRetainDistinctEmittedCalls) {
+  af::Axis a{.id = 0, .name = "a", .size = af::Symbol(3)};
+  af::Axis b{.id = 1, .name = "b", .size = af::Symbol(5)};
+  codegen::Tiler tiler;
+  tiler.AddAxis(a);
+  tiler.AddAxis(b);
+  tiler.axis_map.at(a.id).is_split_b = true;
+  af::AscGraph graph("distinct_calls");
+  af::ascir_op::Data input("input", graph);
+  MockApiCall first("first"), second("second");
+  first.node = second.node = graph.FindNode("input");
+  first.unit = second.unit = af::ComputeUnit::kUnitVector;
+  first.enable_cache = true;
+  first.exec_condition = af::ExecuteCondition::kCacheBlockSplitOriginBroadcastAxis;
+  codegen::Loop root(af::kIdNone), loop_a(a.id), loop_b(b.id);
+  root.AddLoop(&loop_a);
+  root.AddLoop(&loop_b);
+  loop_a.AddCall(&first);
+  loop_b.AddCall(&second);
+  codegen::TPipe tpipe("tpipe", tiler);
+  std::string source;
+  ASSERT_EQ(root.Generate(tiler, tpipe, source), af::SUCCESS);
+  auto params = ascir_param::GetAscirNodeParams(first.node);
+  ASSERT_NE(params, nullptr);
+  ASSERT_EQ(params->cache_executions.size(), 2U);
+  EXPECT_EQ(params->cache_executions[0].mode, ascir_param::CacheExecutionMode::kOriginBroadcast);
+  EXPECT_EQ(params->cache_executions[1].mode, ascir_param::CacheExecutionMode::kNoGuard);
+  EXPECT_EQ(params->cache_executions[0].loops.front().extent, af::Symbol(3));
+  EXPECT_EQ(params->cache_executions[1].loops.front().extent, af::Symbol(5));
+  // A second complete emission round does not duplicate either call.
+  ASSERT_EQ(root.Generate(tiler, tpipe, source), af::SUCCESS);
+  EXPECT_EQ(params->cache_executions.size(), 2U);
+}
+
+TEST(CodegenKernel, CacheRecordResetKeepsOtherStages) {
+  af::Axis axis{.id = 0, .name = "tile", .size = af::Symbol(3)};
+  codegen::Tiler tiler;
+  tiler.AddAxis(axis);
+  af::AscGraph graph("stage_calls");
+  af::ascir_op::Data input("input", graph);
+  MockApiCall call("mock");
+  call.node = graph.FindNode("input");
+  call.unit = af::ComputeUnit::kUnitVector;
+  call.api_call_context.stage = codegen::ComputeStage::kCVFuseStage1;
+  codegen::Loop loop(axis.id);
+  loop.AddCall(&call);
+  codegen::TPipe tpipe("tpipe", tiler);
+  std::string source;
+  ASSERT_EQ(loop.Generate(tiler, tpipe, source, codegen::ComputeStage::kCVFuseStage1), af::SUCCESS);
+  auto params = ascir_param::GetAscirNodeParams(call.node);
+  ASSERT_NE(params, nullptr);
+  call.api_call_context.stage = codegen::ComputeStage::kCVFuseStage2;
+  ASSERT_EQ(loop.Generate(tiler, tpipe, source, codegen::ComputeStage::kCVFuseStage2), af::SUCCESS);
+  ASSERT_EQ(params->cache_executions.size(), 2U);
+  EXPECT_EQ(params->cache_executions[0].stage, static_cast<uint32_t>(codegen::ComputeStage::kCVFuseStage1));
+  ASSERT_EQ(loop.Generate(tiler, tpipe, source, codegen::ComputeStage::kCVFuseStage2), af::SUCCESS);
+  EXPECT_EQ(params->cache_executions.size(), 2U);
+}
+
+namespace {
+// 构造带 BlockSplit 的 Load 图并模拟 TBuf 转换后的输出属性（Buffer/VecCalc）
+af::AscGraph MakeHoistLoadGraph(const std::string &name, bool tbuf_output) {
+  af::AscGraph graph(name.c_str());
+  const auto s0 = graph.CreateSizeVar("s0");
+  auto z0 = graph.CreateAxis("z0", s0);
+  auto split_pair = graph.BlockSplit(z0.id);
+  auto z0t = std::get<1>(split_pair);
+
+  af::ascir_op::Data data("data", graph);
+  data.y.dtype = ge::DT_FLOAT16;
+  *data.y.axis = {z0.id};
+  *data.y.repeats = {s0};
+  *data.y.strides = {af::ops::One};
+
+  af::ascir_op::Load load("load");
+  load.x = data.y;
+  load.attr.api.compute_type = af::ComputeType::kComputeLoad;
+  load.attr.api.unit = af::ComputeUnit::kUnitMTE2;
+  load.y.dtype = ge::DT_FLOAT16;
+  *load.y.axis = {z0.id, z0t->id};
+  *load.y.repeats = {std::get<0>(split_pair)->size, z0t->size};
+  *load.y.strides = {z0t->size, af::ops::One};
+  *load.y.vectorized_axis = {z0t->id};
+  *load.y.vectorized_strides = {af::ops::One};
+  load.attr.sched.axis = {std::get<0>(split_pair)->id, z0.id, z0t->id};
+  load.y.mem->tensor_id = 1;
+  // 模拟调度后状态：tbuf分支对应 HoistInvariantLoads 通过判定后的标记
+  // （loop_axis=BlockOuter轴，kernel入口一次加载）；queue分支对应未通过判定的普通Load，
+  // loop_axis 保持 SelectLoopAxis 赋予的真实循环轴（BlockInner），不外提。
+  load.attr.sched.loop_axis = tbuf_output ? std::get<0>(split_pair)->id : z0t->id;
+  if (tbuf_output) {
+    load.y.mem->alloc_type = af::AllocType::kAllocTypeBuffer;
+    load.y.mem->position = af::Position::kPositionVecCalc;
+    load.y.mem->reuse_id = af::kIdNone;
+    load.y.buf->id = 0;
+    load.y.que->id = af::kIdNone;
+    load.y.que->depth = af::kIdNone;
+    load.y.que->buf_num = af::kIdNone;
+  } else {
+    load.y.mem->alloc_type = af::AllocType::kAllocTypeQueue;
+    load.y.mem->position = af::Position::kPositionVecIn;
+    load.y.mem->reuse_id = 0;
+    load.y.buf->id = af::kIdNone;
+    load.y.que->id = 0;
+    load.y.que->depth = 2;
+    load.y.que->buf_num = 1;
+  }
+  return graph;
+}
+}  // namespace
+
+TEST(CodegenKernel, HoistedTBufLoadEmittedBeforeLoopWithMte2Sync) {
+  auto graph = MakeHoistLoadGraph("hoist_tbuf_load_graph", true);
+  auto load_node = graph.FindNode("load");
+  auto data_node = graph.FindNode("data");
+  ASSERT_NE(load_node, nullptr);
+
+  codegen::Tiler tiler;
+  ascir::AxisId block_outer_id = af::kIdNone;
+  ascir::AxisId block_inner_id = af::kIdNone;
+  const auto &axis_list = graph.GetAllAxis();
+  for (const auto &axis : axis_list) {
+    if (axis->type == ascir::Axis::Type::kAxisTypeOriginal) {
+      tiler.AddSizeVar(af::SizeVar(axis->size));
+    } else if (axis->type == ascir::Axis::Type::kAxisTypeBlockOuter) {
+      block_outer_id = axis->id;
+    } else if (axis->type == ascir::Axis::Type::kAxisTypeBlockInner) {
+      block_inner_id = axis->id;
+    }
+    EXPECT_EQ(tiler.AddAxis(*graph.FindAxis(axis->id)), af::SUCCESS);
+  }
+  codegen::TPipe tpipe("tpipe", tiler);
+  EXPECT_EQ(tpipe.CollectQues(graph), af::SUCCESS);
+  EXPECT_EQ(tpipe.AddTensor(data_node->outputs[0]), 0);
+  EXPECT_EQ(tpipe.AddTensor(load_node->outputs[0]), 0);
+
+  auto *call = CreateApiCallObject(load_node);
+  ASSERT_NE(call, nullptr);
+  EXPECT_EQ(call->Init(load_node), 0);
+  codegen::ApiTensor gm_input;
+  gm_input.id = data_node->outputs[0].attr.mem.tensor_id;
+  call->inputs.push_back(&gm_input);
+
+  codegen::Loop inner_loop(block_inner_id);
+  codegen::Loop outer_loop(block_outer_id);
+  // loop_axis=BlockOuter 的外提Load由MoveToNodeLoop放置在BlockOuter层级，
+  // 自然发射：DataCopy位于内层循环之前、每核一次，并带MTE2_V事件同步
+  outer_loop.AddCall(call);
+  outer_loop.AddLoop(&inner_loop);
+
+  std::string result;
+  EXPECT_EQ(outer_loop.Generate(tiler, tpipe, result), af::SUCCESS);
+  const auto copy_pos = result.find("DataCopyPadExtend(local_1");
+  const auto for_pos = result.find("for (");
+  EXPECT_NE(copy_pos, std::string::npos);
+  EXPECT_NE(for_pos, std::string::npos);
+  EXPECT_LT(copy_pos, for_pos);
+  EXPECT_NE(result.find("SetFlag<HardEvent::MTE2_V>"), std::string::npos);
+  EXPECT_NE(result.find("WaitFlag<HardEvent::MTE2_V>"), std::string::npos);
+  EXPECT_EQ(result.find("DataCopyPadExtend", copy_pos + 1), std::string::npos);
+  delete call;
+}
+
+TEST(CodegenKernel, QueueLoadIsNotHoisted) {
+  auto graph = MakeHoistLoadGraph("queue_load_graph", false);
+  auto load_node = graph.FindNode("load");
+  auto data_node = graph.FindNode("data");
+  ASSERT_NE(load_node, nullptr);
+
+  codegen::Tiler tiler;
+  ascir::AxisId block_outer_id = af::kIdNone;
+  ascir::AxisId block_inner_id = af::kIdNone;
+  const auto &axis_list = graph.GetAllAxis();
+  for (const auto &axis : axis_list) {
+    if (axis->type == ascir::Axis::Type::kAxisTypeOriginal) {
+      tiler.AddSizeVar(af::SizeVar(axis->size));
+    } else if (axis->type == ascir::Axis::Type::kAxisTypeBlockOuter) {
+      block_outer_id = axis->id;
+    } else if (axis->type == ascir::Axis::Type::kAxisTypeBlockInner) {
+      block_inner_id = axis->id;
+    }
+    EXPECT_EQ(tiler.AddAxis(*graph.FindAxis(axis->id)), af::SUCCESS);
+  }
+  codegen::TPipe tpipe("tpipe", tiler);
+  EXPECT_EQ(tpipe.CollectQues(graph), af::SUCCESS);
+  EXPECT_EQ(tpipe.AddTensor(data_node->outputs[0]), 0);
+  EXPECT_EQ(tpipe.AddTensor(load_node->outputs[0]), 0);
+
+  auto *call = CreateApiCallObject(load_node);
+  ASSERT_NE(call, nullptr);
+  EXPECT_EQ(call->Init(load_node), 0);
+  codegen::ApiTensor gm_input;
+  gm_input.id = data_node->outputs[0].attr.mem.tensor_id;
+  call->inputs.push_back(&gm_input);
+
+  codegen::Loop inner_loop(block_inner_id);
+  inner_loop.AddCall(call);
+  codegen::Loop outer_loop(block_outer_id);
+  outer_loop.AddLoop(&inner_loop);
+
+  std::string result;
+  EXPECT_EQ(outer_loop.Generate(tiler, tpipe, result), af::SUCCESS);
+  const auto copy_pos = result.find("DataCopyPadExtend(local_1");
+  const auto for_pos = result.find("for (");
+  EXPECT_NE(copy_pos, std::string::npos);
+  EXPECT_NE(for_pos, std::string::npos);
+  EXPECT_GT(copy_pos, for_pos);
+  EXPECT_EQ(result.find("SetFlag<HardEvent::MTE2_V>"), std::string::npos);
+  delete call;
+}
+
+namespace {
+// 构造挂在 TPipe 上的 VecOut 张量与单输入消费调用，复现向量写（如 cast）产出、
+// IndirectLoad SIMD 标量读消费的等待形态。
+codegen::ApiCall MakeVecOutConsumerCall(codegen::TPipe &tpipe, const std::string &type) {
+  af::AscGraph graph("vecout_consumer_ut");
+  af::ascir_op::Data x("x", graph);
+  auto node = graph.FindNode("x");
+  af::AscTensor tensor = node->outputs[0];
+  tensor.attr.dtype = ge::DT_FLOAT;
+  std::string dtype_name;
+  codegen::Tensor::DtypeName(tensor.attr.dtype, dtype_name);
+  codegen::Tensor t(tensor, dtype_name, "t");
+  t.id = 7L;
+  t.position = af::Position::kPositionVecOut;
+  t.que_id = 0;
+  EXPECT_EQ(tpipe.AddTensor(t), 0);
+  auto call = codegen::ApiCall("indirect_load_consumer");
+  call.type = type;
+  call.unit = af::ComputeUnit::kUnitVector;
+  return call;
+}
+}  // namespace
+
+TEST(CodegenKernelWaitInputsTest, IndirectLoadVecOutInputEmitsArchSplitPipeAllBarrier) {
+  af::SizeVar s0(af::Symbol("s0"));
+  af::SizeVar s1(af::Symbol("s1"));
+  codegen::Tiler tiler;
+  tiler.AddSizeVar(s0);
+  tiler.AddSizeVar(s1);
+  codegen::TPipe tpipe("tpipe", tiler);
+  auto call = MakeVecOutConsumerCall(tpipe, af::ascir_op::IndirectLoad::Type);
+  codegen::ApiTensor in;
+  in.id = 7L;
+  in.reads.push_back(&call);
+  call.inputs.push_back(&in);
+
+  std::stringstream ss;
+  ASSERT_TRUE(call.WaitInputs(tpipe, ss));
+  const std::string result = ss.str();
+  // IndirectLoad 以标量循环读 index，V 写到 S 读跨执行单元：3510/9201/9202 排空全部
+  // 流水线，其余架构保持 PIPE_V。
+  EXPECT_NE(result.find("#if defined(__NPU_ARCH__) && ((__NPU_ARCH__ == 3510) || (__NPU_ARCH__ == 9201) || "
+                        "(__NPU_ARCH__ == 9202))"),
+            std::string::npos);
+  EXPECT_NE(result.find("AscendC::PipeBarrier<PIPE_ALL>();"), std::string::npos);
+  EXPECT_NE(result.find("#else"), std::string::npos);
+  EXPECT_NE(result.find("AscendC::PipeBarrier<PIPE_V>();"), std::string::npos);
+  EXPECT_NE(result.find("#endif"), std::string::npos);
+}
+
+TEST(CodegenKernelWaitInputsTest, NonIndirectLoadVecOutInputKeepsPipeVBarrier) {
+  af::SizeVar s0(af::Symbol("s0"));
+  af::SizeVar s1(af::Symbol("s1"));
+  codegen::Tiler tiler;
+  tiler.AddSizeVar(s0);
+  tiler.AddSizeVar(s1);
+  codegen::TPipe tpipe("tpipe", tiler);
+  auto call = MakeVecOutConsumerCall(tpipe, "SomeVectorOp");
+  codegen::ApiTensor in;
+  in.id = 7L;
+  in.reads.push_back(&call);
+  call.inputs.push_back(&in);
+
+  std::stringstream ss;
+  ASSERT_TRUE(call.WaitInputs(tpipe, ss));
+  const std::string result = ss.str();
+  EXPECT_EQ(result.find("PIPE_ALL"), std::string::npos);
+  EXPECT_NE(result.find("AscendC::PipeBarrier<PIPE_V>();"), std::string::npos);
 }

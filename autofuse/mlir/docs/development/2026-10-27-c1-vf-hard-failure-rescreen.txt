@@ -1,0 +1,83 @@
+# C1 重量：含 VF 的硬失败 50 -> 2（2026-10-27，HEAD 代码）
+#
+# VF 普查（2026-10-26-vf-node-census-reg.txt）那张交叉表里「含 VF / hard-failure = 50」被列为
+# 剩余项里量级最大的一簇，首因记作「在 plan selection 那一层」。那个数量在
+# `6a525700 + 本期广播两笔` 上，不含 VF 那 8 格那一笔、也不含今天的 ATT 拒收那一笔，所以要重量。
+#
+# 量具: autofuse/mlir/test/probe/legacy_takeover_table.sh -j 24 -R '_codegen_v2$'
+# 代码: HEAD(0413d574 的内容) = 6c793b9f + ce3a4fdf。环境: 远端 AF_MLIR_0814。
+# 未知 0、缺二进制 0、**没打出标签的行 0**。
+#
+# VF 那一列**沿用 2026-10-26 的普查**：普查是关掉 MLIR 量「legacy 调度融不融 VF」的，本期两笔
+# 改动全在 MLIR 侧、不动调度，所以那一列在 HEAD 下仍然成立，不重量。含 VF 110 / 无 VF 90。
+#
+#===----------------------------------------------------------------------===#
+# reg 四态（200 行）
+#
+#                  vf8 基线      HEAD
+#   takeover            67    ->    67   （一格不动）
+#   fallback            65    ->   120   （+55）
+#   hard-failure        66    ->    11   （-55）
+#   out-of-scope         2    ->     2
+#
+# 逐格迁移只有一个方向：**55 格 hard-failure -> fallback，0 格变差。**
+#
+#===----------------------------------------------------------------------===#
+# 含 VF × 状态
+#
+#            takeover  fallback(首因是VF)  fallback(其他)  hard-failure  oos
+#   vf8 基线
+#     含 VF      28            2                29            **50**      1   = 110
+#     无 VF      39            0                34              16        1   =  90
+#   HEAD
+#     含 VF      28            5                74             **2**      1   = 110
+#     无 VF      39            0                41               9        1   =  90
+#
+# **C1 这一簇基本消失：50 -> 2。** 它不是被「接 VF」打掉的——那 50 格的首因本来就不在 VF 上，
+# 而在 plan selection 那一层，而那一层现在会答「能力不足」并干净回落（F-4 的模板判据标记 +
+# 今天那笔 ATT 拒收）。所以旧清单里「C1 是今天最大的一簇，比其他所有剩余项加起来都大」这句
+# 不再成立。
+#
+# 顺带订正普查那张表的两列：它的 takeover 24 / 首因是VF 8 是对 **full200** 算的；对 vf8
+# 重算是 28 / 2。hard-failure 那一列两张表都是 50，所以 50 -> 2 是同口径比较。
+#
+#===----------------------------------------------------------------------===#
+# HEAD 下剩的 11 格硬失败（含 VF 只占 2 格），首因全在 lowering
+#
+#   9 格  'afir.store' op transfer source and destination must have the same element type
+#           no-vf  float_logical_not / half_logical_not / int16_logical_not / int32_logical_not
+#           no-vf  uint8_logical_not / load_logicaland_store / load_logicalor_store
+#           no-vf  load_bitwise_and_store
+#           vf     sign_uint8
+#         —— 与 2026-10-21 那轮的结论一致：带这条诊断的几乎全是逻辑 / 位运算族。
+#   1 格  'afir.cast' op operand #0 must be Tensor or MemRef of 4-bit / 8-bit signless integer ...
+#           vf     scalar_cast_add
+#   1 格  UnsupportedOperation: Scalar node 'scalar0' value 'inf' is not a numeric literal
+#           no-vf  scalar_div_inf
+#
+# 一格都不在 plan selection 那一层了（gate 分布：candidate-preparation 39 全部是 fallback）。
+#
+#===----------------------------------------------------------------------===#
+# 订正：第一版这份文档记的「2 格 takeover -> hard-failure 回归」**不存在**
+#
+# 第一版量出 takeover 65 / hard-failure 13，并把 `relu_uint8_test` 与 `truediv_bf16_test`
+# 记成 takeover -> hard-failure 的回归（诊断 `'afir.store' op transfer source and destination
+# must have the same element type`），嫌疑指向 F-4 的 `tiling_field_schema.cpp`。**两点都错：**
+#
+#   1. F-4 的两个提交（`cc7d56b2` 分类标记、`268011ba` tiling 字段表）**都是 `6c793b9f` 的
+#      祖先**，`6c793b9f..HEAD` 的非文档差集只有 `ce3a4fdf` 的 4 个产品文件，里面没有
+#      `tiling_field_schema.cpp`。那个嫌疑排序从一开始就不成立。
+#   2. 四步二分（4 个文件全退回 / 只加回 PlanSelector / 再加回 AttSchemaAdapter / 全恢复成
+#      HEAD）四次都是 `gate=none`。**HEAD 原样就是 takeover**，没有代码回归。
+#
+# 真因是**构建树不一致**：第一版那次量之前，为量「legacy 禁用的 26 个」临时改过
+# `backend_e2e*/CMakeLists.txt`，还原时只 `git checkout` 了文件、**没有重配 cmake**。证据三条：
+#
+#   - ctest 列出 223 行而不是 200（那 23 个临时放开的目标还在 build 树里）；
+#   - 「没打出标签的行」14 行，重配后 0 行；
+#   - 报错形态对得上：`6a525700` 改的正是 `share_graph.cc` 里 12 个用例漏设的 `Output` dtype，
+#     generator 若是旧的，图里就缺那个 dtype，下降时正好报 `afir.store` 两端 dtype 不一致——
+#     而报这条的恰好是 uint8 / bf16 那几格。
+#
+# **教训写在量具的前置条件上**：改过任何 `CMakeLists.txt` 之后，还原文件不等于还原构建树，
+# 必须 `cmake -S . -B build` 重配再量。只看 `git status` 干净会漏掉这一层。

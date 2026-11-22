@@ -62,7 +62,7 @@ void SetupProfilingModelContext(SkLaunchInfo &launchInfo, const SuperKernelScope
   uint16_t modelIdIdx = SkEventRecorder::Instance().RegisterModelId(modelId);
   uint16_t skScopeId = scopeInfo.GetScopeId();
   launchInfo.devArgs.Get()->skHeader.modelIdIndexAndSkScopeId =
-      (static_cast<uint64_t>(modelIdIdx) << 32) | (static_cast<uint64_t>(skScopeId) << 16);
+      (static_cast<uint64_t>(modelIdIdx) << 40) | (static_cast<uint64_t>(skScopeId) << 24);
 }
 
 bool SetupProfilingRuntime(const std::vector<SuperKernelBaseNode *> &taskNodes, SkLaunchInfo &launchInfo,

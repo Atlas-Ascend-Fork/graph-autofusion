@@ -230,7 +230,7 @@ ExprInfoMap ArgsManager::GetOrigVarInfos(const ModelInfo &model_info) {
       VarInfo info;
       info.is_input_var = true;
       info.do_search = false;
-      GELOGD("append extra graph %s size var %s", model_info.graph_name.c_str(), var.Serialize().get());
+      GELOGD("append extra graph %s size var %s", model_info.graph_name.c_str(), var.Str().get());
       expr_var_map.emplace(var, info);
     }
   }
@@ -526,11 +526,24 @@ std::map<HardwareDef, Expr> ArgsManager::GetTotalHardwareCons(bool do_container_
       replace_map.emplace_back(std::make_pair(pair.first, pair.second));
     }
     for (const auto &pair : hardware_cons_) {
+      if (pair.first == HardwareDef::GM) {
+        GELOGD("HBM(GM) constraint is ignored because hbm_size is removed from tiling data: %s",
+               pair.second.Str().get());
+        continue;
+      }
       hardware_cons[pair.first] = pair.second.Replace(replace_map);
     }
     return hardware_cons;
   }
-  return hardware_cons_;
+  std::map<HardwareDef, Expr> filtered_hardware_cons;
+  for (const auto &pair : hardware_cons_) {
+    if (pair.first == HardwareDef::GM) {
+      GELOGD("HBM(GM) constraint is ignored because hbm_size is removed from tiling data: %s", pair.second.Str().get());
+      continue;
+    }
+    filtered_hardware_cons[pair.first] = pair.second;
+  }
+  return filtered_hardware_cons;
 }
 
 Expr ArgsManager::GetUsedHardwareInfo(const HardwareDef scope) const {

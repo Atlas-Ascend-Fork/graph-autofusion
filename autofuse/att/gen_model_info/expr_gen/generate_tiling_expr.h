@@ -99,6 +99,10 @@ class GenerateTilingExpr {
   // 辅助方法：计算惩罚的core_num_ratio
   Expr CalcPenaltyCoreNumRatio(const AttAxis *split_axis, const std::vector<const AttAxis *> &a_axes) const;
 
+  // 辅助方法：获取Reduce分核的core_num_ratio
+  Expr GetPenaltyCoreNumRatio(const ModelInfo &model_info, const AttAxis *split_axis,
+                              const std::vector<const AttAxis *> &a_axes) const;
+
   // 辅助方法：将表达式转换为 upper_bound 形式
   Expr ApplyUpperBoundTransform(const Expr &size_expr) const;
 

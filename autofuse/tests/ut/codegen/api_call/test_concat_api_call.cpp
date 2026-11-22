@@ -142,12 +142,18 @@ TEST(ConcatApiCallTest, ConcatApicallWithConcatDimIsInerAxis) {
   std::cout << result << std::endl;
   EXPECT_EQ(
       result,
-      std::string{"uint32_t concat_dim = 1;\nconst ConcatParams<half, 3> dst_params = {\n.shape  = {(t->s0)/(1), "
-                  "((t->s1_1 + t->s1_2))/(1), (t->s2)/(1)},\n.stride = {(((t->s1_1 + t->s1_2) * t->s2))/(1), "
-                  "(t->s2)/(1), 1},\n.tensor = &local_3,\n};\nconst ConcatParams<half, 3> srcs_params[2] = "
-                  "{\n{\n.shape  = {(t->s0)/(1), (t->s1_1)/(1), (t->s2)/(1), },\n.stride = {((t->s1_1 * t->s2))/(1), "
-                  "(t->s2)/(1), 1},\n.tensor = &local_0,\n},\n{\n.shape  = {(t->s0)/(1), (t->s1_2)/(1), (t->s2)/(1), "
-                  "},\n.stride = {((t->s1_2 * t->s2))/(1), (t->s2)/(1), 1},\n.tensor = "
+      std::string{"uint32_t concat_dim = 1;\nconst ConcatParams<half, 3> dst_params = {\n.shape  = "
+                  "{static_cast<uint32_t>((t->s0)/(1)), static_cast<uint32_t>(((t->s1_1 + t->s1_2))/(1)), "
+                  "static_cast<uint32_t>((t->s2)/(1))},\n.stride = {static_cast<uint32_t>((((t->s1_1 + t->s1_2) * "
+                  "t->s2))/(1)), static_cast<uint32_t>((t->s2)/(1)), 1},\n.tensor = "
+                  "&local_3,\n};\nconst ConcatParams<half, 3> srcs_params[2] = "
+                  "{\n{\n.shape  = {static_cast<uint32_t>((t->s0)/(1)), static_cast<uint32_t>((t->s1_1)/(1)), "
+                  "static_cast<uint32_t>((t->s2)/(1)), },\n.stride = {static_cast<uint32_t>(((t->s1_1 * t->s2))/(1)), "
+                  "static_cast<uint32_t>((t->s2)/(1)), 1},\n.tensor = &local_0,\n},\n{\n.shape  "
+                  "= {static_cast<uint32_t>((t->s0)/(1)), static_cast<uint32_t>((t->s1_2)/(1)), "
+                  "static_cast<uint32_t>((t->s2)/(1)), "
+                  "},\n.stride = {static_cast<uint32_t>(((t->s1_2 * t->s2))/(1)), static_cast<uint32_t>((t->s2)/(1)), "
+                  "1},\n.tensor = "
                   "&local_2,\n},\n};\nConcatExtend<half, 3, 2>(dst_params, srcs_params, concat_dim, tmp_buf_0);\n"});
 }
 

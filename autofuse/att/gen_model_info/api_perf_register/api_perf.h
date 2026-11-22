@@ -35,6 +35,7 @@ struct NodeDetail {
   std::vector<std::string> input_dtype{};
   std::vector<std::string> output_dtype{};
   std::vector<Expr> repeats{};           // 合轴前
+  std::vector<Expr> origin_repeats{};    // 原始图 shape，未经过 tail 切分，用于整张量规模判断
   std::vector<Expr> vectorized_shape{};  // codegen实际使用的vectorized shape
   std::vector<Expr> input_dims{};        // 合轴后
   std::vector<Expr> output_dims{};       // 合轴后

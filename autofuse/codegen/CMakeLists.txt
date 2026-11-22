@@ -7,6 +7,7 @@ target_sources(aihac_codegen PRIVATE
 
 target_include_directories(aihac_codegen PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CODE_ROOT_DIR}
         ${CODE_ROOT_DIR}/common
         ${CODE_ROOT_DIR}/att
         ${TOP_DIR}/runtime/include/external

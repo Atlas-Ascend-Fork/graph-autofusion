@@ -2218,3 +2218,348 @@ TEST_F(BufQueAllocatorUT, test_tmp_buff_reuse) {
   EXPECT_EQ(Sigmoid_result->outputs[0].attr.buf.id, -1);
   EXPECT_EQ(Sigmoid_result->outputs[0].attr.mem.reuse_id, 5);
 }
+
+namespace {
+// 构造 brc 缓存 Load 图：data -> load -> consumer -> store -> output，
+// 并模拟 BufQueAlloc 完成后的 mem/que 属性状态
+af::AscGraph MakeBrcCacheLoadGraph(const std::string &name, bool store_consumer, bool is_cache, int64_t buf_num,
+                                   bool use_tile_split_axis) {
+  af::AscGraph graph(name.c_str());
+  const auto s0 = graph.CreateSizeVar("s0");
+  const auto z0 = graph.CreateAxis("z0", s0);
+  // 模拟调度后形态：外层轴经BlockSplit产生BlockOuter/BlockInner，外提标记取BlockOuter轴
+  const auto block_split_pair = graph.BlockSplit(z0.id);
+  const auto z0_block_outer = std::get<0>(block_split_pair);
+
+  af::ascir_op::Data data("data", graph);
+  data.y.dtype = ge::DT_FLOAT16;
+  *data.y.axis = {z0.id};
+  *data.y.repeats = {s0};
+  *data.y.strides = {af::ops::One};
+
+  af::ascir_op::Load load("load");
+  load.x = data.y;
+  load.attr.api.compute_type = af::ComputeType::kComputeLoad;
+  load.attr.api.unit = af::ComputeUnit::kUnitMTE2;
+  load.attr.sched.exec_condition =
+      is_cache ? af::ExecuteCondition::kCacheBlockSplitOriginBroadcastAxis : af::ExecuteCondition::kNoCache;
+  load.y.dtype = ge::DT_FLOAT16;
+  if (use_tile_split_axis) {
+    const auto split_pair = graph.TileSplit(z0.id);
+    const auto z0t = std::get<1>(split_pair);
+    *load.y.axis = {z0t->id};
+    *load.y.repeats = {s0};
+    *load.y.strides = {af::ops::One};
+  } else {
+    *load.y.axis = {z0.id};
+    // 多元素（>1）行数据：单元素load不再外提（CanHoist元素个数>1条件）
+    *load.y.repeats = {s0};
+    *load.y.strides = {af::sym::kSymbolZero};
+  }
+  load.attr.sched.axis = {z0_block_outer->id, z0.id};
+  load.y.mem->tensor_id = 1;
+  load.y.mem->alloc_type = af::AllocType::kAllocTypeQueue;
+  load.y.mem->hardware = af::MemHardware::kMemHardwareUB;
+  load.y.mem->position = af::Position::kPositionVecIn;
+  load.y.mem->reuse_id = 0;
+  load.y.buf->id = af::kIdNone;
+  load.y.que->id = 0;
+  load.y.que->depth = 2;
+  load.y.que->buf_num = buf_num;
+
+  af::ascir_op::Cast cast("cast");
+  af::ascir_op::Store store("store");
+  if (store_consumer) {
+    store.x = load.y;
+  } else {
+    cast.x = load.y;
+    cast.y.dtype = ge::DT_FLOAT;
+    *cast.y.axis = *load.y.axis;
+    *cast.y.repeats = *load.y.repeats;
+    *cast.y.strides = *load.y.strides;
+    store.x = cast.y;
+  }
+  store.attr.api.compute_type = af::ComputeType::kComputeStore;
+  store.attr.api.unit = af::ComputeUnit::kUnitMTE3;
+  store.y.dtype = ge::DT_FLOAT16;
+  *store.y.axis = {z0.id};
+  *store.y.repeats = {af::ops::One};
+  *store.y.strides = {af::sym::kSymbolZero};
+
+  af::ascir_op::Output output("output");
+  output.x = store.y;
+  output.ir_attr.SetIndex(0);
+  return graph;
+}
+}  // namespace
+
+TEST_F(BufQueAllocatorUT, HoistInvariantLoads_ConvertsCacheLoadWithoutStoreConsumer) {
+  auto graph = MakeBrcCacheLoadGraph("brc_load_convert", false, true, 1, false);
+  ASSERT_EQ(BufQueAllocator().HoistInvariantLoads(graph), af::SUCCESS);
+  const auto load_node = graph.FindNode("load");
+  ASSERT_NE(load_node, nullptr);
+  EXPECT_EQ(load_node->outputs[0].attr.mem.alloc_type, af::AllocType::kAllocTypeBuffer);
+  EXPECT_EQ(load_node->outputs[0].attr.mem.position, af::Position::kPositionVecCalc);
+  EXPECT_EQ(load_node->outputs[0].attr.mem.reuse_id, af::kIdNone);
+  EXPECT_EQ(load_node->outputs[0].attr.buf.id, 0);
+  EXPECT_EQ(load_node->outputs[0].attr.que.id, af::kIdNone);
+  EXPECT_EQ(load_node->outputs[0].attr.que.buf_num, af::kIdNone);
+  // 外提标记：loop_axis 被置为该节点最外层 BlockOuter 轴（z0B）
+  const auto z0_block_outer = graph.FindAxis(load_node->attr.sched.loop_axis);
+  ASSERT_NE(z0_block_outer, nullptr);
+  EXPECT_EQ(z0_block_outer->type, af::Axis::kAxisTypeBlockOuter);
+  EXPECT_EQ(load_node->attr.sched.exec_condition, af::ExecuteCondition::kNoCache);
+}
+
+TEST_F(BufQueAllocatorUT, HoistInvariantLoads_AssignsIncrementalBufId) {
+  auto graph = MakeBrcCacheLoadGraph("brc_load_convert_multi", false, true, 1, false);
+  const auto z0_id = graph.GetAllAxis()[0]->id;
+  int64_t z0_block_outer_id = af::kIdNone;
+  for (const auto &axis : graph.GetAllAxis()) {
+    if (axis->type == af::Axis::kAxisTypeBlockOuter) {
+      z0_block_outer_id = axis->id;
+      break;
+    }
+  }
+  af::ascir_op::Data data2("data2", graph);
+  data2.y.dtype = ge::DT_FLOAT16;
+  af::ascir_op::Load load2("load2");
+  load2.x = data2.y;
+  load2.attr.api.compute_type = af::ComputeType::kComputeLoad;
+  load2.attr.api.unit = af::ComputeUnit::kUnitMTE2;
+  load2.attr.sched.exec_condition = af::ExecuteCondition::kCacheBlockSplitOriginBroadcastAxis;
+  load2.attr.sched.axis = {z0_block_outer_id, z0_id};
+  load2.y.dtype = ge::DT_FLOAT16;
+  *load2.y.axis = {z0_id};
+  // 多元素（>1）行数据：单元素load不再外提（CanHoist元素个数>1条件）
+  *load2.y.repeats = {af::Symbol(4)};
+  *load2.y.strides = {af::sym::kSymbolZero};
+  load2.y.mem->tensor_id = 101;
+  load2.y.mem->alloc_type = af::AllocType::kAllocTypeQueue;
+  load2.y.mem->position = af::Position::kPositionVecIn;
+  load2.y.mem->reuse_id = 1;
+  load2.y.buf->id = af::kIdNone;
+  load2.y.que->id = 1;
+  load2.y.que->depth = 2;
+  load2.y.que->buf_num = 1;
+  ASSERT_EQ(BufQueAllocator().HoistInvariantLoads(graph), af::SUCCESS);
+  EXPECT_EQ(graph.FindNode("load")->outputs[0].attr.buf.id, 0);
+  EXPECT_EQ(graph.FindNode("load2")->outputs[0].attr.buf.id, 1);
+}
+
+TEST_F(BufQueAllocatorUT, HoistInvariantLoads_SkipsStoreConsumer) {
+  auto graph = MakeBrcCacheLoadGraph("brc_load_store", true, true, 1, false);
+  ASSERT_EQ(BufQueAllocator().HoistInvariantLoads(graph), af::SUCCESS);
+  const auto load_node = graph.FindNode("load");
+  ASSERT_NE(load_node, nullptr);
+  EXPECT_EQ(load_node->outputs[0].attr.mem.alloc_type, af::AllocType::kAllocTypeQueue);
+  EXPECT_EQ(load_node->outputs[0].attr.buf.id, af::kIdNone);
+  EXPECT_EQ(load_node->outputs[0].attr.que.id, 0);
+}
+
+TEST_F(BufQueAllocatorUT, HoistInvariantLoads_SkipsNonCacheLoad) {
+  auto graph = MakeBrcCacheLoadGraph("brc_load_non_cache", false, false, 1, false);
+  ASSERT_EQ(BufQueAllocator().HoistInvariantLoads(graph), af::SUCCESS);
+  const auto load_node = graph.FindNode("load");
+  ASSERT_NE(load_node, nullptr);
+  EXPECT_EQ(load_node->outputs[0].attr.mem.alloc_type, af::AllocType::kAllocTypeQueue);
+}
+
+TEST_F(BufQueAllocatorUT, HoistInvariantLoads_SkipsLoopVaryingAddress) {
+  auto graph = MakeBrcCacheLoadGraph("brc_load_loop_vary", false, true, 1, true);
+  ASSERT_EQ(BufQueAllocator().HoistInvariantLoads(graph), af::SUCCESS);
+  const auto load_node = graph.FindNode("load");
+  ASSERT_NE(load_node, nullptr);
+  EXPECT_EQ(load_node->outputs[0].attr.mem.alloc_type, af::AllocType::kAllocTypeQueue);
+}
+
+TEST_F(BufQueAllocatorUT, HoistInvariantLoads_SkipsNonVectorizedLoopVaryingAxis) {
+  // 线上问题回归：非向量化Original轴（z0）stride非0（如z0*8），其变量仅在循环体内计算，
+  // 外提点（kernel入口）不可见，即使轴类型为ORIGINAL也必须拒绝转换。
+  auto graph = MakeBrcCacheLoadGraph("brc_load_orig_axis", false, true, 1, false);
+  graph.FindNode("load")->outputs[0].attr.strides = {af::Symbol(8)};
+  ASSERT_EQ(BufQueAllocator().HoistInvariantLoads(graph), af::SUCCESS);
+  const auto load_node = graph.FindNode("load");
+  ASSERT_NE(load_node, nullptr);
+  EXPECT_EQ(load_node->outputs[0].attr.mem.alloc_type, af::AllocType::kAllocTypeQueue);
+  EXPECT_EQ(load_node->outputs[0].attr.que.id, 0);
+}
+
+TEST_F(BufQueAllocatorUT, HoistInvariantLoads_SkipsGraphContainingIndirectLoad) {
+  // 图级门控：图中包含 IndirectLoad 节点（GM地址数据相关）时，整图不做外提。
+  auto graph = MakeBrcCacheLoadGraph("brc_graph_indirect_load", false, true, 1, false);
+  af::ascir_op::Data data2("data2", graph);
+  data2.y.dtype = ge::DT_FLOAT16;
+  af::ascir_op::IndirectLoad indirect_load("indirect_load");
+  indirect_load.x1 = data2.y;
+  indirect_load.attr.api.compute_type = af::ComputeType::kComputeLoad;
+  indirect_load.attr.api.unit = af::ComputeUnit::kUnitVector;
+  indirect_load.y.dtype = ge::DT_FLOAT16;
+  *indirect_load.y.axis = {graph.GetAllAxis()[0]->id};
+  *indirect_load.y.repeats = {af::ops::One};
+  *indirect_load.y.strides = {af::sym::kSymbolZero};
+  ASSERT_EQ(BufQueAllocator().HoistInvariantLoads(graph), af::SUCCESS);
+  const auto load_node = graph.FindNode("load");
+  ASSERT_NE(load_node, nullptr);
+  EXPECT_EQ(load_node->outputs[0].attr.mem.alloc_type, af::AllocType::kAllocTypeQueue);
+}
+
+TEST_F(BufQueAllocatorUT, HoistInvariantLoads_SkipsGraphContainingCubeNode) {
+  // 图级门控：图中包含 kComputeCube 节点（CV/Cube 管线）时，整图不做外提。
+  auto graph = MakeBrcCacheLoadGraph("brc_graph_cube_node", false, true, 1, false);
+  af::ascir_op::MatMul matmul("matmul");
+  matmul.attr.api.compute_type = af::ComputeType::kComputeCube;
+  matmul.attr.api.unit = af::ComputeUnit::kUnitCube;
+  ASSERT_NE(graph.AddNode(matmul), nullptr);
+  ASSERT_EQ(BufQueAllocator().HoistInvariantLoads(graph), af::SUCCESS);
+  const auto load_node = graph.FindNode("load");
+  ASSERT_NE(load_node, nullptr);
+  EXPECT_EQ(load_node->outputs[0].attr.mem.alloc_type, af::AllocType::kAllocTypeQueue);
+}
+
+TEST_F(BufQueAllocatorUT, HoistInvariantLoads_SkipsMultiBufferQue) {
+  auto graph = MakeBrcCacheLoadGraph("brc_load_db", false, true, 2, false);
+  ASSERT_EQ(BufQueAllocator().HoistInvariantLoads(graph), af::SUCCESS);
+  const auto load_node = graph.FindNode("load");
+  ASSERT_NE(load_node, nullptr);
+  EXPECT_EQ(load_node->outputs[0].attr.mem.alloc_type, af::AllocType::kAllocTypeQueue);
+}
+
+// 在图中追加一个与load同que的Queue类型tensor（模拟que的复用/共用成员）
+static void AppendQueMemberLoad(af::AscGraph &graph, const std::string &name, int64_t tensor_id, int64_t reuse_id) {
+  const auto z0_id = graph.GetAllAxis()[0]->id;
+  af::ascir_op::Data data(("data_" + name).c_str(), graph);
+  data.y.dtype = ge::DT_FLOAT16;
+  af::ascir_op::Load load(name.c_str());
+  load.x = data.y;
+  load.attr.api.compute_type = af::ComputeType::kComputeLoad;
+  load.attr.api.unit = af::ComputeUnit::kUnitMTE2;
+  load.y.dtype = ge::DT_FLOAT16;
+  *load.y.axis = {z0_id};
+  *load.y.repeats = {af::ops::One};
+  *load.y.strides = {af::sym::kSymbolZero};
+  load.y.mem->tensor_id = tensor_id;
+  load.y.mem->alloc_type = af::AllocType::kAllocTypeQueue;
+  load.y.mem->position = af::Position::kPositionVecIn;
+  load.y.mem->reuse_id = reuse_id;
+  load.y.buf->id = af::kIdNone;
+  load.y.que->id = 0;
+  load.y.que->depth = 2;
+  load.y.que->buf_num = 1;
+}
+
+// 条件5：que被其它tensor共用（同que同reuse_id）时不转换
+TEST_F(BufQueAllocatorUT, HoistInvariantLoads_SkipsSharedQue) {
+  auto graph = MakeBrcCacheLoadGraph("brc_load_shared_que", false, true, 1, false);
+  AppendQueMemberLoad(graph, "load_share", 101, 0);
+  ASSERT_EQ(BufQueAllocator().HoistInvariantLoads(graph), af::SUCCESS);
+  EXPECT_EQ(graph.FindNode("load")->outputs[0].attr.mem.alloc_type, af::AllocType::kAllocTypeQueue);
+  EXPECT_EQ(graph.FindNode("load_share")->outputs[0].attr.mem.alloc_type, af::AllocType::kAllocTypeQueue);
+}
+
+// 条件5：que被其它tensor复用（同que异reuse_id）时不转换
+TEST_F(BufQueAllocatorUT, HoistInvariantLoads_SkipsReusedQue) {
+  auto graph = MakeBrcCacheLoadGraph("brc_load_reused_que", false, true, 1, false);
+  AppendQueMemberLoad(graph, "load_reuse", 101, 1);
+  ASSERT_EQ(BufQueAllocator().HoistInvariantLoads(graph), af::SUCCESS);
+  EXPECT_EQ(graph.FindNode("load")->outputs[0].attr.mem.alloc_type, af::AllocType::kAllocTypeQueue);
+  EXPECT_EQ(graph.FindNode("load_reuse")->outputs[0].attr.mem.alloc_type, af::AllocType::kAllocTypeQueue);
+}
+
+// ===== workspace 的 GM 身份 =====
+static af::AscGraph MakeWorkspaceWriterGraph(const std::string &graph_name, const std::string &ws_name) {
+  af::AscGraph graph(graph_name.c_str());
+  const af::Expression s0 = graph.CreateSizeVar(16);
+  auto z0 = graph.CreateAxis("z0", s0);
+
+  af::ascir_op::Data data("data0", graph);
+  data.ir_attr.SetIndex(0);
+  data.y.dtype = ge::DT_FLOAT;
+
+  af::ascir_op::Load load("w_load");
+  load.x = data.y;
+  load.attr.api.compute_type = af::ComputeType::kComputeLoad;
+  load.attr.api.unit = af::ComputeUnit::kUnitMTE2;
+  load.y.dtype = ge::DT_FLOAT;
+  *load.y.axis = {z0.id};
+  *load.y.repeats = {s0};
+  *load.y.strides = {af::ops::One};
+
+  af::ascir_op::Store store("w_store");
+  store.x = load.y;
+  store.attr.api.compute_type = af::ComputeType::kComputeStore;
+  store.attr.api.unit = af::ComputeUnit::kUnitMTE2;
+  store.y.dtype = ge::DT_FLOAT;
+  *store.y.axis = {z0.id};
+  *store.y.repeats = {s0};
+  *store.y.strides = {af::ops::One};
+
+  af::ascir_op::Workspace workspace(ws_name.c_str());
+  workspace.x = store.y;
+  workspace.y.dtype = ge::DT_FLOAT;
+  (void)graph.AddNode(workspace);
+  return graph;
+}
+
+static af::AscGraph MakeWorkspaceReaderGraph(const std::string &graph_name, const std::string &ws_name) {
+  af::AscGraph graph(graph_name.c_str());
+  const af::Expression s0 = graph.CreateSizeVar(16);
+  auto z0 = graph.CreateAxis("z0", s0);
+
+  af::ascir_op::Workspace workspace(ws_name.c_str());
+  workspace.y.dtype = ge::DT_FLOAT;
+  (void)graph.AddNode(workspace);
+
+  af::ascir_op::Load load("r_load");
+  load.x = workspace.y;
+  load.attr.api.compute_type = af::ComputeType::kComputeLoad;
+  load.attr.api.unit = af::ComputeUnit::kUnitMTE2;
+  load.y.dtype = ge::DT_FLOAT;
+  *load.y.axis = {z0.id};
+  *load.y.repeats = {s0};
+  *load.y.strides = {af::ops::One};
+
+  af::ascir_op::Store store("r_store");
+  store.x = load.y;
+  store.attr.api.compute_type = af::ComputeType::kComputeStore;
+  store.attr.api.unit = af::ComputeUnit::kUnitMTE2;
+  store.y.dtype = ge::DT_FLOAT;
+  *store.y.axis = {z0.id};
+  *store.y.repeats = {s0};
+  *store.y.strides = {af::ops::One};
+
+  af::ascir_op::Output output("output0");
+  output.x = store.y;
+  output.ir_attr.SetIndex(0);
+  return graph;
+}
+
+static int64_t WorkspaceTensorId(const af::AscGraph &graph, const std::string &name) {
+  const auto node = graph.FindNode(name.c_str());
+  if (node == nullptr) {
+    return af::kIdNone;
+  }
+  return node->outputs[0].attr.mem.tensor_id;
+}
+
+// workspace 的 GM 身份就是节点名: 跨 impl_graph 同名即同一块, 拿到同一个 tensor_id;
+// 改个名字就是另一块 GM(tiling 按 tensor_id 给每个 id 一段互不相交的偏移)。
+// 多引用切分复制 workspace 时必须沿用源名字, 否则读者读到的是谁也没写过的那一段。
+TEST_F(BufQueAllocatorUT, WorkspaceIdentityIsNodeName) {
+  auto same_name = MakeFusedScheduledResultWithGraphs(
+      {MakeWorkspaceWriterGraph("ws_writer", "max_Workspace"), MakeWorkspaceReaderGraph("ws_reader", "max_Workspace")});
+  BufQueAllocator same_name_allocator;
+  ASSERT_EQ(same_name_allocator.AllocateForIoNodes(same_name), ge::GRAPH_SUCCESS);
+  const auto &same_name_graphs = same_name.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs;
+  const int64_t writer_id = WorkspaceTensorId(same_name_graphs[0], "max_Workspace");
+  EXPECT_NE(writer_id, af::kIdNone);
+  EXPECT_EQ(WorkspaceTensorId(same_name_graphs[1], "max_Workspace"), writer_id);
+
+  auto renamed = MakeFusedScheduledResultWithGraphs({MakeWorkspaceWriterGraph("ws_writer2", "max_Workspace"),
+                                                     MakeWorkspaceReaderGraph("ws_reader2", "copy_of_max_Workspace")});
+  BufQueAllocator renamed_allocator;
+  ASSERT_EQ(renamed_allocator.AllocateForIoNodes(renamed), ge::GRAPH_SUCCESS);
+  const auto &renamed_graphs = renamed.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs;
+  EXPECT_NE(WorkspaceTensorId(renamed_graphs[1], "copy_of_max_Workspace"),
+            WorkspaceTensorId(renamed_graphs[0], "max_Workspace"));
+}

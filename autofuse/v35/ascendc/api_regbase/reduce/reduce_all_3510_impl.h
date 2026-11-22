@@ -13,11 +13,10 @@
 
 #include "kernel_tensor.h"
 #include "kernel_basic_intf.h"
-#ifdef ASCENDC_CPU_DEBUG
 #include "reduce/reduce_common_util_3510_impl.h"
 #include "reduce/reduce_common_ar_reuse_align_3510_impl.h"
+#include "reduce/reduce_common_ar_ra_reuse_unalign_3510_impl.h"
 #include "reduce/reduce_common_ra_reuse_align_3510_impl.h"
-#endif  // ASCENDC_CPU_DEBUG
 
 namespace AscendC {
 namespace ReduceExtendInternal {
@@ -41,6 +40,36 @@ __aicore__ inline void ReduceAllARImpl(__ubuf__ T *dstAddr, __ubuf__ T *srcAddr,
   }
 }
 
+template <class T, bool isReuseSource = false>
+__aicore__ inline void ReduceAllB64ARCompute(__ubuf__ T *dstAddr, __ubuf__ T *srcAddr, __ubuf__ T *tmpAddr,
+                                             const uint32_t srcShape[]) {
+  if ((srcShape[1] * sizeof(T)) % 32 == 0) {
+    ReduceARImpl<T, Reg::RegTraitNumTwo,
+                 Reg::Min<T, Reg::MaskMergeMode::ZEROING, Reg::RegTensor<T, Reg::RegTraitNumTwo>>,
+                 Reg::ReduceMin<T, Reg::MaskMergeMode::ZEROING, Reg::RegTensor<T, Reg::RegTraitNumTwo>>, isReuseSource>(
+        dstAddr, srcAddr, tmpAddr, srcShape[0], srcShape[1]);
+  } else {
+    ReduceARReuseSourceUnAligned<
+        T, Reg::RegTraitNumTwo, Reg::Min<T, Reg::MaskMergeMode::ZEROING, Reg::RegTensor<T, Reg::RegTraitNumTwo>>,
+        Reg::ReduceMin<T, Reg::MaskMergeMode::ZEROING, Reg::RegTensor<T, Reg::RegTraitNumTwo>>>(
+        dstAddr, srcAddr, srcShape[0], srcShape[1]);
+  }
+}
+
+template <class T, bool isReuseSource = false>
+__aicore__ inline void ReduceAllB64RACompute(__ubuf__ T *dstAddr, __ubuf__ T *srcAddr, __ubuf__ T *tmpAddr,
+                                             const uint32_t srcShape[]) {
+  if ((srcShape[1] * sizeof(T)) % 32 == 0) {
+    ReduceRAB64ReuseSource<T, Reg::RegTraitNumTwo,
+                           Reg::Min<T, Reg::MaskMergeMode::ZEROING, Reg::RegTensor<T, Reg::RegTraitNumTwo>>,
+                           isReuseSource>(dstAddr, srcAddr, tmpAddr, srcShape[1], srcShape[0]);
+  } else {
+    ReduceRAReuseSourceUnAlignedB64<T, Reg::RegTraitNumTwo,
+                                    Reg::Min<T, Reg::MaskMergeMode::ZEROING, Reg::RegTensor<T, Reg::RegTraitNumTwo>>>(
+        dstAddr, srcAddr, srcShape[1], srcShape[0]);
+  }
+}
+
 template <typename T, typename pattern, bool isReuseSource = false>
 __aicore__ inline void ReduceAllImpl(const LocalTensor<T> &dst, const LocalTensor<T> &src,
                                      const LocalTensor<uint8_t> &sharedTmpBuffer, const uint32_t srcShape[],
@@ -50,7 +79,8 @@ __aicore__ inline void ReduceAllImpl(const LocalTensor<T> &dst, const LocalTenso
   CheckTensorPos<T>(dst, Hardware::UB, "dst", "VECIN/VECCALC/VECOUT", "ReduceAll");
   CheckTensorPos<T>(src, Hardware::UB, "src", "VECIN/VECCALC/VECOUT", "ReduceAll");
   CheckTensorPos<uint8_t>(sharedTmpBuffer, Hardware::UB, "sharedTmpBuffer", "VECIN/VECCALC/VECOUT", "ReduceAll");
-  static_assert(SupportType<T, uint8_t, float>(), "ReduceAll only support uint8_t/float data type on current device!");
+  static_assert(SupportType<T, uint8_t, int8_t, int16_t, int32_t, float, int64_t>(),
+                "ReduceAll only support uint8_t/int8_t/int16_t/int32_t/float/int64_t data type on current device!");
   static_assert(std::is_same_v<pattern, Pattern::Reduce::AR> || std::is_same_v<pattern, Pattern::Reduce::RA>,
                 "ReduceAll only support AR and RA pattern on current device!");
 
@@ -59,10 +89,18 @@ __aicore__ inline void ReduceAllImpl(const LocalTensor<T> &dst, const LocalTenso
   LocalTensor<T> tmpBuf = sharedTmpBuffer.ReinterpretCast<T>();
   __ubuf__ T *tmpAddr = (__ubuf__ T *)tmpBuf.GetPhyAddr();
   if constexpr (std::is_same_v<pattern, Pattern::Reduce::AR>) {
-    ReduceAllARImpl<T, isReuseSource>(dstAddr, srcAddr, tmpAddr, srcShape[0], srcShape[1]);
+    if constexpr (SupportBytes<T, 8>()) {
+      ReduceAllB64ARCompute<T, isReuseSource>(dstAddr, srcAddr, tmpAddr, srcShape);
+    } else {
+      ReduceAllARImpl<T, isReuseSource>(dstAddr, srcAddr, tmpAddr, srcShape[0], srcShape[1]);
+    }
   } else {
-    ReduceRAImpl<T, Reg::RegTraitNumOne, Reg::Min<T, Reg::MaskMergeMode::ZEROING, Reg::RegTensor<T>>, isReuseSource>(
-        dstAddr, srcAddr, tmpAddr, srcShape[1], srcShape[0]);
+    if constexpr (SupportBytes<T, 8>()) {
+      ReduceAllB64RACompute<T, isReuseSource>(dstAddr, srcAddr, tmpAddr, srcShape);
+    } else {
+      ReduceRAImpl<T, Reg::RegTraitNumOne, Reg::Min<T, Reg::MaskMergeMode::ZEROING, Reg::RegTensor<T>>, isReuseSource>(
+          dstAddr, srcAddr, tmpAddr, srcShape[1], srcShape[0]);
+    }
   }
 }
 }  // namespace Internal

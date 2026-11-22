@@ -10,6 +10,12 @@ enable_testing()
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_STANDARD 17)
+# The ATT test stack uses ABI 0 even when the MDC product library uses ABI 1.
+if(MDC_COMPILE_RUNTIME AND NOT USE_CXX11_ABI STREQUAL "0")
+    get_directory_property(af_test_compile_options COMPILE_OPTIONS)
+    list(REMOVE_ITEM af_test_compile_options "-D_GLIBCXX_USE_CXX11_ABI=${USE_CXX11_ABI}")
+    set_directory_properties(PROPERTIES COMPILE_OPTIONS "${af_test_compile_options}")
+endif()
 add_compile_options(-D_GLIBCXX_USE_CXX11_ABI=0)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fstack-protector-all -Wl,-z,now")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fstack-protector-all -Wl,-z,now")
@@ -169,6 +175,13 @@ if (ENABLE_OPEN_SRC)
     endif()
 endif()
 
+# Community CANN packages (e.g. 9.3.0) no longer ship libintf_llt_pub; fall back to an
+# interface stub whenever no real target exists so test stubs keep linking.
+if (NOT TARGET intf_llt_pub)
+    add_library(intf_llt_pub INTERFACE)
+    target_compile_options(intf_llt_pub INTERFACE -g -fPIC -w)
+endif()
+
 file(GLOB_RECURSE ASCIR_META_TEST_SRC CONFIGURE_DEPENDS "${CODE_ROOT_DIR}/ascir/meta/*.cpp")
 file(GLOB_RECURSE ASCIR_BUILTIN_OPS_TEST_SRC CONFIGURE_DEPENDS
         "${CODE_ROOT_DIR}/ascir/generator/*.cpp"
@@ -284,8 +297,12 @@ file(GLOB SOURCES
     ${ATT_DIR}/gen_model_info/api_tiling_gen/api/*.cpp
     ${ATT_DIR}/gen_model_info/sketch_gen/*.cpp
     ${ATT_DIR}/gen_tiling_impl.cpp
+    ${ATT_DIR}/program/axes_solve_runtime.cpp
     )
 
+
+list(REMOVE_ITEM SOURCES ${ATT_DIR}/gen_model_info/api_perf_register/soc_perf_config_data.cpp)
+list(APPEND SOURCES ${CODE_ROOT_DIR}/tests/common/att/soc_perf_test_config.cpp)
 
 add_library(att SHARED
     ${SOURCES}
@@ -342,7 +359,11 @@ target_link_libraries(att PRIVATE
         error_manager
         ascend_protobuf
         ge_log_utils
+        # ATT probes the builtin performance registry even when the test graph
+        # uses no builtin APIs. Keep the registration-only library loaded.
+        -Wl,--push-state,--no-as-needed
         ascir_builtin_ops
+        -Wl,--pop-state
         autofuse_runtime_stub
         ascgen_common
 )
@@ -378,6 +399,31 @@ target_include_directories(codegen PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/depends/runtime/src
 )
 
+if(ENABLE_AUTOFUSE_MLIR)
+    autofuse_enable_mlir_bridge(codegen PUBLIC)
+
+    # aarch64 上这个库已经贴着 `R_AARCH64_CALL26` 的 ±128 MiB 跳转范围（2026-10-27 实测：
+    # 把 MLIR 桥链进来之后 `.text` 已占 98%），再多几个 op 就链不过，报
+    # `relocation truncated to fit ... against __aarch64_ldadd4_acq_rel`。
+    #
+    # 只在把 MLIR 链进来的那一档加这几个选项：不链 MLIR 的 legacy 档离上限还远，不必动。
+    target_compile_options(codegen PRIVATE -ffunction-sections -fdata-sections)
+    target_link_options(codegen PRIVATE -Wl,--gc-sections -Wl,--exclude-libs,ALL)
+
+    target_link_libraries(codegen PUBLIC AutofuseMlirScheduleBridge)
+    # MLIRLLVMDialect is an IMPORTED target created by find_package(MLIR) inside
+    # the sibling mlir/ subdirectory; imported targets aren't visible across
+    # sibling directory scopes, so re-resolve it here (MLIR_DIR is already
+    # cached from the mlir/ subtree, which is added before tests/).
+    find_package(MLIR REQUIRED CONFIG)
+    target_link_libraries(codegen PUBLIC MLIRLLVMDialect)
+endif()
+
+# codegen calls optimize::BackendSpec::GetInstance() directly (codegen_kernel.cpp,
+# codegen_tiling.cpp, codegen_tiling_pgo_common.cpp), so it must name optimize in
+# both branches.  Relying on att to bring it in transitively is not enough: att
+# links optimize PRIVATE, so libcodegen.so ends up with an undefined symbol and
+# the UT/ST framework fails to load it.
 if (ENABLE_OPEN_SRC)
     target_link_libraries(codegen PUBLIC
         -lgcov
@@ -386,6 +432,7 @@ if (ENABLE_OPEN_SRC)
         ascgen_common
         aihac_symbolizer_af
         error_manager
+        optimize
         att
         json
         ascendc_api_extend
@@ -396,6 +443,7 @@ else ()
         $<BUILD_INTERFACE:msprof_headers>
         $<BUILD_INTERFACE:runtime_headers>
         $<BUILD_INTERFACE:atrace_headers>
+        optimize
         mmpa
         c_sec
         unified_dlog
@@ -421,7 +469,9 @@ target_include_directories(optimize PUBLIC
         ${CODE_ROOT_DIR}/autofuse
 )
 
-target_compile_options(optimize PRIVATE -fPIC -Werror -fno-common -Wextra -Wfloat-equal -O2 -Wall)
+# Host compiler optimization is unnecessary for this test-only library.
+# Keep cold, coverage-enabled builds from spending memory on -O2 optimization.
+target_compile_options(optimize PRIVATE -fPIC -Werror -fno-common -Wextra -Wfloat-equal -O0 -Wall)
 
 if (ENABLE_OPEN_SRC)
     target_link_libraries(optimize PUBLIC
@@ -500,6 +550,9 @@ else ()
             unified_dlog
     )
 endif ()
+if (TARGET pyautofuse_runtime_error_tiling)
+    add_dependencies(pyautofuse pyautofuse_runtime_error_tiling)
+endif ()
 if (ENABLE_OPEN_SRC)
     target_compile_options(att PRIVATE -g --coverage -fprofile-arcs -ftest-coverage)
     target_compile_options(optimize PRIVATE -g --coverage -fprofile-arcs -ftest-coverage)
@@ -520,4 +573,18 @@ endforeach()
 
 if (IS_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/v35")
     add_subdirectory(v35)
+endif()
+
+include(${CODE_ROOT_DIR}/att/cmake/axes_solver_resources.cmake)
+target_link_libraries(att PRIVATE att_axes_solver_resources)
+
+include(${CODE_ROOT_DIR}/att/cmake/tiling_core.cmake)
+if(MDC_COMPILE_RUNTIME AND NOT USE_CXX11_ABI STREQUAL "0")
+    add_att_tiling_core(att_tiling_core_test)
+    target_link_libraries(att PRIVATE att_tiling_core_test)
+else()
+    if(NOT TARGET att_tiling_core)
+        add_att_tiling_core(att_tiling_core)
+    endif()
+    target_link_libraries(att PRIVATE att_tiling_core)
 endif()

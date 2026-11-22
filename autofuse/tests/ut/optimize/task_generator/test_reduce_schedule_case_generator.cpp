@@ -493,9 +493,12 @@ TEST_F(ReduceScheduleCaseGeneratorTest, TestReduce_Three_Elewise_Store) {
   optimize::ReducePartitionCaseGenerator generator;
   OptimizerOptions options;
   EXPECT_EQ(generator.GeneratorTask(graph, tasks, options), af::SUCCESS);
-  ASSERT_EQ(tasks.size(), 2UL);
+  // Sum 对 z0/z1 两轴全归约属多 R 轴, 但单 reduce 非 norm 图放行进入 R-core 模板, 由
+  // AppendReduceFirstStageGroup 一致性判定后打包或回退, Common/RCore/AllLoad 三任务齐全
+  ASSERT_EQ(tasks.size(), 3UL);
   ASSERT_EQ(tasks[0].grouped_graphs.size(), 1UL);
   ASSERT_EQ(tasks[1].grouped_graphs.size(), 2UL);
+  ASSERT_EQ(tasks[2].grouped_graphs.size(), 1UL);
 }
 
 TEST_F(ReduceScheduleCaseGeneratorTest, TestReduce_One_Elewise_Store) {
@@ -505,9 +508,11 @@ TEST_F(ReduceScheduleCaseGeneratorTest, TestReduce_One_Elewise_Store) {
   optimize::ReducePartitionCaseGenerator generator;
   OptimizerOptions options;
   generator.GeneratorTask(graph, tasks, options);
-  ASSERT_EQ(tasks.size(), 2UL);
+  // 同 TestReduce_Three_Elewise_Store: 单 reduce 多 R 轴放行, Common/RCore/AllLoad 三任务齐全
+  ASSERT_EQ(tasks.size(), 3UL);
   ASSERT_EQ(tasks[0].grouped_graphs.size(), 1UL);
   ASSERT_EQ(tasks[1].grouped_graphs.size(), 2UL);
+  ASSERT_EQ(tasks[2].grouped_graphs.size(), 1UL);
 }
 
 TEST_F(ReduceScheduleCaseGeneratorTest, TestReduce_Four_Elewise_Store) {
@@ -517,9 +522,11 @@ TEST_F(ReduceScheduleCaseGeneratorTest, TestReduce_Four_Elewise_Store) {
   optimize::ReducePartitionCaseGenerator generator;
   OptimizerOptions options;
   generator.GeneratorTask(graph, tasks, options);
-  ASSERT_EQ(tasks.size(), 2UL);
+  // 同 TestReduce_Three_Elewise_Store: 单 reduce 多 R 轴放行, Common/RCore/AllLoad 三任务齐全
+  ASSERT_EQ(tasks.size(), 3UL);
   ASSERT_EQ(tasks[0].grouped_graphs.size(), 2UL);
   ASSERT_EQ(tasks[1].grouped_graphs.size(), 3UL);
+  ASSERT_EQ(tasks[2].grouped_graphs.size(), 1UL);
 }
 
 TEST_F(ReduceScheduleCaseGeneratorTest, TestReduce_AllLoadTailReduceFourAxis) {
@@ -532,14 +539,14 @@ TEST_F(ReduceScheduleCaseGeneratorTest, TestReduce_AllLoadTailReduceFourAxis) {
   EXPECT_TRUE(HasReduceTemplateType(tasks, ReduceTemplateType::kAllLoad));
 }
 
-TEST_F(ReduceScheduleCaseGeneratorTest, TestReduce_NoAllLoadForFourAxisNonTailReduce) {
+TEST_F(ReduceScheduleCaseGeneratorTest, TestReduce_AllLoadForFourAxisNonTailReduce) {
   af::AscGraph graph("reduce_no_all_load_for_four_axis_non_tail_reduce");
   ConstructFourAxisReduce(graph, false);
   std::vector<ScheduleTask> tasks;
   optimize::ReducePartitionCaseGenerator generator;
   OptimizerOptions options;
   EXPECT_EQ(generator.GeneratorTask(graph, tasks, options), af::SUCCESS);
-  EXPECT_FALSE(HasReduceTemplateType(tasks, ReduceTemplateType::kAllLoad));
+  EXPECT_TRUE(HasReduceTemplateType(tasks, ReduceTemplateType::kAllLoad));
 }
 
 TEST_F(ReduceScheduleCaseGeneratorTest, TestReduce_NoAllLoadForEmptyRepeats) {
@@ -570,7 +577,7 @@ TEST_F(ReduceScheduleCaseGeneratorTest, TestReduce_Multi_Cita_Store) {
   OptimizerOptions options;
   generator.GeneratorTask(graph, tasks, options);
   EXPECT_TRUE(HasReduceTemplateType(tasks, ReduceTemplateType::kCommon));
-  EXPECT_FALSE(HasReduceTemplateType(tasks, ReduceTemplateType::kAllLoad));
+  EXPECT_TRUE(HasReduceTemplateType(tasks, ReduceTemplateType::kAllLoad));
 }
 
 TEST_F(ReduceScheduleCaseGeneratorTest, TestReduce_Multi_Cita_Multi_Out_NoDependencyCycle) {
@@ -610,7 +617,12 @@ TEST_F(ReduceScheduleCaseGeneratorTest, TestReduce_Multi_Cita_Multi_Out_NoDepend
 
   size_t shared0_workspace_count = 0UL;
   size_t shared1_workspace_count = 0UL;
+  // RCore 任务由 kCommon 任务派生并复制其子图, workspace 节点会随拷贝重复出现,
+  // 故仅在 kCommon 任务内计数
   for (const auto &task : tasks) {
+    if (task.reduce_type != ReduceTemplateType::kCommon) {
+      continue;
+    }
     for (const auto &grouped_graph : task.grouped_graphs) {
       for (const auto &node : grouped_graph.GetAllNodes()) {
         if (!af::ops::IsOps<af::ascir_op::Workspace>(node)) {
@@ -655,7 +667,12 @@ TEST_F(ReduceScheduleCaseGeneratorTest, TestReduce_Multi_Cita_SameReduce_NoDupli
   EXPECT_EQ(generator.GeneratorTask(graph, tasks, options), af::SUCCESS);
 
   size_t shared_workspace_count = 0UL;
+  // RCore 任务由 kCommon 任务派生并复制其子图, workspace 节点会随拷贝重复出现,
+  // 故仅在 kCommon 任务内计数
   for (const auto &task : tasks) {
+    if (task.reduce_type != ReduceTemplateType::kCommon) {
+      continue;
+    }
     for (const auto &grouped_graph : task.grouped_graphs) {
       for (const auto &node : grouped_graph.GetAllNodes()) {
         if (af::ops::IsOps<af::ascir_op::Workspace>(node) &&
@@ -779,7 +796,8 @@ TEST_F(ReduceScheduleCaseGeneratorTest, TestReduce_ScalarData_Input) {
   optimize::ReducePartitionCaseGenerator generator;
   OptimizerOptions options;
   EXPECT_EQ(generator.GeneratorTask(graph, tasks, options), af::SUCCESS);
-  ASSERT_EQ(tasks.size(), 2UL);
+  // Sum 对两轴全归约属多 R 轴, 但单 reduce 非 norm 图放行进入 R-core 模板, Common/RCore/AllLoad 三任务齐全
+  ASSERT_EQ(tasks.size(), 3UL);
   // ScalarData直连算子，reduce拆分时ScalarData走PartitionScalar分支，保持ScalarData类型
   for (const auto &task : tasks) {
     for (const auto &grouped_graph : task.grouped_graphs) {
@@ -897,5 +915,106 @@ TEST_F(ReduceScheduleCaseGeneratorTest, TestReduce_Multi_Cita_RemoveOrphanSource
     }
   }
   EXPECT_EQ(subgraphs_with_src0_copy, 2UL);
+}
+// Workspace 源的多引用切分: 副本必须沿用源 workspace 的名字。
+// workspace 的 GM 身份就是节点名(BufQueAllocator::AllocateForIoNodes 按名字分配 tensor_id,
+// tiling 再按 tensor_id 给每个 id 一段互不相交的偏移)。副本改名会多分出一块谁也没写过的
+// GM, 读到的是未初始化数据。
+TEST_F(ReduceScheduleCaseGeneratorTest, TestReduce_Multi_Cita_Workspace_Source_KeepsName) {
+  auto graph = AscGraphBuilder("reduce_multi_citation_ws_source")
+                   .Loops({Sym(128), Sym(64)})
+                   .Workspace("ws")
+                   .Load("load", "ws")
+                   .Relu("branch0", "load")
+                   .Sum("sum0", "branch0", {0, 1})
+                   .Relu("branch1", "load")
+                   .Sum("sum1", "branch1", {0, 1})
+                   .Store("store0", "sum0")
+                   .Output("output0", "store0", 0)
+                   .Store("store1", "sum1")
+                   .Output("output1", "store1", 1)
+                   .Build();
+  std::vector<ScheduleTask> tasks;
+  ReducePartitionCaseGenerator generator;
+  OptimizerOptions options;
+  ASSERT_EQ(generator.GeneratorTask(graph, tasks, options), af::SUCCESS);
+
+  size_t subgraphs_reading_ws = 0UL;
+  size_t renamed_workspace_copies = 0UL;
+  for (const auto &task : tasks) {
+    if (task.reduce_type != ReduceTemplateType::kCommon) {
+      continue;
+    }
+    for (const auto &grouped_graph : task.grouped_graphs) {
+      bool reads_ws = false;
+      for (const auto &node : grouped_graph.GetAllNodes()) {
+        if (!af::ops::IsOps<af::ascir_op::Workspace>(node)) {
+          continue;
+        }
+        if (node->GetName() == "ws") {
+          reads_ws = true;
+        } else {
+          ++renamed_workspace_copies;
+        }
+      }
+      if (reads_ws) {
+        ++subgraphs_reading_ws;
+      }
+    }
+    break;
+  }
+  // 切分后两个 reduce 子图各自重读同一块 GM, 两边的 workspace 节点都叫 ws。
+  EXPECT_EQ(subgraphs_reading_ws, 2UL);
+  EXPECT_EQ(renamed_workspace_copies, 0UL);
+}
+TEST_F(ReduceScheduleCaseGeneratorTest, TestReduce_Multi_Cita_Workspace_Source_MergesInSubGraph) {
+  // 源是 Workspace 的同一形状: 两条非锚点引用(c1/c2) 经 join 汇聚到同一个 reduce, 两次切分
+  // 产生的 workspace 副本沿用源名字, 同名副本落在同一子图。合并必须跑在
+  // CheckDuplicateWorkspaceNodes 之前, 否则整批子图被当成切分出错清空, 公共候选整个丢失。
+  auto graph = AscGraphBuilder("reduce_multi_citation_ws_merge_copies")
+                   .Loops({Sym(128), Sym(64)})
+                   .Workspace("ws")
+                   .Load("load", "ws")
+                   .Abs("c0", "load")
+                   .Sum("sum0", "c0", {0, 1})
+                   .Relu("c1", "load")
+                   .Op<af::ascir_op::Tanh>("c2", {"load"})
+                   .Add("join", "c1", "c2")
+                   .Sum("sum2", "join", {0, 1})
+                   .Store("store0", "sum0")
+                   .Output("output0", "store0", 0)
+                   .Store("store2", "sum2")
+                   .Output("output2", "store2", 1)
+                   .Build();
+  std::vector<ScheduleTask> tasks;
+  ReducePartitionCaseGenerator generator;
+  OptimizerOptions options;
+  ASSERT_EQ(generator.GeneratorTask(graph, tasks, options), af::SUCCESS);
+  // 候选还在, 说明重名检查没有把它清空
+  ASSERT_TRUE(HasReduceTemplateType(tasks, ReduceTemplateType::kCommon));
+
+  EXPECT_EQ(CountCommonTaskNodesByName(tasks, "copy_from_load"), 1UL);
+  EXPECT_EQ(CountCommonTaskNodesByName(tasks, "copy_from_ws"), 0UL);
+
+  size_t max_ws_per_sub_graph = 0UL;
+  for (const auto &task : tasks) {
+    if (task.reduce_type != ReduceTemplateType::kCommon) {
+      continue;
+    }
+    for (const auto &grouped_graph : task.grouped_graphs) {
+      size_t ws_in_sub_graph = 0UL;
+      for (const auto &node : grouped_graph.GetAllNodes()) {
+        if (af::ops::IsOps<af::ascir_op::Workspace>(node) && (node->GetName() == "ws")) {
+          ++ws_in_sub_graph;
+        }
+      }
+      if (ws_in_sub_graph > max_ws_per_sub_graph) {
+        max_ws_per_sub_graph = ws_in_sub_graph;
+      }
+    }
+    break;
+  }
+  // 同一子图内同名 workspace 只应剩一份
+  EXPECT_EQ(max_ws_per_sub_graph, 1UL);
 }
 }  // namespace schedule

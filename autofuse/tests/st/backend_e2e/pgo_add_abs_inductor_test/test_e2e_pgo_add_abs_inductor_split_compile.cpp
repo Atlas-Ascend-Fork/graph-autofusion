@@ -131,9 +131,11 @@ std::string MeasuredTopnParserScript(const std::string &work_dir) {
 
 std::string MeasuredTopnLinkScript(const std::string &work_dir) {
   return "args.pgo_generation = 'fakecallback'\n"
-         "args.compile_options += ' -DAUTOFUSE_PGO_RUNNER_TIMEOUT_SECONDS=1'\n"
+         "original_compile_options = args.compile_options\n"
+         "args.compile_options += ' -Werror -DAUTOFUSE_PGO_RUNNER_TIMEOUT_SECONDS=1'\n"
          "args.host_files = normal_files\n"
          "objects = ac.compile_host_objs(args, args.temp_dir)\n"
+         "args.compile_options = original_compile_options\n"
          "tiling = '" +
          work_dir +
          "/fake_tiling.so'\n"
@@ -211,7 +213,7 @@ TEST_F(TestBackendPgoAddAbsInductorSplitCompile, SplitCompileChainWorks) {
   PrepareInputs(tiling_def, host_code, device_code);
 
   const std::string host_bin = OUTPUT_DIR "/pgo_add_abs_inductor_host.so";
-  ASSERT_EQ(autofuse::tests::RunHostCompile(tiling_def, host_code, host_bin, "pgo_add_abs_inductor", ""), 0);
+  ASSERT_EQ(autofuse::tests::RunHostCompile(tiling_def, host_code, host_bin, "pgo_add_abs_inductor", "-Werror"), 0);
   ASSERT_TRUE(FileExists(host_bin)) << "host so not found: " << host_bin;
   ASSERT_TRUE(autofuse::tests::HasCxx11AbiSymbols(host_bin)) << "host so should use ABI=1: " << host_bin;
   const std::string tiling_repr_file = OUTPUT_DIR "/tiling_repr.txt";

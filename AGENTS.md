@@ -81,6 +81,14 @@ GitCode PR、Issue、流水线相关操作使用项目默认 skills：
 - 触发或查看流水线：`gitcode-pipeline`
 - skills 缺失或安装默认 skills：`default-skills`
 
+GitCode API 令牌按以下顺序获取：
+
+1. 环境变量 `GITCODE_API_TOKEN`。
+2. 当前仓库配置 `git config --local --get gitcode.token`。
+
+Agent 不得输出或记录令牌值。检查仓库配置时，只确认配置是否存在；调用 GitCode API 时，应通过临时环境变量
+传递令牌，避免令牌出现在命令输出和日志中。
+
 ### 代码检视
 
 **使用技能**： `af-code-reviewer`
@@ -94,6 +102,15 @@ GitCode PR、Issue、流水线相关操作使用项目默认 skills：
 - `CONTRIBUTING.md`
 - `.clang-format`
 - `.pre-commit-config.yaml`
+
+### Autofuse 模板语义命名
+
+新增模板、实现策略、API 分支或回退，以及影响名称的分组、图改写和 reuse 映射变更前，必须读取并遵循：
+
+- [Codegen 语义命名规范](docs/zh/autofuse/design/features/codegen.md#template-semantic-naming)：统一词表、最终 API 采集、完整身份、不确定状态、测试及性能要求。
+- [Schedule 语义信息传递](docs/zh/autofuse/design/features/schedule.md#template-semantic-propagation)：策略、组级角色、成功转换及复制/回退规则。
+
+名称适配必须随模板交付；仅数值参数变化时说明沿用既有分类的依据。PR 中列明采集点、身份/reuse 处理及行为测试证据；不得以默认父名或 `Adaptive` 掩盖遗漏。复用公共 helper 和现有测试，不另建命名词表、模板清单或选择算法。自动接入 CI 检查仍待实施，开发者和 reviewer 必须按上述规范检查。
 
 ### 代码风格
 

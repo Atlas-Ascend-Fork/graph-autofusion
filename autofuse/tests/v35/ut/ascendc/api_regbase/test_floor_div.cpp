@@ -196,6 +196,12 @@ TEST_F(TestRegbaseApiFloorDiv, FloorDiv_Int32_Test) {
   FloorDivTest<int32_t>((MAX_REPEAT_NUM - 1) * ONE_REPEAT_BYTE_SIZE / 2 / sizeof(int32_t));
 }
 
+TEST_F(TestRegbaseApiFloorDiv, FloorDiv_Int64_Test) {
+  FloorDivTest<int64_t>(ONE_BLK_SIZE / sizeof(int64_t));
+  FloorDivTest<int64_t>(ONE_REPEAT_BYTE_SIZE / sizeof(int64_t));
+  FloorDivTest<int64_t>((ONE_REPEAT_BYTE_SIZE - ONE_BLK_SIZE) / sizeof(int64_t));
+}
+
 TEST_F(TestRegbaseApiFloorDiv, FloorDiv_UInt32_Test) {
   FloorDivTest<uint32_t>(ONE_BLK_SIZE / sizeof(uint32_t));
   FloorDivTest<uint32_t>(ONE_REPEAT_BYTE_SIZE / sizeof(uint32_t));

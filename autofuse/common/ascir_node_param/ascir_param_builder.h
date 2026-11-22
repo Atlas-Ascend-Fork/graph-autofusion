@@ -14,6 +14,25 @@
 #include "ascir_node_param/ascir_node_param.h"
 
 namespace ascir_param {
+// Codegen 提供公共轴及最终条件；公共层只组装记录，不重新判断缓存资格。
+// axes 及其指向的轴在本次生成期间保持有效，嵌套作用域共用只读轴并复制自己的 bindings。
+struct CacheExecutionContext {
+  using AxisMap = std::map<ascir::AxisId, const ascir::Axis *>;
+  const AxisMap &axes;
+  uint32_t stage;
+  std::map<ReduceCacheCondition, CacheGuardInfo> bindings;
+  std::map<CacheExecutionMode, CacheGuardInfo> broadcast_bindings;
+};
+
+void ResetCacheExecutions(const af::AscNodePtr &node, uint32_t stage);
+void BindCacheCondition(CacheExecutionContext &context, ReduceCacheCondition condition, const ascir::Axis &axis,
+                        const ascir::Axis &period, const ge::Expression &block_inner_extent);
+void BindCacheCondition(CacheExecutionContext &context, CacheExecutionMode mode, const ascir::Axis &axis,
+                        const ascir::Axis &period, const ge::Expression &block_inner_extent);
+af::Status CollectCacheExecution(const CacheExecutionContext &context, const af::AscNodePtr &node,
+                                 const std::vector<ascir::AxisId> &loop_axes, ascir::AxisId call_axis,
+                                 CacheExecutionMode mode, const std::vector<ReduceCacheCondition> &conditions);
+
 bool IsReduceParamSupported(const std::string &api_name);
 af::Status EnrichAscirGraphNodeParams(const af::AscGraph &graph);
 }  // namespace ascir_param

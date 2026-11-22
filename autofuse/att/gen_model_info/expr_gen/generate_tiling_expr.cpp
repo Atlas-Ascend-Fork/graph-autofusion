@@ -48,7 +48,7 @@ af::Status GenerateTilingExpr::GetBufConstraint(std::map<HardwareDef, Expr> &har
                     "Collect buf constraints failed.");
   for (const auto &buff : buffer_occupy) {
     hardware_cons[buff.first] = buff.second;
-    GELOGD("[DFX]Add buf constraint: %d = %s", buff.first, buff.second.Serialize().get());
+    GELOGD("[DFX]Add buf constraint: %d = %s", buff.first, buff.second.Str().get());
   }
   return af::SUCCESS;
 }
@@ -90,7 +90,7 @@ af::Status GenerateTilingExpr::GetCoreConstraint(std::map<HardwareDef, Expr> &ha
     block_dim_max_expr = af::sym::Max(block_dim_expr, block_dim_max_expr);
   }
   hardware_cons[HardwareDef::CORENUM] = block_dim_max_expr;
-  GELOGD("[DFX]Add core constraint: %d = %s", HardwareDef::CORENUM, block_dim_max_expr.Serialize().get());
+  GELOGD("[DFX]Add core constraint: %d = %s", HardwareDef::CORENUM, block_dim_max_expr.Str().get());
   return af::SUCCESS;
 }
 
@@ -535,6 +535,18 @@ Expr GenerateTilingExpr::CalcPenaltyCoreNumRatio(const AttAxis *split_axis,
   return core_num_ratio;
 }
 
+Expr GenerateTilingExpr::GetPenaltyCoreNumRatio(const ModelInfo &model_info, const AttAxis *split_axis,
+                                                const std::vector<const AttAxis *> &a_axes) const {
+  if (model_info.enable_workspace_alignment) {
+    GELOGI(
+        "[DFX][WorkspaceAlignment] Workspace is aligned, skip reduce split core number penalty, "
+        "model_name=%s, split_axis=%s",
+        model_info.graph_name.c_str(), split_axis->name.c_str());
+    return af::Symbol(1.0);
+  }
+  return CalcPenaltyCoreNumRatio(split_axis, a_axes);
+}
+
 // 应用惩罚配置到 ModelInfo
 void GenerateTilingExpr::ApplyPenaltyConfigToModelInfo(ModelInfo &model_info) {
   // 0. 首先从 TilingScheduleConfigTable 获取基础配置（无论是否有惩罚场景）
@@ -572,8 +584,7 @@ void GenerateTilingExpr::ApplyPenaltyConfigToModelInfo(ModelInfo &model_info) {
 
       GELOGI("[DFX] Found %zu A axes for penalty calculation", a_axes.size());
 
-      // 计算惩罚 ratio
-      Expr penalty_core_num_ratio = CalcPenaltyCoreNumRatio(axis.get(), a_axes);
+      Expr penalty_core_num_ratio = GetPenaltyCoreNumRatio(model_info, axis.get(), a_axes);
 
       // 3. 设置惩罚配置（覆盖基础配置）
       model_info.tiling_schedule_config.trade_off_config.ub_ratio = af::Symbol(kDefaultUbThreshold);

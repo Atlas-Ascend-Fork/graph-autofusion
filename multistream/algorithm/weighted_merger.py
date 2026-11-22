@@ -749,12 +749,23 @@ class _WeightedSolver:
         self, uid: int, candidate: int, state: _StreamingState
     ) -> bool:
         opens = candidate == state.active_stream_count
-        if candidate < 0 or candidate >= self.options.physical_stream_limit:
-            raise RuntimeError("candidate physical stream is out of range")
+        limit = self.options.physical_stream_limit
+        if candidate < 0 or candidate >= limit:
+            raise RuntimeError(
+                f"candidate physical stream {candidate} is out of range [0, {limit})"
+            )
         if opens:
             state.active_stream_count += 1
         if candidate >= state.active_stream_count:
-            raise RuntimeError("candidate physical stream is out of range")
+            if state.active_stream_count <= 0:
+                raise RuntimeError(
+                    f"candidate physical stream {candidate} is out of range "
+                    "(no active streams)"
+                )
+            raise RuntimeError(
+                f"candidate physical stream {candidate} is out of range "
+                f"[0, {state.active_stream_count})"
+            )
         state.assignment[uid] = candidate
         state.stream_total_durations[candidate] += self.unit_total_duration[uid]
         for level in self.unit_active_levels[uid]:

@@ -10,6 +10,23 @@
 #include "generator_utils/tilingdata_gen_utils.h"
 
 namespace att {
+std::string TilingDataGenUtils::GetFieldType(const std::string &var_name,
+                                             const std::set<std::string> &dynamic_size_var_names) {
+  if (var_name == "block_dim" || var_name == "tiling_key") {
+    return "uint16_t";
+  }
+  // 是否动态以前端 ABI 符号集合（GetFrontendShapeVars + !IsConstExpr）为准，不再按命名推断。
+  if (dynamic_size_var_names.count(var_name) != 0U) {
+    return "int64_t";
+  }
+  const std::string tiling_key_suffix = "_tiling_key";
+  if (var_name.size() > tiling_key_suffix.size() &&
+      var_name.compare(var_name.size() - tiling_key_suffix.size(), tiling_key_suffix.size(), tiling_key_suffix) == 0) {
+    return "uint16_t";
+  }
+  return "uint32_t";
+}
+
 void TilingDataGenUtils::AddElementDefinition(ge::CodePrinter &printer, const std::string &type_name,
                                               const std::string &var_name) {
   printer.AddLine(("    TILING_DATA_FIELD_DEF(" + type_name + ", ") + var_name + ")");

@@ -24,7 +24,12 @@ struct ExpressionStaticCheckEq {
     return af::SymbolicUtils::StaticCheckEq(lhs, rhs) == af::TriBool::kTrue;
   }
 };
-using ConcatDimAxisMap = std::unordered_map<af::Expression, af::AxisId, af::ExpressionHash, ExpressionStaticCheckEq>;
+struct ConcatExpressionHash {
+  uint64_t operator()(const af::Expression &expression) const {
+    return expression.Hash();
+  }
+};
+using ConcatDimAxisMap = std::unordered_map<af::Expression, af::AxisId, ConcatExpressionHash, ExpressionStaticCheckEq>;
 class ConcatFusionCaseGenerator : public FusionCaseGenerator {
  public:
   Status Generate(ascir::HintGraph &graph, std::vector<ascir::ImplGraph> &graphs,

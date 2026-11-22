@@ -40,6 +40,8 @@ enum class IndirectLoadOutputPostType : uint32_t {
   kModifiedBesselK0Sum,
 };
 
+enum class CvBroadcastShapeMode { kStatic, kDynamicN, kDynamic };
+
 struct ShareGraph {
   static af::ComputeGraphPtr LoadLog2StoreFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr ModFusedGraph(size_t dims_size);
@@ -58,6 +60,7 @@ struct ShareGraph {
   static af::ComputeGraphPtr LoadUnalignPadFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr LoadNeedLoopModeFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr BrcInlineFusedGraph(size_t dims_size);
+  static af::ComputeGraphPtr BrcInlineLoadOrderFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr LoadWhereStoreFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr LoadWhereX2X3IsUbscalarStoreFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr LoadWhereX2IsUbscalarStoreFusedGraph(size_t dims_size);
@@ -71,6 +74,9 @@ struct ShareGraph {
   static af::ComputeGraphPtr ScalarBrcFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr LoadBrcFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr CastCastFusedGraph(size_t dims_size, af::DataType in_dtype, af::DataType out_dtype);
+  // uint8 -> int64 一维 Cast（A3/2201 需经 half -> float 两跳），用于覆盖 CastExtend 两跳分支
+  static af::ComputeGraphPtr CastUint8ToInt64FusedGraph(size_t dims_size);
+  static af::ComputeGraphPtr CastOnlyFusedGraph(size_t dims_size, af::DataType in_dtype, af::DataType out_dtype);
   static af::ComputeGraphPtr ScalarCastAddFusedGraph(size_t dims_size, af::DataType in_dtype, af::DataType out_dtype);
   static af::ComputeGraphPtr CastCastNanFusedGraph(size_t dims_size, af::DataType in_dtype, af::DataType out_dtype);
   static af::ComputeGraphPtr CastCastIsFiniteFusedGraph(size_t dims_size, af::DataType in_dtype,
@@ -107,6 +113,11 @@ struct ShareGraph {
   static af::ComputeGraphPtr ScaledModifiedBesselK1StoreFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr SphericalBesselJ0StoreFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr NdtrStoreFusedGraph(size_t dims_size);
+  static af::ComputeGraphPtr ArgmaxStoreFusedGraph(size_t dims_size);
+  static af::ComputeGraphPtr ArgminStoreFusedGraph(size_t dims_size, af::DataType dtype = af::DT_FLOAT,
+                                                   bool ra = false);
+  static af::ComputeGraphPtr ArgminWithValueStoreFusedGraph(size_t dims_size, af::DataType dtype = af::DT_FLOAT,
+                                                            bool ra = false);
   static af::ComputeGraphPtr NdtriStoreFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr LogNdtrStoreFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr NextAfterStoreFusedGraph(size_t dims_size);
@@ -126,9 +137,13 @@ struct ShareGraph {
   static af::ComputeGraphPtr HermitePolynomialHeStoreFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr RemainderInt32StoreFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr FloorDivInt32StoreFusedGraph(size_t dims_size);
+  static af::ComputeGraphPtr FloorDivInt64StoreFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr LoadTanhBf16FusedGraph(size_t dims_size);
   static af::ComputeGraphPtr RandStoreFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr RandnStoreFusedGraph(size_t dims_size);
+  static af::ComputeGraphPtr RandIntStoreFusedGraph(size_t dims_size);
+  static af::ComputeGraphPtr RandSeedStoreFusedGraph(size_t dims_size, af::DataType dtype);
+  static af::ComputeGraphPtr RandnSeedStoreFusedGraph(size_t dims_size, af::DataType dtype);
   static af::ComputeGraphPtr AddAbsScalarFusedGraph(size_t dims_size, af::DataType dtype);
   static af::ComputeGraphPtr AbsBrcAddFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr UbScalarBrcAbsAddFusedGraph(size_t dims_size);
@@ -167,11 +182,17 @@ struct ShareGraph {
                                                          bool mixed_index_pre = false, bool direct_index = false);
   static af::ComputeGraphPtr MatMulFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr GatherReduceStore(int64_t gather_axis, af::DataType data_type);
+  static af::ComputeGraphPtr LoadAnyReduceStoreFusedGraph(af::DataType dtype);
+  static af::ComputeGraphPtr LoadAllReduceStoreFusedGraph(af::DataType dtype);
+  static af::ComputeGraphPtr LoadProdReduceStoreFusedGraph(af::DataType dtype);
+  static af::ComputeGraphPtr LoadProdReduceStoreRaFusedGraph(af::DataType dtype);
   static af::ComputeGraphPtr LoadWhereReduceStoreFusedGraph(size_t dims_size, bool x2_scalar, bool x3_scalar);
   static af::ComputeGraphPtr LoadCompareStoreFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr LoadLeBoolStoreFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr LoadBitwiseBoolStoreFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr LoadCompareCastSumStoreFusedGraph(size_t dims_size);
+  static void CreateMatmulOutputBroadcastGraph(af::AscGraph &graph, CvBroadcastShapeMode mode, bool broadcast_m = false,
+                                               bool broadcast_n = true, bool broadcast_chain = false);
   static af::ComputeGraphPtr LoadMatmulElewiseBrcFusedGraph(bool is_dynamic = false);
   static af::ComputeGraphPtr LoadBatchMatmulElewiseBrcFusedGraph(bool is_dynamic = false);
   static af::ComputeGraphPtr LoadMatmulCompareScalarFusedGraph();
@@ -181,6 +202,8 @@ struct ShareGraph {
   static af::ComputeGraphPtr TruedivAbsFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr BF16AddFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr BF16NddmaAddFusedGraph(size_t dims_size);
+  static af::ComputeGraphPtr LoadCastBrcRealignConstFusedGraph();
+  static af::ComputeGraphPtr LoadCastBrcRealignDynamicFusedGraph();
   static af::ComputeGraphPtr AbsBf16FusedGraph(size_t dims_size);
   static af::ComputeGraphPtr AbsUint8FusedGraph(size_t dims_size);
   static af::ComputeGraphPtr ErfBf16FusedGraph(size_t dims_size);
@@ -205,6 +228,7 @@ struct ShareGraph {
   static af::ComputeGraphPtr LoadCompareWhereFusedGraph();
   static af::ComputeGraphPtr BoolMaskFlowFusedGraph();
   static af::ComputeGraphPtr TransposeBoolFusedGraph();
+  static af::ComputeGraphPtr TransposeInt8FusedGraph();
   static af::ComputeGraphPtr SelectBoolFusedGraph();
   static af::ComputeGraphPtr BinaryApiScalarFusedGraph();
   static af::ComputeGraphPtr FloorToIntFloatFusedGraph(size_t dims_size);
@@ -224,6 +248,7 @@ struct ShareGraph {
   static af::ComputeGraphPtr PowBf16FusedGraph(size_t dims_size);
   static af::ComputeGraphPtr ReciprocalBf16FusedGraph(size_t dims_size);
   static af::ComputeGraphPtr RoundBf16FusedGraph(size_t dims_size);
+  static af::ComputeGraphPtr LoadToStoreAndRoundFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr ReluUint8FusedGraph(size_t dims_size);
   static af::ComputeGraphPtr RshiftUint8FusedGraph(size_t dims_size);
   static af::ComputeGraphPtr SignUint8FusedGraph(size_t dims_size);
@@ -249,7 +274,10 @@ struct ShareGraph {
   static af::ComputeGraphPtr TruncToIntBf16ToInt32FusedGraph(size_t dims_size);
   static af::ComputeGraphPtr VfScalarFusionComprehensiveFusedGraph();
   static af::ComputeGraphPtr RemainderBf16FusedGraph(size_t dims_size);
-  static af::ComputeGraphPtr ArgMaxFusedGraph(size_t dims_size);
+  static af::ComputeGraphPtr RemainderFp16FusedGraph(size_t dims_size);
+  static af::ComputeGraphPtr RemainderF32FusedGraph(size_t dims_size);
+  static af::ComputeGraphPtr RemainderInt32FusedGraph(size_t dims_size);
+  static af::ComputeGraphPtr ArgmaxFusedGraph(size_t dims_size);
   static af::ComputeGraphPtr FusedBackendElewiseGraph(size_t dims_size);
 };
 }  // namespace ascir

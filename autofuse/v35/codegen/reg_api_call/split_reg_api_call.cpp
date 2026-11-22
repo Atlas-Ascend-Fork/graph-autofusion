@@ -17,8 +17,16 @@
 #include "codegen/expression_convert_struct.h"
 
 namespace codegen {
+namespace semantic = ascgen_utils::template_semantic;
 using namespace ascgen_utils;
 constexpr uint32_t kDataBlockSize = 32;
+namespace {
+// tiler.Size结果用于uint32_t结构体字段初始化: 常量表达式直接输出, 动态表达式可能是int64_t, 需要显式cast
+std::string GenSizeWithUint32Cast(const Tiler &tiler, const ascir::SizeExpr &expr, bool using_int_tiling_data = false) {
+  const std::string size_str = tiler.Size(expr, using_int_tiling_data);
+  return expr.IsConstExpr() ? size_str : "static_cast<uint32_t>(" + size_str + ")";
+}
+}  // namespace
 Status SplitRegApiCall::ParseAttr(const ascir::NodeView &node) {
   node_ = node;
   return af::SUCCESS;
@@ -129,15 +137,15 @@ void SplitRegApiCall::GenSplitTilingForAllAligned(SplitRegApiCall::SplitTiling &
   const auto qualifier = tiling.all_static ? "constexpr " : "const ";
   ss << qualifier;
   ss << "SplitTilingAllAligned<" << tiling.dst_col_size_exprs.size() << "> split_tiling {" << std::endl;
-  ss << "  .src_col_size = " << tiler.Size(tiling.src_col_actual_size_expr, true) << "," << std::endl;
+  ss << "  .src_col_size = " << GenSizeWithUint32Cast(tiler, tiling.src_col_actual_size_expr, true) << "," << std::endl;
   ss << "  .dst_col_sizes = { ";
   for (const auto &dst_col_size : tiling.dst_col_actual_size_exprs) {
-    ss << tiler.Size(dst_col_size, true) << ", ";
+    ss << GenSizeWithUint32Cast(tiler, dst_col_size, true) << ", ";
   }
   ss << "}," << std::endl;
   ss << "  .src_offsets = { ";
   for (const auto &src_col_size : tiling.src_offsets) {
-    ss << tiler.Size(src_col_size, true) << ", ";
+    ss << GenSizeWithUint32Cast(tiler, src_col_size, true) << ", ";
   }
   ss << "}," << std::endl;
   ss << "};" << std::endl;
@@ -186,6 +194,7 @@ Status SplitRegApiCall::Generate(const TPipe &tpipe, const std::vector<ascir::Ax
   std::stringstream ss;
   if (IsAllAligned(split_tiling)) {
     // by copy
+    GE_ASSERT_SUCCESS(SetSemanticFeature(semantic::kUbAllAligned));
     GE_ASSERT_SUCCESS(GenerateForAllAligned(outputs, x, split_tiling, tpipe.tiler, ss));
   } else {
     // 获取tmp_buf复用TBuf的id
@@ -195,10 +204,34 @@ Status SplitRegApiCall::Generate(const TPipe &tpipe, const std::vector<ascir::Ax
     GE_ASSERT_TRUE(it != this->tmp_buf_id.end(), "SplitRegApiCall cannot find tmp buffer id to use.");
     id = it->second;
     // by scatter
+    GE_ASSERT_SUCCESS(SetSemanticFeature(GetSemanticFeature(split_tiling)));
     GE_ASSERT_SUCCESS(GenerateDefault(outputs, x, split_tiling, tpipe, ss, id));
   }
   result = ss.str();
   return af::SUCCESS;
+}
+
+std::string SplitRegApiCall::GetSemanticFeature(const SplitTiling &tiling) {
+  constexpr int64_t kVectorRegWidth = 256;
+  const int64_t gather_max_len = kVectorRegWidth / static_cast<int64_t>(tiling.data_type_size);
+  bool has_copy = false;
+  bool has_gather = false;
+  for (const auto &dst_col_size : tiling.dst_col_size_exprs) {
+    if (!dst_col_size.IsConstExpr()) {
+      return semantic::kUbExtendAdaptive;
+    }
+    int64_t col_size = 0;
+    GE_WARN_ASSERT(dst_col_size.GetConstValue(col_size));
+    if (col_size > gather_max_len) {
+      has_copy = true;
+    } else {
+      has_gather = true;
+    }
+  }
+  if (has_copy && has_gather) {
+    return semantic::kUbExtendMixed;
+  }
+  return has_copy ? semantic::kUbExtendCopy : semantic::kUbExtendGather;
 }
 
 af::Status SplitRegApiCall::GenerateDefault(const vector<std::reference_wrapper<const Tensor>> &outputs,
@@ -254,10 +287,10 @@ void SplitRegApiCall::DefineSplitTiling(SplitRegApiCall::SplitTiling &tiling, co
                                         std::stringstream &ss) {
   ss << "const split::SplitTiling<" << tiling.dst_col_size_exprs.size() << "> split_tiling {" << std::endl;
   ss << "  .num_rows = static_cast<uint32_t>(" << tiler.ActualSize(tiling.total_rows_expr) << "), " << std::endl;
-  ss << "  .num_src_cols = " << tiler.Size(tiling.src_col_size_expr, true) << ", " << std::endl;
+  ss << "  .num_src_cols = " << GenSizeWithUint32Cast(tiler, tiling.src_col_size_expr, true) << ", " << std::endl;
   ss << "  .num_dsts_cols = {";
   for (const auto &dst_col_size : tiling.dst_col_size_exprs) {
-    ss << tiler.Size(dst_col_size, true) << ", ";
+    ss << GenSizeWithUint32Cast(tiler, dst_col_size, true) << ", ";
   }
   ss << "}" << std::endl;
   ss << "};" << std::endl;

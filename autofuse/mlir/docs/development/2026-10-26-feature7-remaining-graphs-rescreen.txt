@@ -1,0 +1,234 @@
+# 功能 7 的「还剩多少个图」重筛：剩余 79，其中在范围内 60（2026-10-26 / 10-27 定界）
+#
+# 2026-10-16 闭环文档功能需求 7 记的「其余 109 个图」是接管表 reg 63 格那一版的数。接管表
+# 已经走到 reg 67（VF 那 8 格里的 4 格），所以这个数要重筛。顺带把那一节自己说「尚未做」的
+# 「按节点类型逐个归类」做了——**105 不等于「elementwise/broadcast 还差 105」**，这是原文
+# 自己提醒过的坑。
+#
+#===----------------------------------------------------------------------===#
+# 筛法（先把它写死，否则下次又对不上）
+#
+# 分母不是用例目录数，是**输入图**：每个 legacy e2e 用例目录引用的 `ShareGraph::Xxx` 工厂。
+#
+#   mem `tests/st/backend_e2e`        44 个目录 -> 31 个工厂
+#   reg `tests/v35/st/backend_e2e_v2` 169 个目录 -> 159 个工厂
+#   并集去重                          **183**（两侧共用 7 个）
+#
+# 按目录名去重得到的是 204，不是 183；两个数都对，只是口径不同，分母取工厂。9 个 mem 目录
+# （`common` / `pgo_common` / `conv2d_elemwise_test` / `matmul_elemwise_test` /
+# `load_unalign_pad_test` / `workspace_uint64_multi_reduce_test` 等）不走 `ShareGraph`，
+# 因此不在分母里。
+#
+# 一个工厂算「MLIR 能接管」的条件是：**用到它的用例里至少有一格是 `takeover`**。接管表的行名
+# 去掉 `_codegen` / `_codegen_v2` 后缀就是用例目录名，由此对到工厂。
+#
+# 用旧表（reg full200 的 63 格 + mem f4 的 13 格）跑这套筛法得到 takeover 74 / 剩余 109，
+# **与闭环文档逐字一致**——这是「筛法复原对了」的判据，不是巧合。
+#
+#===----------------------------------------------------------------------===#
+# 重筛结果
+#
+#              takeover    剩余
+#   旧表          74        109
+#   新表          78        105      （+4 / -4）
+#
+# 那 4 个是 VF 那一笔打掉的四格，逐个都是新工厂、不与 mem 侧任何已计入的图重名：
+#   abs_bf16_test  abs_uint8_test  relu_uint8_test  truediv_bf16_test
+#
+# **takeover 只会由「MLIR 真的生成出 kernel」变多。** F-4（39 格 hard-failure -> fallback）
+# 与今天那笔（ATT 拒收归为能力不足）都只动失败分类、不动 takeover，F-4 那份自己也写了
+# 「takeover 那 63 格逐格未变」。所以 105 这个数不需要重量接管表就成立；需要重量的是下面
+# 那张分桶表里 hard-failure / fallback 的划分（reg 那一列是 F-4 之前的）。
+#
+#===----------------------------------------------------------------------===#
+# 定界（2026-10-27）：**legacy 自己不跑的用例不算缺口**
+#
+# 183 这个分母里有 26 个工厂，**只被 legacy 已禁用的用例引用**：`backend_e2e_v2/CMakeLists.txt`
+# 第 4 行「要修复的目标列表」底下那批注释掉的 `add_subdirectory`（reg 18 + mem 3），外加 5 个
+# 连注册行都没有的（`fma_int8_test` / `frexp_float_test` / `isfinite_bf16_test` /
+# `isnan_bf16_test` / `tanh_bf16_test`）。
+#
+# 它们不该算在缺口清单里：缺口清单的用途是「补上一个就能把对应的图以约 10 行搬进来」，而这些
+# 图没有可运行的 legacy 用例可以对照，补完也验不了。于是分母去掉这 26 个：
+#
+#                    分母    takeover    剩余    在范围内   范围外   归不出类
+#   ---------------------------------------------------------------------------
+#   含禁用用例        183       78       105       82        22        1
+#   **只算在跑的**    157       78      **79**   **60**      19        0
+#   ---------------------------------------------------------------------------
+#
+# 被排除的 26 个里 22 个本来算「在范围内」，所以这一条定界把在范围内的缺口从 82 砍到 60——
+# 比接管表那 4 格带来的变化大得多。
+#
+# **补量过一遍才定界的，不是直接划掉。** 把这 26 个在两份 CMakeLists 里临时放开（cmake 配置
+# 过得去），用 `legacy_takeover_table.sh -R <这 26 个>` 量，结果：
+#
+#   takeover        1   cast_isfinite_test
+#   fallback        3   cast_reciprocal（`afir.reciprocal` 无实现）、fma_int8（int8 不在 AFIR
+#                       供给表）、argmax（ArgMax 桥不支持，本就范围外）
+#   hard-failure    4   bf16 的 sqrt / sin / sigmoid / rsqrt，**同一条诊断**：
+#                       `'afir.store' op transfer source and destination must have the same
+#                       element type`
+#   no-hook-call   18   generator 二进制不存在（ctest 0.00 秒失败），即 legacy 禁用它们的原因
+#                       ——那批用例自己编不出来。要拿到标签得先修 legacy 的测试代码。
+#
+# 那 4 格 bf16 的 `afir.store` 诊断记在这里备查：它与
+# [[store-dtype-claim-misattributed]] 那一轮的结论不同族（那一轮带这条诊断的是逻辑/位运算
+# 族），但本轮不追——它们已经在界外。量完 CMakeLists 已还原。
+#
+#===----------------------------------------------------------------------===#
+# 剩余（旧口径 105）按节点类型归类  ——  原文「尚未做」的那一项
+#
+# 下面这一节是**含禁用用例**那一口径的归类，留着是因为定界前后两个数都要能对上；今天该用的
+# 是上面那张表的 79 / 60。
+#
+#   在范围内（只含 elementwise / broadcast 族）      82
+#   范围外                                            22
+#     reduce 4、matmul 4、gather 3、transpose 3、concat 2、indirect_load 2、rand 2、
+#     gather+reduce 1、indirect_load+reduce 1
+#   归不出类（工厂定义没解析到）                       1   FrexpFloatFusedGraph
+#
+# 旧表那 109 个同口径是 86 / 22 / 1。**所以 elementwise/broadcast 的真实缺口是 86 -> 82，
+# 不是 109 -> 105。**
+#
+# 归类是按工厂（含它调用的 `Create*AscGraph`，函数指针传参那种也跟进去）里出现的
+# `af::ascir_op::<Type>` 判的，不按名字猜。范围外的族取
+# `op-completion-scope`：reduce / concat / transpose / matmul / gather / indirect_load / rand。
+#
+#===----------------------------------------------------------------------===#
+# 剩余 105 个在新表里的用例状态分桶
+#
+#    50  fallback
+#    26  未量到（见下一节，已补量）
+#    21  hard-failure
+#     4  out-of-scope
+#     3  fallback + hard-failure
+#     1  hard-failure + no-hook-call
+#
+# **「行名去掉 `_codegen` 后缀就是目录名」这条映射有例外，第一版因此多算了 3 个未量到。**
+# `indirect_load_store_test/CMakeLists.txt` 自己注册一批 **sweep 名字**的 ctest
+# （`add_indirect_load_sweep_variant(<sweep> <variant> ...)` → `${sweep}_codegen_v2`），行名
+# 与目录名无关，于是 `IndirectLoadStoreFusedGraph` /
+# `IndirectLoadMixedElementwiseFusedGraph` / `IndirectLoadSimtElementwiseCoverageFusedGraph`
+# 三个被误判成「表里一格都没有」。实际上表里 58 行 `indirect_load_*` 全部量过
+# （fallback 14 + hard-failure 44，**没有一行 takeover**），所以 takeover 78 与剩余 105
+# 两个数不受影响，只是分桶要改。
+#
+# 修法：行名先按「去后缀 = 目录名」试，对不上就找哪个目录的 `CMakeLists.txt` 字面提到这个
+# 名字。改完表里对不上任何目录的行从 63 降到 5（mem 4 + reg 1）。
+#
+# 闭环文档原文那句「对应 fallback 132 格 + 硬失败 17 格」数的是**格**不是图，与本表不是一个
+# 单位。
+#
+#===----------------------------------------------------------------------===#
+# 在范围内的 82 个（elementwise/broadcast 的缺口清单，按工厂名排序）
+#
+#   AbsBrcAddFusedGraph                                  Abs,Add,Broadcast
+#   AbsFmaBf16FusedGraph                                 Abs,Fma
+#   AbsFmaFusedGraph                                     Abs,Fma
+#   AddAbsFusedConstGraph                                Abs,Add
+#   AddAbsScalarFusedGraph                               Abs,Add
+#   AddExpBf16FusedGraph                                 Add,Exp
+#   AddFloorBf16FusedGraph                               Add,Floor
+#   AxpyAbsHalfFusedGraph                                Abs,Axpy
+#   BF16AddFusedGraph                                    Add
+#   BF16NddmaAddFusedGraph                               Add,Nddma
+#   BF16RsqrtFusedGraph                                  Rsqrt
+#   BF16SigmoidFusedGraph                                Sigmoid
+#   BF16SinFusedGraph                                    Sin
+#   BF16SqrtFusedGraph                                   Sqrt
+#   BinaryApiScalarFusedGraph                            Add,Cast,LogicalAnd,LogicalOr,Maximum,Minimum,Mul
+#   BoolMaskFlowFusedGraph                               Broadcast,Cast,Gt,IsFinite,Isnan,Where
+#   BrcInlineFusedGraph                                  Add,Broadcast,Mul
+#   CastCastIsFiniteFusedGraph                           IsFinite
+#   CastCastReciprocalFusedGraph                         Reciprocal
+#   Ceil2intBf16FusedGraph                               Ceil2Int
+#   ChebyshevPolynomialTStoreFusedGraph                  ChebyshevPolynomialT
+#   ChebyshevPolynomialUStoreFusedGraph                  ChebyshevPolynomialU
+#   ChebyshevPolynomialVStoreFusedGraph                  ChebyshevPolynomialV
+#   ChebyshevPolynomialWStoreFusedGraph                  ChebyshevPolynomialW
+#   FloorDivMulLessEqualSelectFusedGraph                 Broadcast,Exp,FloorDiv,Le,Mul,Where
+#   FloorToIntFloatFusedGraph                            FloorToInt
+#   FloordivAbsFusedGraph                                Abs,FloorDiv
+#   FmaInt8FusedGraph                                    Fma
+#   FrexpStoreFusedGraph                                 Frexp
+#   FusedBackendElewiseGraph                             Add
+#   HermitePolynomialHStoreFusedGraph                    HermitePolynomialH
+#   HermitePolynomialHeStoreFusedGraph                   HermitePolynomialHe
+#   HypotFloatFusedGraph                                 Hypot
+#   IsfiniteBf16FusedGraph                               IsFinite
+#   IsnanBf16FusedGraph                                  Isnan
+#   LaguerrePolynomialLStoreFusedGraph                   LaguerrePolynomialL
+#   LegendrePolynomialPStoreFusedGraph                   LegendrePolynomialP
+#   LoadBitwiseAndStoreFusedGraph                        BitwiseAnd
+#   LoadBitwiseBoolStoreFusedGraph                       BitwiseAnd,BitwiseNot,BitwiseOr,BitwiseXor
+#   LoadBitwiseNotStoreFusedGraph                        BitwiseNot
+#   LoadBitwiseOrStoreFusedGraph                         BitwiseOr
+#   LoadBitwiseXorStoreFusedGraph                        BitwiseXor
+#   LoadBrcFusedGraph                                    Add,Broadcast,Mul
+#   LoadCompareScalarWhereFusedGraph                     Add,Ge,Where
+#   LoadCompareWhereFusedGraph                           Eq,Where
+#   LoadErfStoreFusedGraph                               Erf
+#   LoadLShiftStoreFusedGraph                            LShift
+#   LoadLeBoolStoreFusedGraph                            Le
+#   LoadLog10StoreFusedGraph                             Log10
+#   LoadLogicalAndStoreFusedGraph                        LogicalAnd
+#   LoadLogicalOrStoreFusedGraph                         LogicalOr
+#   LoadNeedLoopModeFusedGraph                           Add
+#   LoadSigmoidStoreFusedGraph                           Sigmoid
+#   LoadTanhBf16FusedGraph                               Tanh
+#   MaskRegChainFusedGraph                               Ge,Where
+#   PolyGammaStoreFusedGraph                             PolyGamma
+#   ReciprocalBf16FusedGraph                             Reciprocal
+#   RemainderBf16FusedGraph                              Remainder
+#   RoundToIntFloatToInt32FusedGraph                     RoundToInt
+#   RshiftUint8FusedGraph                                RShift
+#   ScalarBrcFusedGraph                                  Broadcast
+#   ScalarCastAddFusedGraph                              Add,Cast
+#   ScalarDivInfFusedGraph                               Div
+#   ScalarInfAddFusedGraph                               Add
+#   SelectBoolFusedGraph                                 Gt,Select
+#   ShiftedChebyshevPolynomialTStoreFusedGraph           ShiftedChebyshevPolynomialT
+#   ShiftedChebyshevPolynomialUStoreFusedGraph           ShiftedChebyshevPolynomialU
+#   ShiftedChebyshevPolynomialVStoreFusedGraph           ShiftedChebyshevPolynomialV
+#   ShiftedChebyshevPolynomialWStoreFusedGraph           ShiftedChebyshevPolynomialW
+#   SignBitStoreFusedGraph                               SignBit
+#   SignUint8FusedGraph                                  Sign
+#   SinhBf16FusedGraph                                   Sinh
+#   SquareUint8FusedGraph                                Square
+#   SubAbsFusedGraph                                     Add,Sub
+#   TanBf16FusedGraph                                    Tan
+#   TruedivAbsFusedGraph                                 TrueDiv
+#   TruncBf16FusedGraph                                  Trunc
+#   TruncDivBf16FusedGraph                               TruncDiv
+#   TruncToIntBf16ToInt32FusedGraph                      TruncToInt
+#   UbScalarBrcAbsAddFusedGraph                          Abs,Add,Broadcast
+#   VfScalarFusionComprehensiveFusedGraph                Add,Maximum,Minimum
+#   XorUint8FusedGraph                                   Xor
+#
+#
+#===----------------------------------------------------------------------===#
+# 范围外的 22 个
+#
+#   concat                 CompareFusedGraph
+#   concat                 ConcatAscGraph
+#   gather                 LoadGatherAbsStore
+#   gather                 LoadGatherOneAxisAbsStore
+#   gather                 LoadGatherTailAbsStore
+#   gather+reduce          GatherReduceStore
+#   indirect_load          IndirectLoadMixedElementwiseFusedGraph
+#   indirect_load          IndirectLoadSimtElementwiseCoverageFusedGraph
+#   indirect_load+reduce   IndirectLoadStoreFusedGraph
+#   matmul                 LoadBatchMatmulElewiseBrcFusedGraph
+#   matmul                 LoadMatmulCompareScalarFusedGraph
+#   matmul                 LoadMatmulElewiseBrcFusedGraph
+#   matmul                 LoadMatmulToIntCastFusedGraph
+#   rand                   RandStoreFusedGraph
+#   rand                   RandnStoreFusedGraph
+#   reduce                 ArgMaxFusedGraph
+#   reduce                 BrcReduceFusedGraph
+#   reduce                 LoadCompareCastSumStoreFusedGraph
+#   reduce                 TailBrcTailReduceFusedGraph
+#   transpose              SubTransposeAbsFusedConstGraph
+#   transpose              SubTransposeAbsFusedGraph
+#   transpose              TransposeBoolFusedGraph

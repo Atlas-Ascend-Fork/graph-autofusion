@@ -1,3 +1,7 @@
+# 历史日志适配参考
+
+本文描述旧信息库，用于维护 Log Parser 的输入适配；新 Graph View 使用 `graph_report` 标准模型。旧 scope/task 页面及“log 主、JSON shadow”描述不再是公共运行合同。当前合同见 [artifact-contract.md](artifact-contract.md)。
+
 # Update View 信息库构建指导
 
 ## 当前结论
@@ -17,7 +21,7 @@
 另外要注意两点：
 
 - 上述对象都是**按单个 model 或 model-instance**导出的；跨 model 实例联动时，不能只靠 `node_id`
-- `scope-graph.html` 是当前 update-aware 主视图，`task-queue-graph.html` 仍是下钻页，不反过来主导 update 叙事
+- 当前统一 Graph 中展示 update、scope 和 task queue
 
 ## 1. 为什么旧版理解需要更新
 旧版文档把目标信息库抽象成：
@@ -184,7 +188,7 @@ graph-backed node 的首选连接键是：
 
 - 多实例分区
 - 同一 `node_id` 行需要更强上下文时
-- task identity / tracing / graph membership 联动
+- task identity / graph membership 联动
 
 ### 3.3 device section -> scope
 当前绑定顺序是：
@@ -265,7 +269,7 @@ graph-backed node 的首选连接键是：
 再进入：
 
 - `scope_library.device_task_library.sections`
-- `task-queue-graph.html`
+- Graph 内的 SK 内部任务流
 
 不要反过来从 task queue 推导整张 update 主图。
 
