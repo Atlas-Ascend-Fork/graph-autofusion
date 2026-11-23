@@ -1098,36 +1098,51 @@ bool ReducePartitionCaseGenerator::FindOutputReduce(const af::AscNodePtr &node, 
 Status ReducePartitionCaseGenerator::PartitionReduceNode(af::AscNodePtr &src_node, ascir::ImplGraph &impl_graph) {
   partition_ = true;
   node_order_.emplace_back(src_node);
-  af::ascir_op::Workspace workspace_pre((src_node->GetName() + "_Workspace").c_str());
-  af::ascir_op::Workspace workspace_post((src_node->GetName() + "_Workspace").c_str());
-  af::ascir_op::Load load((src_node->GetName() + "_Load").c_str());
-  af::ascir_op::Store store((src_node->GetName() + "_Store").c_str());
-  auto workspace_pre_node = impl_graph.AddNode(workspace_pre);
-  auto workspace_post_node = impl_graph.AddNode(workspace_post);
-  auto load_node = impl_graph.AddNode(load);
-  auto store_node = impl_graph.AddNode(store);
-  GE_CHK_STATUS_RET(DoCopyAscNodeTensorAttr(src_node, load_node));
-  GE_CHK_STATUS_RET(DoCopyAscNodeTensorAttr(src_node, store_node));
-  GE_CHK_STATUS_RET(DoCopyWorkspaceTensorAttr(store_node, workspace_pre_node));
-  GE_CHK_STATUS_RET(DoCopyWorkspaceTensorAttr(load_node, workspace_post_node));
-  for (const auto &out_anchor : src_node->GetAllOutDataAnchors()) {
-    GE_CHECK_NOTNULL(out_anchor, "Out data anchor is null, node:%s.", src_node->GetNamePtr());
+  const size_t output_count = src_node->outputs().size();
+  GE_ASSERT_TRUE(output_count > 0UL, "Reduce node has no output, node:%s.", src_node->GetNamePtr());
+
+  for (size_t output_idx = 0UL; output_idx < output_count; ++output_idx) {
+    const std::string output_suffix = output_count == 1UL ? "" : ("_" + std::to_string(output_idx));
+    const std::string workspace_name = src_node->GetName() + "_Workspace" + output_suffix;
+    const std::string load_name = src_node->GetName() + "_Load" + output_suffix;
+    const std::string store_name = src_node->GetName() + "_Store" + output_suffix;
+
+    af::ascir_op::Workspace workspace_pre(workspace_name.c_str());
+    af::ascir_op::Workspace workspace_post(workspace_name.c_str());
+    af::ascir_op::Load load(load_name.c_str());
+    af::ascir_op::Store store(store_name.c_str());
+    auto workspace_pre_node = impl_graph.AddNode(workspace_pre);
+    auto workspace_post_node = impl_graph.AddNode(workspace_post);
+    auto load_node = impl_graph.AddNode(load);
+    auto store_node = impl_graph.AddNode(store);
+
+    // Load and Store have one output. Copy only the corresponding Reduce output
+    // so value and index paths keep independent tensor attributes.
+    GE_CHK_STATUS_RET(DoCopyAscNodeOutputTensorAttr(src_node, load_node, output_idx));
+    GE_CHK_STATUS_RET(DoCopyAscNodeOutputTensorAttr(src_node, store_node, output_idx));
+    GE_CHK_STATUS_RET(DoCopyWorkspaceTensorAttr(store_node, workspace_pre_node));
+    GE_CHK_STATUS_RET(DoCopyWorkspaceTensorAttr(load_node, workspace_post_node));
+
+    auto out_anchor = src_node->GetOutDataAnchor(output_idx);
+    GE_CHECK_NOTNULL(out_anchor, "Out data anchor is null, node:%s, output:%zu.", src_node->GetNamePtr(), output_idx);
+    std::vector<af::InDataAnchorPtr> peer_in_anchors;
     for (const auto &peer_in_anchor : out_anchor->GetPeerInDataAnchors()) {
+      peer_in_anchors.emplace_back(peer_in_anchor);
+    }
+    for (const auto &peer_in_anchor : peer_in_anchors) {
       GE_CHECK_NOTNULL(peer_in_anchor);
       auto dst_node = peer_in_anchor->GetOwnerNode();
       GE_CHECK_NOTNULL(dst_node, "peer node is null, src node: %s", src_node->GetNamePtr());
-      // remove src->dst
-      GE_CHK_STATUS_RET(af::GraphUtils::RemoveEdge(src_node->GetOutAnchor(out_anchor->GetIdx()),
-                                                   dst_node->GetInAnchor(peer_in_anchor->GetIdx())));
-      GE_CHK_STATUS_RET(af::GraphUtils::AddEdge(load_node->GetOutAnchor(out_anchor->GetIdx()),
-                                                dst_node->GetInAnchor(peer_in_anchor->GetIdx())));
+      GE_CHK_STATUS_RET(af::GraphUtils::RemoveEdge(out_anchor, dst_node->GetInAnchor(peer_in_anchor->GetIdx())));
+      GE_CHK_STATUS_RET(
+          af::GraphUtils::AddEdge(load_node->GetOutAnchor(0UL), dst_node->GetInAnchor(peer_in_anchor->GetIdx())));
     }
+
+    // Add an independent workspace boundary for each Reduce output.
+    GE_CHK_STATUS_RET(af::GraphUtils::AddEdge(out_anchor, store_node->GetInAnchor(0UL)));
+    GE_CHK_STATUS_RET(af::GraphUtils::AddEdge(store_node->GetOutAnchor(0UL), workspace_pre_node->GetInAnchor(0UL)));
+    GE_CHK_STATUS_RET(af::GraphUtils::AddEdge(workspace_post_node->GetOutAnchor(0UL), load_node->GetInAnchor(0UL)));
   }
-  // add src->store->workspace_pre_node
-  GE_CHK_STATUS_RET(af::GraphUtils::AddEdge(src_node->GetOutAnchor(0UL), store_node->GetInAnchor(0UL)));
-  GE_CHK_STATUS_RET(af::GraphUtils::AddEdge(store_node->GetOutAnchor(0UL), workspace_pre_node->GetInAnchor(0UL)));
-  // add workspace_post_node->load->dst
-  GE_CHK_STATUS_RET(af::GraphUtils::AddEdge(workspace_post_node->GetOutAnchor(0UL), load_node->GetInAnchor(0UL)));
   return ge::GRAPH_SUCCESS;
 }
 
