@@ -125,10 +125,11 @@ class ShapeEnvAttr : public AttrGroupsBase {
     auto hint_int64 = static_cast<int64_t>(hint);
     GE_ASSERT_TRUE((shape_env_setting_.dynamic_mode >= DynamicMode::kDynamic) &&
                        (shape_env_setting_.dynamic_mode < DynamicMode::kEnd),
-                   "Invalid dynamic mode: %d, create symbol failed", shape_env_setting_.dynamic_mode);
+                   "Invalid dynamic mode: %d, should be in [%d, %d), create symbol failed",
+                   static_cast<int32_t>(shape_env_setting_.dynamic_mode), static_cast<int32_t>(DynamicMode::kDynamic),
+                   static_cast<int32_t>(DynamicMode::kEnd));
     if (shape_env_setting_.specialize_zero_one && ((hint_int64 == 0) || (hint_int64 == 1))) {
-      GELOGI("Create symbol %d for in specialize_zero_one mode, source: %s", hint_int64,
-             source->GetSourceStr().c_str());
+      GELOGI("Create symbol %d in specialize_zero_one mode, source: %s", hint_int64, source->GetSourceStr().c_str());
       return Symbol(hint_int64);
     }
     if (shape_env_setting_.dynamic_mode != DynamicMode::kDynamic) {

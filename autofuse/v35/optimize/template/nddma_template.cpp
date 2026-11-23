@@ -157,10 +157,10 @@ af::Status JudgeByTailBlockSize(const af::AscNodePtr &node_load, const std::vect
         int64_t value;
         GE_ASSERT_TRUE(axis_size.GetConstValue(value));
         original_axis_numel *= value;
-        GELOGD("original axis size = %ld", i, value);
+        GELOGD("original axis size = %ld", value);
       } else {
         has_non_const = true;
-        GELOGD("original axis is dynamic", i);
+        GELOGD("original axis is dynamic");
       }
     } else {
       if (repeat.IsConstExpr()) {

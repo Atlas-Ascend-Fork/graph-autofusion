@@ -166,9 +166,8 @@ Status TransposeApiCall::ParseAttr(const ascir::NodeView &node) {
 
   /* 只有非Transpose节点才异常，当前处理位于Tranpose节点下，无需判断异常 */
   GE_ASSERT_SUCCESS(GetApiTilingFieldName(node, this->api_tiling_data_field));
-  GELOGD("TilingData parse success, device_type:%s, host_type:%s,  name:%s\n",
-         this->device_api_tiling_data_type.c_str(), this->host_api_tiling_data_type.c_str(),
-         this->api_tiling_data_field.c_str());
+  GELOGD("TilingData parse success, device_type:%s, host_type:%s, name:%s", this->device_api_tiling_data_type.c_str(),
+         this->host_api_tiling_data_type.c_str(), this->api_tiling_data_field.c_str());
   return af::SUCCESS;
 }
 

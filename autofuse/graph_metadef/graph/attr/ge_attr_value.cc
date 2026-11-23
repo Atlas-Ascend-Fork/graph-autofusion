@@ -805,8 +805,10 @@ GE_FUNC_DEV_VISIBILITY GE_FUNC_HOST_VISIBILITY bool AttrUtils::GetListGraph(Attr
       ModelSerializeImp imp;
       imp.SetProtobufOwner(static_cast<const ProtoMsgOwner &>(graph_def));
       if (!imp.UnserializeGraph(graph, *graph_def)) {
-        REPORT_INNER_ERR_MSG("E18888", "UnserializeGraph failed.");
-        GELOGE(ge::GRAPH_FAILED, "[Unserialize][Graph] Failed");
+        REPORT_INNER_ERR_MSG("E18888", "UnserializeGraph failed, index[%zu], graph name[%s]", i,
+                             graph_defs->at(i).name().c_str());
+        GELOGE(ge::GRAPH_FAILED, "[Unserialize][Graph] Failed, index[%zu], graph name[%s]", i,
+               graph_defs->at(i).name().c_str());
         return false;
       }
       value[i] = graph;

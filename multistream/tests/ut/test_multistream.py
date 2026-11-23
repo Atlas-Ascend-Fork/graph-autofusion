@@ -129,7 +129,7 @@ def test_real_profiling_changes_stream_grouping_and_logs(tmp_path, caplog):
     nodes = [graph.add_node(name, "AI_CORE") for name in ("a", "b", "c", "d")]
     graph.add_edge(nodes[0], 0, nodes[1], 0)
 
-    caplog.set_level(logging.INFO, logger="multistream")
+    caplog.set_level(logging.DEBUG, logger="multistream")
     plain = multistream.plan(
         graph,
         max_stream_num=2,

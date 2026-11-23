@@ -47,7 +47,7 @@ TopoSortingMode GetTopoSortingStrategy() {
       GELOGD("topo_sorting_mode: %s", GetTopoSortingModeStr(topo_sorting_mode));
       return topo_sorting_mode;
     } else {
-      GELOGW("OPTION_TOPOSORTING_MODE = %s is invalid", topo_sorting_mode_str.c_str());
+      GELOGW("OPTION_TOPOSORTING_MODE = %s is invalid, valid values are [BFS, DFS]", topo_sorting_mode_str.c_str());
     }
   }
 
@@ -713,11 +713,11 @@ bool ComputeGraphImpl::VectorInputNodePtrIsEqual(const std::vector<NodePtr> &lef
   if (left_nodes_size != right_nodes_size) {
     REPORT_INNER_ERR_MSG("E18888",
                          "Check failed with graph input_nodes_: "
-                         "left inputNodes size %zu is different with right inputNodes size %zu .",
+                         "left inputNodes size %zu is different from right inputNodes size %zu.",
                          left_nodes_size, right_nodes_size);
     GELOGE(GRAPH_FAILED,
            "[Check][Param] failed with graph input_nodes_: "
-           "left inputNodes size %zu is different with right inputNodes size %zu .",
+           "left inputNodes size %zu is different from right inputNodes size %zu.",
            left_nodes_size, right_nodes_size);
     return false;
   }
@@ -732,11 +732,11 @@ bool ComputeGraphImpl::VectorInputNodePtrIsEqual(const std::vector<NodePtr> &lef
     if (left_input_name != right_input_name) {
       REPORT_INNER_ERR_MSG("E18888",
                            "Check failed with graph input_nodes_: "
-                           "left inputNode name %s is different with right inputNode name %s at inputNodes index %zu.",
+                           "left inputNode name %s is different from right inputNode name %s at inputNodes index %zu.",
                            left_input_name.c_str(), right_input_name.c_str(), j);
       GELOGE(GRAPH_FAILED,
              "[Check][Param] failed with graph input_nodes_: "
-             "left inputNode name %s is different with right inputNode name %s at inputNodes index %zu.",
+             "left inputNode name %s is different from right inputNode name %s at inputNodes index %zu.",
              left_input_name.c_str(), right_input_name.c_str(), j);
       return false;
     }
@@ -822,7 +822,7 @@ NodePtr ComputeGraphImpl::AddNodeFront(const OpDescPtr &op, const ComputeGraphPt
   GE_IF_BOOL_EXEC(node_ptr == nullptr, GELOGE(GRAPH_FAILED, "[Create][Node] node_ptr is NULL!!!"); return nullptr);
   GE_IF_BOOL_EXEC(node_ptr->Init() != GRAPH_SUCCESS,
                   REPORT_INNER_ERR_MSG("E18888", "node %s init failed.", op->GetName().c_str());
-                  GELOGE(GRAPH_FAILED, "node init fail."); return nullptr);
+                  GELOGE(GRAPH_FAILED, "node %s init failed.", op->GetName().c_str()); return nullptr);
   return AddNodeFront(node_ptr);
 }
 
@@ -960,7 +960,7 @@ NodePtr ComputeGraphImpl::AddNode(const OpDescPtr op, const ComputeGraphPtr &com
                   GELOGE(GRAPH_FAILED, "[Create][Node] node_ptr is NULL!!!"); return nullptr);
   GE_IF_BOOL_EXEC(node_ptr->Init() != GRAPH_SUCCESS,
                   REPORT_INNER_ERR_MSG("E18888", "node:%s init failed.", op->GetName().c_str());
-                  GELOGE(GRAPH_FAILED, "[Init][Node] %s fail.", op->GetName().c_str()); return nullptr);
+                  GELOGE(GRAPH_FAILED, "[Init][Node] node %s init failed.", op->GetName().c_str()); return nullptr);
   return AddNode(node_ptr);
 }
 
@@ -975,7 +975,7 @@ NodePtr ComputeGraphImpl::AddNode(const OpDescPtr op, const int64_t id, const Co
   GE_IF_BOOL_EXEC(node == nullptr, REPORT_INNER_ERR_MSG("E18888", "create node failed.");
                   GELOGE(GRAPH_FAILED, "[Create][Node] node_ptr is NULL!!!"); return nullptr);
   GE_IF_BOOL_EXEC(node->Init() != GRAPH_SUCCESS, REPORT_INNER_ERR_MSG("E18888", "node init failed.");
-                  GELOGE(GRAPH_FAILED, "[Init][Node] fail."); return nullptr);
+                  GELOGE(GRAPH_FAILED, "[Init][Node] node init failed."); return nullptr);
   node->SetHostNode(is_valid_flag_);
   PushBackToNodeList(node);
   AddInputDataNode(node);
@@ -1196,7 +1196,7 @@ graphStatus ComputeGraphImpl::AddSubgraph(const std::string &name, const std::sh
     GELOGW("[Add][Subgraph] The subgraphs should only be added to the root graph");
   }
   if (name != subgraph->GetName()) {
-    GELOGW("[Add][Subgraph] The subgraph name %s is different with input %s", subgraph->GetName().c_str(),
+    GELOGW("[Add][Subgraph] The subgraph name %s is different from input %s", subgraph->GetName().c_str(),
            name.c_str());
   }
   if (names_to_subgraph_.find(name) != names_to_subgraph_.end()) {
@@ -1627,7 +1627,7 @@ void ComputeGraphImpl::SetGraphTargetNodesInfo(const std::vector<af::NodePtr> &t
   targets_.clear();
   for (auto &node : target_nodes_info_) {
     if (node == nullptr) {
-      GELOGW("User pointed targets contains null node, ignore it!");
+      GELOGW("User pointed targets contain null node, ignore it!");
       continue;
     }
     targets_.insert(node);
@@ -1709,7 +1709,7 @@ graphStatus ComputeGraphImpl::CollectOutputNode(const ComputeGraphPtr &compute_g
     GE_CHECK_NOTNULL(op_desc);
     int32_t parent_index = -1;
     auto output_desc = op_desc->MutableOutputDesc(ele.second);
-    GE_ASSERT_NOTNULL(output_desc, "[Get][OutputDesc]Can not find output tensor desc from node:%s, index %d",
+    GE_ASSERT_NOTNULL(output_desc, "[Get][OutputDesc] Can not find output tensor desc from node:%s, index %d",
                       op_desc->GetName().c_str(), ele.second);
     (void)af::AttrUtils::GetInt(output_desc, ATTR_NAME_PARENT_NODE_INDEX, parent_index);
     output_nodes_info.push_back({ele.first, ele.second, parent_index});
@@ -1863,7 +1863,7 @@ graphStatus ComputeGraphImpl::RemoveUnusedRetvalNode(const ComputeGraphPtr &comp
   for (NodePtr &node : node_to_delete) {
     const auto iter = targets_.find(node);
     if (iter != targets_.end()) {
-      GELOGI("node[%s] is in user set targets.so do not remove!", node->GetName().c_str());
+      GELOGI("node[%s] is in user set targets, so do not remove!", node->GetName().c_str());
       continue;
     }
     GE_ASSERT_SUCCESS(RemoveNode(node), "Remove node:%s(%s) from graph:%s failed", node->GetName().c_str(),
@@ -1968,7 +1968,7 @@ graphStatus ComputeGraphImpl::UpdateNetOutputParentNodeIndex(const af::NodePtr &
 
     if (item.parent_node_index >= 0) {
       auto input_desc = net_output->GetOpDesc()->MutableInputDesc(net_input_index);
-      GE_ASSERT_NOTNULL(input_desc, "Node:%s(%s) has no input desc index is %d, check invalid",
+      GE_ASSERT_NOTNULL(input_desc, "Node:%s(%s) has no input desc at index:%d, check invalid",
                         net_output->GetName().c_str(), net_output->GetType().c_str(), net_input_index);
       int32_t parent_node_index = -1;
       if (AttrUtils::GetInt(input_desc, ATTR_NAME_PARENT_NODE_INDEX, parent_node_index) && (parent_node_index >= 0)) {
@@ -1978,7 +1978,7 @@ graphStatus ComputeGraphImpl::UpdateNetOutputParentNodeIndex(const af::NodePtr &
       GE_ASSERT_TRUE(AttrUtils::SetInt(input_desc, ATTR_NAME_PARENT_NODE_INDEX, item.parent_node_index),
                      "Set Attr:%s to input:%d tensor of op:%s(%s) failed", ATTR_NAME_PARENT_NODE_INDEX.c_str(),
                      net_input_index, net_output->GetName().c_str(), net_output->GetType().c_str());
-      GELOGI("Add parent node index %d for the netoutput input %d on graph %s", item.parent_node_index, net_input_index,
+      GELOGD("Add parent node index %d for the netoutput input %d on graph %s", item.parent_node_index, net_input_index,
              GetName().c_str());
     }
     net_input_index++;
@@ -2348,7 +2348,10 @@ size_t ComputeGraphImpl::GetInEdgeSize(const NodePtr &node) const {
       const auto out_node = out_anchor->GetOwnerNodeBarePtr();
       if ((out_node->GetType() == NEXTITERATION) || (out_node->GetType() == REFNEXTITERATION)) {
         GE_IF_BOOL_EXEC(in_edge_size == 0UL,
-                        GELOGE(GRAPH_FAILED, "[Check][Param] If [in_edge_size = 0], the result will be reversed");
+                        GELOGE(GRAPH_FAILED,
+                               "[Check][Param] Node %s has in_edge_size 0 for NEXTITERATION output node %s, "
+                               "reversing result is invalid",
+                               node->GetName().c_str(), out_node->GetName().c_str());
                         return in_edge_size);
         in_edge_size -= 1UL;
       }
@@ -2402,12 +2405,12 @@ void ComputeGraphImpl::Dump(const ConstComputeGraphPtr &graph) const {
     for (const auto &anchor : node->GetAllOutDataAnchors()) {
       for (const auto &peer_in_anchor : anchor->GetPeerInDataAnchorsPtr()) {
         GE_IF_BOOL_EXEC((peer_in_anchor != nullptr) && (peer_in_anchor->GetOwnerNode() != nullptr),
-                        GELOGI("node name = %s, out data node name = %s.", node->GetName().c_str(),
+                        GELOGD("node name = %s, out data node name = %s.", node->GetName().c_str(),
                                peer_in_anchor->GetOwnerNode()->GetName().c_str()));
       }
       for (const auto &peer_in_anchor : anchor->GetPeerInControlAnchors()) {
         GE_IF_BOOL_EXEC((peer_in_anchor != nullptr) && (peer_in_anchor->GetOwnerNode() != nullptr),
-                        GELOGI("node name = %s, out control node name = %s.", node->GetName().c_str(),
+                        GELOGD("node name = %s, out control node name = %s.", node->GetName().c_str(),
                                peer_in_anchor->GetOwnerNode()->GetName().c_str()));
       }
     }
@@ -2415,12 +2418,12 @@ void ComputeGraphImpl::Dump(const ConstComputeGraphPtr &graph) const {
     if (out_control_anchor != nullptr) {
       for (const auto &peer_in_anchor : out_control_anchor->GetPeerInControlAnchors()) {
         GE_IF_BOOL_EXEC((peer_in_anchor != nullptr) && (peer_in_anchor->GetOwnerNode() != nullptr),
-                        GELOGI("node name = %s, out control node name = %s.", node->GetName().c_str(),
+                        GELOGD("node name = %s, out control node name = %s.", node->GetName().c_str(),
                                peer_in_anchor->GetOwnerNode()->GetName().c_str()));
       }
       for (const auto &peer_in_anchor : out_control_anchor->GetPeerInDataAnchors()) {
         GE_IF_BOOL_EXEC((peer_in_anchor != nullptr) && (peer_in_anchor->GetOwnerNode() != nullptr),
-                        GELOGI("node name = %s, out control node name = %s.", node->GetName().c_str(),
+                        GELOGD("node name = %s, out control node name = %s.", node->GetName().c_str(),
                                peer_in_anchor->GetOwnerNode()->GetName().c_str()));
       }
     }
@@ -2693,8 +2696,10 @@ void ComputeGraphImpl::SetUserDefOutput(const std::string &output_name) {
   for (const std::string &node : nodes) {
     std::vector<std::string> item = StringUtils::Split(node, ':');
     if (item.size() != OUTPUT_PARAM_SIZE) {
-      REPORT_INNER_ERR_MSG("W18888", "Check output param size failed, output_name:%s", output_name.c_str());
-      GELOGW("[Check][Output] Check output param size failed, output_name:%s", output_name.c_str());
+      REPORT_INNER_ERR_MSG("W18888", "Check output param size failed, output_name:%s, current size:%zu, expected:%zu",
+                           output_name.c_str(), item.size(), OUTPUT_PARAM_SIZE);
+      GELOGW("[Check][Output] Check output param size failed, output_name:%s, current size:%zu, expected:%zu",
+             output_name.c_str(), item.size(), OUTPUT_PARAM_SIZE);
       continue;
     }
 

@@ -157,7 +157,7 @@ graphStatus OptimizationOption::SetPassSwitch(const std::string &pass_switch_str
 
     // 3. 黑名单检查：不能配置ge option，记录Warning日志
     if (forbidden_option_set.find(pass_name) != forbidden_option_set.end()) {
-      GELOGW("[Oo][SetPassSwitch] [%s] is one of ge option names, can not configured here", pass_name.c_str());
+      GELOGW("[Oo][SetPassSwitch] [%s] is one of ge option names, can not be configured here", pass_name.c_str());
       continue;
     }
 

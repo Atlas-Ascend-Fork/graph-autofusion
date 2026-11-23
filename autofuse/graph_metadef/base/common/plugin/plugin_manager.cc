@@ -218,7 +218,9 @@ Status PluginManager::GetOppPluginVendors(const std::string &vendors_config, std
   GE_ASSERT_TRUE(!content.empty(), "Content of file '%s' is empty!", vendors_config.c_str());
   std::vector<std::string> v_parts;
   SplitPath(content, v_parts, '=');
-  GE_ASSERT_TRUE(v_parts.size() == kVendorConfigPartsCount, "Format of file content is invalid!");
+  GE_ASSERT_TRUE(v_parts.size() == kVendorConfigPartsCount,
+                 "Content of file '%s' has invalid format, expect 'vendor=path', actual: '%s'.", vendors_config.c_str(),
+                 content.c_str());
   SplitPath(v_parts[1], vendors, ',');
   GE_ASSERT_TRUE(!vendors.empty(), "Format of file content is invalid!");
   (void)for_each(vendors.begin(), vendors.end(), &StringUtils::Trim);
@@ -362,7 +364,7 @@ bool PluginManager::GetEffectiveVersion(const std::string &opp_version, uint32_t
     split_version[1].append(c_effective_version_max_num - c_effective_version_size, '0');
   } else {
     GELOGW(
-        "c_effective_version_size:%zu, will reach or over max num:%zu, Ensure that the range of valid version is not "
+        "c_effective_version_size:%zu, will reach or exceed max num:%zu, Ensure that the range of valid version is not "
         "empty",
         c_effective_version_size, c_effective_version_max_num);
   }
@@ -380,7 +382,7 @@ bool PluginManager::IsVendorVersionValid(const std::string &vendor_path) {
   // opp_kernel包支持独立升级，不进行版本号校验
   GELOGD("CheckVersionValid, vendor_path:%s", vendor_path.c_str());
   if (vendor_path.find(kOppLatest) != std::string::npos) {
-    GELOGW("Will not verify version for [%s] as the opp kernel is independent upgrade.", vendor_path.c_str());
+    GELOGW("Will not verify version for [%s] as the opp kernel is upgraded independently.", vendor_path.c_str());
     return true;
   }
 
@@ -753,7 +755,7 @@ Status PluginManager::LoadSoWithFlags(const std::string &path, const int32_t fla
   SplitPath(path, path_vec);
   for (const auto &single_path : path_vec) {
     GE_IF_BOOL_EXEC(single_path.length() >= static_cast<ULONG>(MMPA_MAX_PATH),
-                    GELOGE(PARAM_INVALID, "The shared library file path is too long!");
+                    GELOGE(PARAM_INVALID, "The shared library file path is too long! path:%s", single_path.c_str());
                     continue);
     // load break when number of loaded so reach maximum
     if (num_of_loaded_so >= static_cast<uint32_t>(kMaxNumOfSo)) {
@@ -825,7 +827,7 @@ Status PluginManager::LoadSoWithFlags(const std::string &path, const int32_t fla
 
   GELOGI("The total number of shared libraries loaded: %u", num_of_loaded_so);
   for (const auto &name : so_list_) {
-    GELOGI("load %s successfully", name.c_str());
+    GELOGD("load %s successfully", name.c_str());
   }
 
   if (num_of_loaded_so == 0U) {
@@ -856,8 +858,8 @@ Status PluginManager::ValidateSo(const std::string &file_path, const int64_t siz
   // load continue if the total size of so reaches maximum when it is loaded
   if ((size_of_loaded_so + file_size) > kMaxSizeOfLoadedSo) {
     GELOGW(
-        "%s is skipped because the size of loaded share library reaches maximum if it is loaded! "
-        "(size: %ldB, size of loaded share library: %ldB, maximum: %dB)",
+        "%s is skipped because the size of loaded shared library reaches maximum if it is loaded! "
+        "(size: %ldB, size of loaded shared library: %ldB, maximum: %dB)",
         file_path.c_str(), file_size, size_of_loaded_so, kMaxSizeOfLoadedSo);
     return FAILED;
   }
@@ -1193,7 +1195,7 @@ void PluginManager::GetFileListWithSuffix(const std::string &path, const std::st
     if ((static_cast<int32_t>(dir_ent->d_type) != DT_DIR) && IsEndWith(name, so_suff)) {
       const std::string full_name = path + "/" + name;
       file_list.push_back(full_name);
-      GELOGI("PluginManager Parse full name = %s.", full_name.c_str());
+      GELOGD("PluginManager Parse full name = %s.", full_name.c_str());
     }
   }
   mmScandirFree(entries, file_num);

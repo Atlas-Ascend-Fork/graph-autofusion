@@ -167,8 +167,9 @@ bool IsNotPartitionReduce(const af::AscNodePtr &reduce_node, size_t threshold) {
     node_count += 1UL;
     if (node_count > threshold) {
       GELOGW(
-          "The total count of nodes after the reduce node[%s](including the store node) is above the threshold[%zu].",
-          reduce_node->GetNamePtr(), threshold);
+          "The total count of nodes after the reduce node[%s](including the store node) is %zu, above the "
+          "threshold[%zu].",
+          reduce_node->GetNamePtr(), node_count, threshold);
       return false;
     }
     const auto &asc_current_node = std::dynamic_pointer_cast<af::AscNode>(current_node);
@@ -185,8 +186,8 @@ bool IsNotPartitionReduce(const af::AscNodePtr &reduce_node, size_t threshold) {
     }
 
     if (node_count > threshold - 1UL) {
-      GELOGW("The count of nodes after the reduce node[%s] is above the threshold[%zu].", reduce_node->GetNamePtr(),
-             threshold - 1UL);
+      GELOGW("The count of nodes after the reduce node[%s] is %zu, above the threshold[%zu].",
+             reduce_node->GetNamePtr(), node_count, threshold - 1UL);
       return false;
     }
 
@@ -1313,7 +1314,7 @@ Status ReducePartitionCaseGenerator::PartitionNorm(
         continue;
       }
       af::AscNodePtr src_node = std::dynamic_pointer_cast<af::AscNode>(in_node);
-      GELOGI("PartitionNorm: loop start=%s end=%s, partition src_node=%s -> dst(loop.end)=%s",
+      GELOGD("PartitionNorm: loop start=%s end=%s, partition src_node=%s -> dst(loop.end)=%s",
              loop.first->GetName().c_str(), loop.second->GetName().c_str(), src_node->GetName().c_str(),
              loop.second->GetName().c_str());
       GE_CHK_STATUS_RET(PartitionByNode(src_node, loop.second, impl_graph, partition_, node_order_));

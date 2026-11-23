@@ -182,7 +182,7 @@ void AscNodeInputs::Init() {
   for (const auto &in_anchor : node_->GetAllInDataAnchorsPtr()) {
     const auto &peer_out_anchor = in_anchor->GetPeerOutAnchor();
     if (peer_out_anchor == nullptr) {
-      GELOGD("node[%s, %s] link [%d] are not ready", node_->GetNamePtr(), node_->GetTypePtr(), in_anchor->GetIdx());
+      GELOGD("node[%s, %s] link [%d] is not ready", node_->GetNamePtr(), node_->GetTypePtr(), in_anchor->GetIdx());
       continue;
     }
     tmp_tensors.emplace_back(AscTensor(*peer_out_anchor));

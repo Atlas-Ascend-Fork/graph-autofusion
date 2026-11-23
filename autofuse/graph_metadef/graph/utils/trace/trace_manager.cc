@@ -39,7 +39,7 @@ class TraceFileHolder {
     if (fd_ >= 0) {
       const mmSsize_t written_count = mmWrite(fd_, const_cast<char_t *>(data), strlen(data));
       if ((written_count == EN_INVALID_PARAM) || (written_count == EN_ERROR)) {
-        GELOGE(INTERNAL_ERROR, "[trace] Failed to write trace info to file %s", data);
+        GELOGE(INTERNAL_ERROR, "[trace] Failed to write trace info to trace file, fd:%d, data:%s", fd_, data);
       }
       (void)mmWrite(fd_, const_cast<char_t *>(separator), strlen(separator));
     }
@@ -109,7 +109,7 @@ std::string TraceManager::NextFileName() {
 
 std::unique_ptr<TraceFileHolder> OpenOrCreateFile(const std::string &file_path) {
   if (strnlen(file_path.c_str(), MMPA_MAX_PATH) >= MMPA_MAX_PATH) {
-    GELOGE(PATH_INVALID, "[trace] Trace file name %s exceed max length %u", file_path.c_str(),
+    GELOGE(PATH_INVALID, "[trace] Trace file name %s exceeds max length %u", file_path.c_str(),
            static_cast<uint32_t>(MMPA_MAX_PATH));
     return nullptr;
   }

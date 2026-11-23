@@ -96,8 +96,8 @@ bool IsInputRegionBoundary(const af::AscNodePtr &node) {
 // 检查已选中的 Broadcast 路径是否可以安全折叠；不支持时只淘汰当前 candidate。
 bool IsSupportedBroadcastPath(const NodePath &path, size_t broadcast_index, ascir::TemplateId template_id) {
   if (broadcast_index >= path.size()) {
-    GELOGI("[IndirectLoad] Reject candidate[%d]: Broadcast path index is out of range.",
-           static_cast<int32_t>(template_id));
+    GELOGI("[IndirectLoad] Reject candidate[%d]: Broadcast path index %zu is out of range [0, %zu).",
+           static_cast<int32_t>(template_id), broadcast_index, path.size());
     return false;
   }
   const af::AscNodePtr &broadcast = path[broadcast_index];
@@ -214,7 +214,8 @@ af::Status ApplyPhysicalView(const NodePath &path,
     // sched rank 不匹配的防御场景（完全移除会使 layernorm 等复合场景在
     // BuildReduceContext 阶段失败）。
     if (node->attr.sched.axis.size() != layout.axis_ids.size()) {
-      GELOGD("[IndirectLoad] Preserve node[%s] view: sched rank does not match physical layout.", node->GetNamePtr());
+      GELOGD("[IndirectLoad] Preserve node[%s] view: sched rank (%zu) does not match physical layout (%zu).",
+             node->GetNamePtr(), node->attr.sched.axis.size(), layout.axis_ids.size());
       continue;
     }
     GE_ASSERT_EQ(node->attr.sched.axis.size(), layout.axis_ids.size());

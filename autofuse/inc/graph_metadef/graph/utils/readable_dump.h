@@ -82,7 +82,7 @@ class ReadableDump {
         if (op_desc->GetType() != kNetOutput) {
           std::shared_ptr<std::vector<std::string>> output_rets = ComGraphMakeShared<std::vector<std::string>>();
           if (output_rets == nullptr) {
-            REPORT_INNER_ERR_MSG("E18888", "Initial output vector failed");
+            REPORT_INNER_ERR_MSG("E18888", "Failed to initialize output vector");
             GELOGE(GRAPH_FAILED, "[OutputHandler][GenNodeToOutputsMap] failed to initialize output vector");
             return;
           }

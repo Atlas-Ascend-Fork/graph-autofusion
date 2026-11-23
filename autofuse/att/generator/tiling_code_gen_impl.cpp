@@ -337,12 +337,12 @@ void GetRelatedInfo(const ArgsManager &args_manager, const Expr &expr, ExprExprM
   }
   for (const auto &arg : args_manager.GetSearchableVars()) {
     if (expr.ContainVar(arg)) {
-      GELOGD("Expr [%s] contain arg [%s].", Str(expr).c_str(), Str(arg).c_str());
+      GELOGD("Expr [%s] contains arg [%s].", Str(expr).c_str(), Str(arg).c_str());
       related = true;
     }
     for (const auto &pair : param_map) {
       if (expr.ContainVar(pair.first) && pair.second.ContainVar(arg)) {
-        GELOGD("Expr [%s](%s) contain arg [%s].", Str(pair.first).c_str(), Str(pair.second).c_str(), Str(arg).c_str());
+        GELOGD("Expr [%s](%s) contains arg [%s].", Str(pair.first).c_str(), Str(pair.second).c_str(), Str(arg).c_str());
         related = true;
       }
     }
@@ -1360,7 +1360,7 @@ bool TilingCodeGenImpl::HitSmallShapePattern(ArgsManager &args_manager) const {
   std::set<std::string> mc_cons_related_ancestor_vars =
       GetConsRelatedAncestors(HardwareDef::CORENUM, args_manager, hardware_cons);
   if (mc_cons_related_ancestor_vars.empty() && ub_cons_related_ancestor_vars.empty()) {
-    GELOGD("HitSmallShapePattern: ub_cons_related_ancestor_vars and mc_cons_related_ancestor_vars is empty");
+    GELOGD("HitSmallShapePattern: ub_cons_related_ancestor_vars and mc_cons_related_ancestor_vars are empty");
     return false;
   }
   for (const auto &mc_var : mc_cons_related_ancestor_vars) {

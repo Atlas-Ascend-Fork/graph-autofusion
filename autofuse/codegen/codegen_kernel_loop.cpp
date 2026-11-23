@@ -206,7 +206,7 @@ Status RequireContiguousInputBufs(const af::AscNodePtr &node, ApiCall &api_call,
 
   GE_CHK_BOOL_RET_SPECIAL_STATUS((!ascir::utils::AreAllInputsFromPosition(node, af::Position::kPositionVecCalc)),
                                  af::SUCCESS,
-                                 "%s(%s) cannot require contiguous inputs, inputs come from multiple position",
+                                 "%s(%s) cannot require contiguous inputs, inputs come from multiple positions",
                                  node->GetNamePtr(), api_call.api_name_.c_str());
   std::vector<ascir::BufId> input_buf_ids;
   for (const auto &input : api_call.inputs) {
@@ -527,7 +527,7 @@ Status Loop::ConstructFromNodes(ascir::NodeViewVisitorConst nodes, const Tiler &
       continue;
     }
 
-    GELOGD("node:%s, ComputeUnit:%u\r\n", node->GetNamePtr(), static_cast<uint32_t>(node->attr.api.unit));
+    GELOGD("node:%s, ComputeUnit:%u", node->GetNamePtr(), static_cast<uint32_t>(node->attr.api.unit));
     GE_ASSERT_SUCCESS(MoveToNodeLoop(node, current_axis, current_loop));
 
     auto call = CreateApiCallObject(node);

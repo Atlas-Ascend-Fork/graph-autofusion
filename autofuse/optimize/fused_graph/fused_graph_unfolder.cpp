@@ -287,9 +287,10 @@ Status FusedGraphUnfolder::MergeInputNodes(const af::ComputeGraphPtr &graph, af:
     }
     int64_t index = -1;
     (void)ScheduleUtils::GetNodeIrAttrIndex(node, index);
-    GE_ASSERT_TRUE(index >= 0, "Ir attr index is invalid, node:[%s].", node->GetNamePtr());
+    GE_ASSERT_TRUE(index >= 0, "Ir attr index [%lld] is invalid, node:[%s], expect >= 0.",
+                   static_cast<long long>(index), node->GetNamePtr());
     const auto parent_node_in_anchor = asc_backend->GetInDataAnchor(static_cast<int32_t>(index));
-    GE_CHECK_NOTNULL(parent_node_in_anchor, "Parent output anchor is nullptr, data:[%s], index:[%d].",
+    GE_CHECK_NOTNULL(parent_node_in_anchor, " Parent output anchor is nullptr, data:[%s], index:[%d].",
                      node->GetNamePtr(), static_cast<int32_t>(index));
     const auto src_out_anchor = parent_node_in_anchor->GetPeerOutAnchor();
     if ((src_out_anchor == nullptr) || (src_out_anchor->GetOwnerNodeBarePtr() == nullptr)) {
@@ -659,11 +660,13 @@ Status FusedGraphUnfolder::CloneAscGraphs(const std::map<af::Node *, af::AscGrap
   // AxisPtr instances must not be shared with the original graphs before commit.
   for (const auto &iter : source_graphs) {
     std::string serialized_graph;
-    GE_CHK_STATUS_RET(af::AscGraphUtils::SerializeToReadable(iter.second, serialized_graph), "Serialize failed.");
+    GE_CHK_STATUS_RET(af::AscGraphUtils::SerializeToReadable(iter.second, serialized_graph),
+                      "Serialize graph [%s] failed.", iter.second.GetName().c_str());
     af::AscGraph cloned_graph(iter.second.GetName().c_str());
     GE_CHK_STATUS_RET(af::AscGraphUtils::DeserializeFromReadable(serialized_graph, cloned_graph),
-                      "Deserialize failed.");
-    GE_CHK_STATUS_RET(AscGraphInfoComplete::CompleteApiInfo(cloned_graph), "Complete api info failed.");
+                      "Deserialize graph [%s] failed.", iter.second.GetName().c_str());
+    GE_CHK_STATUS_RET(AscGraphInfoComplete::CompleteApiInfo(cloned_graph), "Complete api info for graph [%s] failed.",
+                      cloned_graph.GetName().c_str());
     cloned_graphs.emplace(iter.first, std::move(cloned_graph));
   }
   return af::SUCCESS;
@@ -683,7 +686,8 @@ Status FusedGraphUnfolder::FindConcatContext(const af::ComputeGraphPtr &fused_gr
         continue;
       }
       GE_ASSERT_TRUE(concat_ascbc_node == nullptr, "Only one concat is supported in a fused graph.");
-      GE_CHK_STATUS_RET(ScheduleUtils::GetConcatDim(node, concat_dim), "Get concat dim failed.");
+      GE_CHK_STATUS_RET(ScheduleUtils::GetConcatDim(node, concat_dim), "Get concat dim for node [%s] failed.",
+                        node->GetNamePtr());
       concat_ascbc_node = graph_node;
       new_loop_axes = graph_iter->second.GetAllAxis();
       for (const auto &axis : new_loop_axes) {
@@ -758,12 +762,13 @@ Status FusedGraphUnfolder::ApplyPreConcatMappings(
     }
     const auto mapping_iter = pre_concat_mappings.find(iter.first);
     if (mapping_iter == pre_concat_mappings.end()) {
-      GE_CHK_STATUS_RET(ApplyMergedLoopAxis(iter.second, new_loop_axes, loop_axis_ids, concat_dim), "Apply failed.");
+      GE_CHK_STATUS_RET(ApplyMergedLoopAxis(iter.second, new_loop_axes, loop_axis_ids, concat_dim),
+                        "Apply merged loop axis for graph [%s] failed.", iter.second.GetName().c_str());
       continue;
     }
     GE_ASSERT_TRUE(IsGraphAxisMappingComplete(mapping_iter->second), "Pre-concat graph has unmapped axes.");
     GE_CHK_STATUS_RET(ApplyMappedLoopAxis(iter.second, new_loop_axes, loop_axis_ids, mapping_iter->second),
-                      "Apply failed.");
+                      "Apply mapped loop axis for graph [%s] failed.", iter.second.GetName().c_str());
   }
   return af::SUCCESS;
 }
@@ -773,7 +778,8 @@ Status FusedGraphUnfolder::SelectCommonLoopAxis(const af::ComputeGraphPtr &fused
                                                 std::vector<af::AxisPtr> &new_loop_axes) {
   GE_ASSERT_TRUE(!asc_backend_to_asc_graph.empty(), "The map is empty after deserialization.");
   std::map<af::Node *, af::AscGraph> cloned_graphs;
-  GE_CHK_STATUS_RET(CloneAscGraphs(asc_backend_to_asc_graph, cloned_graphs), "Clone ascgraphs failed.");
+  GE_CHK_STATUS_RET(CloneAscGraphs(asc_backend_to_asc_graph, cloned_graphs),
+                    "Clone ascgraphs for fused graph [%s] failed.", fused_graph->GetName().c_str());
   size_t concat_dim = 0UL;
   af::Node *concat_ascbc_node = nullptr;
   std::vector<af::AxisId> loop_axis_ids;
@@ -905,8 +911,9 @@ Status FusedGraphUnfolder::ApplyMergedLoopAxis(const af::AscGraph &graph, const 
         output->attr.repeats.push_back(af::sym::kSymbolOne);
         output->attr.strides.push_back(af::sym::kSymbolZero);
       } else {
-        GE_ASSERT_TRUE(concat_dim < output->attr.repeats.size(), "concat dim:[%zu] is invalid, node name:[%s]",
-                       concat_dim, node->GetNamePtr());
+        GE_ASSERT_TRUE(concat_dim < output->attr.repeats.size(),
+                       "concat dim:[%zu] is invalid, valid range is [0, %zu), node name:[%s]", concat_dim,
+                       output->attr.repeats.size(), node->GetNamePtr());
         GE_ASSERT_TRUE(concat_dim < output->attr.strides.size());
         output->attr.repeats.insert(output->attr.repeats.begin() + static_cast<int64_t>(concat_dim),
                                     af::sym::kSymbolOne);
@@ -932,8 +939,9 @@ Status FusedGraphUnfolder::ApplyMappedLoopAxis(const af::AscGraph &graph, const 
   std::set<size_t> mapped_global_axes;
   for (size_t index = 0UL; index < old_axis.size(); ++index) {
     GE_ASSERT_NOTNULL(old_axis[index]);
-    GE_ASSERT_TRUE(old_to_global[index] < loop_axis_ids.size(), "Axis mapping index is invalid, graph:[%s].",
-                   graph.GetName().c_str());
+    GE_ASSERT_TRUE(old_to_global[index] < loop_axis_ids.size(),
+                   "Axis mapping index:[%zu] is invalid, valid range is [0, %zu), graph:[%s].", old_to_global[index],
+                   loop_axis_ids.size(), graph.GetName().c_str());
     GE_ASSERT_TRUE(mapped_global_axes.emplace(old_to_global[index]).second, "Axis mapping is not injective.");
     GE_ASSERT_TRUE(old_axis_to_global.emplace(old_axis[index]->id, old_to_global[index]).second,
                    "Graph has duplicate axis id.");
@@ -1023,10 +1031,12 @@ Status FusedGraphUnfolder::DoAxisMappingForConstPostAscGraph(const af::AscGraph 
         auto iter = new_idx_to_old_idx.find(idx);
         if (iter != new_idx_to_old_idx.end()) {
           const size_t old_index = iter->second;
-          GE_ASSERT_TRUE(old_index < output->attr.repeats.size(), "Index out of bounds, node:[%s].",
-                         node->GetNamePtr());
-          GE_ASSERT_TRUE(old_index < output->attr.strides.size(), "Index out of bounds, node:[%s].",
-                         node->GetNamePtr());
+          GE_ASSERT_TRUE(old_index < output->attr.repeats.size(),
+                         "Index out of bounds, index:[%zu], repeats size:[%zu], node:[%s].", old_index,
+                         output->attr.repeats.size(), node->GetNamePtr());
+          GE_ASSERT_TRUE(old_index < output->attr.strides.size(),
+                         "Index out of bounds, index:[%zu], strides size:[%zu], node:[%s].", old_index,
+                         output->attr.strides.size(), node->GetNamePtr());
           new_repeats.push_back(output->attr.repeats[old_index]);
           new_strides.push_back(output->attr.strides[old_index]);
         } else {

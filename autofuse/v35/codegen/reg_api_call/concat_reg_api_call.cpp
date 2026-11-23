@@ -107,7 +107,7 @@ bool ConcatRegApiCall::IsShareInputs() const {
 }
 
 bool ConcatRegApiCall::AreContiguousBufsPreferred() const {
-  GE_CHK_BOOL_RET_SPECIAL_STATUS(IsTile(), false, "%s all inputs are from single source");
+  GE_CHK_BOOL_RET_SPECIAL_STATUS(IsTile(), false, "%s all inputs are from single source", node_->GetNamePtr());
   const auto is_all_inputs_shape_equal = ascir::utils::AreConcatInputShapesEqual(node_);
   GE_CHK_BOOL_RET_SPECIAL_STATUS((is_all_inputs_shape_equal == af::TriBool::kFalse), false,
                                  "%s cannot use Gather, input shapes differ", node_->GetNamePtr());

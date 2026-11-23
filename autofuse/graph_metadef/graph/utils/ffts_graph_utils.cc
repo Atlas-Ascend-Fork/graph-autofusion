@@ -295,9 +295,9 @@ ComputeGraphPtr FftsGraphUtils::GetFftsPlusGraph(ComputeGraph &graph) {
     return nullptr;
   }
   if (subgraphs.size() != 1U) {
-    REPORT_INNER_ERR_MSG("E18888", "Number of subgraphs in parent_node:%s is %zu, graph:%s",
+    REPORT_INNER_ERR_MSG("E18888", "Number of subgraphs in parent_node:%s is %zu, expected 1, graph:%s",
                          parent_node->GetName().c_str(), subgraphs.size(), graph.GetName().c_str());
-    GELOGE(GRAPH_FAILED, "[Check][Param] Number of subgraphs in parent_node:%s is %zu, graph:%s",
+    GELOGE(GRAPH_FAILED, "[Check][Param] Number of subgraphs in parent_node:%s is %zu, expected 1, graph:%s",
            parent_node->GetName().c_str(), subgraphs.size(), graph.GetName().c_str());
     return nullptr;
   }
@@ -348,7 +348,7 @@ graphStatus FftsGraphUtils::GraphPartition(ComputeGraph &graph, const CalcFunc &
 
   // input graph not exceed the limit
   if ((graph_value.count(ffts_plus_graph) > 0U) && (graph_value[ffts_plus_graph] <= upper_limit)) {
-    GELOGI("Graph %s not exceed limit, skip graph partition", ffts_plus_graph->GetName().c_str());
+    GELOGI("Graph %s does not exceed limit, skip graph partition", ffts_plus_graph->GetName().c_str());
     return SUCCESS;
   }
   const auto &parent_node = ffts_plus_graph->GetParentNodeBarePtr();
@@ -383,7 +383,7 @@ graphStatus FftsGraphUtils::Calculate(const ComputeGraphPtr &graph, const CalcFu
                                       const uint32_t recursive_depth) {
   if (recursive_depth >= kMaxiumRecursionDepth) {
     REPORT_INNER_ERR_MSG("E18888", "param depth:%u >= %u(allow max subgraphs)", recursive_depth, kMaxiumRecursionDepth);
-    GELOGE(GRAPH_FAILED, "[Check][Param]exist too much subgraphs:%u > %u(allow max subgraphs)", recursive_depth,
+    GELOGE(GRAPH_FAILED, "[Check][Param] exist too many subgraphs:%u > %u(allow max subgraphs)", recursive_depth,
            kMaxiumRecursionDepth);
     return GRAPH_FAILED;
   }
@@ -502,18 +502,25 @@ bool FftsGraphUtils::IsValueValid(const ComputeGraphPtr &graph, const std::vecto
   const auto is_node_value_match = [upper_limit](const std::pair<NodePtr, std::vector<uint32_t>> &pair_item) {
     return pair_item.second.size() != upper_limit.size();
   };
-  if (std::find_if(node_value.begin(), node_value.end(), is_node_value_match) != node_value.end()) {
-    REPORT_INNER_ERR_MSG("E18888", "Node value size does not match");
-    GELOGE(GRAPH_FAILED, "[Check][Param] Node value size does not match");
+  const auto node_value_iter = std::find_if(node_value.begin(), node_value.end(), is_node_value_match);
+  if (node_value_iter != node_value.end()) {
+    REPORT_INNER_ERR_MSG("E18888", "Node %s value size %zu does not match upper_limit size %zu",
+                         node_value_iter->first->GetName().c_str(), node_value_iter->second.size(), upper_limit.size());
+    GELOGE(GRAPH_FAILED, "[Check][Param] Node %s value size %zu does not match upper_limit size %zu",
+           node_value_iter->first->GetName().c_str(), node_value_iter->second.size(), upper_limit.size());
     return false;
   }
 
   const auto is_graph_value_match = [upper_limit](const std::pair<ComputeGraphPtr, std::vector<uint32_t>> &pair_item) {
     return pair_item.second.size() != upper_limit.size();
   };
-  if (std::find_if(graph_value.begin(), graph_value.end(), is_graph_value_match) != graph_value.end()) {
-    REPORT_INNER_ERR_MSG("E18888", "Graph value size does not match");
-    GELOGE(GRAPH_FAILED, "[Check][Param] Graph value size does not match");
+  const auto graph_value_iter = std::find_if(graph_value.begin(), graph_value.end(), is_graph_value_match);
+  if (graph_value_iter != graph_value.end()) {
+    REPORT_INNER_ERR_MSG("E18888", "Graph %s value size %zu does not match upper_limit size %zu",
+                         graph_value_iter->first->GetName().c_str(), graph_value_iter->second.size(),
+                         upper_limit.size());
+    GELOGE(GRAPH_FAILED, "[Check][Param] Graph %s value size %zu does not match upper_limit size %zu",
+           graph_value_iter->first->GetName().c_str(), graph_value_iter->second.size(), upper_limit.size());
     return false;
   }
 
@@ -527,7 +534,7 @@ graphStatus FftsGraphUtils::PartitionGraphWithLimit(const ComputeGraphPtr &graph
                                                     const uint32_t recursive_depth) {
   if (recursive_depth >= kMaxiumRecursionDepth) {
     REPORT_INNER_ERR_MSG("E18888", "param depth:%u >= %u(allow max subgraphs)", recursive_depth, kMaxiumRecursionDepth);
-    GELOGE(GRAPH_FAILED, "[Check][Param]exist too much subgraphs:%u > %u(allow max subgraphs)", recursive_depth,
+    GELOGE(GRAPH_FAILED, "[Check][Param] exist too many subgraphs:%u > %u(allow max subgraphs)", recursive_depth,
            kMaxiumRecursionDepth);
     return GRAPH_FAILED;
   }

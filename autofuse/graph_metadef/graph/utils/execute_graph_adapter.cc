@@ -106,7 +106,7 @@ graphStatus ExecuteGraphAdapter::CopyOpAndSubgraph(ExecuteGraph *src_graph, cons
 graphStatus ExecuteGraphAdapter::RelinkGraphEdges(FastNode *old_node,
                                                   const std::unordered_map<FastNode *, Node *> &all_new_nodes) {
   const auto &iter = all_new_nodes.find(old_node);
-  GE_ASSERT_TRUE(iter != all_new_nodes.end(), "all_new_nodes not contain %s", old_node->GetNamePtr());
+  GE_ASSERT_TRUE(iter != all_new_nodes.end(), "all_new_nodes does not contain %s", old_node->GetNamePtr());
   const auto &new_node = iter->second;
   GE_ASSERT_NOTNULL(new_node);
   const auto &old_out_edges = old_node->GetAllOutDataEdgesRef();

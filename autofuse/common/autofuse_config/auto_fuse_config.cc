@@ -119,7 +119,7 @@ Status AutofuseEnvParaParse(std::unordered_map<std::string, std::string> &merged
                             std::unordered_map<std::string, std::string> &env_configs) {
   // 环境变量的配置属于进程级别，ini的配置属于全局级别，所以环境变量的配置优先级较高
   for (auto &env_config : env_configs) {
-    GELOGI("Update config of env, config name=%s, config value=%s\n", env_config.first.c_str(),
+    GELOGI("Update config of env, config name=%s, config value=%s", env_config.first.c_str(),
            env_config.second.c_str());
     merged_configs[env_config.first] = env_config.second;
   }

@@ -1392,16 +1392,20 @@ Status Optimizer::Optimize(af::AscGraph &hint_graph, FusedScheduledResult &fused
                     "Failed to optimize for graph:[%s].", hint_graph.GetName().c_str());
   // 内存分配
   BufQueAllocator allocator;
-  GE_CHK_STATUS_RET(allocator.PrepareImplGraphMemoryPlan(fused_scheduled_result));
+  GE_CHK_STATUS_RET(allocator.PrepareImplGraphMemoryPlan(fused_scheduled_result),
+                    "PrepareImplGraphMemoryPlan failed, graph:[%s].", hint_graph.GetName().c_str());
   if (options_.graph_type == GraphType::kAscGraph) {
     fused_scheduled_result.fused_graph_name = hint_graph.GetName().c_str();
     fused_scheduled_result.origin_vars.assign(original_var_set.begin(), original_var_set.end());
   }
-  GE_CHK_STATUS_RET(StaticUbTemplateFilter().Filter(fused_scheduled_result));
-  GE_CHK_STATUS_RET(allocator.CollectFusedIoNodes(fused_scheduled_result));
+  GE_CHK_STATUS_RET(StaticUbTemplateFilter().Filter(fused_scheduled_result),
+                    "StaticUbTemplateFilter filter failed, graph:[%s].", hint_graph.GetName().c_str());
+  GE_CHK_STATUS_RET(allocator.CollectFusedIoNodes(fused_scheduled_result), "CollectFusedIoNodes failed, graph:[%s].",
+                    hint_graph.GetName().c_str());
   const auto compute_graph = af::AscGraphUtils::GetComputeGraph(hint_graph);
   GE_ASSERT_NOTNULL(compute_graph);
-  GE_CHK_STATUS_RET(optimize::L2CacheHintManager::ParseGraph(*compute_graph, fused_scheduled_result));
+  GE_CHK_STATUS_RET(optimize::L2CacheHintManager::ParseGraph(*compute_graph, fused_scheduled_result),
+                    "L2CacheHintManager::ParseGraph failed, graph:[%s].", hint_graph.GetName().c_str());
   GELOGI("AllocBufQue end");
   TryEnableGroupParallel(fused_scheduled_result);
   ExecSeqAdvancedOfLoad(fused_scheduled_result);

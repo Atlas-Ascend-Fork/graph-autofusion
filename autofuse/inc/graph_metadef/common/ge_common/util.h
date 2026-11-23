@@ -25,12 +25,13 @@
 
 using AddrGetter = std::function<const void *(size_t)>;
 
-#define GE_CHECK_POSITIVE_SIZE_RANGE(size)                             \
-  do {                                                                 \
-    if ((size) <= 0) {                                                 \
-      GELOGE(af::FAILED, "param[%s] is not a positive number", #size); \
-      return PARAM_INVALID;                                            \
-    }                                                                  \
+#define GE_CHECK_POSITIVE_SIZE_RANGE(size)                                                                 \
+  do {                                                                                                     \
+    if ((size) <= 0) {                                                                                     \
+      GELOGE(af::FAILED, "param[%s][%ld] is not a positive number, which should be greater than 0", #size, \
+             static_cast<int64_t>(size));                                                                  \
+      return PARAM_INVALID;                                                                                \
+    }                                                                                                      \
   } while (false)
 
 #define CHECK_FALSE_EXEC(expr, exec_expr, ...) \
@@ -125,7 +126,7 @@ using AddrGetter = std::function<const void *(size_t)>;
   do {                                                                                        \
     if ((val) == nullptr) {                                                                   \
       REPORT_INNER_ERR_MSG("E19999", "Param:" #val " is nullptr, check invalid" __VA_ARGS__); \
-      GELOGE(af::FAILED, "[Check][Param:" #val "]null is invalid" __VA_ARGS__);               \
+      GELOGE(af::FAILED, "[Check][Param:" #val "] null is invalid" __VA_ARGS__);              \
       return af::PARAM_INVALID;                                                               \
     }                                                                                         \
   } while (false)
@@ -167,12 +168,12 @@ using AddrGetter = std::function<const void *(size_t)>;
   } while (false)
 
 // Check if the parameter is out of bounds
-#define GE_CHECK_SIZE(size)                                   \
-  do {                                                        \
-    if ((size) == 0U) {                                       \
-      GELOGE(af::FAILED, "param[%s] is out of range", #size); \
-      return af::PARAM_INVALID;                               \
-    }                                                         \
+#define GE_CHECK_SIZE(size)                                                                                          \
+  do {                                                                                                               \
+    if ((size) == 0U) {                                                                                              \
+      GELOGE(af::FAILED, "param[%s][%zu] is out of range, which should not be 0", #size, static_cast<size_t>(size)); \
+      return af::PARAM_INVALID;                                                                                      \
+    }                                                                                                                \
   } while (false)
 
 // Check if the value on the left is greater than or equal to the value on the right

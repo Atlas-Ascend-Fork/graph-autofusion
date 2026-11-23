@@ -91,7 +91,7 @@ graphStatus IRDataTypeSymbolStore::InferDtype(const OpDescPtr &op) const {
     auto *sym = output_syms_[i];
     GE_ASSERT_NOTNULL(sym);
     if (sym->IsLegacy()) {
-      GELOGW("Trying infer legacy output %s(%s) of %s(%s)", sym->Id().c_str(), sym->DebugString().c_str(),
+      GELOGW("Trying to infer legacy output %s(%s) of %s(%s)", sym->Id().c_str(), sym->DebugString().c_str(),
              op->GetName().c_str(), op->GetType().c_str());
       return GRAPH_FAILED;
     }

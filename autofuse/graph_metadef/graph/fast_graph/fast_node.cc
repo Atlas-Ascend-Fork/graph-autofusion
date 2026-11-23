@@ -248,8 +248,8 @@ graphStatus FastNode::EraseEdge(const FastEdge *const edge, DirectionType type) 
 graphStatus FastNode::CheckAllInputParamter(DirectionType type, int32_t io_idx, int32_t cur_array_index,
                                             int32_t replace_array_index) const {
   if (io_idx < -1) {
-    REPORT_INNER_ERR_MSG("E18888", "The idx[%d] exceed the max capacity of in_edges.", io_idx);
-    GELOGE(GRAPH_FAILED, "[Check][Param] The idx[%d] exceed the max capacity of in_edges.", io_idx);
+    REPORT_INNER_ERR_MSG("E18888", "The idx[%d] is out of range of in_edges, idx must be >= -1.", io_idx);
+    GELOGE(GRAPH_FAILED, "[Check][Param] The idx[%d] is out of range of in_edges, idx must be >= -1.", io_idx);
     return GRAPH_FAILED;
   }
 
@@ -264,8 +264,8 @@ graphStatus FastNode::CheckAllInputParamter(DirectionType type, int32_t io_idx, 
     }
 
     if (io_size <= static_cast<size_t>(io_idx)) {
-      REPORT_INNER_ERR_MSG("E18888", "The idx [%d] exceed the max capacity [%zu] of in_edges.", io_idx, io_size);
-      GELOGE(GRAPH_FAILED, "[Check][Param] The idx [%d] exceed the max capacity [%zu] of in_edges.", io_idx, io_size);
+      REPORT_INNER_ERR_MSG("E18888", "The idx [%d] exceeds the max capacity [%zu] of in_edges.", io_idx, io_size);
+      GELOGE(GRAPH_FAILED, "[Check][Param] The idx [%d] exceeds the max capacity [%zu] of in_edges.", io_idx, io_size);
       return GRAPH_FAILED;
     }
   }
@@ -286,10 +286,10 @@ graphStatus FastNode::CheckAllInputParamter(DirectionType type, int32_t io_idx, 
 
   if ((edge_size <= static_cast<size_t>(replace_array_index)) || (edge_size <= static_cast<size_t>(cur_array_index))) {
     REPORT_INNER_ERR_MSG("E18888",
-                         "The replace index [%d] or current index [%d] exceed the max capacity [%zu] of in_edges.",
+                         "The replace index [%d] or current index [%d] exceeds the max capacity [%zu] of in_edges.",
                          replace_array_index, cur_array_index, edge_size);
     GELOGE(GRAPH_FAILED,
-           "[Check][Param] The replace index [%d] or current index [%d] exceed the max capacity [%zu] of in_edges.",
+           "[Check][Param] The replace index [%d] or current index [%d] exceeds the max capacity [%zu] of in_edges.",
            replace_array_index, cur_array_index, edge_size);
     return GRAPH_FAILED;
   }

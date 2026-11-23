@@ -112,10 +112,13 @@ __aicore__ inline void MeanCheckParams(const LocalTensor<T> &dstTensor, const Lo
   CheckTensorPos<uint8_t>(sharedTmpBuffer, Hardware::UB, "sharedTmpBuffer", "VECIN/VECCALC/VECOUT", "Mean");
   constexpr uint32_t meanInnerAlignLen = 32;
   ASCENDC_ASSERT((1 <= meanParams.n) && (meanParams.n <= meanParams.inner), {
-    KERNEL_LOG(KERNEL_ERROR, "The value of n must be greater than or equal to 1 and less than or equal to inner.");
+    KERNEL_LOG(KERNEL_ERROR, "The value of n must be in [1, inner], got n=%u, inner=%u", meanParams.n,
+               meanParams.inner);
   });
-  ASCENDC_ASSERT((meanParams.inner * sizeof(T) % meanInnerAlignLen == 0),
-                 { KERNEL_LOG(KERNEL_ERROR, "The value of inner * sizeof(T) must be an integer multiple of 32."); });
+  ASCENDC_ASSERT((meanParams.inner * sizeof(T) % meanInnerAlignLen == 0), {
+    KERNEL_LOG(KERNEL_ERROR, "The value of inner * sizeof(T) must be an integer multiple of 32, got %u",
+               meanParams.inner * (uint32_t)sizeof(T));
+  });
 }
 
 template <typename T, typename accType = T, bool isReuseSource = false, bool isBasicBlock = false,

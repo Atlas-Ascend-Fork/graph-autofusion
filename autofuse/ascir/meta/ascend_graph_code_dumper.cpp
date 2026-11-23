@@ -177,7 +177,7 @@ std::string GetPythonNodeNameByOriginName(const std::string &origin_name,
   const auto &name_mapping_info = name_generator->GetNameMapping();
   const auto &iter = name_mapping_info.find(origin_name);
   if (iter == name_mapping_info.end()) {
-    GELOGW("%s has not been added to name map, may be topo is wrong", origin_name.c_str());
+    GELOGW("%s has not been added to name map, the topo may be wrong", origin_name.c_str());
     return "";
   }
   return iter->second;

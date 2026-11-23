@@ -699,9 +699,11 @@ af::Status BaseAlignmentStrategy::SetVectorizedStridesForTensor(const af::NodePt
   const auto &output_vec_axis = output_attr.vectorized_axis;
   GE_ASSERT_TRUE(!output_vec_axis.empty(), "Node [%s] output tensor has empty vectorized_axis.", node->GetNamePtr());
   GE_ASSERT_TRUE(output_attr.axis.size() == output_attr.repeats.size(),
-                 "Node [%s] output tensor axis and repeats size mismatch.", node->GetNamePtr());
+                 "Node [%s] output tensor axis size [%zu] and repeats size [%zu] mismatch.", node->GetNamePtr(),
+                 output_attr.axis.size(), output_attr.repeats.size());
   GE_ASSERT_TRUE(output_attr.axis.size() == output_attr.strides.size(),
-                 "Node [%s] output tensor axis and strides size mismatch.", node->GetNamePtr());
+                 "Node [%s] output tensor axis size [%zu] and strides size [%zu] mismatch.", node->GetNamePtr(),
+                 output_attr.axis.size(), output_attr.strides.size());
 
   const auto dtype_size = af::GetSizeByDataType(output_attr.dtype);
   GE_ASSERT_TRUE(dtype_size > 0, "Node [%s] output tensor dtype is invalid.", node->GetNamePtr());

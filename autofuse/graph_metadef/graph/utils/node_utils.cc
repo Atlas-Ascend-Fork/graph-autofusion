@@ -177,11 +177,11 @@ graphStatus NodeUtils::MoveOutputEdges(const NodePtr &origin_node, const NodePtr
     for (const auto &peer_anchor : origin_out_data_anchors.at(i)->GetPeerInControlAnchors()) {
       GE_CHK_BOOL_EXEC(
           origin_out_data_anchors.at(i)->Unlink(peer_anchor) == GRAPH_SUCCESS,
-          REPORT_INNER_ERR_MSG("E18888", "unlink peer_controlanchor failed, node:%s", origin_node->GetName().c_str());
+          REPORT_INNER_ERR_MSG("E18888", "unlink peer_control_anchor failed, node:%s", origin_node->GetName().c_str());
           continue, "[Unlink][PeerAnchor] failed, node:%s", origin_node->GetName().c_str());
       GE_CHK_BOOL_EXEC(
           new_out_data_anchors.at(i)->LinkTo(peer_anchor) == GRAPH_SUCCESS,
-          REPORT_INNER_ERR_MSG("E18888", "LinkTo peer_controlanchor failed, node:%s", new_node->GetName().c_str());
+          REPORT_INNER_ERR_MSG("E18888", "LinkTo peer_control_anchor failed, node:%s", new_node->GetName().c_str());
           continue, "[LinkTo][PeerAnchor] failed, node:%s", new_node->GetName().c_str());
     }
   }
@@ -961,7 +961,7 @@ graphStatus NodeUtils::RemoveSubgraphsOnNode(const NodePtr &node) {
     }
     // Remove subgraph from root_graph
     for (const auto &name : subgraph_to_remove) {
-      GELOGI("Remove subgraph:%s.", name.c_str());
+      GELOGD("Remove subgraph:%s.", name.c_str());
       root_graph->RemoveSubgraph(name);
     }
   }
@@ -1471,7 +1471,7 @@ graphStatus NodeUtils::TryGetWeightByDataNode(const NodePtr &node_ptr, ConstGeTe
   NodePtr real_parent_node = nullptr;
   (void)NodeUtils::GetInNodeCrossPartionedCallNode(node_ptr, 0U, real_parent_node);
   if ((real_parent_node != nullptr) && (ConstantUtils::IsConstant(real_parent_node->GetOpDesc()))) {
-    GELOGI("Get in really parent node:[%s %s] for node:[%s %s]", real_parent_node->GetName().c_str(),
+    GELOGI("Get in real parent node:[%s %s] for node:[%s %s]", real_parent_node->GetName().c_str(),
            real_parent_node->GetType().c_str(), op_desc->GetName().c_str(), op_desc->GetType().c_str());
     if (ConstantUtils::IsConstant(real_parent_node)) {
       if (ConstantUtils::GetWeight(real_parent_node->GetOpDesc(), 0U, ge_tensor)) {

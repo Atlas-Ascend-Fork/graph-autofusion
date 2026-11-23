@@ -486,7 +486,7 @@ graphStatus GNode::GetDynamicInputIndexesByName(const AscendString &name, std::v
 
   if (op_desc->GetDynamicInputIndexesByName(node_name, indexes) != GRAPH_SUCCESS || indexes.empty()) {
     const std::string error_message = indexes.empty()
-                                          ? "the dynamic input indexes is empty, input name is " + node_name + "."
+                                          ? "the dynamic input indexes are empty, input name is " + node_name + "."
                                           : "get dynamic input index by name failed, input name is " + node_name + ".";
     REPORT_INNER_ERR_MSG("E18888", "%s", error_message.c_str());
     GELOGE(GRAPH_FAILED, "[Check][Param] %s", error_message.c_str());
@@ -526,7 +526,7 @@ graphStatus GNode::GetDynamicOutputIndexesByName(const AscendString &name, std::
 
   if (op_desc->GetDynamicOutputIndexesByName(node_name, indexes) != GRAPH_SUCCESS || indexes.empty()) {
     const std::string error_message =
-        indexes.empty() ? "the dynamic output indexes is empty, output name is " + node_name + "."
+        indexes.empty() ? "the dynamic output indexes are empty, output name is " + node_name + "."
                         : "get dynamic output index by name failed, output name is " + node_name + ".";
     REPORT_INNER_ERR_MSG("E18888", "%s", error_message.c_str());
     GELOGE(GRAPH_FAILED, "[Check][Param] %s", error_message.c_str());

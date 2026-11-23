@@ -83,7 +83,7 @@ class TensorAssign {
                        const int64_t count, GeTensorPtr &weight, const bool is_complex = false) {
     // val_size must be even, and complex value should be an integer multiple of 2
     if (is_complex && ((val_size % kComplexWidth) != 0)) {
-      GELOGE(FAILED, "complex value should be an integer multiple of 2.");
+      GELOGE(FAILED, "complex value %lld should be an integer multiple of 2.", static_cast<long long>(val_size));
       return FAILED;
     }
     const std::unique_ptr<T[]> addr(new (std::nothrow) T[static_cast<size_t>(count)]());  // Zero init default value

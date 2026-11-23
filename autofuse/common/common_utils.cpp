@@ -1188,7 +1188,7 @@ std::vector<ascir::TensorId> GetWorkspaceTensorIdListInOneScheduleResult(
   for (auto workspace : fused_schedule_result.workspace_nodes) {
     GE_ASSERT_NOTNULL(workspace, "fused schedule result workspace node is null");
     ascir::TensorId tId = workspace->outputs[0].attr.mem.tensor_id;
-    GELOGI("Get workspace tensor id: %ld", tId);
+    GELOGD("Get workspace tensor id: %ld", tId);
     auto index = std::find(tensorId.begin(), tensorId.end(), tId);
     if (index == tensorId.end()) {
       tensorId.emplace_back(tId);
@@ -1203,7 +1203,7 @@ std::vector<ascir::TensorId> GetWorkspaceTensorIdListInOneGraph(
   for (auto workspace : fused_schedule_result.workspace_nodes) {
     GE_ASSERT_NOTNULL(workspace, "fused schedule result workspace node is null");
     ascir::TensorId tId = workspace->outputs[0].attr.mem.tensor_id;
-    GELOGI("Get workspace tensor id: %ld", tId);
+    GELOGD("Get workspace tensor id: %ld", tId);
     // 检查是否在 graph 中存在
     bool is_exist = false;
     for (auto node : graph.GetAllNodes()) {

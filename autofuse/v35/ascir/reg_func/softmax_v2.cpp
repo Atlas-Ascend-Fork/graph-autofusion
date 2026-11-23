@@ -32,7 +32,8 @@ std::vector<std::unique_ptr<TmpBufDesc>> CalcSoftmaxTmpSizeV2(const AscNode &nod
   }
 
   const auto dtype_size = ge::GetSizeByDataType(node_inputs[0].attr.dtype);
-  GE_ASSERT_TRUE(dtype_size > 0, "Softmax node %s[%s] invalid dtype size.", node.GetTypePtr(), node.GetNamePtr());
+  GE_ASSERT_TRUE(dtype_size > 0, "Softmax node %s[%s] invalid dtype size: %d, expected > 0.", node.GetTypePtr(),
+                 node.GetNamePtr(), dtype_size);
   const uint32_t align_size = kAlignWidth / static_cast<uint32_t>(dtype_size);
 
   auto attr = GetOrCreateSoftmaxGraphAttrsGroup(node.GetOwnerComputeGraph());
@@ -52,7 +53,7 @@ std::vector<std::unique_ptr<TmpBufDesc>> CalcSoftmaxTmpSizeV2(const AscNode &nod
 
   Expression element_size = sym::Add(sym::Mul(a_exp, r_exp), sym::Mul(a_exp, Symbol(kSoftmaxExtraMul)));
   Expression tmp_size = sym::Mul(element_size, Symbol(dtype_size));
-  GELOGD("Softmax node %s[%s] temp buffer size: %s", node.GetTypePtr(), node.GetNamePtr(), tmp_size.Str().get());
+  GELOGD("Softmax node %s[%s] temp buffer size: %s bytes", node.GetTypePtr(), node.GetNamePtr(), tmp_size.Str().get());
   TmpBufDesc desc = {tmp_size, -1};
   tmp_buf_desc.emplace_back(std::make_unique<TmpBufDesc>(desc));
   return tmp_buf_desc;

@@ -46,7 +46,7 @@ std::vector<DimRange> SetOperation::Diff(DimRange &range1, DimRange &range2) {
 TensorRange SetOperation::Diff(TensorRange &range1, TensorRange &range2) {
   TensorRange new_range;
   if (range1.size() != range2.size()) {
-    GELOGD("Diff left size not same with right size.");
+    GELOGD("Diff left size is not the same as right size.");
     return new_range;
   }
   for (auto coordinate1 : range1) {

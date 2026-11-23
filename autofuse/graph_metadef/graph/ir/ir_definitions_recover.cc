@@ -130,7 +130,10 @@ bool ValidateIrOrderCompatibility(const IrDef &node_ir_defs, const IrDef &compat
   const size_t min_size = std::min(node_ir_defs.size(), compatible_ir_defs.size());
   for (size_t i = 0U; i < min_size; ++i) {
     if (node_ir_defs[i] != compatible_ir_defs[i]) {
-      GELOGE(af::GRAPH_FAILED, "ValidateIrOrderCompatibility failed: index is %zu", i);
+      GELOGE(af::GRAPH_FAILED,
+             "ValidateIrOrderCompatibility failed: index is %zu, node ir defs size is %zu, "
+             "compatible ir defs size is %zu",
+             i, node_ir_defs.size(), compatible_ir_defs.size());
       return false;
     }
   }

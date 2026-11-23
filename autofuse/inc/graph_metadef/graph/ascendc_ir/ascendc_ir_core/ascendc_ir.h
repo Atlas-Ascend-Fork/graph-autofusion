@@ -316,7 +316,7 @@ class AscOpOutput {
       return *this;
     }
     if (HasBindToContainer()) {
-      GELOGE(PARAM_INVALID, " this tensor has been bound to a que or buf, can not be repeated bound.");
+      GELOGE(PARAM_INVALID, "this tensor has been bound to a que or buf, can not be bound repeatedly.");
       return *this;
     }
     if (!used_out.HasBindToContainer()) {
@@ -394,7 +394,7 @@ class VectorizedOutTensor {
     if (op_ != nullptr) {
       AscendString name;
       (void)op_->GetName(name);
-      GELOGE(FAILED, "Tensor has been bind to %s", name.GetString());
+      GELOGE(FAILED, "Tensor has been bound to %s", name.GetString());
       return;
     }
     op_ = asc_op_output.op_;

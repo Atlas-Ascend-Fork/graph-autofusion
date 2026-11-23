@@ -241,11 +241,11 @@ af::Status GenerateModelInfo(const std::vector<af::AscGraph> &graph_list, std::v
     ModelInfo model_info;
     TuningSpacePtr tuning_space = af::MakeShared<TuningSpace>();
     GE_ASSERT_NOTNULL(tuning_space, "Make tuning space failed.");
-    GE_ASSERT_SUCCESS(GenerateModelInfo(graph, model_info, tuning_space, tiling_key), "General model info failed.");
+    GE_ASSERT_SUCCESS(GenerateModelInfo(graph, model_info, tuning_space, tiling_key), "Generate model info failed.");
     model_info_list.emplace_back(model_info);
     tiling_key++;
   }
-  GE_ASSERT_TRUE(!model_info_list.empty(), "No graph need convert.");
+  GE_ASSERT_TRUE(!model_info_list.empty(), "No graph needs to be converted.");
   return af::SUCCESS;
 }
 
@@ -374,7 +374,7 @@ void DumpModelInfo(const std::vector<ModelInfo> &model_info_list, std::string du
   ge::char_t realpath_file[PATH_MAX] = {0x00};
   auto ret = realpath(model_file.c_str(), realpath_file);
   if (ret == nullptr) {
-    GELOGD("Model file path [%s] unfound.", model_file.c_str());
+    GELOGD("Model file path [%s] not found.", model_file.c_str());
     return;
   }
   file_stream.open(realpath_file, std::ios::out | std::ios::trunc);
@@ -492,7 +492,7 @@ static af::Status GenerateModelInfoWithContext(const std::vector<af::AscGraph> &
     model_info_list.emplace_back(model_info);
     tiling_key++;
   }
-  GE_ASSERT_TRUE(!model_info_list.empty(), "No graph need convert.");
+  GE_ASSERT_TRUE(!model_info_list.empty(), "No graph needs to be converted.");
   if (options.find(kDumpDebugInfo) != options.end()) {
     DumpModelInfo(model_info_list, options.at(kDumpDebugInfo).back() == '/' ? options.at(kDumpDebugInfo)
                                                                             : options.at(kDumpDebugInfo) + "/");

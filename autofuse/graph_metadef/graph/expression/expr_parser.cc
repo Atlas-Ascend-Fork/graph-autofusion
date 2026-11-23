@@ -76,7 +76,7 @@ ExpressionImplPtr ExprParser::ParserFactor() {
   if (it != kUnaryFuncParsers.end()) {
     return (this->*(it->second))();
   }
-  GELOGE(ge::PARAM_INVALID, "Unsupported operator %d when Parser factor.", currentToken_.type);
+  GELOGE(ge::PARAM_INVALID, "Unsupported operator %d when parsing factor.", currentToken_.type);
   return nullptr;
 }
 

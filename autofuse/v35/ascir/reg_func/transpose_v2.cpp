@@ -15,7 +15,8 @@ namespace ascir {
 bool GetTensorVectorizedRepeats(const AscTensorAttr &attr, std::vector<Expression> &output_vectorized_repeats) {
   for (size_t i = 0; i < attr.vectorized_axis.size(); i++) {
     auto it = std::find(attr.axis.begin(), attr.axis.end(), attr.vectorized_axis[i]);
-    GE_ASSERT_TRUE(it != attr.axis.end(), "Incorrect axis ID in vectorized_axis");
+    GE_ASSERT_TRUE(it != attr.axis.end(), "Incorrect axis ID %ld in vectorized_axis, must exist in attr.axis",
+                   attr.vectorized_axis[i]);
     auto axis_id = static_cast<uint64_t>(std::distance(attr.axis.begin(), it));
     output_vectorized_repeats.emplace_back(attr.repeats[axis_id]);
   }
@@ -38,7 +39,7 @@ std::vector<std::unique_ptr<TmpBufDesc>> CalcTransposeTmpSizeV2(const AscNode &n
   }
   const auto data_type_size = GetSizeByDataType(attr.dtype);
   const Expression total_size = Symbol(data_type_size) * input_size;
-  GELOGD("Node %s[%s] temp buffer size: %s", node.GetTypePtr(), node.GetNamePtr(), total_size.Str().get());
+  GELOGD("Node %s[%s] temp buffer size: %s bytes", node.GetTypePtr(), node.GetNamePtr(), total_size.Str().get());
   TmpBufDesc desc = {total_size, -1};
   std::vector<std::unique_ptr<TmpBufDesc>> tmpBufDescs;
   tmpBufDescs.emplace_back(std::make_unique<TmpBufDesc>(desc));

@@ -19,7 +19,7 @@ std::vector<std::unique_ptr<TmpBufDesc>> CalcTanhTmpSizeV2(const AscNode &node) 
   GE_ASSERT_TRUE(node_inputs.Size() > 0, "Node %s[%s] inputs size is 0.", node.GetTypePtr(), node.GetNamePtr());
   uint32_t calcTmpBuf = TANH_ONE_REPEAT_BYTE_SIZE *
                         (node_inputs[0].attr.dtype == ge::DT_FLOAT16 ? TANH_HALF_CALC_PROC : TANH_FLOAT_CALC_PROC);
-  GELOGD("Node %s[%s] temp buffer size: %u", node.GetTypePtr(), node.GetNamePtr(), calcTmpBuf);
+  GELOGD("Node %s[%s] temp buffer size: %u bytes", node.GetTypePtr(), node.GetNamePtr(), calcTmpBuf);
   Expression TmpSize = Symbol(calcTmpBuf);
   TmpBufDesc desc = {TmpSize, -1};
   std::vector<std::unique_ptr<TmpBufDesc>> tmpBufDescs;
