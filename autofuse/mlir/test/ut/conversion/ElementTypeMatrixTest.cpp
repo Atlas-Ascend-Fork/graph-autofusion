@@ -46,6 +46,7 @@
 #include "conversion/AFIRToAscendC/Implementations/ElementwiseApiFamily.h"
 #include "conversion/AFIRToAscendC/RegisterAscendCImplementations.h"
 #include "dialect/AFIR/IR/AFIR.h"
+#include "dialect/AFIR/IR/AFIRElementwiseSupport.h"
 #include "support/AfirElementTypes.h"
 #include "target/Ascend/Capability/ImplementationRegistry.h"
 #include "mlir/IR/MLIRContext.h"
@@ -197,6 +198,10 @@ struct KnownNarrowerRow {
   llvm::StringRef reason;
 };
 constexpr KnownNarrowerRow kKnownNarrower[] = {
+    {"axpy.tensor_tensor.reg_base", kBF16 | kI64 | kUI64, kF16 | kF32 | kBF16 | kI64 | kUI64,
+     "f16/f32 由两侧共用行收，A5 专属行只注册扩展类型"},
+    {"relu.tensor.reg_base", kI64, kF16 | kF32 | kI32 | kI64 | kUI8,
+     "共用行收 f16/f32/i32，A5 额外收 i64；连续 Relu 不接受 ui8"},
     // mem 侧的 Duplicate 档**有意**摘除 i64：legacy 对 int64 的 `BroadcastScalar` 发的是
     // 带 tmp 尾参的四参调用 `Duplicate(dst, v, n, tmp)`（`broadcast_api_call.cpp:246`，
     // 只在 int64 / uint64 时拼那个尾巴），而这一档发的是不带尾巴的标准
@@ -309,6 +314,7 @@ struct KnownWiderRow {
   llvm::StringRef reason;
 };
 constexpr KnownWiderRow kOdsWiderThanLegacy[] = {
+    {"afir.select", afir::kAfirBitBF16, "v2 MaskedFill 在调度前改写成 Select，使用支持 bf16 的 WhereExtend"},
     {"afir.broadcast", afir::kAfirBitBF16,
      "broadcast_extend_impl.h:260 的 SupportBytes<T,1,2,4,8> 收 b16，legacy 的 "
      "REG_ASC_IR(Broadcast) 两侧只是没声明 bf16"},
@@ -591,6 +597,20 @@ TEST(ElementTypeMatrixTest, OdsElementTypesAgreeWithRegistrationsAndLegacy) {
   }
 }
 
+TEST(ElementTypeMatrixTest, CastPairsRespectPlatformAvailability) {
+  using afir::elementwise::CastSupply;
+  using afir::elementwise::isSupportedCastPair;
+  MLIRContext context;
+  Type ui8 = IntegerType::get(&context, 8, IntegerType::Unsigned);
+  Type ui64 = IntegerType::get(&context, 64, IntegerType::Unsigned);
+  Type i64 = IntegerType::get(&context, 64);
+  Type f32 = Float32Type::get(&context);
+  EXPECT_TRUE(isSupportedCastPair(CastSupply::MemBased, ui8, i64));
+  EXPECT_TRUE(isSupportedCastPair(CastSupply::RegBased, ui8, i64));
+  EXPECT_TRUE(isSupportedCastPair(CastSupply::RegBased, f32, ui64));
+  EXPECT_FALSE(isSupportedCastPair(CastSupply::MemBased, f32, ui64));
+}
+
 // 不按集合判元素类型的 implementation：它们走 `ResultElementType::CastPair` 的逐行对表
 // （表在 `Ops/Cast.cpp`），集合在那一档根本不被读，所以上面那条跳过它们。
 // 名单钉死，否则「跳过」会悄悄长大，上面那条就越查越少。
@@ -667,10 +687,8 @@ constexpr FormCoverageGap kFormCoverageGaps[] = {
     {"afir.exp", "reg", "tensor", kBF16, "Any 单行只收两列交集；reg 侧 bf16 需拆 mem/reg 行"},
     {"afir.ln", "reg", "tensor", kBF16, "同 exp：Any 单行只收交集，reg 侧 bf16 需拆行"},
     {"afir.sqrt", "reg", "tensor", kBF16, "同 exp：Any 单行只收交集，reg 侧 bf16 需拆行"},
-    {"afir.relu", "reg", "tensor", kUI8 | kI64, "Any 单行只收交集（f16/f32/i32）；reg 侧 ui8/i64 需拆行"},
+    {"afir.relu", "reg", "tensor", kUI8, "连续 Relu 调用不接受 ui8"},
     {"afir.ub2ub", "reg", "tensor", kI64, "Shared 单行只收交集；reg 侧 i64 需拆行"},
-    {"afir.axpy", "reg", "tensor", kBF16 | kI64 | kUI64,
-     "Shared 单行只收交集；拆行被家族判据挡住（reg 行要求 _reg_base 头，axpy.h 是中立名）"},
 };
 
 // 聚合 (op|side|form) → 注册位并集。Any/Shared 一行供两侧,计入两侧;id 含 scalar 归

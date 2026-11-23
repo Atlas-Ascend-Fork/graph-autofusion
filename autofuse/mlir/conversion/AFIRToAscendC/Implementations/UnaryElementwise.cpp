@@ -728,17 +728,28 @@ LogicalResult registerPredicate(ImplementationRegistry &registry, llvm::StringRe
 
 }  // namespace
 
-LogicalResult registerUnaryElementwiseImplementations(ImplementationRegistry &registry,
-                                                      ascend::instruction::SelectionPolicyRegistry *) {
-  // 两张支持表给的是同一个 `AscendC::` 调用，都不要 tmp buffer：一个 id，不问 feature。
+// exp / ln / relu / sqrt 四件:两张支持表同调用、无 tmp,家族 Any(relu 另有 A5 的 i64 拆行)。
+// 抽成 helper 给主函数的 nbnc 棘轮留额度,注册顺序不变。
+LogicalResult registerExpLnReluSqrtBatch(ImplementationRegistry &registry) {
+  // 共用标准调用无需 tmp buffer。A5 的连续 Relu 另外接受 i64。
   if (failed(registerUnary<ExpOp, ascendc::ExpL2Op>(registry, "exp.tensor", ApiFamily::Any, ResultElementRule::Same,
                                                     kFloatElementTypes)) ||
       failed(registerUnary<LnOp, ascendc::LnL2Op>(registry, "ln.tensor", ApiFamily::Any, ResultElementRule::Same,
                                                   kFloatElementTypes)) ||
       failed(registerUnary<ReluOp, ascendc::ReluL2Op>(registry, "relu.tensor", ApiFamily::Any, ResultElementRule::Same,
                                                       kFloatAndI32ElementTypes)) ||
+      failed(registerUnary<ReluOp, ascendc::ReluL2Op>(registry, "relu.tensor.reg_base", ApiFamily::RegBased,
+                                                      ResultElementRule::Same, kI64)) ||
       failed(registerUnary<SqrtOp, ascendc::SqrtL2Op>(registry, "sqrt.tensor", ApiFamily::Any, ResultElementRule::Same,
                                                       kFloatElementTypes))) {
+    return failure();
+  }
+  return success();
+}
+
+LogicalResult registerUnaryElementwiseImplementations(ImplementationRegistry &registry,
+                                                      ascend::instruction::SelectionPolicyRegistry *) {
+  if (failed(registerExpLnReluSqrtBatch(registry))) {
     return failure();
   }
 
