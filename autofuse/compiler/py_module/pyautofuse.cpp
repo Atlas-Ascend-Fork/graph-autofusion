@@ -12,6 +12,7 @@
 
 #include "optimize.h"
 #include "codegen.h"
+#include "codegen_tiling_utils.h"
 #include "pyascir_common_utils.h"
 
 #include "pyascir.h"
@@ -462,6 +463,7 @@ class CodeGen {
   static int Init(PyObject *self_pyobject, PyObject *args, PyObject *kwds);
 
   static PyObject *device_code_generator(PyObject *self_pyobject, PyObject *args, PyObject *kwds);
+  static PyObject *get_kernel_task_type(PyObject *self, PyObject *args);
   static PyObject *host_code_generator(PyObject *self_pyobject, PyObject *args, PyObject *kwds);
   static PyObject *get_kernel_and_json_generator(PyObject *self_pyobject, PyObject *args, const PyObject *kwds);
   static PyObject *pgo_code_generator(PyObject *self_pyobject, PyObject *args, const PyObject *kwds);
@@ -475,8 +477,8 @@ class CodeGen {
   static af::Status HandleHostCodeGenForCVFusion(CodeGen::Object *self,
                                                  const ascir::FusedScheduledResult &fused_schedule_result,
                                                  const std::map<std::string, std::string> &symbol_source_info,
-                                                 const char *pgo_dir, const char *vector_core_num,
-                                                 PyObject *py_tilings);
+                                                 const char *pgo_dir, const char *vector_core_num, PyObject *py_tilings,
+                                                 uint32_t aicore_num);
   static af::Status HandleHostCodeGenForNonCVFusion(CodeGen::Object *self,
                                                     const ascir::FusedScheduledResult &fused_schedule_result,
                                                     const std::map<std::string, std::string> &symbol_source_info,
@@ -486,10 +488,12 @@ class CodeGen {
                                           pyascir::FusedScheduledResult::Object *fused_schedule_result,
                                           PyObject *shape_info_obj,
                                           const std::vector<std::vector<std::string>> &output_shape,
-                                          const char *pgo_dir, const char *vector_core_num);
+                                          const char *pgo_dir, const char *vector_core_num, uint32_t aicore_num);
 };
 
 PyMethodDef CodeGen::methods[] = {
+    {"get_kernel_task_type", reinterpret_cast<PyCFunction>(CodeGen::get_kernel_task_type), METH_VARARGS,
+     "Return the task type used by kernel code generation."},
     {"device_code_generator", reinterpret_cast<PyCFunction>(CodeGen::device_code_generator),
      METH_VARARGS | METH_KEYWORDS, nullptr},
     {"host_code_generator", reinterpret_cast<PyCFunction>(CodeGen::host_code_generator), METH_VARARGS | METH_KEYWORDS,
@@ -619,8 +623,8 @@ af::Status CodeGen::HandleDeviceCodeGenForNonCVFusion(CodeGen::Object *self,
 af::Status CodeGen::HandleHostCodeGenForCVFusion(CodeGen::Object *self,
                                                  const ascir::FusedScheduledResult &fused_schedule_result,
                                                  const std::map<std::string, std::string> &symbol_source_info,
-                                                 const char *pgo_dir, const char *vector_core_num,
-                                                 PyObject *py_tilings) {
+                                                 const char *pgo_dir, const char *vector_core_num, PyObject *py_tilings,
+                                                 uint32_t aicore_num) {
   ascir::FusedScheduledResult ub_schedule_result = fused_schedule_result;
   ascir::FusedScheduledResult common_schedule_result = fused_schedule_result;
 
@@ -634,7 +638,7 @@ af::Status CodeGen::HandleHostCodeGenForCVFusion(CodeGen::Object *self,
   std::map<std::string, std::string> ub_tiling_file_name_to_content;
   if (ascgen_utils::HasCubeUBFusedScheduled(ub_schedule_result)) {
     GE_CHK_STATUS_RET(self->codegen->GenerateTiling(ub_schedule_result, symbol_source_info, pgo_dir, vector_core_num,
-                                                    ub_tiling_file_name_to_content),
+                                                    ub_tiling_file_name_to_content, aicore_num),
                       "generate ub tiling failed");
   } else {
     GELOGI("Has no cube ub fused schedule result, no need to generate ub tiling");
@@ -644,7 +648,7 @@ af::Status CodeGen::HandleHostCodeGenForCVFusion(CodeGen::Object *self,
   GE_ASSERT_TRUE(ascgen_utils::HasCubeCommonFusedScheduled(common_schedule_result));
   std::map<std::string, std::string> common_tiling_file_name_to_content;
   GE_CHK_STATUS_RET(self->codegen->GenerateTiling(common_schedule_result, symbol_source_info, pgo_dir, vector_core_num,
-                                                  common_tiling_file_name_to_content),
+                                                  common_tiling_file_name_to_content, aicore_num),
                     "generate common tiling failed");
 
   // 创建UB模板、兜底模板的内层字典
@@ -772,7 +776,7 @@ PyObject *CodeGen::GenerateHostCodeResult(CodeGen::Object *self,
                                           pyascir::FusedScheduledResult::Object *fused_schedule_result,
                                           PyObject *shape_info_obj,
                                           const std::vector<std::vector<std::string>> &output_shape,
-                                          const char *pgo_dir, const char *vector_core_num) {
+                                          const char *pgo_dir, const char *vector_core_num, uint32_t aicore_num) {
   af::Status ret = af::FAILED;
   std::string infer_shape;
 
@@ -798,7 +802,7 @@ PyObject *CodeGen::GenerateHostCodeResult(CodeGen::Object *self,
     // 如果是cv融合，需要过滤ub、兜底融合结果分别生成代码
     if (ascgen_utils::IsCubeFusedScheduled(fused_schedule_result->fused_schedule_result)) {
       ret = HandleHostCodeGenForCVFusion(self, fused_schedule_result->fused_schedule_result, symbol_source_info,
-                                         pgo_dir, vector_core_num, py_tilings);
+                                         pgo_dir, vector_core_num, py_tilings, aicore_num);
     } else {
       ret = HandleHostCodeGenForNonCVFusion(self, fused_schedule_result->fused_schedule_result, symbol_source_info,
                                             pgo_dir, vector_core_num, py_tilings);
@@ -816,6 +820,21 @@ PyObject *CodeGen::GenerateHostCodeResult(CodeGen::Object *self,
   }
 }
 
+PyObject *CodeGen::get_kernel_task_type(PyObject *self, PyObject *args) {
+  (void)self;
+  PyObject *result = nullptr;
+  if (!PyArg_ParseTuple(args, "O", &result)) {
+    return nullptr;
+  }
+  if (PyObject_IsInstance(result, reinterpret_cast<PyObject *>(&pyascir::FusedScheduledResult::type)) !=
+      kPythonSuccess) {
+    return PyErr_Format(PyExc_TypeError, "get_kernel_task_type requires FusedScheduledResult");
+  }
+  auto fused_result = reinterpret_cast<pyascir::FusedScheduledResult::Object *>(result);
+  const auto task_type = codegen::GetKernelTaskType(fused_result->fused_schedule_result);
+  return PyUnicode_FromString(task_type.c_str());
+}
+
 PyObject *CodeGen::host_code_generator(PyObject *self_pyobject, PyObject *args, PyObject *kwds) {
   (void)kwds;
   auto self = reinterpret_cast<CodeGen::Object *>(self_pyobject);
@@ -825,8 +844,9 @@ PyObject *CodeGen::host_code_generator(PyObject *self_pyobject, PyObject *args, 
   PyObject *output_shape_obj = nullptr;
   const char *pgo_dir = nullptr;
   const char *vector_core_num = "";
-  if (PyArg_ParseTuple(args, "OOOss", &list_result_result, &shape_info_obj, &output_shape_obj, &pgo_dir,
-                       &vector_core_num) == kPythonFail) {
+  uint32_t aicore_num = 0U;
+  if (PyArg_ParseTuple(args, "OOOss|I", &list_result_result, &shape_info_obj, &output_shape_obj, &pgo_dir,
+                       &vector_core_num, &aicore_num) == kPythonFail) {
     return PyErr_Format(PyExc_ValueError, "codegen param parse failed");
   }
 
@@ -848,7 +868,8 @@ PyObject *CodeGen::host_code_generator(PyObject *self_pyobject, PyObject *args, 
     return PyErr_Format(PyExc_ValueError, "output_symbol_shape parse fail");
   }
 
-  return GenerateHostCodeResult(self, fused_schedule_result, shape_info_obj, output_shape, pgo_dir, vector_core_num);
+  return GenerateHostCodeResult(self, fused_schedule_result, shape_info_obj, output_shape, pgo_dir, vector_core_num,
+                                aicore_num);
 }
 
 PyObject *CodeGen::get_kernel_and_json_generator(PyObject *self_pyobject, PyObject *args, const PyObject *kwds) {

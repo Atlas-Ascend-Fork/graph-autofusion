@@ -24,6 +24,10 @@ __attribute__((visibility("hidden"))) ge::AscNodePtr FindBmmInputView(const asci
 __attribute__((visibility("hidden"))) bool IsRegisterBmmInputPackSupported();
 __attribute__((visibility("hidden"))) bool CanPackBmmInput(const ge::AscNodePtr &view);
 
+std::string GetKernelTaskType(const ascir::FusedScheduledResult &result);
+__attribute__((visibility("hidden"))) void AppendCvCoreLimitHelperDefs(std::stringstream &ss,
+                                                                       const ascir::FusedScheduledResult &result);
+
 __attribute__((visibility("hidden"))) void AppendCvBaseAlignHelperDefs(std::stringstream &ss);
 __attribute__((visibility("hidden"))) void AppendCvPlatformSelectionDefs(std::stringstream &ss, bool avoid_tensor_api,
                                                                          bool a_trans, bool b_trans);

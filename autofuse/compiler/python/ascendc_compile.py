@@ -1521,6 +1521,26 @@ def init_torch_npu_for_const_tiling():
     torch.npu.synchronize()
 
 
+def get_npu_device_core_limits():
+    """查询当前设备的 Cube/Vector 核数上限。
+
+    本编译进程内 get_soc_spec 依赖 SoC spec 初始化，可能返回错误的小值（如 1），
+    优先取设备属性；查询失败返回 (0, 0)，由调用方退化到既有 soc spec 兜底。
+    """
+    try:
+        import torch
+        import torch_npu  # noqa: F401
+
+        props = torch.npu.get_device_properties(torch.npu.current_device())
+        return (
+            int(getattr(props, "cube_core_num", 0)),
+            int(getattr(props, "vector_core_num", 0)),
+        )
+    except Exception as exc:
+        _log_warning("query npu device core limits failed: %s", exc)
+        return 0, 0
+
+
 def rewrite_device_kernel_with_const_tiling(args: argparse.Namespace, temp_dir, lib):
     """改写 device 源为 const 分支，生成并写入 const tiling 头文件。"""
     logger.info("static shape detected, compile kernel with const tiling data")
@@ -1528,14 +1548,46 @@ def rewrite_device_kernel_with_const_tiling(args: argparse.Namespace, temp_dir, 
     with InductorCompileDuration(args, "InitTorchNpu"):
         init_torch_npu_for_const_tiling()
     with InductorCompileDuration(args, "GenerateConstTilingData"):
-        lib.GenConstTilingData.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_int]
-        lib.GenConstTilingData.restype = ctypes.c_char_p
         config_file = ctypes.c_char_p(args.config_file.encode("utf-8"))
-        aiv_num = int(get_soc_spec("vector_core_cnt"))
+        aic_num = int(getattr(args, "aic_num", 0))
+        aiv_num = int(getattr(args, "aiv_num", 0))
+        if aic_num < 0 or aiv_num < 0:
+            raise CompileError("CV constant tiling core limits must be nonnegative")
+        # 不控核（=0）的维度凑不出可求解的 C:V 任务组：aic=0 时 groups=min(aic, ...) 直接
+        # 为 0 组；本进程 get_soc_spec 依赖 SoC spec 初始化不可靠（可能返回 1），aiv 仅靠
+        # soc spec 兜底也可能凑不满一组。用户显式控核值优先，未控的核上限优先用设备属性
+        # 补齐，取不到时退化 soc spec。
+        if aic_num == 0 or aiv_num == 0:
+            device_aic, device_aiv = get_npu_device_core_limits()
+            if aic_num == 0:
+                aic_num = device_aic or int(get_soc_spec("cube_core_cnt"))
+            if aiv_num == 0:
+                aiv_num = device_aiv or int(get_soc_spec("vector_core_cnt"))
         ub_size = int(get_soc_spec("ub_size"))
-        result = lib.GenConstTilingData(
-            config_file, ctypes.c_int(aiv_num), ctypes.c_int(ub_size)
-        )
+        if hasattr(lib, "GenConstTilingDataWithCoreLimits"):
+            const_generator = lib.GenConstTilingDataWithCoreLimits
+            const_generator.argtypes = [
+                ctypes.c_char_p,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+            ]
+            const_generator.restype = ctypes.c_char_p
+            result = const_generator(config_file, aic_num, aiv_num, ub_size)
+        else:
+            if int(getattr(args, "aic_num", 0)) or int(getattr(args, "aiv_num", 0)):
+                raise CompileError(
+                    "The CV constant tiling library does not support core limits"
+                )
+            lib.GenConstTilingData.argtypes = [
+                ctypes.c_char_p,
+                ctypes.c_int,
+                ctypes.c_int,
+            ]
+            lib.GenConstTilingData.restype = ctypes.c_char_p
+            result = lib.GenConstTilingData(
+                config_file, ctypes.c_int(aiv_num), ctypes.c_int(ub_size)
+            )
     if not result:
         raise CompileError("GenConstTilingData returned empty const tiling data")
     const_tiling_data = result.decode("utf-8")

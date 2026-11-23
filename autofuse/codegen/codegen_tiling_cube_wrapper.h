@@ -89,6 +89,8 @@ extern "C" bool AutofuseDoCubeMatMulTiling(const CompileInfo* compile_info,
                                            bool is_batch,
                                            TilingResult* result);
 
+bool GetCubePlatformCoreLimits(const CompileInfo &compile_info, uint32_t &aic_num, uint32_t &aiv_num);
+
 class CubeKernelTilingWrapper {
 public:
     CubeKernelTilingWrapper();
@@ -1132,6 +1134,17 @@ extern "C" bool AutofuseDoCubeMatMulTiling(const ge::autofuse::CompileInfo *comp
     return false;
   }
   return RunSharedCubeTiling(request, *result);
+}
+
+bool GetCubePlatformCoreLimits(const CompileInfo &compile_info, uint32_t &aic_num, uint32_t &aiv_num) {
+  fe::PlatFormInfos platform_info;
+  if (fe::PlatformInfoManager::GeInstance().GetRuntimePlatformInfosByDevice(
+          GetCompileDeviceId(compile_info), platform_info, true) != 0U) {
+    return false;
+  }
+  aic_num = GetPlatformCoreNum(platform_info, "AiCore", "cube_core_cnt");
+  aiv_num = GetPlatformCoreNum(platform_info, "VectorCore", "vector_core_cnt");
+  return aic_num != 0U;
 }
 
 CubeKernelTilingWrapper::CubeKernelTilingWrapper() {}

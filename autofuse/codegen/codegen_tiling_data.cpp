@@ -38,6 +38,28 @@ void AppendCVAutofuseCommonTilingFields(std::stringstream &ss) {
   ss << "    uint32_t cube_ub_stage_size;\n";
   ss << "    uint32_t cube_m_stage_size;\n";
 }
+
+// 生成 GenConstTilingData 入口签名、workspace/block_dim 声明以及 ResLimit 初始化代码。
+void AppendConstGenEntryCode(std::stringstream &const_gen_ss, bool cv_inductor, bool ge_cv_broadcast) {
+  if (cv_inductor) {
+    const_gen_ss << "extern \"C\" const char* GenConstTilingDataWithCoreLimits(char* config_file, int aic_num, "
+                    "int aiv_num, int ub_size) {\n";
+  } else {
+    const_gen_ss << "extern \"C\" const char* GenConstTilingData(char* config_file, int aiv_num, int ub_size) {"
+                 << std::endl;
+  }
+  const_gen_ss << "  uint64_t workspace_size;" << std::endl;
+  const_gen_ss << "  uint32_t block_dim;" << std::endl;
+  if (!ge_cv_broadcast) {
+    const_gen_ss << "  ResLimit limit;" << std::endl;
+    const_gen_ss << "  limit.aiv_num = aiv_num;" << std::endl;
+    if (cv_inductor) {
+      const_gen_ss << "  limit.aic_num = aic_num;\n  limit.ub_size = ub_size;\n";
+    } else {
+      const_gen_ss << "  limit.ub_size = ub_size - 256;" << std::endl;
+    }
+  }
+}
 }  // namespace
 
 codegen::TilingData::TilingData(const std::string &kernel, const std::string &name_class)
@@ -750,7 +772,7 @@ std::string codegen::TilingData::GenCVConstTilingData(const std::string &tiling_
   if (is_inductor_scene) {
     // Inductor场景：调用AutofuseTiling获取CVAutofuseTilingData
     ss << "  // Call AutofuseTiling to get CV tiling data" << std::endl;
-    ss << "  int64_t result = AutofuseTiling(&" << tiling_data_struct_name << ", &workspace_size, &block_dim, nullptr);"
+    ss << "  int64_t result = AutofuseTiling(&" << tiling_data_struct_name << ", &workspace_size, &block_dim, &limit);"
        << std::endl;
     ss << "  if (result != 0) {" << std::endl;
     ss << "    OP_LOGE(OP_NAME, \"AutofuseTiling failed: %ld\", result);" << std::endl;
@@ -851,6 +873,56 @@ std::string codegen::TilingData::GenCVConstReplace(const std::string &tiling_dat
   return ss.str();
 }
 
+// 按场景生成 tiling 调用主体代码：CV 广播、Cube 融合、普通场景三分支。
+void codegen::TilingData::AppendConstGenSceneBody(std::stringstream &global_pre_def_ss, std::stringstream &const_gen_ss,
+                                                  const ascir::FusedScheduledResult &fused_schedule_result,
+                                                  bool is_inductor_scene, bool ge_cv_broadcast,
+                                                  const std::string &tiling_data_struct_name) {
+  if (ge_cv_broadcast) {
+    global_pre_def_ss
+        << "static int64_t SelectCvBroadcastTiling(char *, int, int, AutofuseTilingData &, uint64_t &, uint32_t &, "
+           "bool &);\n";
+    const_gen_ss << "  bool non_db = false;\n"
+                 << "  const auto selected_case = SelectCvBroadcastTiling(config_file, aiv_num, ub_size, "
+                 << tiling_data_struct_name << ", workspace_size, block_dim, non_db);\n"
+                 << "  if (selected_case < 0) {return \"\";}\n";
+  } else if (IsCubeFusedScheduled(fused_schedule_result)) {
+    const_gen_ss << GenCVConstTilingData(tiling_data_struct_name, is_inductor_scene);
+  } else {
+    const_gen_ss << "  auto ret = AutofuseTilingWithConfig(config_file, &" << tiling_data_struct_name;
+    if (is_inductor_scene) {
+      const_gen_ss << ", &workspace_size, &block_dim, nullptr);" << std::endl;
+    } else {
+      const_gen_ss << ", &workspace_size, &block_dim, &limit);" << std::endl;
+    }
+    const_gen_ss << "  if (ret != 0) {" << std::endl;
+    const_gen_ss << "    OP_LOGE(OP_NAME, \"AutofuseTilingWithConfig failed: %ld\", ret);" << std::endl;
+    const_gen_ss << "    return \"\";" << std::endl;
+    const_gen_ss << "  }" << std::endl;
+  }
+}
+
+// 常量模式下生成前置函数并产出 tiling data 字符串，CV+inductor 场景前后维护 tiling_data 字段栈。
+std::string codegen::TilingData::GenerateConstFieldData(const ascir::FusedScheduledResult &fused_schedule_result,
+                                                        bool is_inductor_scene) {
+  pre_func_ss << GenGenTilingDataFieldConstDefFunc() << std::endl;
+  pre_func_ss << GenGenTilingDataFieldConstValueFunc() << std::endl;
+
+  // CV+inductor: AutofuseTilingData fields are inside tiling_data member of CVAutofuseTilingData
+  // Push "tiling_data" so field paths become TilingDataValue.tiling_data.xxx
+  if (IsCubeFusedScheduled(fused_schedule_result) && is_inductor_scene) {
+    const_tiling_data_field.push_back("tiling_data");
+  }
+
+  std::string g_str = Generate(fused_schedule_result, is_inductor_scene);
+
+  // Pop "tiling_data" after Generate
+  if (IsCubeFusedScheduled(fused_schedule_result) && is_inductor_scene) {
+    ConstTilingDataFieldPopBack();
+  }
+  return g_str;
+}
+
 // GenerateConst生成的信息放在tiling func .cpp中
 std::string codegen::TilingData::GenerateConst(const ascir::FusedScheduledResult &fused_schedule_result,
                                                bool is_inductor_scene) {
@@ -877,55 +949,13 @@ std::string codegen::TilingData::GenerateConst(const ascir::FusedScheduledResult
 
   global_pre_def_ss << GenStringReplaceFunc() << std::endl;  // 生成一个字符串替换接口
 
-  const_gen_ss << "extern \"C\" const char* GenConstTilingData(char* config_file, int aiv_num, int ub_size) {"
-               << std::endl;
-  const_gen_ss << "  uint64_t workspace_size;" << std::endl;
-  const_gen_ss << "  uint32_t block_dim;" << std::endl;
+  const bool cv_inductor = IsCubeFusedScheduled(fused_schedule_result) && is_inductor_scene;
   const bool ge_cv_broadcast = !is_inductor_scene && ascir::HasCvBroadcast(fused_schedule_result);
-  if (!ge_cv_broadcast) {
-    const_gen_ss << "  ResLimit limit;" << std::endl;
-    const_gen_ss << "  limit.aiv_num = aiv_num;" << std::endl;
-    const_gen_ss << "  limit.ub_size = ub_size - 256;" << std::endl;
-  }
+  AppendConstGenEntryCode(const_gen_ss, cv_inductor, ge_cv_broadcast);
+  AppendConstGenSceneBody(global_pre_def_ss, const_gen_ss, fused_schedule_result, is_inductor_scene, ge_cv_broadcast,
+                          tiling_data_struct_name);
 
-  if (ge_cv_broadcast) {
-    global_pre_def_ss
-        << "static int64_t SelectCvBroadcastTiling(char *, int, int, AutofuseTilingData &, uint64_t &, uint32_t &, "
-           "bool &);\n";
-    const_gen_ss << "  bool non_db = false;\n"
-                 << "  const auto selected_case = SelectCvBroadcastTiling(config_file, aiv_num, ub_size, "
-                 << tiling_data_struct_name << ", workspace_size, block_dim, non_db);\n"
-                 << "  if (selected_case < 0) {return \"\";}\n";
-  } else if (IsCubeFusedScheduled(fused_schedule_result)) {
-    const_gen_ss << GenCVConstTilingData(tiling_data_struct_name, is_inductor_scene);
-  } else {
-    const_gen_ss << "  auto ret = AutofuseTilingWithConfig(config_file, &" << tiling_data_struct_name;
-    if (is_inductor_scene) {
-      const_gen_ss << ", &workspace_size, &block_dim, nullptr);" << std::endl;
-    } else {
-      const_gen_ss << ", &workspace_size, &block_dim, &limit);" << std::endl;
-    }
-    const_gen_ss << "  if (ret != 0) {" << std::endl;
-    const_gen_ss << "    OP_LOGE(OP_NAME, \"AutofuseTilingWithConfig failed: %ld\", ret);" << std::endl;
-    const_gen_ss << "    return \"\";" << std::endl;
-    const_gen_ss << "  }" << std::endl;
-  }
-
-  pre_func_ss << GenGenTilingDataFieldConstDefFunc() << std::endl;
-  pre_func_ss << GenGenTilingDataFieldConstValueFunc() << std::endl;
-
-  // CV+inductor: AutofuseTilingData fields are inside tiling_data member of CVAutofuseTilingData
-  // Push "tiling_data" so field paths become TilingDataValue.tiling_data.xxx
-  if (IsCubeFusedScheduled(fused_schedule_result) && is_inductor_scene) {
-    const_tiling_data_field.push_back("tiling_data");
-  }
-
-  std::string g_str = Generate(fused_schedule_result, is_inductor_scene);
-
-  // Pop "tiling_data" after Generate
-  if (IsCubeFusedScheduled(fused_schedule_result) && is_inductor_scene) {
-    ConstTilingDataFieldPopBack();
-  }
+  std::string g_str = GenerateConstFieldData(fused_schedule_result, is_inductor_scene);
 
   global_pre_def_ss << pre_func_ss.str() << std::endl;  // 一些前置函数定义放在前面,
 
@@ -944,6 +974,10 @@ std::string codegen::TilingData::GenerateConst(const ascir::FusedScheduledResult
   }
   const_gen_ss << "  return tiling_data_const_gen_result.c_str();" << std::endl;
   const_gen_ss << "}" << std::endl;
+  if (cv_inductor) {
+    const_gen_ss << "extern \"C\" const char* GenConstTilingData(char* config_file, int aiv_num, int ub_size) {\n"
+                    "  return GenConstTilingDataWithCoreLimits(config_file, 0, aiv_num, ub_size);\n}\n";
+  }
   ConstTilingDataFieldPopBack();
 
   ss << global_pre_def_ss.str();

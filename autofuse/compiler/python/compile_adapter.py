@@ -134,6 +134,12 @@ def parse_compile_args(argv):
         "--force_unknown", default=False, type=str2bool, help="force unknown shape."
     )
     parser.add_argument(
+        "--aic_num", default=0, type=int, help="CV constant tiling AIC limit."
+    )
+    parser.add_argument(
+        "--aiv_num", default=0, type=int, help="CV constant tiling AIV limit."
+    )
+    parser.add_argument(
         "--config_file",
         default="",
         type=str,

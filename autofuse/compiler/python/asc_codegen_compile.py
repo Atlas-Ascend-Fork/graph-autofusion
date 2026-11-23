@@ -19,6 +19,7 @@ import platform
 import json
 import time
 from collections import namedtuple
+from contextlib import contextmanager
 
 from tbe.common.buildcfg import get_current_build_config
 from tbe.tikcpp.compile_op import CommonUtility, AscendCLogLevel
@@ -59,6 +60,8 @@ _SUPPORTED_CROSS_COMPILE_PREFIXES = {
     ("linux", "x86_64"): "x86_64-linux-gnu-",
 }
 
+_CV_TASK_RATIOS = {"KERNEL_TYPE_MIX_AIC_1_1": 1, "KERNEL_TYPE_MIX_AIC_1_2": 2}
+
 StaticCompileContext = namedtuple(
     "StaticCompileContext",
     [
@@ -69,7 +72,9 @@ StaticCompileContext = namedtuple(
         "is_cross_compile_flag",
         "cross_compiler_prefix",
         "target_machine",
+        "cv_task_ratio",
     ],
+    defaults=[2],
 )
 
 CodegenCompileContext = namedtuple(
@@ -623,6 +628,47 @@ def get_static_compile_vector_core_num(vector_core_num=None):
     return min(int(vector_core_num), soc_vector_core_cnt)
 
 
+def normalize_cv_core_limits(aic_num, aiv_num, kernel_type):
+    """Choose the largest legal mixed task group within both resource limits."""
+    if kernel_type not in _CV_TASK_RATIOS:
+        raise ValueError(f"Unsupported CV kernel task type: {kernel_type}")
+    platform_aic = int(get_soc_spec("cube_core_cnt"))
+    platform_aiv = int(get_soc_spec("vector_core_cnt"))
+
+    def resolve(value, available):
+        if value is None or str(value) in ("", "0"):
+            return available
+        value = int(value)
+        if value <= 0:
+            raise ValueError(
+                "CV core limits must be positive or 0 for the platform default"
+            )
+        return min(value, available)
+
+    ratio = _CV_TASK_RATIOS[kernel_type]
+    groups = min(
+        resolve(aic_num, platform_aic), resolve(aiv_num, platform_aiv) // ratio
+    )
+    if groups == 0:
+        raise ValueError("CV core limits do not provide a complete mixed task group")
+    return groups, groups * ratio
+
+
+@contextmanager
+def cv_core_limit_context(context, aic_num, aiv_num):
+    """Let the native TBE tiler see the same limits as the vector solver."""
+    names = ("_op_aicore_num", "_op_vectorcore_num")
+    previous = [context.get_addition(name) for name in names]
+    try:
+        # The native tiling JSON interface consumes these attributes as strings.
+        context.add_addition(names[0], str(aic_num))
+        context.add_addition(names[1], str(aiv_num))
+        yield
+    finally:
+        for name, value in zip(names, previous):
+            context.add_addition(name, value)
+
+
 def get_codegen_compile_context():
     import tbe.common.context.op_context as op_context
 
@@ -1085,9 +1131,10 @@ def generate_device_and_host_code(graph_name, temp_dir, params, code_gen):
     timestamp_set(True, graph_name, "GenHost")
     shape_info = params.get("symbol_source_info")
     output_symbol = json.loads(params.get("output_symbol_shape"))
-    tiling_func_srcs, infershape_src = code_gen.host_code_generator(
-        schedule_results, shape_info, output_symbol, pgo_dir, vector_core_num
-    )
+    host_args = [schedule_results, shape_info, output_symbol, pgo_dir, vector_core_num]
+    if params.get("ai_core_num", 0):
+        host_args.append(params["ai_core_num"])
+    tiling_func_srcs, infershape_src = code_gen.host_code_generator(*host_args)
 
     # 处理tiling函数和infershape文件
     ret_tiling_func_srcs = _process_tiling_funcs_and_infershape(
@@ -1929,7 +1976,9 @@ SafetyFusionCtx = namedtuple(
         "cube_block_dim",
         "tiling_key",
         "use_cv_common",
+        "task_ratio",
     ],
+    defaults=[2],
 )
 
 
@@ -1982,10 +2031,8 @@ def _apply_safety_fusion(ctx):
         tiling_info.file_content += "\n#define CV_SAFETY_FUSION_AIV_ONLY 1\n"
         new_block_dim = max(ctx.cube_block_dim, vec_block_dim)
     else:
-        new_block_dim = (
-            (vec_block_dim + 1) // 2
-            if ctx.cube_block_dim * 2 < vec_block_dim
-            else ctx.cube_block_dim
+        new_block_dim = max(
+            ctx.cube_block_dim, (vec_block_dim + ctx.task_ratio - 1) // ctx.task_ratio
         )
     cv_aic_num = new_block_dim if use_launch_aic_num else ctx.cube_block_dim
     logger.info(
@@ -2060,6 +2107,7 @@ def template_decider(
                 cube_block_dim=cube_block_dim,
                 tiling_key=tiling_key,
                 use_cv_common=use_cv_common,
+                task_ratio=compile_context.cv_task_ratio,
             )
         )
     # 分支3: UB融合模式
@@ -2429,6 +2477,7 @@ def ascbc_conv_kernel_tiling_pro(
     is_cross_compile_flag=False,
     cross_compiler_prefix=None,
     target_machine=None,
+    cv_task_ratio=2,
 ):
     graph_name = camel_to_snake(graph_name)
     args_list = args[0]
@@ -2560,6 +2609,7 @@ def ascbc_conv_kernel_tiling_pro(
         is_cross_compile_flag,
         cross_compiler_prefix,
         target_machine,
+        cv_task_ratio,
     )
     create_conv_tiling_data(compile_context, tiling_info, cube_info, cube_attributes)
 
@@ -2579,6 +2629,7 @@ def ascbc_matmul_kernel_tiling_pro(
     is_cross_compile_flag=False,
     cross_compiler_prefix=None,
     target_machine=None,
+    cv_task_ratio=2,
 ):
     graph_name = camel_to_snake(graph_name)
     args_list = args[0]
@@ -2683,6 +2734,7 @@ def ascbc_matmul_kernel_tiling_pro(
         is_cross_compile_flag,
         cross_compiler_prefix,
         target_machine,
+        cv_task_ratio,
     )
     create_matmul_tiling_data(
         compile_context,
@@ -2854,6 +2906,35 @@ def copy_so_and_modify_json(host_build_dir, kernel_name, json_file):
 
 
 def asc_graph_compile(*args, temp_dir, params):
+    schedule_results = params["schedule_results"]
+    if not schedule_results.is_cube_type():
+        return _asc_graph_compile_impl(*args, temp_dir=temp_dir, params=params)
+    kernel_type = CodeGen().get_kernel_task_type(schedule_results)
+    if kernel_type not in _CV_TASK_RATIOS:
+        return _asc_graph_compile_impl(*args, temp_dir=temp_dir, params=params)
+    cv_params = dict(params)
+    cv_params["cv_task_ratio"] = _CV_TASK_RATIOS[kernel_type]
+    context = get_context()
+    requested_aic = context.get_addition("_op_aicore_num")
+    requested_aiv = params.get("vector_core_num")
+    aic_num, aiv_num = normalize_cv_core_limits(
+        requested_aic, requested_aiv, kernel_type
+    )
+    cv_params["ai_core_num"] = aic_num
+    cv_params["vector_core_num"] = aiv_num
+    logger.info(
+        "CV core limits: kernel_type=%s, requested=%s:%s, effective=%s:%s",
+        kernel_type,
+        requested_aic,
+        requested_aiv,
+        aic_num,
+        aiv_num,
+    )
+    with cv_core_limit_context(context, aic_num, aiv_num):
+        return _asc_graph_compile_impl(*args, temp_dir=temp_dir, params=cv_params)
+
+
+def _asc_graph_compile_impl(*args, temp_dir, params):
     """入口为asc graph场景"""
     graph_name, input_num, output_num, is_cube, is_conv, cube_attrs = (
         get_graph_basic_info(params, args)
@@ -2897,6 +2978,7 @@ def asc_graph_compile(*args, temp_dir, params):
                     is_cross_compile_flag=cross_compile_flag,
                     cross_compiler_prefix=cross_compiler_prefix,
                     target_machine=target_machine,
+                    cv_task_ratio=params.get("cv_task_ratio", 2),
                 )
             else:
                 ascbc_matmul_kernel_tiling_pro(
@@ -2914,6 +2996,7 @@ def asc_graph_compile(*args, temp_dir, params):
                     cross_compiler_prefix=cross_compiler_prefix,
                     is_cross_compile_flag=cross_compile_flag,
                     target_machine=target_machine,
+                    cv_task_ratio=params.get("cv_task_ratio", 2),
                 )
             replace_host_files_if_needed(
                 replace_root, temp_dir, use_cv_common, graph_name

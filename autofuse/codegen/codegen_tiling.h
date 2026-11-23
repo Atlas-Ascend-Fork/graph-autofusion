@@ -118,6 +118,10 @@ class TilingLib {
   std::map<std::string, std::string> Generate(const ::ascir::FusedScheduledResult &fused_schedule_result,
                                               const std::map<std::string, std::string> &shape_info,
                                               const std::string &pgo_dir, const std::string &core_num) const;
+  std::map<std::string, std::string> Generate(const ::ascir::FusedScheduledResult &fused_schedule_result,
+                                              const std::map<std::string, std::string> &shape_info,
+                                              const std::string &pgo_dir, const std::string &core_num,
+                                              uint32_t aicore_num) const;
   std::map<std::string, std::string> GenerateForInductor(const ::ascir::FusedScheduledResult &fused_schedule_result,
                                                          bool launch_decouple = false) const;
 
@@ -138,7 +142,7 @@ class TilingLib {
   std::string TilingFuncDef(const ::ascir::FusedScheduledResult &fused_schedule_result,
                             const ::ascir::FusedScheduledResult &elemwise_schedule_result,
                             const std::map<std::string, std::string> &shape_info, const std::string &pgo_dir,
-                            const std::string &core_num) const;
+                            const std::string &core_num, uint32_t aicore_num = 0U) const;
   std::string TilingFuncDefForInductor(const ::ascir::FusedScheduledResult &fused_schedule_result,
                                        const ::ascir::FusedScheduledResult &elemwise_schedule_result,
                                        bool launch_decouple) const;
@@ -381,10 +385,16 @@ class TilingLib {
   void GenInductorPgoProxyResultParser(std::stringstream &ss, const std::string &tiling) const;
   void GenInductorPgoProxySpawn(std::stringstream &ss) const;
   void GenInductorPgoProxyFunction(std::stringstream &ss, const std::string &tiling) const;
+  void AppendExternCubeStaticTilingFunc(std::stringstream &ss,
+                                        const ::ascir::FusedScheduledResult &fused_schedule_result,
+                                        const ::ascir::FusedScheduledResult &elemwise_schedule_result,
+                                        const std::map<std::string, std::string> &shape_info, const std::string &tiling,
+                                        const std::string &pgo_dir, const std::string &extern_c) const;
   std::string GenExternTilingFunc(const ::ascir::FusedScheduledResult &fused_schedule_result,
                                   const ::ascir::FusedScheduledResult &elemwise_schedule_result,
                                   const std::map<std::string, std::string> &shape_info, const std::string tiling,
-                                  const std::string &pgo_dir, const std::string &core_num) const;
+                                  const std::string &pgo_dir, const std::string &core_num,
+                                  uint32_t aicore_num = 0U) const;
   void TilingSetShapeDim(std::stringstream &tiling_set_shape_dim, const std::string &var_define,
                          const ::ascir::FusedScheduledResult &fused_schedule_result,
                          const std::string &tiling_expr = "tiling->") const;
@@ -420,17 +430,23 @@ class TilingLib {
   std::map<std::string, std::string> GenerateCVFusionStatic(
       const ::ascir::FusedScheduledResult &fused_schedule_result,
       const ::ascir::FusedScheduledResult &elemwise_schedule_result,
-      const std::map<std::string, std::string> &shape_info, const std::string &pgo_dir,
-      const std::string &core_num) const;
+      const std::map<std::string, std::string> &shape_info, const std::string &pgo_dir, const std::string &core_num,
+      uint32_t aicore_num = 0U) const;
   std::map<std::string, std::string> GenerateCVFusionDynamic(
       const ::ascir::FusedScheduledResult &fused_schedule_result,
       const ::ascir::FusedScheduledResult &elemwise_schedule_result,
-      const std::map<std::string, std::string> &shape_info, const std::string &pgo_dir,
-      const std::string &core_num) const;
+      const std::map<std::string, std::string> &shape_info, const std::string &pgo_dir, const std::string &core_num,
+      uint32_t aicore_num = 0U) const;
   // codegen_tiling.cpp: Cube/CV entry orchestration shared with the common translation-unit renderer.
+  bool BuildCvFusionScheduleResult(const ::ascir::FusedScheduledResult &fused_schedule_result,
+                                   ::ascir::FusedScheduledResult &elemwise_schedule_result, bool is_static) const;
+  void RenderCvFusionEntryUnit(const ::ascir::FusedScheduledResult &elemwise_schedule_result,
+                               const std::map<std::string, std::string> &result, bool is_static,
+                               std::map<std::string, std::string> &tiling_file_name_to_content) const;
   std::map<std::string, std::string> GenerateCVFusion(const ::ascir::FusedScheduledResult &fused_schedule_result,
                                                       const std::map<std::string, std::string> &shape_info,
-                                                      const std::string &pgo_dir, const std::string &core_num) const;
+                                                      const std::string &pgo_dir, const std::string &core_num,
+                                                      uint32_t aicore_num = 0U) const;
   void AppendCubeFusionUbModeCode(std::stringstream &ss, const ::ascir::FusedScheduledResult &elemwise_schedule_result,
                                   const MatMulCubeInfo &cube_info, const std::vector<bool> &non_db_cases) const;
   std::string GenCubeFusionTilingBody(const ::ascir::FusedScheduledResult &fused_schedule_result,
@@ -459,6 +475,13 @@ class TilingLib {
                                        bool is_batch) const;
   std::string ProcessCubeKernelTilingFromFusedResult(const ::ascir::FusedScheduledResult &fused_schedule_result,
                                                      bool enable_input_view = false) const;
+  bool AppendCvInductorCubeTilingCall(const ::ascir::FusedScheduledResult &fused_schedule_result,
+                                      const ::ascir::FusedScheduledResult &elemwise_schedule_result,
+                                      const std::string &shape_dim_param, MatMulCubeInfo &cube_info, uint64_t &count,
+                                      std::stringstream &ss) const;
+  void GenCvInductorTilingEntry(const ::ascir::FusedScheduledResult &elemwise_schedule_result, bool use_att_codegen,
+                                std::string &tiling_entry, std::string &fallback_final_tiling_call) const;
+  void AppendCvInductorTailReturnCode(std::stringstream &ss) const;
   std::string GenCubeFusionTilingBodyInductor(const ::ascir::FusedScheduledResult &fused_schedule_result,
                                               const ::ascir::FusedScheduledResult &elemwise_schedule_result,
                                               const std::string &shape_dim_param) const;

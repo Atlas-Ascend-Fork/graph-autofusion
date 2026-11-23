@@ -1223,3 +1223,14 @@ def test_compile_result_carries_baked_for_device_obj(compile_adapter_module):
         {"kernel_obj_path": "/tmp/k.o", "kernel_source_path": "/tmp/k.cpp"},
     )
     assert out["baked"] is False
+
+
+def test_parse_compile_args_keeps_cv_core_limits_explicit(compile_adapter_module):
+    limited, _, _ = compile_adapter_module.prepare_compile_context(
+        ["--output_file=x.so", "--aic_num=5", "--aiv_num=7"], "device_obj", None
+    )
+    assert (limited.aic_num, limited.aiv_num) == (5, 7)
+    defaults, _, _ = compile_adapter_module.prepare_compile_context(
+        ["--output_file=x.so"], "all", None
+    )
+    assert (defaults.aic_num, defaults.aiv_num) == (0, 0)

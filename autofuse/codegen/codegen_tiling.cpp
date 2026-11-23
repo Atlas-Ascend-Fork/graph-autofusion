@@ -162,7 +162,7 @@ void GenInductorCvSafetyFallback(std::stringstream &ss, uint64_t count, const st
   ss << indent << "}" << std::endl;
   ss << indent
      << "*blockDim = is_cv_safety_aiv_only ? std::max(cube_block_dim, vec_block_dim) : "
-        "((cube_block_dim * 2 < vec_block_dim) ? (vec_block_dim + 1) / 2 : cube_block_dim);"
+        "std::max(cube_block_dim, (vec_block_dim + kCvTaskRatio - 1U) / kCvTaskRatio);"
      << std::endl;
   ss << indent << "if (!CheckedWorkspaceAdd(vec_wss, static_cast<uint64_t>(ws_size), *workspaceSize)) {" << std::endl;
   ss << indent << "  return -1;" << std::endl;
@@ -743,21 +743,10 @@ void TilingLib::GenPgoMixTilingTable(const ascir::FusedScheduledResult &fused_sc
   }
 }
 
-std::map<std::string, std::string> TilingLib::GenerateCVFusion(const ascir::FusedScheduledResult &fused_schedule_result,
-                                                               const std::map<std::string, std::string> &shape_info,
-                                                               const std::string &pgo_dir,
-                                                               const std::string &core_num) const {
-  std::map<std::string, std::string> tiling_file_name_to_content;
-  ascir::FusedScheduledResult elemwise_schedule_result = fused_schedule_result;
-  bool is_static = IsFrontendStaticSchedResult(elemwise_schedule_result);
-  if (!is_static) {
-    for (const auto &var : GetFrontendShapeVars(fused_schedule_result)) {
-      if (!var.IsConstExpr() && shape_info.find(std::string(var.Str().get())) == shape_info.end()) {
-        GELOGE(af::FAILED, "Missing dynamic shape source for frontend symbol[%s].", var.Str().get());
-        return {{kTilingDefAndConstIdentify, ascgen_utils::INVALID_TILING}};
-      }
-    }
-  }
+// 按前端 UB/Common 模板形态构建 CV 融合调度结果；断言失败时返回 false，调用方应返回空内容回落。
+bool TilingLib::BuildCvFusionScheduleResult(const ascir::FusedScheduledResult &fused_schedule_result,
+                                            ascir::FusedScheduledResult &elemwise_schedule_result,
+                                            bool is_static) const {
   // The Python frontend may already have split UB and Common templates. Only combine both when present.
   if (!is_static && ascgen_utils::IsCubeUBFusedScheduled(fused_schedule_result) &&
       ascgen_utils::IsCubeCommonFusedScheduled(fused_schedule_result)) {
@@ -769,22 +758,15 @@ std::map<std::string, std::string> TilingLib::GenerateCVFusion(const ascir::Fuse
       GE_ASSERT_SUCCESS(ascgen_utils::CreateCVFusionCommonResult(elemwise_schedule_result));
     }
   }
-  CommonOutputReusePlan::PreserveShapeVars(fused_schedule_result, elemwise_schedule_result);
-  if (is_static && UseCvNRowBatch(fused_schedule_result)) {
-    AlignCvNRowBatchTile(elemwise_schedule_result);
-  }
-  tiling_file_name_to_content = GetTilingHeaders(elemwise_schedule_result, false, true);
-  GE_CHK_BOOL_RET_STATUS_NOLOG(CheckTilingHeadersValid(tiling_file_name_to_content), tiling_file_name_to_content);
+  return true;
+}
 
-  std::map<std::string, std::string> result;
-  if (is_static) {
-    result = GenerateCVFusionStatic(fused_schedule_result, elemwise_schedule_result, shape_info, pgo_dir, core_num);
-  } else {
-    result = GenerateCVFusionDynamic(fused_schedule_result, elemwise_schedule_result, shape_info, pgo_dir, core_num);
-  }
-
+// 渲染 CV 融合入口翻译单元，并在动态场景下补充 Cube Kernel wrapper 头/源文件内容。
+void TilingLib::RenderCvFusionEntryUnit(const ascir::FusedScheduledResult &elemwise_schedule_result,
+                                        const std::map<std::string, std::string> &result, bool is_static,
+                                        std::map<std::string, std::string> &tiling_file_name_to_content) const {
   const std::string entry_body =
-      tiling_file_name_to_content[kTilingDefAndConstIdentify] + result[kTilingDefAndConstIdentify];
+      tiling_file_name_to_content[kTilingDefAndConstIdentify] + result.at(kTilingDefAndConstIdentify);
   const EntryTranslationUnitOptions entry_options = {
       false,
       true,
@@ -795,15 +777,59 @@ std::map<std::string, std::string> TilingLib::GenerateCVFusion(const ascir::Fuse
       !is_static};
   tiling_file_name_to_content[kTilingDefAndConstIdentify] = RenderEntryTranslationUnit(entry_body, entry_options);
   if (!is_static) {
-    tiling_file_name_to_content[kCubeKernelTilingWrapperHpp] = result[kCubeKernelTilingWrapperHpp];
-    tiling_file_name_to_content[kCubeKernelTilingWrapperCpp] = result[kCubeKernelTilingWrapperCpp];
+    tiling_file_name_to_content[kCubeKernelTilingWrapperHpp] = result.at(kCubeKernelTilingWrapperHpp);
+    tiling_file_name_to_content[kCubeKernelTilingWrapperCpp] = result.at(kCubeKernelTilingWrapperCpp);
   }
+}
+
+std::map<std::string, std::string> TilingLib::GenerateCVFusion(const ascir::FusedScheduledResult &fused_schedule_result,
+                                                               const std::map<std::string, std::string> &shape_info,
+                                                               const std::string &pgo_dir, const std::string &core_num,
+                                                               uint32_t aicore_num) const {
+  std::map<std::string, std::string> tiling_file_name_to_content;
+  ascir::FusedScheduledResult elemwise_schedule_result = fused_schedule_result;
+  bool is_static = IsFrontendStaticSchedResult(elemwise_schedule_result);
+  if (!is_static) {
+    for (const auto &var : GetFrontendShapeVars(fused_schedule_result)) {
+      if (!var.IsConstExpr() && shape_info.find(std::string(var.Str().get())) == shape_info.end()) {
+        GELOGE(af::FAILED, "Missing dynamic shape source for frontend symbol[%s].", var.Str().get());
+        return {{kTilingDefAndConstIdentify, ascgen_utils::INVALID_TILING}};
+      }
+    }
+  }
+  if (!BuildCvFusionScheduleResult(fused_schedule_result, elemwise_schedule_result, is_static)) {
+    return {};
+  }
+  CommonOutputReusePlan::PreserveShapeVars(fused_schedule_result, elemwise_schedule_result);
+  if (is_static && UseCvNRowBatch(fused_schedule_result)) {
+    AlignCvNRowBatchTile(elemwise_schedule_result);
+  }
+  tiling_file_name_to_content = GetTilingHeaders(elemwise_schedule_result, false, true);
+  GE_CHK_BOOL_RET_STATUS_NOLOG(CheckTilingHeadersValid(tiling_file_name_to_content), tiling_file_name_to_content);
+
+  std::map<std::string, std::string> result;
+  if (is_static) {
+    result = GenerateCVFusionStatic(fused_schedule_result, elemwise_schedule_result, shape_info, pgo_dir, core_num,
+                                    aicore_num);
+  } else {
+    result = GenerateCVFusionDynamic(fused_schedule_result, elemwise_schedule_result, shape_info, pgo_dir, core_num,
+                                     aicore_num);
+  }
+
+  RenderCvFusionEntryUnit(elemwise_schedule_result, result, is_static, tiling_file_name_to_content);
   return tiling_file_name_to_content;
 }
 
 std::map<std::string, std::string> TilingLib::Generate(const ascir::FusedScheduledResult &fused_schedule_result,
                                                        const std::map<std::string, std::string> &shape_info,
                                                        const std::string &pgo_dir, const std::string &core_num) const {
+  return Generate(fused_schedule_result, shape_info, pgo_dir, core_num, 0U);
+}
+
+std::map<std::string, std::string> TilingLib::Generate(const ascir::FusedScheduledResult &fused_schedule_result,
+                                                       const std::map<std::string, std::string> &shape_info,
+                                                       const std::string &pgo_dir, const std::string &core_num,
+                                                       uint32_t aicore_num) const {
   if (ShouldFallbackPgo(fused_schedule_result)) {
     uint64_t tiling_key_count = 0U;
     const bool exact_count = ascgen_utils::TryCalcTilingKeyCount(
@@ -812,11 +838,11 @@ std::map<std::string, std::string> TilingLib::Generate(const ascir::FusedSchedul
     GELOGW("Tiling key count %s exceeds 10000, fallback to non-PGO codegen", count_text.c_str());
     TilingLib fallback(*this);
     fallback.DisableInductorPgo();
-    return fallback.Generate(fused_schedule_result, shape_info, pgo_dir, core_num);
+    return fallback.Generate(fused_schedule_result, shape_info, pgo_dir, core_num, aicore_num);
   }
   if (ascgen_utils::IsCubeFusedScheduled(fused_schedule_result) &&
       !ascgen_utils::IsJustCubeFixpip(fused_schedule_result)) {
-    return GenerateCVFusion(fused_schedule_result, shape_info, pgo_dir, core_num);
+    return GenerateCVFusion(fused_schedule_result, shape_info, pgo_dir, core_num, aicore_num);
   }
 
   std::map<std::string, std::string> tiling_file_name_to_content = GetTilingHeaders(fused_schedule_result, false);
@@ -1085,7 +1111,7 @@ std::string TilingLib::TilingFuncDefForInductor(const ascir::FusedScheduledResul
 std::string TilingLib::TilingFuncDef(const ascir::FusedScheduledResult &fused_schedule_result,
                                      const ::ascir::FusedScheduledResult &elemwise_schedule_result,
                                      const std::map<std::string, std::string> &shape_info, const std::string &pgo_dir,
-                                     const std::string &core_num) const {
+                                     const std::string &core_num, uint32_t aicore_num) const {
   std::stringstream ss;
   std::string graph_name = ascgen_utils::GenValidName(fused_schedule_result.fused_graph_name.GetString());
   std::string tiling_func_name = "AutofuseTiling";
@@ -1111,7 +1137,7 @@ std::string TilingLib::TilingFuncDef(const ascir::FusedScheduledResult &fused_sc
     ss << GenGetTilingKeyCount(elemwise_schedule_result);
   }
   ss << this->GenExternTilingFunc(fused_schedule_result, elemwise_schedule_result, shape_info, tiling_data_name,
-                                  pgo_dir, core_num)
+                                  pgo_dir, core_num, aicore_num)
      << std::endl;
   ss << this->GenTilingCacheFunc(elemwise_schedule_result, shape_info);
   ss << this->GenDfxInputSymbolInfo(elemwise_schedule_result, shape_info);
@@ -1349,9 +1375,14 @@ static void AppendCubeFusionUbSelectionCode(std::stringstream &ss, const MatMulC
                                             const std::string &final_tiling_call = "", bool reserve_cube_always = false,
                                             bool batch_n_rows = false);
 
-static std::string GenInductorCubeTilingCall(const ascir::FusedScheduledResult &fused_schedule_result,
-                                             const std::string &shape_dim_param) {
-  std::stringstream ss;
+// 生成 inductor 场景 CallCubeTiling 调用与 basen/basem 对齐常量代码，同时提取 MatMul 元信息与 tiling key 数量。
+bool TilingLib::AppendCvInductorCubeTilingCall(const ascir::FusedScheduledResult &fused_schedule_result,
+                                               const ::ascir::FusedScheduledResult &elemwise_schedule_result,
+                                               const std::string &shape_dim_param, MatMulCubeInfo &cube_info,
+                                               uint64_t &count, std::stringstream &ss) const {
+  GE_ASSERT_SUCCESS(ExtractMatMulCubeInfoFromFusedResult(fused_schedule_result, cube_info),
+                    "[Extract][MatMulCubeInfo]Failed to extract MatMul cube info from FusedScheduledResult");
+  count = CalcTilingKeyCount(elemwise_schedule_result);
   ss << "  int64_t ws_size = 0;" << std::endl;
   ss << "  int64_t cube_tiling_key = 0;" << std::endl;
   ss << "  uint32_t cube_block_dim = 0;" << std::endl;
@@ -1362,7 +1393,9 @@ static std::string GenInductorCubeTilingCall(const ascir::FusedScheduledResult &
     ss << "  tiling->cv_tiling_data = {};\n";
   }
   ss << "  if (!CallCubeTiling(" << shape_dim_param
-     << "ws_size, cube_block_dim, cube_tiling_key, basem, basen, tiling)) {return -1;}" << std::endl;
+     << "limit->aic_num, limit->aiv_num, ws_size, cube_block_dim, cube_tiling_key, basem, basen, tiling)) { return -1; "
+        "}"
+     << std::endl;
   ss << "  tiling->cube_tiling_key = cube_tiling_key;" << std::endl;
   if (ascgen_utils::IsJustCubeFixpip(fused_schedule_result)) {
     ss << "  if (ws_size < 0) { return -1; }\n"
@@ -1372,7 +1405,7 @@ static std::string GenInductorCubeTilingCall(const ascir::FusedScheduledResult &
           "  *workspaceSize = static_cast<uint64_t>(ws_size);\n"
           "  return 0;\n}\n";
   }
-  return ss.str();
+  return true;
 }
 
 static void AppendInductorCubeVectorInitialization(std::stringstream &ss) {
@@ -1389,7 +1422,20 @@ static void AppendInductorCubeVectorInitialization(std::stringstream &ss) {
   ss << "  tiling->tiling_data.set_ub_size(limit->ub_size - 256);" << std::endl;
 }
 
-static void AppendInductorCubeWorkspaceResult(std::stringstream &ss) {
+// 按 ATT codegen 与单组形态选择 inductor tiling 入口名与最终 tiling 回落调用串。
+void TilingLib::GenCvInductorTilingEntry(const ::ascir::FusedScheduledResult &elemwise_schedule_result,
+                                         bool use_att_codegen, std::string &tiling_entry,
+                                         std::string &fallback_final_tiling_call) const {
+  fallback_final_tiling_call =
+      use_att_codegen && ascgen_utils::IsSingleGroup(elemwise_schedule_result)
+          ? "optiling::EmitFinalTilingByCase(tiling->tiling_data, tiling->tiling_data.get_block_dim(), \"runtime\", "
+            "\"default\", 0U, static_cast<int32_t>(choice_case_id));"
+          : "";
+  tiling_entry = use_att_codegen ? "GetTilingCore" : "GetTiling";
+}
+
+// 生成 blockDim 回填与 workspace 校验的收尾代码。
+void TilingLib::AppendCvInductorTailReturnCode(std::stringstream &ss) const {
   ss << "  *blockDim = cube_block_dim;" << std::endl;
   ss << "  uint64_t vector_workspace_size = 0U;" << std::endl;
   ss << "  if (!GetWorkspaceSize(tiling->tiling_data, vector_workspace_size) ||" << std::endl;
@@ -1406,10 +1452,11 @@ std::string TilingLib::GenCubeFusionTilingBodyInductor(const ascir::FusedSchedul
                                                        const std::string &shape_dim_param) const {
   std::stringstream ss;
   MatMulCubeInfo cube_info;
-  GE_ASSERT_SUCCESS(ExtractMatMulCubeInfoFromFusedResult(fused_schedule_result, cube_info),
-                    "[Extract][MatMulCubeInfo]Failed to extract MatMul cube info from FusedScheduledResult");
-  uint64_t count = CalcTilingKeyCount(elemwise_schedule_result);
-  ss << GenInductorCubeTilingCall(fused_schedule_result, shape_dim_param);
+  uint64_t count = 0U;
+  if (!AppendCvInductorCubeTilingCall(fused_schedule_result, elemwise_schedule_result, shape_dim_param, cube_info,
+                                      count, ss)) {
+    return "";
+  }
   if (ascgen_utils::IsJustCubeFixpip(fused_schedule_result)) {
     return ss.str();
   }
@@ -1417,13 +1464,9 @@ std::string TilingLib::GenCubeFusionTilingBodyInductor(const ascir::FusedSchedul
   AppendInductorCubeVectorInitialization(ss);
 
   const bool use_att_codegen = UseAttCodegen(elemwise_schedule_result);
-  const std::string fallback_final_tiling_call =
-      use_att_codegen && ascgen_utils::IsSingleGroup(elemwise_schedule_result)
-          ? "optiling::EmitFinalTilingByCase(tiling->tiling_data, tiling->tiling_data.get_block_dim(), \"runtime\", "
-            "\"default\", 0U, static_cast<int32_t>(choice_case_id));"
-          : "";
-
-  const std::string tiling_entry = use_att_codegen ? "GetTilingCore" : "GetTiling";
+  std::string fallback_final_tiling_call;
+  std::string tiling_entry;
+  GenCvInductorTilingEntry(elemwise_schedule_result, use_att_codegen, tiling_entry, fallback_final_tiling_call);
   if (!ascgen_utils::IsCubeUBFusedScheduled(fused_schedule_result) &&
       ascgen_utils::IsCubeCommonFusedScheduled(fused_schedule_result)) {
     // The filtered ATT input contains only Common cases, starting at key 0.
@@ -1452,7 +1495,7 @@ std::string TilingLib::GenCubeFusionTilingBodyInductor(const ascir::FusedSchedul
     GenInductorGetTilingBranch(ss, count, cube_info.type_size, fallback_final_tiling_call, tiling_entry,
                                use_att_codegen && ascgen_utils::IsSingleGroup(elemwise_schedule_result));
   }
-  AppendInductorCubeWorkspaceResult(ss);
+  AppendCvInductorTailReturnCode(ss);
   return ss.str();
 }
 
@@ -1479,6 +1522,7 @@ std::string TilingLib::GenCallCubeTilingForInductor(const ascir::FusedScheduledR
                     "[Extract][MatMulCubeInfo]Failed to extract MatMul cube info from FusedScheduledResult");
   ss << "using namespace ge::autofuse;" << std::endl;
   AppendCvBaseAlignHelperDefs(ss);
+  AppendCvCoreLimitHelperDefs(ss, fused_schedule_result);
   AppendCvSafetyMixModeHelperDefs(ss, cube_info.is_batch);
   AppendCvUbSupportedKeyHelperDef(ss, (!cube_info.is_batch && cube_info.type_size == sizeof(float)) ? "true" : "false");
 
@@ -1486,9 +1530,11 @@ std::string TilingLib::GenCallCubeTilingForInductor(const ascir::FusedScheduledR
   ss << "// Global variable to store tiling bytes for const generation in static shape\n";
   ss << "std::vector<uint8_t> g_matmul_tiling_bytes;\n\n";
   ss << "extern \"C\" bool CallCubeTiling(" << pgo_shape_dim.shape_dim_def.str()
-     << "int64_t &ws_size, uint32_t &cube_block_dim, int64_t &tiling_key, uint32_t &basem, uint32_t "
+     << "uint32_t &cv_aic_num, uint32_t &cv_aiv_num, int64_t &ws_size, uint32_t &cube_block_dim, int64_t &tiling_key, "
+        "uint32_t &basem, uint32_t "
         "&basen, CVAutofuseTilingData *tiling_data) {"
      << std::endl;
+  ss << "static std::mutex cube_tiling_mutex;\nstd::lock_guard<std::mutex> lock(cube_tiling_mutex);\n";
   GenCallCubeTilingCacheRead(ss, dynamic_shape_vars);
   ss << ProcessCubeKernelTilingFromFusedResult(fused_schedule_result, true) << std::endl;
   GenCallCubeTilingCacheWrite(ss, dynamic_shape_vars);
@@ -1499,6 +1545,9 @@ std::string TilingLib::GenCallCubeTilingForInductor(const ascir::FusedScheduledR
 
 void TilingLib::GenCallCubeTilingCacheRead(std::stringstream &ss,
                                            const std::vector<std::string> &dynamic_shape_vars) const {
+  ss << "const uint32_t requested_aic = cv_aic_num;\nconst uint32_t requested_aiv = cv_aiv_num;\n";
+  ss << "static uint32_t cached_requested_aic = 0U, cached_requested_aiv = 0U;\n";
+  ss << "static uint32_t cached_effective_aic = 0U, cached_effective_aiv = 0U;\n";
   ss << "static bool g_cube_tiling_cache_valid = false;\n";
   for (const auto &var_name : dynamic_shape_vars) {
     ss << "static int64_t g_cube_tiling_cache_" << var_name << " = 0;\n";
@@ -1515,7 +1564,8 @@ void TilingLib::GenCallCubeTilingCacheRead(std::stringstream &ss,
   ss << "static uint64_t g_cube_tiling_cache_b_workspace_offset = 0U;\n";
   ss << "#ifdef CV_DYNAMIC_BMM_INPUT_VIEW\nstatic uint64_t g_cube_tiling_cache_b_input_shape[3] = {};\n#endif\n";
   ss << "#endif\n";
-  ss << "if (g_cube_tiling_cache_valid";
+  ss << "if (g_cube_tiling_cache_valid && cached_requested_aic == requested_aic && cached_requested_aiv == "
+        "requested_aiv";
   for (const auto &var_name : dynamic_shape_vars) {
     ss << " && g_cube_tiling_cache_" << var_name << " == " << var_name;
   }
@@ -1526,6 +1576,7 @@ void TilingLib::GenCallCubeTilingCacheRead(std::stringstream &ss,
   ss << "#ifdef CV_DYNAMIC_BMM_INPUT_VIEW\n"
         "  std::copy_n(g_cube_tiling_cache_b_input_shape, 3U, tiling_data->cv_tiling_data.b_input_shape);\n#endif\n";
   ss << "#endif\n";
+  ss << "  cv_aic_num = cached_effective_aic;\n  cv_aiv_num = cached_effective_aiv;\n";
   ss << "  ws_size = g_cube_tiling_cache_ws_size;\n";
   ss << "  cube_block_dim = g_cube_tiling_cache_block_dim;\n";
   ss << "  tiling_key = g_cube_tiling_cache_tiling_key;\n";
@@ -1545,6 +1596,8 @@ void TilingLib::GenCallCubeTilingCacheWrite(std::stringstream &ss,
   ss << "#ifdef CV_DYNAMIC_BMM_INPUT_VIEW\n"
         "std::copy_n(tiling_data->cv_tiling_data.b_input_shape, 3U, g_cube_tiling_cache_b_input_shape);\n#endif\n";
   ss << "#endif\n";
+  ss << "cached_requested_aic = requested_aic;\ncached_requested_aiv = requested_aiv;\n";
+  ss << "cached_effective_aic = cv_aic_num;\ncached_effective_aiv = cv_aiv_num;\n";
   ss << "g_cube_tiling_cache_valid = true;\n";
   for (const auto &var_name : dynamic_shape_vars) {
     ss << "g_cube_tiling_cache_" << var_name << " = " << var_name << ";\n";
@@ -1613,8 +1666,13 @@ std::string TilingLib::GenTilingFuncForInductor(const ascir::FusedScheduledResul
   ss << " ResLimit *res_limit = nullptr)" << std::endl;
   ss << "{" << std::endl;
 
-  ss << " const ResLimit effective_res_limit = GetResLimit(res_limit);" << std::endl;
-  ss << " const ResLimit *limit = &effective_res_limit;" << std::endl;
+  if (ascgen_utils::IsCubeFusedScheduled(fused_schedule_result)) {
+    ss << " ResLimit effective_res_limit = GetResLimit(res_limit);\n";
+    ss << " ResLimit *limit = &effective_res_limit;\n";
+  } else {
+    ss << " const ResLimit effective_res_limit = GetResLimit(res_limit);\n";
+    ss << " const ResLimit *limit = &effective_res_limit;\n";
+  }
 
   // Use first input shape pass all size variable value
   ss << pgo_shape_dim.tiling_set_shape_dim.str();
@@ -1707,16 +1765,50 @@ std::string TilingLib::GenTilingFunc(const std::map<std::string, std::string> &s
   return ss.str();
 }
 
-static void GetTilingParse(std::string &tiling_parse, int &vector_core_num, bool needs_api_workspace) {
-  std::stringstream ss;
+// 生成 AfTilingParseData 结构体定义，按场景包含 aic_num 与 api_workspace_size 字段。
+static void AppendTilingParseStructDef(std::stringstream &ss, bool is_cv, bool needs_api_workspace) {
   ss << "bool version_is_ASCEND950 = false;" << std::endl;
   ss << "struct AfTilingParseData{" << std::endl;
   ss << " uint32_t aiv_num;" << std::endl;
+  if (is_cv) {
+    ss << " uint32_t aic_num;\n";
+  }
   ss << " uint64_t ub_size;" << std::endl;
   if (needs_api_workspace) {
     ss << " uint64_t api_workspace_size;" << std::endl;
   }
   ss << "};" << std::endl;
+}
+
+// 生成 TilingParse 输出数据的申请与默认删除器挂接代码。
+static void AppendTilingParseOutputInit(std::stringstream &ss) {
+  ss << " auto extend_context = reinterpret_cast<gert::KernelContext *>(context);" << std::endl;
+  ss << " auto tiling_parse_data_av = extend_context->GetOutput(0);" << std::endl;
+  ss << " if (tiling_parse_data_av == nullptr) {" << std::endl;
+  ss << " return ge::GRAPH_FAILED;" << std::endl;
+  ss << " }" << std::endl;
+  ss << " auto tiling_parse_data_ptr = new (std::nothrow) uint8_t[sizeof(AfTilingParseData)];" << std::endl;
+  ss << " if (tiling_parse_data_ptr == nullptr) {" << std::endl;
+  ss << " return ge::GRAPH_FAILED;" << std::endl;
+  ss << " }" << std::endl;
+  ss << " tiling_parse_data_av->SetWithDefaultDeleter<uint8_t[]>(tiling_parse_data_ptr);" << std::endl;
+}
+
+// 当前A5获取ubsize没减256，和静态编译获取的不一致，临时规避
+static void AppendTilingParseUbSizeAdjust(std::stringstream &ss) {
+  ss << " if (ascendc_platform.GetSocVersion() == platform_ascendc::SocVersion::ASCEND950) {" << std::endl;
+  ss << " version_is_ASCEND950 = true;" << std::endl;
+  ss << " }" << std::endl;
+  ss << " ub_size -= (ascendc_platform.GetSocVersion() != platform_ascendc::SocVersion::ASCEND910 && "
+        "ascendc_platform.GetSocVersion() != platform_ascendc::SocVersion::ASCEND910B && ub_size % 1024 == 0) ? "
+        "256 : 0;"
+     << std::endl;
+}
+
+static void GetTilingParse(std::string &tiling_parse, int &vector_core_num, bool needs_api_workspace, bool is_cv,
+                           uint32_t aicore_num) {
+  std::stringstream ss;
+  AppendTilingParseStructDef(ss, is_cv, needs_api_workspace);
 
   ss << "extern \"C\" ge::graphStatus TilingParse(gert::SymbolTilingParseContext *context) {" << std::endl;
   ss << " auto platform = context->GetPlatFormInfos();" << std::endl;
@@ -1734,29 +1826,22 @@ static void GetTilingParse(std::string &tiling_parse, int &vector_core_num, bool
     ss << " aiv_num = std::min(platform_core_num, static_cast<uint32_t>(" << vector_core_num << "));" << std::endl;
   }
 
+  if (is_cv) {
+    ss << " uint32_t platform_aic_num = ascendc_platform.GetCoreNumAic();\n";
+    ss << " uint32_t aic_num = " << aicore_num << "U;\n";
+    ss << " if (!NormalizeCvCoreLimit(aic_num, aiv_num, platform_aic_num, platform_core_num)) {\n"
+          "   return ge::GRAPH_FAILED;\n }\n";
+  }
   ss << " ascendc_platform.GetCoreMemSize(platform_ascendc::CoreMemType::UB, ub_size);" << std::endl;
 
-  ss << " auto extend_context = reinterpret_cast<gert::KernelContext *>(context);" << std::endl;
-  ss << " auto tiling_parse_data_av = extend_context->GetOutput(0);" << std::endl;
-  ss << " if (tiling_parse_data_av == nullptr) {" << std::endl;
-  ss << " return ge::GRAPH_FAILED;" << std::endl;
-  ss << " }" << std::endl;
-  ss << " auto tiling_parse_data_ptr = new (std::nothrow) uint8_t[sizeof(AfTilingParseData)];" << std::endl;
-  ss << " if (tiling_parse_data_ptr == nullptr) {" << std::endl;
-  ss << " return ge::GRAPH_FAILED;" << std::endl;
-  ss << " }" << std::endl;
-  ss << " tiling_parse_data_av->SetWithDefaultDeleter<uint8_t[]>(tiling_parse_data_ptr);" << std::endl;
+  AppendTilingParseOutputInit(ss);
 
   ss << " auto tiling_parse_data = extend_context->GetOutputPointer<AfTilingParseData *>(0);" << std::endl;
   ss << " (*tiling_parse_data)->aiv_num = aiv_num;" << std::endl;
-  // 当前A5获取ubsize没减256，和静态编译获取的不一致，临时规避
-  ss << " if (ascendc_platform.GetSocVersion() == platform_ascendc::SocVersion::ASCEND950) {" << std::endl;
-  ss << " version_is_ASCEND950 = true;" << std::endl;
-  ss << " }" << std::endl;
-  ss << " ub_size -= (ascendc_platform.GetSocVersion() != platform_ascendc::SocVersion::ASCEND910 && "
-        "ascendc_platform.GetSocVersion() != platform_ascendc::SocVersion::ASCEND910B && ub_size % 1024 == 0) ? "
-        "256 : 0;"
-     << std::endl;
+  if (is_cv) {
+    ss << " (*tiling_parse_data)->aic_num = aic_num;\n";
+  }
+  AppendTilingParseUbSizeAdjust(ss);
   ss << " (*tiling_parse_data)->ub_size = ub_size;" << std::endl;
   if (needs_api_workspace) {
     ss << " (*tiling_parse_data)->api_workspace_size = ascendc_platform.GetLibApiWorkSpaceSize();" << std::endl;
@@ -1905,9 +1990,12 @@ static void AppendCubeFusionInitCode(std::stringstream &ss, const std::string &s
   ss << "  uint32_t cube_block_dim = 0;" << std::endl;
   ss << "  uint32_t basem = 0;" << std::endl;
   ss << "  uint32_t basen = 0;" << std::endl;
+  ss << "  ResLimit limit;\n  limit.aic_num = parse->aic_num;\n  limit.aiv_num = parse->aiv_num;\n";
   ss << "  if (!CallCubeTiling(" << shape_dim_param
-     << "ws_size, cube_block_dim, cube_tiling_key, basem, basen, tiling_data)) {return ge::GRAPH_FAILED;}" << std::endl;
-  ss << "  ResLimit limit;" << std::endl << "  limit.aiv_num = parse->aiv_num;" << std::endl;
+     << "limit.aic_num, limit.aiv_num, ws_size, cube_block_dim, cube_tiling_key, basem, basen, tiling_data)) { return "
+        "ge::GRAPH_FAILED; }"
+     << std::endl;
+
   ss << "  limit.ub_size = (uint32_t)parse->ub_size;" << std::endl;
   ss << "  auto ret = ge::GRAPH_SUCCESS;" << std::endl;
   if (!is_ub_fused) {
@@ -2039,7 +2127,8 @@ static void AppendCubeFusionCommonCode(std::stringstream &ss, const std::string 
   ss << "    return ge::GRAPH_FAILED;" << std::endl;
   ss << "  }" << std::endl;
   ss << "  const bool aiv_only = is_cv_safety_aiv_only_mode(cube_tiling_key);" << std::endl;
-  ss << "  const uint32_t launch_block_dim = aiv_only ? block_dim : std::max(cube_block_dim, (block_dim + 1) / 2);"
+  ss << "  const uint32_t launch_block_dim = aiv_only ? block_dim : std::max(cube_block_dim, (block_dim + kCvTaskRatio "
+        "- 1U) / kCvTaskRatio);"
      << std::endl;
   ss << "  context->SetBlockDim(launch_block_dim);" << std::endl;
   ss << "  *context->GetWorkspaceSizes(1) = static_cast<int64_t>(total_workspace_size);" << std::endl;
@@ -2180,13 +2269,33 @@ std::string TilingLib::GenExternTilingFuncBody(const ascir::FusedScheduledResult
   return ss.str() + GenNonCubeFusionTilingBody(elemwise_schedule_result, tiling, shape_dim_param.str());
 }
 
-std::string TilingLib::GenExternTilingFunc(const ascir::FusedScheduledResult &fused_schedule_result,
-                                           const ascir::FusedScheduledResult &elemwise_schedule_result,
-                                           const std::map<std::string, std::string> &shape_info,
-                                           const std::string tiling, const std::string &pgo_dir,
-                                           const std::string &core_num) const {
-  std::stringstream ss;
-  std::string extern_c = "extern \"C\"";
+// 生成 Cube 静态场景的 TilingFunc 主体与 TilingFuncVec 函数签名，workspace 按宿主任务形态决定挂接位置。
+void TilingLib::AppendExternCubeStaticTilingFunc(std::stringstream &ss,
+                                                 const ascir::FusedScheduledResult &fused_schedule_result,
+                                                 const ascir::FusedScheduledResult &elemwise_schedule_result,
+                                                 const std::map<std::string, std::string> &shape_info,
+                                                 const std::string &tiling, const std::string &pgo_dir,
+                                                 const std::string &extern_c) const {
+  ss << extern_c << " ge::graphStatus TilingFunc(gert::TilingSymbolEvalContext *context)" << std::endl;
+  ss << "{" << std::endl;
+  ss << GenExternTilingFuncBody(fused_schedule_result, elemwise_schedule_result, shape_info, tiling, pgo_dir);
+  if (!ascgen_utils::IsConv2DFusedScheduled(fused_schedule_result)) {
+    // GE static tasks add Cube workspace to TilingFuncVec separately; Host tasks use TilingFunc directly.
+    ss << "  if (!CheckedWorkspaceAdd(*context->GetWorkspaceSizes(1), CUBE_WORKSPACE_SIZE, workspace_size)) {"
+       << std::endl;
+    ss << "    return ge::GRAPH_FAILED;" << std::endl;
+    ss << "  }" << std::endl;
+    ss << "  *context->GetWorkspaceSizes(1) = workspace_size;" << std::endl;
+  }
+  ss << "  context->SetBlockDim(CUBE_BLOCK_DIM);" << std::endl;
+  ss << "  context->SetTilingKey(static_cast<uint64_t>(CUBE_TILING_KEY));" << std::endl;
+  ss << "  return ret;" << std::endl;
+  ss << "}" << std::endl;
+  ss << extern_c << " ge::graphStatus TilingFuncVec(gert::TilingSymbolEvalContext *context)" << std::endl;
+}
+
+// gert 侧 TilingSymbolEvalContext / SymbolTilingParseContext 适配类定义，供外部 tiling 函数引用。
+static std::string GetTilingContextDef() {
   std::string tiling_context = R"(
 namespace gert {
   class TilingSymbolEvalContext : public TilingContext {
@@ -2211,33 +2320,30 @@ namespace gert {
       }
   };
 })";
+  return tiling_context;
+}
 
-  ss << tiling_context << std::endl;
+std::string TilingLib::GenExternTilingFunc(const ascir::FusedScheduledResult &fused_schedule_result,
+                                           const ascir::FusedScheduledResult &elemwise_schedule_result,
+                                           const std::map<std::string, std::string> &shape_info,
+                                           const std::string tiling, const std::string &pgo_dir,
+                                           const std::string &core_num, uint32_t aicore_num) const {
+  std::stringstream ss;
+  std::string extern_c = "extern \"C\"";
+  ss << GetTilingContextDef() << std::endl;
   std::string tiling_parse_def;
   int vector_core_num = std::atoi(core_num.c_str());
   const bool needs_api_workspace = ascgen_utils::IsCubeFusedScheduled(fused_schedule_result) &&
                                    !ascgen_utils::IsConv2DFusedScheduled(fused_schedule_result) &&
                                    !IsFrontendStaticSchedResult(fused_schedule_result);
-  GetTilingParse(tiling_parse_def, vector_core_num, needs_api_workspace);
+  const bool is_cv = ascgen_utils::IsCubeFusedScheduled(fused_schedule_result) &&
+                     !ascgen_utils::IsJustCubeFixpip(fused_schedule_result);
+  GetTilingParse(tiling_parse_def, vector_core_num, needs_api_workspace, is_cv, aicore_num);
   ss << tiling_parse_def << std::endl;
   const std::string graph_name = CamelToLowerSneak(fused_schedule_result.fused_graph_name.GetString());
   if (ascgen_utils::IsCubeFusedScheduled(fused_schedule_result) && IsFrontendStaticSchedResult(fused_schedule_result)) {
-    ss << extern_c << " ge::graphStatus TilingFunc(gert::TilingSymbolEvalContext *context)" << std::endl;
-    ss << "{" << std::endl;
-    ss << GenExternTilingFuncBody(fused_schedule_result, elemwise_schedule_result, shape_info, tiling, pgo_dir);
-    if (!ascgen_utils::IsConv2DFusedScheduled(fused_schedule_result)) {
-      // GE static tasks add Cube workspace to TilingFuncVec separately; Host tasks use TilingFunc directly.
-      ss << "  if (!CheckedWorkspaceAdd(*context->GetWorkspaceSizes(1), CUBE_WORKSPACE_SIZE, workspace_size)) {"
-         << std::endl;
-      ss << "    return ge::GRAPH_FAILED;" << std::endl;
-      ss << "  }" << std::endl;
-      ss << "  *context->GetWorkspaceSizes(1) = workspace_size;" << std::endl;
-    }
-    ss << "  context->SetBlockDim(CUBE_BLOCK_DIM);" << std::endl;
-    ss << "  context->SetTilingKey(static_cast<uint64_t>(CUBE_TILING_KEY));" << std::endl;
-    ss << "  return ret;" << std::endl;
-    ss << "}" << std::endl;
-    ss << extern_c << " ge::graphStatus TilingFuncVec(gert::TilingSymbolEvalContext *context)" << std::endl;
+    AppendExternCubeStaticTilingFunc(ss, fused_schedule_result, elemwise_schedule_result, shape_info, tiling, pgo_dir,
+                                     extern_c);
   } else {
     ss << extern_c << " ge::graphStatus TilingFunc(gert::TilingSymbolEvalContext *context)" << std::endl;
   }

@@ -9,6 +9,8 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
+from types import SimpleNamespace
+
 import pytest
 
 from compile_test_utils import load_asc_codegen_compile_module
@@ -289,7 +291,8 @@ def test_host_replacement_happens_once_before_static_shape_compile_and_uses_fina
         "kernel_name",
         temp_dir=str(tmpdir),
         params={
-            "schedule_results": object(),
+            # asc_graph_compile入口按is_cube_type分流CV融合预算，非cube桩保持原_compile_impl流程
+            "schedule_results": SimpleNamespace(is_cube_type=lambda: False),
             "vector_core_num": 1,
             "impl_mode": None,
         },

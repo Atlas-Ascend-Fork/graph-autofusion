@@ -27,6 +27,7 @@
 #include "common_utils.h"
 #include "common/ge_common/debug/log.h"
 #include "codegen_infershape.h"
+#include "codegen_tiling_utils.h"
 #include "common/platform_context.h"
 #include "gen_model_info/api_perf_register/soc_perf_config.h"
 #include "graph/ascendc_ir/utils/asc_graph_utils.h"
@@ -47,25 +48,6 @@ const std::string kAdvApiInclude = "#include \"adv_api/";
 const std::string kMicroApiInclude = "#include \"micro_api/";
 const std::string kSimtApiInclude = "#include \"simt_api/";
 const std::string kUtilsStdInclude = "#include \"utils/std/";
-
-std::string GetKernelTaskType(const ascir::FusedScheduledResult &schedule_results) {
-  if (ascgen_utils::IsJustCubeFixpip(schedule_results)) {
-    return kKernelTaskTypeAICOnly;
-  } else if (ascgen_utils::IsCubeFusedScheduled(schedule_results)) {
-    if (ascgen_utils::IsConv2DFusedScheduled(schedule_results)) {
-      std::string npu_arch;
-      GE_ASSERT_SUCCESS(ge::PlatformContext::GetInstance().GetCurrentPlatformString(npu_arch));
-      if (npu_arch == "5102") {
-        return kKernelTaskTypeMixAICOneOne;
-      } else {
-        return kKernelTaskTypeMixAICOneTwo;
-      }
-    } else {
-      return kKernelTaskTypeMixAICOneTwo;
-    }
-  }
-  return schedule_results.workspace_nodes.size() != 0 ? kKernelTaskTypeMixAIVOneZero : kKernelTaskTypeAIVOnly;
-}
 
 std::string RemoveAutoFuseTilingHeadGuards(const std::string &input) {
   std::istringstream iss(input);
@@ -519,8 +501,17 @@ Status Codegen::GenerateTiling(const ascir::FusedScheduledResult &fused_schedule
                                const std::map<std::string, std::string> &shape_info, const std::string &pgo_dir,
                                const std::string &core_num,
                                std::map<std::string, std::string> &tiling_file_name_to_content) const {
+  return GenerateTiling(fused_schedule_result, shape_info, pgo_dir, core_num, tiling_file_name_to_content, 0U);
+}
+
+Status Codegen::GenerateTiling(const ascir::FusedScheduledResult &fused_schedule_result,
+                               const std::map<std::string, std::string> &shape_info, const std::string &pgo_dir,
+                               const std::string &core_num,
+                               std::map<std::string, std::string> &tiling_file_name_to_content,
+                               uint32_t aicore_num) const {
   GE_CHK_STATUS_RET(att::ValidateSocPerfEntry(), "Validate SoC performance target failed");
-  tiling_file_name_to_content = this->tiling_lib_.Generate(fused_schedule_result, shape_info, pgo_dir, core_num);
+  tiling_file_name_to_content =
+      this->tiling_lib_.Generate(fused_schedule_result, shape_info, pgo_dir, core_num, aicore_num);
   for (const auto &pair : tiling_file_name_to_content) {
     GE_CHK_BOOL_RET_STATUS(pair.second != ascgen_utils::INVALID_TILING, af::FAILED, "tilings(%s) is invalid",
                            pair.second.c_str());

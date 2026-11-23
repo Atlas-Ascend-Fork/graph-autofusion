@@ -12,6 +12,16 @@
 
 namespace MatmulV3Advanced {
 
+template <class Params, class Tiling>
+__aicore__ inline auto FillTensorCommonSplitKBase(Params &params, const Tiling &tiling, int)
+    -> decltype(params.splitSingleCoreKBase = tiling.splitSingleCoreKBase, void()) {
+  params.splitSingleCoreKBase = tiling.splitSingleCoreKBase;
+}
+
+// Older native MMADs use a fixed split threshold and have no corresponding tiling field.
+template <class Params, class Tiling>
+__aicore__ inline void FillTensorCommonSplitKBase(Params &, const Tiling &, long) {}
+
 // Native block parameter layouts differ between Basic and full-load MMADs.
 template <int8_t Model, int8_t FullLoad, class Params>
 __aicore__ inline void FillTensorCommonMmadParams(Params &params, GM_ADDR aGM, GM_ADDR bGM, GM_ADDR biasGM, GM_ADDR cGM,
@@ -33,6 +43,7 @@ __aicore__ inline void FillTensorCommonMmadParams(Params &params, GM_ADDR aGM, G
   }
   if constexpr (Model == MAT_MUL_BASIC_SPLIT_K) {
     params.k = tiling.k;
+    FillTensorCommonSplitKBase(params, tiling, 0);
   } else if constexpr (FullLoad != MAT_MUL_NO_FULL_LOAD) {
     params.oriK = tiling.k;
   }

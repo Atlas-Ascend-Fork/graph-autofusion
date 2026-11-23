@@ -32,7 +32,7 @@ constexpr int8_t MAT_MUL_ON_THE_FLY = 0;
 struct MatMulV3BasicTilingData {
   uint32_t m, n, k, mL1, nL1, kL1, baseM, baseN, baseK, mTailCnt, nTailCnt;
   uint32_t mBaseTailSplitCnt, nBaseTailSplitCnt, mTailMain, nTailMain, l1BufferNum, l0cDB;
-  uint32_t rowStride, l2CacheDisable, sliceM, srcNdStride, usedCoreNum, innerBatch;
+  uint32_t rowStride, l2CacheDisable, sliceM, srcNdStride, usedCoreNum, innerBatch, splitSingleCoreKBase;
   uint8_t mmadParam;
 };
 namespace AscendC {
@@ -116,6 +116,7 @@ struct BasicParams : MmadParamsBase {
 };
 struct SplitKParams : BasicParams {
   uint64_t k{};
+  uint64_t splitSingleCoreKBase{1024};
 };
 struct AFullParams : MmadParamsBase {
   uint64_t oriK{};
@@ -124,10 +125,19 @@ struct BFullParams : BasicParams {
   uint64_t oriK{};
 };
 
+TEST(TensorCommonDispatch, SplitKThresholdKeepsLegacyNativeLayoutsCompilable) {
+  struct LegacyTiling {};
+  struct LegacyParams {};
+  LegacyParams legacy{};
+  LegacyTiling tiling{};
+  MatmulV3Advanced::FillTensorCommonSplitKBase(legacy, tiling, 0);
+}
+
 TEST(TensorCommonDispatch, NativeMmadLayoutsKeepTheirKAndNTileFields) {
   MatMulV3BasicTilingData tiling{};
   tiling.k = 512;
   tiling.nL1 = 64;
+  tiling.splitSingleCoreKBase = 128;
   BasicParams basic{};
   SplitKParams split{};
   AFullParams aFull{};
@@ -143,6 +153,7 @@ TEST(TensorCommonDispatch, NativeMmadLayoutsKeepTheirKAndNTileFields) {
   EXPECT_EQ(basic.nL1, 64U);
   EXPECT_EQ(split.nL1, 64U);
   EXPECT_EQ(split.k, 512U);
+  EXPECT_EQ(split.splitSingleCoreKBase, 128U);
   EXPECT_EQ(aFull.oriK, 512U);
   EXPECT_EQ(bFull.nL1, 64U);
   EXPECT_EQ(bFull.oriK, 512U);

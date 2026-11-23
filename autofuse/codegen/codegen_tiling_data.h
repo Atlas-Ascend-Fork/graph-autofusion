@@ -55,6 +55,11 @@ class TilingData {
                                             const ascir::NodeView &node);
   void ConstTilingDataFieldPopBack();
 
+  void AppendConstGenSceneBody(std::stringstream &global_pre_def_ss, std::stringstream &const_gen_ss,
+                               const ascir::FusedScheduledResult &fused_schedule_result, bool is_inductor_scene,
+                               bool ge_cv_broadcast, const std::string &tiling_data_struct_name);
+  std::string GenerateConstFieldData(const ascir::FusedScheduledResult &fused_schedule_result, bool is_inductor_scene);
+
   std::string GenGenTilingDataFieldConstDefFunc() const;
   std::string GenGenTilingDataFieldConstValueFunc() const;
   af::Status ProcessCubeFusionResult(ascir::FusedScheduledResult &schedule_result);
