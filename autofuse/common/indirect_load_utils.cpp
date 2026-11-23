@@ -1307,7 +1307,11 @@ af::Status BuildSimtPolicyMetadata(const TemplateLogicalView &logical_view, cons
       metadata.runtime_params = {inner_span, output_axis_span, input_axis_stride, input_axis_span};
       break;
     case SimtAddressPolicy::kEmbedding:
-      AppendRuntimeParams(metadata.runtime_params, index.sizes);
+      // 坐标分解的除数取 IL 自身输出尺寸：output_index 定义在输出坐标空间上，索引视图只
+      // 描述索引的逻辑坐标，两者尺寸不保证一致（索引路径可能解析为原始装载窗口而非
+      // broadcast 视图）。除数取索引视图尺寸时，非 gather 轴坐标被解为 0，input_base
+      // 随该维步长偏移丢失；input/index 的 strides 仍按各自视图表达。
+      AppendRuntimeParams(metadata.runtime_params, output.sizes);
       AppendRuntimeParams(metadata.runtime_params, input.strides);
       AppendRuntimeParams(metadata.runtime_params, index.strides);
       break;
@@ -1316,12 +1320,8 @@ af::Status BuildSimtPolicyMetadata(const TemplateLogicalView &logical_view, cons
       AppendRuntimeParams(metadata.runtime_params, input.strides);
       break;
     case SimtAddressPolicy::kStrided:
-      // [多路融合参数坍缩修复] 分解除数必须取 IL 自身输出尺寸（output_index 的坐标
-      // 空间），不能取 index 视图尺寸——单路 IL 两者恒等无差异；多路融合共享
-      // broadcast index 时，非 primary 成员的 index 视图可能解析为 raw Load 窗口
-      // （如 [1,1,5]）而非 broadcast 输出（如 [88,4752,5]），导致分解坍缩
-      // → 所有元素恒读 input[0,idx,0,0] → 常向量（静默精度错误）。
-      // kEmbedding/kRecursive 不改：其 index 视图语义就是输出坐标（单路恒等）。
+      // 与 kEmbedding 同一坐标空间约定：分解除数取 IL 自身输出尺寸，strides 按各自视图
+      // 表达。
       AppendRuntimeParams(metadata.runtime_params, output.sizes);
       AppendRuntimeParams(metadata.runtime_params, input.strides);
       AppendRuntimeParams(metadata.runtime_params, index.strides);
