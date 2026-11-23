@@ -1560,6 +1560,21 @@ LogicalResult registerLogicalScalarImplementations(ImplementationRegistry &regis
   return success();
 }
 
+// `axpy`：两个平台共用同一个扩展包装 `AxpyExtend`（`axpy.h`，`api_regbase/` 下没有
+// 对应文件）与 tmp 契约。f16/f32 由两侧共用行收；bf16/i64/ui64 只在 reg 侧可选，按
+// 家族拆一行 RegBased 注册。它与上面所有 op 差的不是可用实现，是生成的形状：二元 +
+// 一个由 ODS 属性来的实参 + 一块 tmp buffer，所以走自己的 pattern
+// （`BinaryScalarAttrConversionPattern`），不走 `registerBinary` 那条。
+LogicalResult registerAxpyImplementations(ImplementationRegistry &registry) {
+  if (failed(registerBinaryScalarAttr<AxpyOp, ascendc::AxpyExtendContiguousOp>(registry, "axpy.tensor_tensor",
+                                                                               ApiFamily::Shared, kF16 | kF32)) ||
+      failed(registerBinaryScalarAttr<AxpyOp, ascendc::AxpyExtendContiguousOp>(
+          registry, "axpy.tensor_tensor.reg_base", ApiFamily::RegBased, kBF16 | kI64 | kUI64))) {
+    return failure();
+  }
+  return success();
+}
+
 LogicalResult registerTrueDivPowAxpyImplementations(ImplementationRegistry &registry) {
   // `truediv`：**第一个结果 dtype 逐行不同的 op**，也是第一个 mem 侧要说出**两个**扩展头
   // 的二元 op（`scalar_div.h` + `true_div.h`，`sign` 在一元那边先兑现过前置 A）。
@@ -1633,11 +1648,7 @@ LogicalResult registerTrueDivPowAxpyImplementations(ImplementationRegistry &regi
     return failure();
   }
 
-  // 两个平台用同一个包装和 tmp 契约。f16/f32 共用，扩展类型只在 A5 可选。
-  if (failed(registerBinaryScalarAttr<AxpyOp, ascendc::AxpyExtendContiguousOp>(registry, "axpy.tensor_tensor",
-                                                                               ApiFamily::Shared, kF16 | kF32)) ||
-      failed(registerBinaryScalarAttr<AxpyOp, ascendc::AxpyExtendContiguousOp>(
-          registry, "axpy.tensor_tensor.reg_base", ApiFamily::RegBased, kBF16 | kI64 | kUI64))) {
+  if (failed(registerAxpyImplementations(registry))) {
     return failure();
   }
   return success();
