@@ -166,15 +166,13 @@ bool EnsureStreamCapacity(const ScopeStreamInfo &streamInfo, const std::vector<a
 
 bool ProcessFrontWaitForStream(SuperKernelGraph &graph, ScopeExtInfo &extInfo,
                                const std::vector<ScopeStreamInfo> &scopeStreamInfos, uint32_t curStreamIdx,
+                               uint64_t lastNodeId,
                                const std::unordered_map<uint32_t, uint64_t> &lastTaskByStreamAfterFilter,
                                uint32_t &needFrontWaitCount, uint32_t &prevWaitStreamIdx) {
   auto &scopeStreamInfo = scopeStreamInfos[curStreamIdx];
   const auto owner = lastTaskByStreamAfterFilter.find(scopeStreamInfo.streamIdx);
-  if (owner == lastTaskByStreamAfterFilter.end()) {
-    SK_LOGI("no synthetic event owner after filtering: streamId=%u, tailNodeId=%lu", scopeStreamInfo.streamIdx,
-            scopeStreamInfo.tailNodeIdx);
-    extInfo.processStatus = ScopeProcessStatus::NO_TARGET_NODE;
-    return false;
+  if (owner != lastTaskByStreamAfterFilter.end()) {
+    lastNodeId = owner->second;
   }
   SK_LOGI("front-wait process begin: streamId=%u, prevWaitStreamIdx=%u, remainFrontWait=%u", scopeStreamInfo.streamIdx,
           prevWaitStreamIdx, needFrontWaitCount);
@@ -199,7 +197,7 @@ bool ProcessFrontWaitForStream(SuperKernelGraph &graph, ScopeExtInfo &extInfo,
   // create resetNode for sk optimize
   auto resetNode =
       SuperKernelNodeFactory::CreateNode(std::make_unique<aclmdlRITask>(nullptr), ACL_MODEL_RI_TASK_EVENT_RESET,
-                                         INVALID_TASK_ID, scopeStreamInfo.streamIdx, INVALID_STREAM_ID, owner->second);
+                                         INVALID_TASK_ID, scopeStreamInfo.streamIdx, INVALID_STREAM_ID, lastNodeId);
   resetNode->SetNodeId(syntheticNodeId);
   resetNode->SetNodeType(SkNodeType::NODE_RESET);
   resetNode->nodeInfos.syncInfos.eventId = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(addr));
@@ -240,14 +238,12 @@ bool ProcessFrontWaitForStream(SuperKernelGraph &graph, ScopeExtInfo &extInfo,
 
 bool ProcessBackBlockForStream(SuperKernelGraph &graph, ScopeExtInfo &extInfo,
                                const std::vector<ScopeStreamInfo> &scopeStreamInfos, uint32_t curStreamIdx,
+                               uint64_t lastNodeId,
                                const std::unordered_map<uint32_t, uint64_t> &lastTaskByStreamAfterFilter) {
   auto &scopeStreamInfo = scopeStreamInfos[curStreamIdx];
   const auto owner = lastTaskByStreamAfterFilter.find(scopeStreamInfo.streamIdx);
-  if (owner == lastTaskByStreamAfterFilter.end()) {
-    SK_LOGI("no synthetic event owner after filtering: streamId=%u, tailNodeId=%lu", scopeStreamInfo.streamIdx,
-            scopeStreamInfo.tailNodeIdx);
-    extInfo.processStatus = ScopeProcessStatus::NO_TARGET_NODE;
-    return false;
+  if (owner != lastTaskByStreamAfterFilter.end()) {
+    lastNodeId = owner->second;
   }
   SK_LOGI("back-block process begin: streamId=%u", scopeStreamInfo.streamIdx);
 
@@ -268,7 +264,7 @@ bool ProcessBackBlockForStream(SuperKernelGraph &graph, ScopeExtInfo &extInfo,
   // create notifyNode for sk optimize
   auto notifyNode =
       SuperKernelNodeFactory::CreateNode(std::make_unique<aclmdlRITask>(nullptr), ACL_MODEL_RI_TASK_EVENT_RECORD,
-                                         INVALID_TASK_ID, scopeStreamInfo.streamIdx, INVALID_STREAM_ID, owner->second);
+                                         INVALID_TASK_ID, scopeStreamInfo.streamIdx, INVALID_STREAM_ID, lastNodeId);
   notifyNode->SetNodeId(syntheticNodeId);
   notifyNode->SetNodeType(SkNodeType::NODE_NOTIFY);
   notifyNode->nodeInfos.syncInfos.eventId = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(addr));
@@ -638,33 +634,30 @@ bool SuperKernelScopePostProcessor::ProcessSubStreamSyncEvents(
     uint32_t mainStreamIdx, const std::vector<uint32_t> &subStreamOrder, uint32_t needFrontWaitCount,
     const std::unordered_map<uint32_t, uint64_t> &lastTaskByStreamAfterFilter) {
   uint32_t prevWaitStreamIdx = mainStreamIdx;
+  uint64_t lastNodeId = tempExtInfo.filteredNodes.back()->GetNodeId();
+  SK_LOGI("scope processing front-wait and back-block begin: lastNodeId=%lu", lastNodeId);
+
   const auto &scopeStreamInfos = scopeInfo.GetScopeStreamInfos();
-  SK_LOGI("scope processing front-wait and back-block begin");
   for (uint32_t curStreamIdx : subStreamOrder) {
-    const auto &plan = plans[curStreamIdx];
-    if (!plan.needFrontWait && !plan.needBackBlock) {
-      continue;
-    }
-    if (plan.needFrontWait &&
-        !ProcessFrontWaitForStream(graph, tempExtInfo, scopeStreamInfos, curStreamIdx, lastTaskByStreamAfterFilter,
-                                   needFrontWaitCount, prevWaitStreamIdx)) {
+    if (plans[curStreamIdx].needFrontWait &&
+        !ProcessFrontWaitForStream(graph, tempExtInfo, scopeStreamInfos, curStreamIdx, lastNodeId,
+                                   lastTaskByStreamAfterFilter, needFrontWaitCount, prevWaitStreamIdx)) {
       SK_LOGE("process front-wait failed streamId=%u, nodeSize=%lu, FrontWait=%u",
               scopeStreamInfos[curStreamIdx].streamIdx, scopeStreamInfos[curStreamIdx].nodeSize,
               plans[curStreamIdx].needFrontWait);
-      if (tempExtInfo.processStatus != ScopeProcessStatus::UNRECOVERABLE_FAIL &&
-          tempExtInfo.processStatus != ScopeProcessStatus::NO_TARGET_NODE) {
+      if (tempExtInfo.processStatus != ScopeProcessStatus::UNRECOVERABLE_FAIL) {
         tempExtInfo.processStatus = ScopeProcessStatus::RESOURCE_INSUFFICIENT;
       }
       return false;
     }
 
-    if (plan.needBackBlock &&
-        !ProcessBackBlockForStream(graph, tempExtInfo, scopeStreamInfos, curStreamIdx, lastTaskByStreamAfterFilter)) {
+    if (plans[curStreamIdx].needBackBlock &&
+        !ProcessBackBlockForStream(graph, tempExtInfo, scopeStreamInfos, curStreamIdx, lastNodeId,
+                                   lastTaskByStreamAfterFilter)) {
       SK_LOGE("process back-block failed streamId=%u, nodeSize=%lu, BackBlock=%u",
               scopeStreamInfos[curStreamIdx].streamIdx, scopeStreamInfos[curStreamIdx].nodeSize,
               plans[curStreamIdx].needBackBlock);
-      if (tempExtInfo.processStatus != ScopeProcessStatus::UNRECOVERABLE_FAIL &&
-          tempExtInfo.processStatus != ScopeProcessStatus::NO_TARGET_NODE) {
+      if (tempExtInfo.processStatus != ScopeProcessStatus::UNRECOVERABLE_FAIL) {
         tempExtInfo.processStatus = ScopeProcessStatus::RESOURCE_INSUFFICIENT;
       }
       return false;

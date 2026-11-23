@@ -237,7 +237,12 @@ bool SuperKernelOptimizer::BuildTaskListWithCustomEvents(
     }
     auto &events = it->second;
     for (const auto *event : events) {
-      if (event->GetStreamIdxInGraph() != task->GetStreamIdxInGraph()) {
+      // An empty stream keeps the scope-tail anchor used before early release.
+      if (event->GetStreamIdxInGraph() != task->GetStreamIdxInGraph() &&
+          (task != taskNodes.back() ||
+           std::any_of(taskNodes.begin(), taskNodes.end(), [event](const SuperKernelBaseNode *node) {
+             return node != nullptr && node->GetStreamIdxInGraph() == event->GetStreamIdxInGraph();
+           }))) {
         SK_LOGE(
             "cannot schedule custom event: owner is on a different stream, eventId=%lu, streamIdx=%u, ownerNodeId=%lu",
             event->GetNodeId(), event->GetStreamIdxInGraph(), task->GetNodeId());

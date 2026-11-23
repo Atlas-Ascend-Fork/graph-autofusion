@@ -769,3 +769,35 @@ TEST_F(SkOptimizerTaskReorderTest, TaskAssemblyUsesBoundOwnerWithoutAddingDepend
   EXPECT_EQ(later->sendToNodeId.count(notify->GetNodeId()), 0U);
   EXPECT_TRUE(notify->receiveNodeId.empty());
 }
+
+TEST_F(SkOptimizerTaskReorderTest, EmptyStreamEventsFollowBoundScopeTail) {
+  auto *first = CreateKernelNode(9301, 0);
+  auto *tail = CreateKernelNode(9302, 1, SkKernelType::MIX_AIC_1_2);
+  auto *reset = CreateResetNode(9303, 2);
+  auto *notify = CreateNotifyNode(9304, 2);
+  BindSyntheticEvent(tail, reset);
+  BindSyntheticEvent(tail, notify);
+  std::vector<std::unique_ptr<SuperKernelBaseNode>> events;
+  events.push_back(std::move(graph->graphMap[reset->GetNodeId()]));
+  events.push_back(std::move(graph->graphMap[notify->GetNodeId()]));
+
+  auto tasks = BuildTasksWithCustomEvents({first, tail}, events);
+  ASSERT_EQ(ToNodeIds(tasks), (std::vector<uint64_t>{9301, 9302, 9304, 9303}));
+  SkTaskBuilder::SkTaskContext context;
+  ASSERT_TRUE(AnalyzeTasks(tasks, context));
+  EXPECT_EQ(context.syncInfos[1].cubSendInfo.at(2), SyncDirection::CUB_TO_VEC);
+  EXPECT_EQ(context.syncInfos[1].cubSendInfo.at(3), SyncDirection::CUB_TO_VEC);
+}
+
+TEST_F(SkOptimizerTaskReorderTest, EmptyStreamEventRejectsOwnerBeforeScopeTail) {
+  auto *first = CreateKernelNode(9311, 0);
+  auto *tail = CreateKernelNode(9312, 1);
+  auto *notify = CreateNotifyNode(9313, 2);
+  BindSyntheticEvent(first, notify);
+  std::vector<std::unique_ptr<SuperKernelBaseNode>> events;
+  events.push_back(std::move(graph->graphMap[notify->GetNodeId()]));
+
+  std::vector<SuperKernelBaseNode *> tasks;
+  EXPECT_FALSE(optimizer->BuildTaskListWithCustomEvents({first, tail}, events, tasks));
+  EXPECT_TRUE(tasks.empty());
+}

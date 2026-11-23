@@ -1259,28 +1259,38 @@ TEST_F(SuperKernelScopePostprocessTest, PostProcess_ThreeStreamsWithThreeNodesEa
   EXPECT_EQ(scopeInfo.extInfo_.processStatus, ScopeProcessStatus::RESOURCE_INSUFFICIENT);
 }
 
-TEST_F(SuperKernelScopePostprocessTest, ProcessSubStreamSyncEvents_MissingOwnerPreservesNoTargetNode) {
-  for (bool frontWait : {false, true}) {
-    SCOPED_TRACE(frontWait);
+TEST_F(SuperKernelScopePostprocessTest, ProcessSubStreamSyncEvents_EmptyStreamUsesScopeTail) {
+  ScopedModelContext modelCtx(reinterpret_cast<aclmdlRI>(0x1));
+  auto tail = std::make_unique<SuperKernelKernelNode>(nullptr, ACL_MODEL_RI_TASK_KERNEL, 0, 0, INVALID_STREAM_ID,
+                                                      INVALID_TASK_ID);
+  tail->SetNodeId(40);
+  for (uint32_t sync : {1U, 2U, 3U}) {
+    SCOPED_TRACE(sync);
+    const bool frontWait = (sync & 1U) != 0U;
+    const bool backBlock = (sync & 2U) != 0U;
     SuperKernelScopeInfo scopeInfo;
-    ScopeStreamInfo stream;
-    stream.streamIdx = 1;
-    stream.tailNodeIdx = 52;
     scopeInfo.scopeStreamInfos_.resize(2);
-    scopeInfo.scopeStreamInfos_[1] = stream;
+    scopeInfo.scopeStreamInfos_[0].nodeSize = 4;
+    scopeInfo.scopeStreamInfos_[1].streamIdx = 1;
+    scopeInfo.scopeStreamInfos_[1].tailNodeIdx = 52;
+    scopeInfo.scopeStreamInfos_[1].nodeSize = 4;
     ScopeExtInfo extInfo;
+    extInfo.filteredNodes = {tail.get()};
     extInfo.customParamsList.resize(2);
     std::vector<StreamPostPlan> plans(2);
     plans[1].needFrontWait = frontWait;
-    plans[1].needBackBlock = !frontWait;
+    plans[1].needBackBlock = backBlock;
     const std::unordered_map<uint32_t, uint64_t> lastTaskByStreamAfterFilter = {{0, 40}};
     SuperKernelScopePostProcessor postProcessor(*graph);
 
-    EXPECT_FALSE(postProcessor.ProcessSubStreamSyncEvents(scopeInfo, extInfo, plans, 0, {1}, frontWait ? 1 : 0,
-                                                          lastTaskByStreamAfterFilter));
-    EXPECT_EQ(extInfo.processStatus, ScopeProcessStatus::NO_TARGET_NODE);
-    EXPECT_TRUE(extInfo.eventNodes.empty());
-    EXPECT_TRUE(extInfo.customParamsList[0].empty());
-    EXPECT_TRUE(extInfo.customParamsList[1].empty());
+    ASSERT_TRUE(postProcessor.ProcessSubStreamSyncEvents(scopeInfo, extInfo, plans, 0, {1}, frontWait ? 1 : 0,
+                                                         lastTaskByStreamAfterFilter));
+    ASSERT_EQ(extInfo.eventNodes.size(), static_cast<size_t>(frontWait) + static_cast<size_t>(backBlock));
+    for (const auto &event : extInfo.eventNodes) {
+      EXPECT_EQ(event->GetPreNodeId(), tail->GetNodeId());
+      EXPECT_EQ(event->GetStreamIdxInGraph(), 1U);
+    }
+    EXPECT_EQ(extInfo.customParamsList[0].size(), static_cast<size_t>(frontWait));
+    EXPECT_EQ(extInfo.customParamsList[1].size(), static_cast<size_t>(frontWait) + 2U * backBlock);
   }
 }

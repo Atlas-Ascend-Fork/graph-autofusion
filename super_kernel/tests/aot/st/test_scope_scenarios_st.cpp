@@ -176,3 +176,59 @@ TEST_F(AotSystemTest, SyncAllocationFailureDoesNotCommitCrossStreamModel) {
   EXPECT_EQ(model.UpdateAttempts(), 0U);
   EXPECT_EQ(sk::test::OutstandingAllocations(), 0U);
 }
+
+TEST_F(AotSystemTest, FilteredEmptySubstreamKeepsScopeFusionAndBoundarySynchronization) {
+  for (uint32_t parallel : {0U, 1U}) {
+    SCOPED_TRACE(parallel);
+    sk::test::Model model;
+    auto producer = model.AddStream();
+    auto consumer = model.AddStream();
+    std::vector<aclmdlRITask> outside = {model.AddKernel(producer, "outside_producer"),
+                                         model.AddKernel(consumer, "outside_consumer")};
+    uint64_t storage = 0;
+    auto event = reinterpret_cast<aclrtEvent>(&storage);
+    ASSERT_EQ(aclskScopeBegin("empty_substream", producer), ACL_SUCCESS);
+    ASSERT_EQ(aclskScopeBegin("empty_substream", consumer), ACL_SUCCESS);
+    for (uint32_t i = 0; i < 6; ++i) {
+      model.AddKernel(producer, "inside_producer_" + std::to_string(i));
+    }
+    model.AddEvent(producer, ACL_MODEL_RI_TASK_EVENT_RECORD, event);
+    model.AddEvent(consumer, ACL_MODEL_RI_TASK_EVENT_WAIT, event);
+    ASSERT_EQ(aclskScopeEnd("empty_substream", producer), ACL_SUCCESS);
+    ASSERT_EQ(aclskScopeEnd("empty_substream", consumer), ACL_SUCCESS);
+    outside.push_back(model.AddKernel(producer, "after_producer"));
+    outside.push_back(model.AddKernel(consumer, "after_consumer"));
+    aclskOption option{};
+    option.optionType = aclskOptionType::AUTO_OP_PARALLEL;
+    option.autoOpParallel.enableAutoOpParallel = parallel;
+    aclskOptions options{&option, 1};
+    ASSERT_EQ(aclskOptimize(model.Handle(), &options), ACL_SUCCESS);
+
+    size_t entries = 0;
+    std::set<uintptr_t> writes;
+    std::vector<uintptr_t> waits;
+    for (auto stream : {producer, consumer}) {
+      for (const auto &task : model.Tasks(stream)) {
+        if (task.disabled) {
+          continue;
+        }
+        entries += task.function.find("sk_entry_") == 0;
+        if (task.type == ACL_MODEL_RI_TASK_VALUE_WRITE) {
+          writes.insert(task.syncAddress);
+        } else if (task.type == ACL_MODEL_RI_TASK_VALUE_WAIT) {
+          waits.push_back(task.syncAddress);
+        }
+      }
+    }
+    EXPECT_EQ(entries, 1U);
+    EXPECT_FALSE(waits.empty());
+    for (auto address : waits) {
+      EXPECT_NE(address, 0U);
+      EXPECT_EQ(writes.count(address), 1U);
+    }
+    for (auto task : outside) {
+      EXPECT_FALSE(model.Snapshot(task).disabled);
+      EXPECT_EQ(model.Snapshot(task).setParamsCount, 0U);
+    }
+  }
+}
