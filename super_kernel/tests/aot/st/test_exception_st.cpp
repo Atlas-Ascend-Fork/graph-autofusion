@@ -167,7 +167,7 @@ TEST_F(AotSystemTest, ExceptionCallbackRejectsMissingAndFailedRuntimeInformation
   exception.args = validArgs;
   exception.registersResult = -1;
   exception.Raise();
-  ExpectExceptionLog("Call rtGetExceptionRegInfo for error register information failed");
+  ExpectExceptionLog("Failed to call rtGetExceptionRegInfo for error register information");
   EXPECT_EQ(sk::test::OutstandingAllocations(), allocated);
 }
 

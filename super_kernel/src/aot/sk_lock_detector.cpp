@@ -83,7 +83,7 @@ aclError LockDetector::GetDeviceCores() {
     return ret;
   }
 
-  SK_LOGI("[lock detector] GetDeviceCores success, cube=%u, vec=%u", deviceRealCubeNum, deviceRealVecNum);
+  SK_LOGI("[lock detector] GetDeviceCores success, cube=%ld, vec=%ld", deviceRealCubeNum, deviceRealVecNum);
   return ACL_SUCCESS;
 }
 
@@ -943,7 +943,7 @@ bool LockDetector::HasDeadlockPredecessor(SuperKernelBaseNode *curNode,
       hasDeadlock = HasDeadlock(preNode, expandedScopeIds);
       break;
     default:
-      SK_LOGD("nodeId: %u, unsupported node type %u in HasDeadlock", preNode->GetNodeId(), preNode->GetNodeType());
+      SK_LOGD("nodeId: %lu, unsupported node type %u in HasDeadlock", preNode->GetNodeId(), preNode->GetNodeType());
       deadlockReason_ = DeadlockFailReason::NO_SUPPORT_NODE;
       break;
   }
@@ -1388,7 +1388,7 @@ void LockDetector::SetNotifyNodesExpandNumForScope(SuperKernelScopeInfo &scope, 
   for (auto *notifyNode : notifyNodes) {
     notifyNode->SetNotifyExpandVecNum(maxExpandVecNum);
     notifyNode->SetNotifyExpandCubeNum(maxExpandCubeNum);
-    SK_LOGI("[lock detector] Set Notify node %lu expandVecNum=%u, expandCubeNum=%u", notifyNode->GetNodeId(),
+    SK_LOGD("[lock detector] Set Notify node %lu expandVecNum=%u, expandCubeNum=%u", notifyNode->GetNodeId(),
             maxExpandVecNum, maxExpandCubeNum);
   }
   // Set expand stream for all node

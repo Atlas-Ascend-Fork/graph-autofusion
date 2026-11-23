@@ -212,7 +212,7 @@ uint32_t EventOnlyStreamRemovePass::ProcessScope(SuperKernelScopeInfo &scope) {
           node->SetIsFusible(false);
           node->SetFusionFailReason(FusionFailReason::ISOLATED_EVENT);
           scopeMarkedCount++;
-          SK_LOGI("[EventOnlyStreamRemove] Marked event node %lu in stream %u as non-fusible", node->GetNodeId(),
+          SK_LOGD("[EventOnlyStreamRemove] Marked event node %lu in stream %u as non-fusible", node->GetNodeId(),
                   streamIdx);
         }
       }
@@ -443,7 +443,7 @@ bool PerOpMaxCoreSplitPass::Run(std::vector<SuperKernelScopeInfo> &scopes) {
         RebuildStreamInfos(scope);
         scope.SetScopeCoreInfo(BuildDebugPerOpScopeCoreInfo(*node, maxDeviceCubeNum, maxDeviceVectorNum));
         scopes.push_back(std::move(scope));
-        SK_LOGI("[PerOpMaxCore] Created scope for kernel %lu (scopeIdx=%zu)", node->GetNodeId(), scopes.size() - 1);
+        SK_LOGD("[PerOpMaxCore] Created scope for kernel %lu (scopeIdx=%zu)", node->GetNodeId(), scopes.size() - 1);
       }
       nodeId = node->GetNextNodeId();
     }
@@ -497,7 +497,7 @@ void ScopeSplitPass::PrintScopeNodes(size_t scopeIdx, const SuperKernelScopeInfo
   const auto &nodes = scope.GetNodes();
   SK_LOGI("  Scope %zu nodes: %zu", scopeIdx, nodes.size());
   for (size_t i = 0; i < nodes.size(); ++i) {
-    SK_LOGI("    [%zu] %s", i, nodes[i]->Format().c_str());
+    SK_LOGD("    [%zu] %s", i, nodes[i]->Format().c_str());
   }
 }
 
@@ -701,7 +701,7 @@ bool InitialScopeSplitPass::ProcessUnfusibleNodeForSkip(uint32_t streamIdx, Supe
     }
   } else {
     processedNodes_.insert(node->GetNodeId());
-    SK_LOGI("Stream %u: Skipping unfusible node %s (type=%d), added to processedNodes", streamIdx,
+    SK_LOGD("Stream %u: Skipping unfusible node %s (type=%d), added to processedNodes", streamIdx,
             node->Format().c_str(), static_cast<int>(nodeType));
   }
   return true;
@@ -819,7 +819,7 @@ void InitialScopeSplitPass::TryAddNodeToHeap(uint32_t streamIdx) {
   }
 
   if (processedNodes_.find(state.currentNodeId) != processedNodes_.end()) {
-    SK_LOGI("Stream %u: node %lu already processed, advancing", streamIdx, state.currentNodeId);
+    SK_LOGD("Stream %u: node %lu already processed, advancing", streamIdx, state.currentNodeId);
     state.currentNodeId = node->GetNextNodeId();
     TryAddNodeToHeap(streamIdx);
     return;
@@ -862,7 +862,7 @@ void InitialScopeSplitPass::TryAddNodeToHeap(uint32_t streamIdx) {
 
   // Add to heap (no deadlock check in this pass)
   nodeHeap_.push(state.currentNodeId);
-  SK_LOGI("Stream %u: added node %s to heap, heap size=%zu", streamIdx, node->Format().c_str(), nodeHeap_.size());
+  SK_LOGD("Stream %u: added node %s to heap, heap size=%zu", streamIdx, node->Format().c_str(), nodeHeap_.size());
 }
 
 void InitialScopeSplitPass::HandleWaitNode(SuperKernelBaseNode *waitNode, uint32_t streamIdx) {
@@ -926,7 +926,7 @@ void InitialScopeSplitPass::ProcessNotifyNode(SuperKernelBaseNode *notifyNode) {
       state.waitingForNotify = INVALID_TASK_ID;
       TryAddNodeToHeap(streamIdx);
       resumedCount++;
-      SK_LOGI("Resumed stream %u for wait node %s", streamIdx, waitNode->Format().c_str());
+      SK_LOGD("Resumed stream %u for wait node %s", streamIdx, waitNode->Format().c_str());
     }
   }
   SK_LOGI("Resumed %u suspended streams", resumedCount);
@@ -959,10 +959,10 @@ void InitialScopeSplitPass::ProcessResetNode(SuperKernelBaseNode *resetNode) {
       streamStates_[streamIdx].waitingForNotify = INVALID_TASK_ID;
       streamStates_[streamIdx].isSuspended = true;
       suspendedCount++;
-      SK_LOGE("Suspended stream %u for wait node %s (eventId=0x%lx)", streamIdx, waitNode->Format().c_str(), eventId);
+      SK_LOGI("Suspended stream %u for wait node %s (eventId=0x%lx)", streamIdx, waitNode->Format().c_str(), eventId);
     }
   }
-  SK_LOGE("Suspended %u streams due to reset", suspendedCount);
+  SK_LOGI("Suspended %u streams due to reset", suspendedCount);
 }
 
 bool InitialScopeSplitPass::HandleUnfusibleNotifyNode(SuperKernelBaseNode *notifyNode, uint32_t streamIdx) {
@@ -1100,7 +1100,7 @@ bool InitialScopeSplitPass::BuildCurrentScope(SuperKernelScopeInfo &scopeInfo) {
 
     // Add to scope
     scopeInfo.AddNode(node);
-    SK_LOGI("Added node %s to scope (count=%zu)", node->Format().c_str(), scopeInfo.GetNodes().size());
+    SK_LOGD("Added node %s to scope (count=%zu)", node->Format().c_str(), scopeInfo.GetNodes().size());
     AddStreamInfoToScope(scopeInfo, node);
     processedNodes_.insert(nodeId);
 
@@ -1229,7 +1229,7 @@ bool SingleScopeDeadlockRefinePass::FindDeadlockInScope(const SuperKernelScopeIn
     if (node->GetNodeType() == SkNodeType::NODE_WAIT) {
       lastWaitNode = const_cast<SuperKernelBaseNode *>(node);
       coreInfoBeforeLastWait = candidateCoreInfo;
-      SK_LOGI("Found Wait node %s at position %zu", node->Format().c_str(), i);
+      SK_LOGD("Found Wait node %s at position %zu", node->Format().c_str(), i);
     }
 
     // Check for deadlock
@@ -1243,7 +1243,7 @@ bool SingleScopeDeadlockRefinePass::FindDeadlockInScope(const SuperKernelScopeIn
       }
       return true;
     }
-    SK_LOGI("Node %s passed deadlock check", node->Format().c_str());
+    SK_LOGD("Node %s passed deadlock check", node->Format().c_str());
   }
 
   *checkedScopeCoreInfo = candidateCoreInfo;
@@ -1455,7 +1455,7 @@ bool SingleScopeDeadlockRefinePass::Run(std::vector<SuperKernelScopeInfo> &scope
   lockDetector_.SetScopeInfos(scopes);
 
   for (size_t i = 0; i < scopes.size(); ++i) {
-    SK_LOGI("[SingleScopeDeadlockRefine] Processing scope index %zu with %zu nodes", i, scopes[i].GetNodes().size());
+    SK_LOGD("[SingleScopeDeadlockRefine] Processing scope index %zu with %zu nodes", i, scopes[i].GetNodes().size());
 
     SuperKernelScopeInfo currentScope = std::move(scopes[i]);
     std::optional<SuperKernelScopeInfo> pendingScope;
@@ -1822,7 +1822,7 @@ bool ScheModeKernelSplitPass::Run(std::vector<SuperKernelScopeInfo> &scopes) {
   }
 
   for (size_t i = 0; i < scopes.size(); ++i) {
-    SK_LOGI("[ScheModeSplit] Processing scope index %zu with %zu nodes", i, scopes[i].GetNodes().size());
+    SK_LOGD("[ScheModeSplit] Processing scope index %zu with %zu nodes", i, scopes[i].GetNodes().size());
     SuperKernelScopeInfo currentScope = std::move(scopes[i]);
     std::optional<SuperKernelScopeInfo> pendingScope;
 
@@ -1908,7 +1908,7 @@ void SuperKernelScopeSplitter::InitDefaultNodeFusibility() {
       if (node->GetNodeType() == SkNodeType::NODE_DEFAULT) {
         node->SetIsFusible(true);
         count++;
-        SK_LOGI("[ScopeSplitter] Default node %s set isFusible=true", node->Format().c_str());
+        SK_LOGD("[ScopeSplitter] Default node %s set isFusible=true", node->Format().c_str());
       }
       nodeId = node->GetNextNodeId();
     }
@@ -2028,7 +2028,7 @@ void DefaultNodeProcessPass::MarkDefaultsUnfusible(const std::vector<SuperKernel
   for (auto *node : defaultNodes) {
     node->SetIsFusible(false);
     node->SetFusionFailReason(FusionFailReason::DEFAULT_NODE);
-    SK_LOGI("[DefaultNodeProcess] Default %s marked unfusible (stream has kernel)", node->Format().c_str());
+    SK_LOGD("[DefaultNodeProcess] Default %s marked unfusible (stream has kernel)", node->Format().c_str());
   }
 }
 
@@ -2039,7 +2039,7 @@ void DefaultNodeProcessPass::RemoveDefaultsAndStreams(SuperKernelScopeInfo &scop
   std::vector<SuperKernelBaseNode *> remaining;
   for (auto *node : nodes) {
     if (node->GetNodeType() == SkNodeType::NODE_DEFAULT) {
-      SK_LOGI("[DefaultNodeProcess] Removing default: %s", node->Format().c_str());
+      SK_LOGD("[DefaultNodeProcess] Removing default: %s", node->Format().c_str());
       continue;
     }
     remaining.push_back(node);
@@ -2059,7 +2059,7 @@ void DefaultNodeProcessPass::RemoveStreamFromScope(SuperKernelScopeInfo &scope, 
     if (node->GetStreamIdxInGraph() != streamIdx) {
       remaining.push_back(node);
     } else {
-      SK_LOGI("[DefaultNodeProcess] Removing event node: %s (stream %u)", node->Format().c_str(), streamIdx);
+      SK_LOGD("[DefaultNodeProcess] Removing event node: %s (stream %u)", node->Format().c_str(), streamIdx);
     }
   }
   scope.SetNodes(std::move(remaining));

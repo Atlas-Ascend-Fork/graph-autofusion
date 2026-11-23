@@ -134,7 +134,7 @@ aclError SuperKernelGraph::Update() {
   }
   aclError ret = aclmdlRIUpdate(modelRI);
   if (ret != ACL_SUCCESS) {
-    SK_LOGE("Failed to update modelRI");
+    SK_LOGE("Failed to update modelRI, ret=%d", ret);
   }
   // Clear shape info memory after update completes
   ClearShapeInfoPtrList();
@@ -409,7 +409,7 @@ void SuperKernelGraph::BuildEventNodeAssociations() {
   for (const auto &it : eventToNodes) {
     const uint64_t eventId = it.first;
     const EventInfos &eventInfo = it.second;
-    SK_LOGI("Processing event 0x%lx, notify nodeId: %lu, wait node size: %zu, reset node size: %zu", eventId,
+    SK_LOGD("Processing event 0x%lx, notify nodeId: %lu, wait node size: %zu, reset node size: %zu", eventId,
             eventInfo.notifyNodeId, eventInfo.waitNodeIdList.size(), eventInfo.resetNodeIdList.size());
     if (eventInfo.notifyNodeId != INVALID_TASK_ID && !eventInfo.waitNodeIdList.empty()) {
       auto *notifyNode = GetNodeById(eventInfo.notifyNodeId);

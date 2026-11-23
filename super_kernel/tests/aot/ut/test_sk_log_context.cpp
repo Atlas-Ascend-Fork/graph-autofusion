@@ -59,6 +59,32 @@ TEST_F(TestSkLogContext, CreateSkMetaDirectory_DoesNotAddAnotherModelPrefix) {
   EXPECT_TRUE(S_ISDIR(st.st_mode));
 }
 
+TEST_F(TestSkLogContext, FileLogger_InitializationFailureReportsDirectory) {
+  const std::string modelId(256, 'a');
+  const std::string targetPath = GetSkMetaPath(modelId);
+
+  sk::logger::LoggerConfig config;
+  config.enabled = true;
+  config.modelId = modelId;
+  EXPECT_FALSE(sk::logger::FileLogger::Instance().Initialize(config));
+  EXPECT_NE(ut_log::LogBuffer::Instance().GetContent().find("Failed to create sk_meta directory: " + targetPath),
+            std::string::npos);
+}
+
+TEST_F(TestSkLogContext, FileLogger_RegistrationFailureReportsHandleAndPath) {
+  const std::string modelId = "model_logger_registration_failure";
+  const std::string targetPath = GetSkMetaPath(modelId) + "/super_kernel.log";
+  ASSERT_TRUE(CreateDirectoryRecursive(targetPath));
+
+  sk::logger::LoggerConfig config;
+  config.enabled = true;
+  config.modelId = modelId;
+  EXPECT_FALSE(sk::logger::FileLogger::Instance().Initialize(config));
+  EXPECT_NE(ut_log::LogBuffer::Instance().GetContent().find("Failed to register log file for model: " + modelId +
+                                                            ", handle: " + modelId + ", path: " + targetPath),
+            std::string::npos);
+}
+
 TEST_F(TestSkLogContext, LogContextGuard_RoutesNestedModelsAndRestoresPreviousState) {
   const std::string originalModelId = "model_route_original";
   sk::logger::LoggerConfig config;
@@ -116,6 +142,7 @@ TEST_F(TestSkLogContext, LogContextGuard_InitializationFailureDoesNotWriteToPrev
     EXPECT_EQ(sk::logger::FileHandleManager::Instance().GetCurrentHandle(), "default");
     SK_LOGI("%s", logMarker.c_str());
   }
+  EXPECT_NE(ut_log::LogBuffer::Instance().GetContent().find("directory: " + targetPath), std::string::npos);
 
   EXPECT_EQ(sk::logger::FileLogger::GetCurrentModelId(), originalModelId);
   EXPECT_EQ(sk::logger::FileHandleManager::Instance().GetCurrentHandle(), "default");
@@ -124,6 +151,21 @@ TEST_F(TestSkLogContext, LogContextGuard_InitializationFailureDoesNotWriteToPrev
   ASSERT_TRUE(originalLog.good());
   std::string content((std::istreambuf_iterator<char>(originalLog)), std::istreambuf_iterator<char>());
   EXPECT_EQ(content.find(logMarker), std::string::npos);
+}
+
+TEST_F(TestSkLogContext, FileLogger_ContextDirectoryFailureReportsPath) {
+  const std::string originalModelId = "model_context_directory_original";
+  const std::string targetModelId(256, 'b');
+  sk::logger::LoggerConfig config;
+  config.enabled = true;
+  config.modelId = originalModelId;
+  ASSERT_TRUE(sk::logger::FileLogger::Instance().Initialize(config));
+
+  const std::string targetPath = GetSkMetaPath(targetModelId);
+
+  EXPECT_EQ(sk::logger::FileLogger::Instance().CreateContext("context.log", targetModelId), nullptr);
+  EXPECT_NE(ut_log::LogBuffer::Instance().GetContent().find("Failed to create directory for context: " + targetPath),
+            std::string::npos);
 }
 
 TEST_F(TestSkLogContext, LogContextGuard_ConcurrentThreadsKeepModelIdsIsolated) {
