@@ -8,7 +8,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # ----------------------------------------------------------------------------------------------------------
 function(run_llt_test)
-    cmake_parse_arguments(LLT "" "TARGET;TASK_NUM;ENV_FILE;COVERAGE_SUITE" "" ${ARGN})
+    cmake_parse_arguments(LLT "" "TARGET;TASK_NUM;ENV_FILE;COVERAGE_SUITE;COVERAGE_SOURCE_DIR;COVERAGE_REPORT_DIR" "" ${ARGN})
 
     set(_llt_run_target run_${LLT_TARGET})
 
@@ -65,6 +65,13 @@ function(run_llt_test)
             get_filename_component(_cov_source_filter "${_cov_source_filter}" ABSOLUTE)
         endif()
         set(_cov_report ${GRAPH_AUTOFUSION_ROOT_DIR}/super_kernel/coverage/${LLT_COVERAGE_SUITE})
+        if(LLT_COVERAGE_SOURCE_DIR)
+            set(_cov_capture_dir ${CMAKE_CURRENT_BINARY_DIR})
+            get_filename_component(_cov_source_filter "${LLT_COVERAGE_SOURCE_DIR}" ABSOLUTE)
+        endif()
+        if(LLT_COVERAGE_REPORT_DIR)
+            set(_cov_report ${LLT_COVERAGE_REPORT_DIR})
+        endif()
         set(_cov_html ${_cov_report}/html)
         set(_cov_data ${_cov_report}/coverage.info)
 

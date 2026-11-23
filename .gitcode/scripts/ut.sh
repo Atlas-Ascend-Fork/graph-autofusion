@@ -61,6 +61,10 @@ if [ "${target_branch}" == "master" ] || [ "${target_branch}" == "develop" ]; th
 			bash build.sh -u -c --impl=cpp --module=superkernel --cann_3rd_lib_path="/home/jenkins/opensource" -f ${WORKSPACE}/pr_filelist.txt
 			ret=$?
 			;;
+		UT_Test_Cpp_model_specialization)
+			bash build.sh -u -c --impl=cpp --module=model_specialization --no-autofuse --cann_3rd_lib_path="/home/jenkins/opensource" -f ${WORKSPACE}/pr_filelist.txt
+			ret=$?
+			;;
 		UT_Test_autofuse_framework)
 			bash build.sh -u -c --module=autofuse_framework --cann_3rd_lib_path="/home/jenkins/opensource" -f ${WORKSPACE}/pr_filelist.txt
 			ret=$?
@@ -114,6 +118,10 @@ else
 			;;
 		UT_Test_Cpp_superkernel)
 			bash build.sh -u -c --impl=cpp --module=superkernel --cann_3rd_lib_path="/home/jenkins/opensource"
+			ret=$?
+			;;
+		UT_Test_Cpp_model_specialization)
+			bash build.sh -u -c --impl=cpp --module=model_specialization --no-autofuse --cann_3rd_lib_path="/home/jenkins/opensource"
 			ret=$?
 			;;
 		UT_Test_autofuse_framework)

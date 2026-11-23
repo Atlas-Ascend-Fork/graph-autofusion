@@ -63,7 +63,7 @@ else
   PYTHON_CMD="python3"
 fi
 
-SUPPORTED_MODULES=("multistream" "superkernel" "autofuse_framework" "autofuse_ascendc_api" "autofuse_e2e" "autofuse_v35_1" "autofuse_v35_2" "autofuse_v35_3")
+SUPPORTED_MODULES=("multistream" "superkernel" "model_specialization" "autofuse_framework" "autofuse_ascendc_api" "autofuse_e2e" "autofuse_v35_1" "autofuse_v35_2" "autofuse_v35_3")
 declare -A MODULE_ACTION_HANDLERS=(
   ["multistream:py_ut"]="multistream_py_ut"
   ["multistream:py_st"]="multistream_py_st"
@@ -71,6 +71,7 @@ declare -A MODULE_ACTION_HANDLERS=(
   ["superkernel:cpp_ut"]="superkernel_cpp_ut"
   ["superkernel:py_st"]="superkernel_py_st"
   ["superkernel:cpp_st"]="superkernel_cpp_st"
+  ["model_specialization:cpp_ut"]="model_specialization_cpp_ut"
   ["autofuse_framework:all_ut"]="autofuse_module_test_suite"
   ["autofuse_framework:all_st"]="autofuse_module_test_suite"
   ["autofuse_ascendc_api:all_ut"]="autofuse_module_test_suite"
@@ -121,9 +122,8 @@ usage() {
   echo "    --build-type=<TYPE>   Set build type: Debug, Release(default: Release)"
   echo "    --pkg-type=<TYPE>     Set package type: run/rpm/deb(default: run)"
   echo "    -f <FILE>             File containing list of changed files. Smart module selection:"
-  echo "                          - Only super_kernel/ changed: skip autofuse build/tests"
-  echo "                          - Only autofuse/ changed: skip superkernel tests"
-  echo "                          - Both changed: build all"
+  echo "                          - Component changes: run only changed components (super_kernel/autofuse/model_specialization/multistream)"
+  echo "                          - Shared build files changed: build/test all selected components"
   echo "                          - Only docs/examples/etc: skip all (exit 200)"
   echo ""
 }
@@ -160,7 +160,9 @@ is_supported_module() {
 
 analyze_changed_modules() {
   local changed_files="$1"
+  CHANGED_MULTISTREAM=false
   CHANGED_SUPERKERNEL=false
+  CHANGED_MODEL_SPECIALIZATION=false
   CHANGED_AUTOFUSE=false
   CHANGED_OTHER=false
 
@@ -200,8 +202,12 @@ analyze_changed_modules() {
       continue
     fi
 
-    if echo "$file" | grep -q "^super_kernel/"; then
+    if echo "$file" | grep -q "^multistream/"; then
+      CHANGED_MULTISTREAM=true
+    elif echo "$file" | grep -q "^super_kernel/"; then
       CHANGED_SUPERKERNEL=true
+    elif echo "$file" | grep -q "^model_specialization/"; then
+      CHANGED_MODEL_SPECIALIZATION=true
     elif echo "$file" | grep -q "^autofuse/"; then
       CHANGED_AUTOFUSE=true
     else
@@ -211,19 +217,25 @@ analyze_changed_modules() {
 }
 
 apply_module_selection() {
-  if [ "$CHANGED_SUPERKERNEL" = true ] && [ "$CHANGED_AUTOFUSE" = false ] && [ "$CHANGED_OTHER" = false ]; then
-    echo "[INFO] Only super_kernel changed, skipping autofuse build and autofuse tests."
-    ENABLE_AUTOFUSE="off"
-    SKIP_AUTOFUSE_TESTS="on"
-    return 0
-  elif [ "$CHANGED_AUTOFUSE" = true ] && [ "$CHANGED_SUPERKERNEL" = false ] && [ "$CHANGED_OTHER" = false ]; then
-    echo "[INFO] Only autofuse changed, skipping superkernel tests."
-    SKIP_SUPERKERNEL_TESTS="on"
-    return 0
-  elif [ "$CHANGED_SUPERKERNEL" = false ] && [ "$CHANGED_AUTOFUSE" = false ] && [ "$CHANGED_OTHER" = false ]; then
-    echo "[INFO] Changed files only contain docs/, examples/, .claude/, .opencode/, README.md, CONTRIBUTING.md or AGENTS.md, skipping build."
-    echo "[INFO] Changed files: $CHANGED_FILES"
-    return 200
+  if [ "$CHANGED_OTHER" = false ]; then
+    if [ "$CHANGED_AUTOFUSE" = false ]; then
+      ENABLE_AUTOFUSE="off"
+      SKIP_AUTOFUSE_TESTS="on"
+    fi
+    if [ "$CHANGED_SUPERKERNEL" = false ]; then
+      SKIP_SUPERKERNEL_TESTS="on"
+    fi
+    if [ "$CHANGED_MULTISTREAM" = false ]; then
+      SKIP_MULTISTREAM_TESTS="on"
+    fi
+    if [ "$CHANGED_MODEL_SPECIALIZATION" = false ]; then
+      SKIP_MODEL_SPECIALIZATION_TESTS="on"
+    fi
+    if [ "$CHANGED_MULTISTREAM" = false ] && [ "$CHANGED_SUPERKERNEL" = false ] && [ "$CHANGED_MODEL_SPECIALIZATION" = false ] && [ "$CHANGED_AUTOFUSE" = false ]; then
+      echo "[INFO] Changed files only contain docs/, examples/, .claude/, .opencode/, README.md, CONTRIBUTING.md or AGENTS.md, skipping build."
+      echo "[INFO] Changed files: $CHANGED_FILES"
+      return 200
+    fi
   fi
   return 0
 }
@@ -568,6 +580,7 @@ clean_coverage_artifacts() {
   if [ "X$has_cpp_tests" == "Xon" ]; then
     echo "---------------- Clean AOT C++ Coverage Artifacts ----------------"
     rm -rf ${BASEPATH}/super_kernel/coverage/cpp_ut ${BASEPATH}/super_kernel/coverage/cpp_st
+    rm -rf ${BASEPATH}/model_specialization/coverage/cpp_ut
     find ${BUILD_PATH} -name "*.gcda" -delete 2>/dev/null || true
   fi
 }
@@ -631,15 +644,20 @@ superkernel_py_st() {
 }
 
 function superkernel_cpp_ut() {
-  superkernel_cpp_test ut
+  cpp_test ut super_kernel_aot
 }
 
 function superkernel_cpp_st() {
-  superkernel_cpp_test st
+  cpp_test st super_kernel_aot
 }
 
-function superkernel_cpp_test() {
+function model_specialization_cpp_ut() {
+  cpp_test ut model_specialization
+}
+
+function cpp_test() {
   local suite="$1"
+  local module="$2"
   local test_options="-DENABLE_CPP_UTEST=OFF -DENABLE_CPP_STEST=OFF -DENABLE_GCOV=OFF"
   local coverage_target="collect_coverage_data"
   echo "---------------- Start run cpp ${suite}est ----------------"
@@ -649,6 +667,10 @@ function superkernel_cpp_test() {
   else
     test_options="${test_options} -DENABLE_CPP_STEST=ON"
     coverage_target="collect_coverage_data_cpp_st"
+  fi
+
+  if [ "${module}" == "model_specialization" ]; then
+    coverage_target="collect_coverage_data_model_specialization_cpp_${suite}"
   fi
 
   if [ "X$ENABLE_COVERAGE" == "Xon" ]; then
@@ -669,8 +691,7 @@ function superkernel_cpp_test() {
     build clean &&
     build "${coverage_target}"
   else
-    build "run_super_kernel_aot_${suite}est" &&
-    build "run_model_specialization_${suite}est"
+    build "run_${module}_${suite}est"
   fi &&
   echo "Build run cpp ${suite}est success!"
 }
@@ -753,6 +774,8 @@ multistream_py_st() {
 main() {
   checkopts "$@"
 
+  SKIP_MULTISTREAM_TESTS="off"
+  SKIP_MODEL_SPECIALIZATION_TESTS="off"
   SKIP_SUPERKERNEL_TESTS="off"
   SKIP_AUTOFUSE_TESTS="off"
 
@@ -775,6 +798,12 @@ main() {
     for _action_entry in "${EXEC_ACTIONS[@]}"; do
       _module="${_action_entry%%:*}"
       if [ "$SKIP_SUPERKERNEL_TESTS" = "on" ] && [[ "$_module" == "superkernel" ]]; then
+        continue
+      fi
+      if [ "$SKIP_MULTISTREAM_TESTS" = "on" ] && [[ "$_module" == "multistream" ]]; then
+        continue
+      fi
+      if [ "$SKIP_MODEL_SPECIALIZATION_TESTS" = "on" ] && [[ "$_module" == "model_specialization" ]]; then
         continue
       fi
       if [ "$SKIP_AUTOFUSE_TESTS" = "on" ] && [[ "$_module" == "autofuse"* ]]; then
@@ -859,6 +888,16 @@ PYEOF
 
     if [ "X$SKIP_SUPERKERNEL_TESTS" == "Xon" ] && [[ "$module" == "superkernel" ]]; then
       echo "[INFO] Skipping superkernel ${action} due to module selection."
+      continue
+    fi
+
+    if [ "X$SKIP_MULTISTREAM_TESTS" == "Xon" ] && [[ "$module" == "multistream" ]]; then
+      echo "[INFO] Skipping multistream ${action} due to module selection."
+      continue
+    fi
+
+    if [ "X$SKIP_MODEL_SPECIALIZATION_TESTS" == "Xon" ] && [[ "$module" == "model_specialization" ]]; then
+      echo "[INFO] Skipping model_specialization ${action} due to module selection."
       continue
     fi
 
