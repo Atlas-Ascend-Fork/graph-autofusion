@@ -184,7 +184,8 @@ std::unique_ptr<char[]> GetBinFromFile(const std::string &path, size_t offset, s
   (void)ifs.seekg(0, std::ifstream::end);
   const size_t act_file_len = static_cast<size_t>(ifs.tellg());
   GE_ASSERT_TRUE((offset <= (SIZE_MAX - data_len)) && ((offset + data_len) <= act_file_len),
-                 "Offset add length overflow size_t or file length");
+                 "Offset add length overflow size_t or file length, offset=%zu, data_len=%zu, file_length=%zu", offset,
+                 data_len, act_file_len);
   ifs.clear();
   (void)ifs.seekg(static_cast<int64_t>(offset), std::ifstream::beg);
   auto bin_data = std::unique_ptr<char_t[]>(new (std::nothrow) char_t[data_len]);

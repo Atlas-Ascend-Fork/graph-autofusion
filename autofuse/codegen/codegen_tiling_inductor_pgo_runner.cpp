@@ -288,21 +288,46 @@ int ParseInductorPgoRunnerArgs(int argc, char *argv[], InductorPgoRunnerArgs &ar
   int64_t device_id = 0;
   int64_t aiv_num = 0;
   int64_t ub_size = 0;
-  if (!ParseRunnerInteger(argv[1], 0, INT32_MAX, device_id) ||
-      !ParseRunnerInteger(argv[2], 1, UINT32_MAX, aiv_num) ||
-      !ParseRunnerInteger(argv[3], 257, UINT32_MAX, ub_size) ||
-      !ParseRunnerInteger(argv[8], 1, kMaxPgoTopn, args.topn)) {
-    DLOGE("invalid numeric runner argument"); return FAILED;
+  if (!ParseRunnerInteger(argv[1], 0, INT32_MAX, device_id)) {
+    DLOGE("invalid runner argument device_id=%s, expected integer in [%lld, %lld]", argv[1],
+          static_cast<long long>(0), static_cast<long long>(INT32_MAX));
+    return FAILED;
+  }
+  if (!ParseRunnerInteger(argv[2], 1, UINT32_MAX, aiv_num)) {
+    DLOGE("invalid runner argument aiv_num=%s, expected integer in [%lld, %lld]", argv[2],
+          static_cast<long long>(1), static_cast<long long>(UINT32_MAX));
+    return FAILED;
+  }
+  if (!ParseRunnerInteger(argv[3], 257, UINT32_MAX, ub_size)) {
+    DLOGE("invalid runner argument ub_size=%s, expected integer in [%lld, %lld]", argv[3],
+          static_cast<long long>(257), static_cast<long long>(UINT32_MAX));
+    return FAILED;
+  }
+  if (!ParseRunnerInteger(argv[8], 1, kMaxPgoTopn, args.topn)) {
+    DLOGE("invalid runner argument topn=%s, expected integer in [%lld, %lld]", argv[8],
+          static_cast<long long>(1), static_cast<long long>(kMaxPgoTopn));
+    return FAILED;
   }
   args.device_id = static_cast<int32_t>(device_id);
   args.aiv_num = static_cast<uint32_t>(aiv_num);
   args.ub_size = static_cast<uint32_t>(ub_size);
   args.kernel_name = argv[4]; args.tiling_file = argv[5];
   args.kernel_file = argv[6]; args.result_file = argv[7];
-  if (!IsValidKernelName(args.kernel_name) || args.tiling_file.empty() || args.kernel_file.empty() ||
-      args.result_file.empty() || ::access(args.tiling_file.c_str(), R_OK) != 0 ||
-      ::access(args.kernel_file.c_str(), R_OK) != 0) {
-    DLOGE("invalid runner path or kernel name"); return FAILED;
+  if (!IsValidKernelName(args.kernel_name)) {
+    DLOGE("invalid kernel_name=%s, expected nonempty alphanumeric or underscore name", args.kernel_name.c_str());
+    return FAILED;
+  }
+  if (args.tiling_file.empty() || ::access(args.tiling_file.c_str(), R_OK) != 0) {
+    DLOGE("invalid tiling_file=%s, expected nonempty readable file path", args.tiling_file.c_str());
+    return FAILED;
+  }
+  if (args.kernel_file.empty() || ::access(args.kernel_file.c_str(), R_OK) != 0) {
+    DLOGE("invalid kernel_file=%s, expected nonempty readable file path", args.kernel_file.c_str());
+    return FAILED;
+  }
+  if (args.result_file.empty()) {
+    DLOGE("invalid result_file=%s, expected nonempty output path", args.result_file.c_str());
+    return FAILED;
   }
   return SUCCESS;
 }
@@ -437,7 +462,7 @@ int RunInductorPgo(const InductorPgoRunnerArgs &args) {
   if (ret != 0) { DLOGE("GenerateMeasuredTopnSolutions failed, ERROR: %" PRId64, ret); return FAILED; }
   if (tiling_datas.empty()) { return FAILED; }
   if (WritePgoTopnResult(args.result_file, tiling_datas, workspaces, block_dims) != SUCCESS) {
-    DLOGE("Write PGO TopN result failed"); return FAILED;
+    DLOGE("Write PGO TopN result to %s failed", args.result_file.c_str()); return FAILED;
   }
   if (WritePgoSearchResult(args, measured_candidates) != SUCCESS) {
     DLOGW("Write PGO search result failed");

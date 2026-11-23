@@ -225,7 +225,7 @@ public:
   CardLock(const char *path) {
     fd_ = open(path, O_RDWR | O_CREAT, 0666);
     if (fd_ == -1) {
-      DLOGE("open lock file: %s", std::strerror(errno));
+      DLOGE("open lock file %s: %s", path, std::strerror(errno));
       std::exit(1);
     }
     if (flock(fd_, LOCK_EX) == -1) {
@@ -348,7 +348,13 @@ void TilingLib::GenPgoLaunchParamsInit(const ascir::FusedScheduledResult &fused_
   ss << "      tensor_args->output_num < kPgoOutputCount ||" << std::endl;
   ss << "      (kPgoInputCount > 0U && tensor_args->inputs == nullptr) ||" << std::endl;
   ss << "      (kPgoOutputCount > 0U && tensor_args->outputs == nullptr)) {" << std::endl;
-  ss << "    DLOGE(\"invalid pgo tensor args\");" << std::endl;
+  ss << "    DLOGE(\"invalid pgo tensor args: args=%p, input_num=%u (expected >= %u), output_num=%u "
+        "(expected >= %u), inputs=%p, outputs=%p\", static_cast<void *>(tensor_args), "
+        "tensor_args == nullptr ? 0U : tensor_args->input_num, kPgoInputCount, "
+        "tensor_args == nullptr ? 0U : tensor_args->output_num, kPgoOutputCount, "
+        "tensor_args == nullptr ? nullptr : static_cast<const void *>(tensor_args->inputs), "
+        "tensor_args == nullptr ? nullptr : static_cast<const void *>(tensor_args->outputs));"
+     << std::endl;
   ss << "    return FAILED;" << std::endl;
   ss << "  }" << std::endl;
   ss << PGOSearchFuncInputOutputStructAssignDef(fused_schedule_result, "  g_launch_params.aiv_args");
@@ -696,7 +702,7 @@ void ResetProfilingRound() {
 
 int InitAclPgoEvents() {
   const int status = AutofusePgoCollectorCreate(g_pgo_device_id, g_stream, &g_pgo_collector);
-  if (status != 0) { DLOGI("InitAclPgoEvents failed, status: %d", status); }
+  if (status != 0) { DLOGE("InitAclPgoEvents failed, status: %d", status); }
   return status;
 }
 
@@ -724,26 +730,26 @@ int MeasureAclPgoLaunch(uint64_t workspace_size, AutofuseTilingData *tiling_data
   }
   ss << R"(
   if (begin_status != 0) {
-    DLOGI("PgoBeginCandidate failed, status: %d", begin_status);
+    DLOGE("PgoBeginCandidate failed, status: %d", begin_status);
     return FAILED;
   }
   for (uint64_t launch_count = 0U; launch_count < kPgoMeasureLoop; ++launch_count) {
     const int record_status = AutofusePgoCollectorRecordLaunch(g_pgo_collector, launch_count);
     if (record_status != 0) {
-      DLOGI("AutofusePgoCollectorRecordLaunch failed, status: %d", record_status);
+      DLOGE("AutofusePgoCollectorRecordLaunch failed, status: %d", record_status);
       AutofusePgoCollectorAbort(g_pgo_collector);
       return FAILED;
     }
     const int launch_status = WrapperOnlyLaunch(workspace_size, tiling_data);
     if (launch_status != ACL_SUCCESS) {
-      DLOGI("WrapperOnlyLaunch failed, ERROR: %d", launch_status);
+      DLOGE("WrapperOnlyLaunch failed, ERROR: %d", launch_status);
       AutofusePgoCollectorAbort(g_pgo_collector);
       return FAILED;
     }
   }
   const int end_status = AutofusePgoCollectorEnd(g_pgo_collector);
   if (end_status != 0) {
-    DLOGI("AutofusePgoCollectorEnd failed, status: %d", end_status);
+    DLOGE("AutofusePgoCollectorEnd failed, status: %d", end_status);
     AutofusePgoCollectorAbort(g_pgo_collector);
     return FAILED;
   }
@@ -758,7 +764,7 @@ void TilingLib::GenPgoBatchProcess(std::stringstream &ss) const {
   for (auto it = begin; it != end; ++it) {
     const auto update_status = UpdateLaunchParam(it->tiling_data);
     if (update_status != ACL_SUCCESS) {
-      DLOGI("UpdateLaunchParam failed, ERROR: %d", update_status);
+      DLOGE("UpdateLaunchParam failed, ERROR: %d", update_status);
       AutofusePgoCollectorAbort(g_pgo_collector);
       return FAILED;
     }
@@ -769,7 +775,7 @@ void TilingLib::GenPgoBatchProcess(std::stringstream &ss) const {
   }
   const int finalize_status = AutofusePgoCollectorFinalizeBatch(g_pgo_collector);
   if (finalize_status != 0) {
-    DLOGI("AutofusePgoCollectorFinalizeBatch failed, status: %d", finalize_status);
+    DLOGE("AutofusePgoCollectorFinalizeBatch failed, status: %d", finalize_status);
     AutofusePgoCollectorAbort(g_pgo_collector);
     return FAILED;
   }
@@ -778,7 +784,7 @@ void TilingLib::GenPgoBatchProcess(std::stringstream &ss) const {
     uint64_t elapsed_ns = 0U;
     const int duration_status = AutofusePgoCollectorGetCandidateDurationNs(g_pgo_collector, candidate_index, &elapsed_ns);
     if (duration_status != 0) {
-      DLOGI("AutofusePgoCollectorGetCandidateDurationNs failed, candidate_index: %u, status: %d", candidate_index,
+      DLOGE("AutofusePgoCollectorGetCandidateDurationNs failed, candidate_index: %u, status: %d", candidate_index,
             duration_status);
       AutofusePgoCollectorAbort(g_pgo_collector);
       return FAILED;
@@ -928,7 +934,7 @@ void TilingLib::GenPgoProfilingSetup(std::stringstream &ss) const {
 void TilingLib::GenPgoProfilingLaunch(std::stringstream &ss) const {
   ss << "  const auto update_status = UpdateLaunchParam(*tiling_data);" << std::endl;
   ss << "  if (update_status != ACL_SUCCESS) {" << std::endl;
-  ss << "    DLOGI(\"UpdateLaunchParam failed, ERROR: %d\", update_status);" << std::endl;
+  ss << "    DLOGE(\"UpdateLaunchParam failed, ERROR: %d\", update_status);" << std::endl;
   ss << "    DestroyAclPgoEvents();" << std::endl;
   ss << "    if (g_workspace != nullptr) {" << std::endl;
   ss << "      aclrtFree(g_workspace);" << std::endl;
@@ -947,7 +953,7 @@ void TilingLib::GenPgoProfilingLaunch(std::stringstream &ss) const {
   ss << "  }" << std::endl;
   ss << "  const int finalize_status = AutofusePgoCollectorFinalizeBatch(g_pgo_collector);" << std::endl;
   ss << "  if (finalize_status != 0) {" << std::endl;
-  ss << "    DLOGI(\"AutofusePgoCollectorFinalizeBatch failed, status: %d\", finalize_status);" << std::endl;
+  ss << "    DLOGE(\"AutofusePgoCollectorFinalizeBatch failed, status: %d\", finalize_status);" << std::endl;
   ss << "    AutofusePgoCollectorAbort(g_pgo_collector);" << std::endl;
   ss << "    DestroyAclPgoEvents();" << std::endl;
   ss << "    if (g_workspace != nullptr) {" << std::endl;
@@ -960,7 +966,7 @@ void TilingLib::GenPgoProfilingLaunch(std::stringstream &ss) const {
   ss << "  const int duration_status = AutofusePgoCollectorGetCandidateDurationNs(g_pgo_collector, 0U, &elapsed_ns);"
      << std::endl;
   ss << "  if (duration_status != 0) {" << std::endl;
-  ss << "    DLOGI(\"AutofusePgoCollectorGetCandidateDurationNs failed, candidate_index: %u, status: %d\", 0U, "
+  ss << "    DLOGE(\"AutofusePgoCollectorGetCandidateDurationNs failed, candidate_index: %u, status: %d\", 0U, "
         "duration_status);"
      << std::endl;
   ss << "    AutofusePgoCollectorAbort(g_pgo_collector);" << std::endl;
@@ -1096,7 +1102,7 @@ void TilingLib::GenPgoMain(const ascir::FusedScheduledResult &fused_schedule_res
   ss << "  g_kernel_name = argv[5];" << std::endl;
   ss << "  DLOGI(\"execute info : type: %d, device_id: %d, kernel_name: %s\", type, device_id, g_kernel_name.c_str());"
      << std::endl;
-  ss << "  DLOGI(\"execute limit: aiv_num is %d, ub_size is %d\", aiv_num, ub_size);" << std::endl;
+  ss << "  DLOGI(\"execute limit: aiv_num is %d, ub_size is %d bytes\", aiv_num, ub_size);" << std::endl;
   ss << "  g_npu_lock_file = std::string(pgo_dir) + \"/npu_lock_\" + std::to_string(device_id) + \".lock\";"
      << std::endl;
   ss << "  g_kernel_o_file = std::string(pgo_dir) + \"/\" + g_kernel_name + \".o\";" << std::endl;
@@ -1108,7 +1114,7 @@ void TilingLib::GenPgoMain(const ascir::FusedScheduledResult &fused_schedule_res
   ss << "    g_is_static_kernel = true;" << std::endl;
   ss << "    ret = static_pgo(config_file);" << std::endl;
   ss << "  } else {" << std::endl;
-  ss << "    DLOGE(\"Invalid type: %d\", type);" << std::endl;
+  ss << "    DLOGE(\"Invalid type: %d, expected 0 or 1\", type);" << std::endl;
   ss << "    ret = -1;" << std::endl;
   ss << "  }" << std::endl;
   GenPgoDeinit(fused_schedule_result, ss);
@@ -1208,7 +1214,7 @@ void TilingLib::GenPgoLaunchKernelInit(std::stringstream &ss, bool direct_link) 
   ss << "  if (!inited) {" << std::endl;
   ss << "    auto ret = aclrtBinaryLoadFromFile(g_kernel_o_file.c_str(), nullptr, &" << bin_handle << ");" << std::endl;
   ss << "    if (ret != ACL_SUCCESS) {" << std::endl;
-  ss << "      DLOGE(\"acl load binary from file failed, ERROR: %d\", ret);" << std::endl;
+  ss << "      DLOGE(\"acl load binary from file %s failed, ERROR: %d\", g_kernel_o_file.c_str(), ret);" << std::endl;
   ss << "      return FAILED;" << std::endl;
   ss << "    }" << std::endl;
   if (direct_link) {

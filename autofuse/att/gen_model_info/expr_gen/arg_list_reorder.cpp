@@ -787,7 +787,7 @@ std::vector<AttAxisPtr> ArgListReorder::GetNewArgList(const std::vector<size_t> 
   GELOGI("After reorder, Arglist size is [%zu]", new_arg_list.size());
   for (size_t i = 0; i < new_arg_list.size(); i++) {
     auto &arg = new_arg_list[i];
-    GELOGI("arg[%s], id is [%zu], order is [%zu]", arg->name.c_str(), i, arg->order);
+    GELOGD("arg[%s], id is [%zu], order is [%zu]", arg->name.c_str(), i, arg->order);
   }
   return new_arg_list;
 }

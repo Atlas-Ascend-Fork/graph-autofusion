@@ -101,6 +101,11 @@ if [ "${target_branch}" == "master" ] || [ "${target_branch}" == "develop" ]; th
 			ret=$?
 			coverage_save="true"
 			;;
+		MLIR_Test_autofuse)
+			bash build.sh -s -c --module=autofuse_mlir --cann_3rd_lib_path="/home/jenkins/opensource" -f ${WORKSPACE}/pr_filelist.txt
+			ret=$?
+			coverage_save="true"
+			;;
         *)
             echo "Skip UT test execution for ${ut_type} on non-master branch"
             exit 0

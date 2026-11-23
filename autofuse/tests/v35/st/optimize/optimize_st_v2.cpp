@@ -5037,5 +5037,157 @@ TEST_F(OptimizerStV2, DowncastCastOptimizeAfterGenerate) {
   }
   EXPECT_EQ(cast_count, 2U);
 }
+
+namespace {
+// 提取折叠形态分数文本的返回值（"return N;"）；无 return 行时返回 -1。
+int32_t ParseFoldedScoreText(const std::string &score_text) {
+  const auto pos = score_text.find("return ");
+  if (pos == std::string::npos) {
+    return -1;
+  }
+  return std::stoi(score_text.substr(pos + strlen("return ")));
+}
+
+// 收集单个 schedule group 内的 IndirectLoad 实现图分数（模板 ID → 分数文本）。
+void CollectGroupScoreFuncs(const ::ascir::ScheduleGroup &group, std::map<int64_t, std::string> &template_to_score) {
+  for (const auto &impl_graph : group.impl_graphs) {
+    const auto node = impl_graph.FindNode("indirect_load");
+    if (node == nullptr) {
+      continue;
+    }
+    const auto score = group.graph_name_to_score_funcs.find(impl_graph.GetName());
+    if (score == group.graph_name_to_score_funcs.end()) {
+      continue;
+    }
+    template_to_score[static_cast<int64_t>(::ascir::GetTemplateIdOrDefault(*node))] = score->second;
+  }
+}
+
+// 按模板 ID 汇总各存活 IndirectLoad 候选的实现图名 → 分数文本映射。
+std::map<int64_t, std::string> CollectIndirectLoadScoreFuncs(const ::ascir::FusedScheduledResult &result) {
+  std::map<int64_t, std::string> template_to_score;
+  for (const auto &per_node : result.node_idx_to_scheduled_results) {
+    for (const auto &scheduled : per_node) {
+      for (const auto &group : scheduled.schedule_groups) {
+        CollectGroupScoreFuncs(group, template_to_score);
+      }
+    }
+  }
+  return template_to_score;
+}
+
+// 尾轴稠密 gather 的张量视图（轴、repeats、strides），静态/动态形态共享。
+struct TailDenseGatherView {
+  std::vector<af::AxisId> input_axes;
+  std::vector<af::AxisId> output_axes;
+  std::vector<af::Expression> input_repeats;
+  std::vector<af::Expression> input_strides;
+  std::vector<af::Expression> output_repeats;
+  std::vector<af::Expression> output_strides;
+};
+
+// 创建尾轴稠密 gather 的视图：input [rows, window]、index/output [rows, lookups]。
+TailDenseGatherView MakeTailDenseGatherView(af::AscGraph &graph, const af::Expression &rows,
+                                            const af::Expression &window, const af::Expression &lookups) {
+  const auto in0 = graph.CreateAxis("tw_in0", rows);
+  const auto in1 = graph.CreateAxis("tw_in1", window);
+  const auto out0 = graph.CreateAxis("tw_out0", rows);
+  const auto out1 = graph.CreateAxis("tw_out1", lookups);
+  return TailDenseGatherView{{in0.id, in1.id},       {out0.id, out1.id}, {rows, window},
+                             {window, af::ops::One}, {rows, lookups},    {lookups, af::ops::One}};
+}
+
+// 按视图初始化 Data/Load 对（Load 对象由调用方持有，本函数只做成员赋值）。
+void InitTailDenseLoad(Data &data, Load &load, af::DataType dtype, int32_t tensor_index,
+                       const std::vector<af::AxisId> &axes, const std::vector<af::Expression> &repeats,
+                       const std::vector<af::Expression> &strides) {
+  data.y.dtype = dtype;
+  data.ir_attr.SetIndex(tensor_index);
+  load.x = data.y;
+  load.attr.sched.axis = axes;
+  *load.y.axis = axes;
+  load.y.dtype = dtype;
+  *load.y.repeats = repeats;
+  *load.y.strides = strides;
+}
+
+// 尾轴稠密 gather（axis=1，无 payload 后缀）图：input [rows, window]、index/output
+// [rows, lookups]。静态版用带值 sizevar（分数生成期折叠）。
+std::shared_ptr<af::AscGraph> BuildTailDenseGatherStGraph(const std::string &name, bool dynamic_shape) {
+  auto graph = std::make_shared<af::AscGraph>(name.c_str());
+  const auto dtype = af::DT_FLOAT16;
+  const auto rows = dynamic_shape ? graph->CreateSizeVar("tw_rows") : graph->CreateSizeVar(64);
+  const auto window = dynamic_shape ? graph->CreateSizeVar("tw_window") : graph->CreateSizeVar(2048);
+  const auto lookups = dynamic_shape ? graph->CreateSizeVar("tw_lookups") : graph->CreateSizeVar(512);
+  const auto view = MakeTailDenseGatherView(*graph, rows, window, lookups);
+  Data input_data("tw_input_data", *graph);
+  Data index_data("tw_index_data", *graph);
+  Load input_load("tw_input_load");
+  Load index_load("tw_index_load");
+  InitTailDenseLoad(input_data, input_load, dtype, 0, view.input_axes, view.input_repeats, view.input_strides);
+  InitTailDenseLoad(index_data, index_load, af::DT_INT32, 1, view.output_axes, view.output_repeats,
+                    view.output_strides);
+
+  af::ascir_op::IndirectLoad indirect_load("indirect_load");
+  indirect_load.x1 = input_load.y;
+  indirect_load.x2 = index_load.y;
+  indirect_load.ir_attr.SetAxis(1);
+  indirect_load.attr.sched.axis = view.output_axes;
+  *indirect_load.y.axis = view.output_axes;
+  indirect_load.y.dtype = dtype;
+  *indirect_load.y.repeats = view.output_repeats;
+  *indirect_load.y.strides = view.output_strides;
+
+  Store store_op("store");
+  store_op.x = indirect_load.y;
+  store_op.attr.sched.axis = view.output_axes;
+  *store_op.y.axis = view.output_axes;
+  store_op.y.dtype = dtype;
+  *store_op.y.repeats = view.output_repeats;
+  *store_op.y.strides = view.output_strides;
+
+  Output output_op("output");
+  output_op.x = store_op.y;
+  output_op.ir_attr.SetIndex(0);
+  *output_op.y.axis = view.output_axes;
+  output_op.y.dtype = dtype;
+  *output_op.y.repeats = view.output_repeats;
+  *output_op.y.strides = view.output_strides;
+  return graph;
+}
+}  // namespace
+
+// 静态尾轴稠密 gather：窗口 4KB 整驻 UB 且 512 次 lookup 密度折算（64B cache line）
+// 覆盖窗口字节，平局有效 payload 取整行窗口字节——SIMD 候选分数（return 1;）严格
+// 高于 SIMT 候选（return 0;），窗口口径在端到端 Optimize 流程下生效。
+TEST_F(OptimizerStV2, IndirectLoadTailDenseWindowPrefersSimdScoreFunc) {
+  auto graph = BuildTailDenseGatherStGraph("indirect_load_tail_window_static", false);
+  ::ascir::FusedScheduledResult fused_scheduled_result;
+  EXPECT_EQ(optimizer.Optimize(*graph, fused_scheduled_result), 0);
+  const auto template_to_score = CollectIndirectLoadScoreFuncs(fused_scheduled_result);
+  const auto simd_score_func = template_to_score.find(static_cast<int64_t>(::ascir::TemplateId::kIndirectLoadSimd));
+  const auto simt_score_func = template_to_score.find(static_cast<int64_t>(::ascir::TemplateId::kIndirectLoadSimt));
+  ASSERT_NE(simd_score_func, template_to_score.end());
+  ASSERT_NE(simt_score_func, template_to_score.end());
+  const auto simd_score = ParseFoldedScoreText(simd_score_func->second);
+  const auto simt_score = ParseFoldedScoreText(simt_score_func->second);
+  EXPECT_GE(simd_score, 0);
+  EXPECT_GE(simt_score, 0);
+  EXPECT_GT(simd_score, simt_score);
+}
+
+// 动态 shape 尾轴稠密 gather：窗口两叶为符号，分数函数发射与静态折叠同式的运行期
+// 条件（窗口整驻 UB（含预留）且 lookup 密度折算覆盖窗口字节时取窗口字节）。
+TEST_F(OptimizerStV2, IndirectLoadTailDenseDynamicWindowEmitsRuntimeTiePayload) {
+  auto graph = BuildTailDenseGatherStGraph("indirect_load_tail_window_dynamic", true);
+  ::ascir::FusedScheduledResult fused_scheduled_result;
+  EXPECT_EQ(optimizer.Optimize(*graph, fused_scheduled_result), 0);
+  const auto template_to_score = CollectIndirectLoadScoreFuncs(fused_scheduled_result);
+  const auto simd_score_func = template_to_score.find(static_cast<int64_t>(::ascir::TemplateId::kIndirectLoadSimd));
+  ASSERT_NE(simd_score_func, template_to_score.end());
+  EXPECT_NE(simd_score_func->second.find("tie_payload_0"), std::string::npos);
+  EXPECT_NE(simd_score_func->second.find(" * 64LL >= "), std::string::npos);
+  EXPECT_NE(simd_score_func->second.find("32768LL <= 245760LL"), std::string::npos);
+}
 }  // namespace optimize
 }  // namespace

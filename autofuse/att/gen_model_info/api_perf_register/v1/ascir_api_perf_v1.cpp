@@ -1322,7 +1322,7 @@ af::Status WhereApi([[maybe_unused]] const std::vector<TensorShapeInfo> &input_s
   GE_ASSERT_SUCCESS(SetNodeDetail(input_shapes, output_shapes, node_info));
   GE_ASSERT_SUCCESS(SetDims(used_dims, node_info));
   auto input_dims_size = node_info.input_dims.size();
-  GELOGD("input_dims_size is {%u}", input_dims_size);
+  GELOGD("input_dims_size is {%zu}", input_dims_size);
   if (input_dims_size == 1U) {
     GE_ASSERT_SUCCESS(WhereBasePerf(node_info, perf_res));
   } else {
@@ -1616,7 +1616,7 @@ inline af::Status CompareNormalPerf(const NodeDetail &node_info, const std::stri
 
 af::Status CompareExtendPerf(const NodeDetail &node_info, const std::string &mode, PerfOutputInfo &perf) {
   auto input_dims_size = node_info.input_dims.size();
-  GELOGD("CompareExtend input_dims_size is {%u}.", input_dims_size);
+  GELOGD("CompareExtend input_dims_size is {%zu}.", input_dims_size);
   Expr first_axis = input_dims_size == 1U ? af::sym::kSymbolOne : node_info.input_dims[kNumZero];
   Expr last_axis = input_dims_size == 1U ? node_info.input_dims[kNumZero] : node_info.input_dims[kNumOne];
   Expr one_rpt_size = kRptSizeFloat;

@@ -38,7 +38,9 @@ void AppendTopnEntryInitialization(std::stringstream &ss) {
   ss << "  workspaces.clear();" << std::endl;
   ss << "  block_dims.clear();" << std::endl;
   ss << "  if (topn <= 0) {" << std::endl;
-  ss << "    OP_LOGE(OP_NAME, \"GenerateTopnSolutions failed: invalid topn.\");" << std::endl;
+  ss << "    OP_LOGE(OP_NAME, \"GenerateTopnSolutions failed: invalid topn=%ld, expected topn > 0.\", "
+        "static_cast<long>(topn));"
+     << std::endl;
   ss << "    return -1;" << std::endl;
   ss << "  }" << std::endl;
 }
@@ -517,9 +519,9 @@ void TilingLib::GenTopnSearchTilingSetup(std::stringstream &ss, const std::strin
                                          const ascir::FusedScheduledResult &fused_schedule_result) const {
   ss << "  for (const auto *cfg : config_ptrs) {" << std::endl;
   ss << "    if (cfg == nullptr) {" << std::endl;
-  ss << "      OP_LOGI(OP_NAME, \"config: original tiling config\");" << std::endl;
+  ss << "      OP_LOGD(OP_NAME, \"config: original tiling config\");" << std::endl;
   ss << "    } else {" << std::endl;
-  ss << "      OP_LOGI(OP_NAME, \"config: ub_thresh=%.3f(enabled=%d), corenum_thresh=%.3f(enabled=%d), "
+  ss << "      OP_LOGD(OP_NAME, \"config: ub_thresh=%.3f(enabled=%d), corenum_thresh=%.3f(enabled=%d), "
      << "multicore_ub_tradeoff=%d\", cfg->ub_threshold, cfg->ub_threshold_enabled, "
      << "cfg->corenum_threshold, cfg->corenum_threshold_enabled, cfg->enable_multicore_ub_tradeoff);" << std::endl;
   ss << "    }" << std::endl;
@@ -539,7 +541,7 @@ void TilingLib::GenTopnSearchTilingSetup(std::stringstream &ss, const std::strin
      << "failed_config_count, config_ptrs.size());" << std::endl;
   ss << "      continue;" << std::endl;
   ss << "    }" << std::endl;
-  ss << "    OP_LOGI(OP_NAME, \"PGOSearchTilingKey returned %zu raw_candidates, best_perf=%.6f\", "
+  ss << "    OP_LOGD(OP_NAME, \"PGOSearchTilingKey returned %zu raw_candidates, best_modeled_cost=%.6f cycles\", "
      << "raw_candidates.size(), best_perf);" << std::endl;
   ss << "    if (raw_candidates.empty()) {" << std::endl;
   ss << "      response.error_message = \"PGOSearchTilingKey returned no raw candidate\";" << std::endl;
@@ -560,7 +562,7 @@ void TilingLib::GenTopnCollectCandidates(std::stringstream &ss, const std::strin
   ss << "      solution.modeled_perf = final_modeled_perf;" << std::endl;
   ss << "      solution.is_default = !default_repr.empty() && (solution.canonical_repr == default_repr);" << std::endl;
   ss << "      if (solution.is_default) { found_default_candidate = true; }" << std::endl;
-  ss << "      OP_LOGI(OP_NAME, \"candidate: repr=%s perf=%.6f is_default=%d\", "
+  ss << "      OP_LOGD(OP_NAME, \"candidate: repr=%s modeled_perf=%.6f cycles is_default=%d\", "
      << "solution.canonical_repr.c_str(), solution.modeled_perf, solution.is_default);" << std::endl;
   ss << "      response.candidate_solutions.push_back(solution);" << std::endl;
   GenMoveTopnSelectionSnapshots(ss, "      ", use_att_codegen, "raw_candidate.final_tiling_selections");
@@ -886,21 +888,28 @@ void TilingLib::GenGenerateTopnSolutionsEntry(std::stringstream &ss,
   ss << "  std::vector<int64_t> export_block_dims;" << std::endl;
   ss << "  for (const auto &sol : response.candidate_solutions) {" << std::endl;
   ss << "    uint64_t workspace_size = 0U;" << std::endl;
-  ss << "    if (!GetWorkspaceSize(sol.tiling_data, workspace_size) ||" << std::endl;
-  ss << "        workspace_size > static_cast<uint64_t>(INT64_MAX)) {" << std::endl;
-  ss << "      OP_LOGE(OP_NAME, \"GenerateTopnSolutions failed: workspace size exceeds INT64_MAX.\");" << std::endl;
+  ss << "    if (!GetWorkspaceSize(sol.tiling_data, workspace_size)) {" << std::endl;
+  ss << "      OP_LOGE(OP_NAME, \"GenerateTopnSolutions failed: could not obtain workspace size.\");" << std::endl;
+  ss << "      return -1;" << std::endl;
+  ss << "    }" << std::endl;
+  ss << "    if (workspace_size > static_cast<uint64_t>(INT64_MAX)) {" << std::endl;
+  ss << "      OP_LOGE(OP_NAME, \"GenerateTopnSolutions failed: workspace size %llu bytes exceeds maximum %llu "
+        "bytes.\", "
+        "static_cast<unsigned long long>(workspace_size), static_cast<unsigned long long>(INT64_MAX));"
+     << std::endl;
   ss << "      return -1;" << std::endl;
   ss << "    }" << std::endl;
   ss << "    export_tilings.push_back(sol.tiling_data);" << std::endl;
   ss << "    export_workspaces.push_back(static_cast<int64_t>(workspace_size));" << std::endl;
   ss << "    export_block_dims.push_back(static_cast<int64_t>(sol.tiling_data.get_block_dim()));" << std::endl;
-  ss << "    OP_LOGI(OP_NAME, \"output[%zu]: perf=%.6f is_default=%d block_dim=%ld repr_len=%zu\", "
+  ss << "    OP_LOGD(OP_NAME, \"output[%zu]: modeled_perf=%.6f cycles is_default=%d block_dim=%ld "
+        "repr_len=%zu\", "
      << "export_tilings.size() - 1, sol.modeled_perf, sol.is_default, "
      << "static_cast<long>(sol.tiling_data.get_block_dim()), sol.canonical_repr.size());" << std::endl;
   ss << "    const std::string &repr = sol.canonical_repr;" << std::endl;
   ss << "    const size_t chunk = 800;" << std::endl;
   ss << "    for (size_t off = 0; off < repr.size(); off += chunk) {" << std::endl;
-  ss << "      OP_LOGI(OP_NAME, \"  output[%zu] repr[%zu..%zu]: %.*s\", "
+  ss << "      OP_LOGD(OP_NAME, \"  output[%zu] repr[%zu..%zu]: %.*s\", "
      << "export_tilings.size() - 1, off, std::min(off + chunk, repr.size()), "
      << "static_cast<int>(std::min(chunk, repr.size() - off)), repr.c_str() + off);" << std::endl;
   ss << "    }" << std::endl;
@@ -1023,7 +1032,8 @@ void TilingLib::GenDeduplicateCandidateSolutionsPrefix(std::stringstream &ss) co
 void TilingLib::GenDeduplicateCandidateSolutions(std::stringstream &ss) const {
   GenDeduplicateCandidateSolutionsPrefix(ss);
   ss << "    if (!(std::fabs(kept.modeled_perf - solution.modeled_perf) < 1e-8)) {" << std::endl;
-  ss << "      OP_LOGW(OP_NAME, \"same repr with different modeled_perf, keep first: kept=%.6f, current=%.6f, "
+  ss << "      OP_LOGW(OP_NAME, \"same repr with different modeled_perf, keep first: kept=%.6f cycles, "
+        "current=%.6f cycles, "
         "repr=%s\", "
      << "kept.modeled_perf, solution.modeled_perf, solution.canonical_repr.c_str());" << std::endl;
   ss << "      continue;" << std::endl;
@@ -1067,12 +1077,12 @@ std::string TilingLib::GenTopnSelectorHelpersForInductor() const {
      << std::endl;
   ss << "  std::sort(solutions.begin(), solutions.end(), CompareCandidateSolution);" << std::endl;
   ss << "  for (size_t i = 0; i < solutions.size(); ++i) {" << std::endl;
-  ss << "    OP_LOGI(OP_NAME, \"sorted[%zu]: perf=%.6f is_default=%d repr_len=%zu\", "
+  ss << "    OP_LOGD(OP_NAME, \"sorted[%zu]: modeled_perf=%.6f cycles is_default=%d repr_len=%zu\", "
      << "i, solutions[i].modeled_perf, solutions[i].is_default, solutions[i].canonical_repr.size());" << std::endl;
   ss << "    const std::string &repr = solutions[i].canonical_repr;" << std::endl;
   ss << "    const size_t chunk = 800;" << std::endl;
   ss << "    for (size_t off = 0; off < repr.size(); off += chunk) {" << std::endl;
-  ss << "      OP_LOGI(OP_NAME, \"  repr[%zu..%zu]: %.*s\", off, std::min(off + chunk, repr.size()), "
+  ss << "      OP_LOGD(OP_NAME, \"  repr[%zu..%zu]: %.*s\", off, std::min(off + chunk, repr.size()), "
      << "static_cast<int>(std::min(chunk, repr.size() - off)), repr.c_str() + off);" << std::endl;
   ss << "    }" << std::endl;
   ss << "  }" << std::endl;

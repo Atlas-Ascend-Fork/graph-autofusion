@@ -28,7 +28,7 @@ struct ConcatByGatherTiling {
 template <size_t INPUT_NUM>
 struct ConcatTilingPadded {
   uint32_t num_rows;
-  uint32_t num_dst_cols;
+  uint32_t dst_row_stride;
   uint32_t num_srcs_cols[INPUT_NUM];
   uint32_t src_row_strides[INPUT_NUM];
   uint32_t src_second_last_dim_strides[INPUT_NUM];
@@ -381,18 +381,19 @@ __aicore__ inline void ConcatExtend(__ubuf__ T *dst_addr, __ubuf__ T *src_addrs[
   for (size_t i = 0UL; i < INPUT_NUM; ++i) {
     if (tiling.num_srcs_cols[i] == tiling.src_row_strides[i]) {
       if (tiling.num_srcs_cols[i] > kScatterMaxLen) {
-        Copy(dst_addr + dst_col_offset, src_addrs[i], tiling.num_rows, tiling.num_srcs_cols[i], tiling.num_dst_cols);
+        Copy(dst_addr + dst_col_offset, src_addrs[i], tiling.num_rows, tiling.num_srcs_cols[i], tiling.dst_row_stride);
       } else {
-        GenScatterIndex(tiling.num_srcs_cols[i], tiling.num_dst_cols, dst_col_offset, seq_addr, index_addr);
-        ScatterInput(dst_addr, src_addrs[i], index_addr, tiling.num_rows, tiling.num_dst_cols, tiling.num_srcs_cols[i]);
+        GenScatterIndex(tiling.num_srcs_cols[i], tiling.dst_row_stride, dst_col_offset, seq_addr, index_addr);
+        ScatterInput(dst_addr, src_addrs[i], index_addr, tiling.num_rows, tiling.dst_row_stride,
+                     tiling.num_srcs_cols[i]);
       }
     } else {
       if (tiling.src_row_strides[i] > kScatterMaxLen) {
         CopyPadded(dst_addr + dst_col_offset, src_addrs[i], tiling.num_rows, tiling.src_row_strides[i],
-                   tiling.num_dst_cols, tiling.src_second_last_dim_strides[i], tiling.gather_mask_dim_sizes[i]);
+                   tiling.dst_row_stride, tiling.src_second_last_dim_strides[i], tiling.gather_mask_dim_sizes[i]);
       } else {
-        GenScatterIndex(tiling.num_srcs_cols[i], tiling.num_dst_cols, dst_col_offset, seq_addr, index_addr);
-        ScatterInputPadded(dst_addr, src_addrs[i], index_addr, tiling.num_rows, tiling.num_dst_cols,
+        GenScatterIndex(tiling.num_srcs_cols[i], tiling.dst_row_stride, dst_col_offset, seq_addr, index_addr);
+        ScatterInputPadded(dst_addr, src_addrs[i], index_addr, tiling.num_rows, tiling.dst_row_stride,
                            tiling.num_srcs_cols[i], tiling.src_row_strides[i], tiling.src_second_last_dim_strides[i],
                            tiling.gather_mask_dim_sizes[i]);
       }

@@ -28,6 +28,10 @@
 
 namespace optimize {
 namespace indirect_load_detail {
+// 尾轴稠密 gather 窗口口径的触及粒度（字节，cache line 级）：单窗口 lookup 次数按该粒度
+// 折算触及字节，折算值不低于窗口字节视为高密度（窗口驻留 staging 的读取放大有界）；
+// 低于该密度时逐元素 SIMT 直读更优，维持 input_slice_bytes 口径不变。
+constexpr int64_t kDenseWindowLineBytes = 64;
 bool IsEmbeddingFastPathCapable(const TemplateCase &template_case,
                                 const ascgen_utils::indirect_load::IndirectLoadAccessInfo &access_info) {
   if (template_case.implementation != ascgen_utils::indirect_load::Implementation::kDefault) {
@@ -68,6 +72,17 @@ bool LowersToStridedSimdFacade(const af::AscNodePtr &candidate_node) {
 
 // 在候选图副本上收集（access_info ext attr 由成员各自的分析流水写入，与既有
 // primary 单点读取同一时机）。
+// 打分叶子的单一构造点：保证窗口口径在单 gather 与组路径间一致填充。
+MemberScoreLeaves MakeMemberScoreLeaves(const ascgen_utils::indirect_load::IndirectLoadAccessInfo &info) {
+  MemberScoreLeaves leaves;
+  leaves.slice_bytes = info.input_slice_bytes;
+  leaves.lookup_extent = info.index_varying_extent;
+  leaves.has_tail_window = info.has_tail_window;
+  leaves.window_bytes = info.window_bytes;
+  leaves.window_lookup_count = info.window_lookup_count;
+  return leaves;
+}
+
 GroupAccessStats CollectGroupAccessStats(const std::vector<af::AscNodePtr> &members) {
   GroupAccessStats stats;
   stats.member_count = members.size();
@@ -80,7 +95,7 @@ GroupAccessStats CollectGroupAccessStats(const std::vector<af::AscNodePtr> &memb
     GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::GetIndirectLoadAccessInfo(member, info));
     stats.simd_embedding_capable = stats.simd_embedding_capable && info.can_use_simd_embedding;
     stats.simt_structured_capable = stats.simt_structured_capable && info.can_use_simt_structured;
-    stats.members.emplace_back(MemberScoreLeaves{info.input_slice_bytes, info.index_varying_extent});
+    stats.members.emplace_back(MakeMemberScoreLeaves(info));
     int64_t slice_bytes = 0L;
     if (!info.input_slice_bytes.GetConstValue(slice_bytes)) {
       stats.all_static = false;
@@ -357,9 +372,46 @@ std::string EmitUnifiedScoreFunc(const GroupCandidateForm form, const std::vecto
 // [动静态对齐] 原实现：静态按 avg_payload 给平局分、动态固定 SIMD +1，同一张非 embedding 图
 // 会得到相反倾向。现在两条分支统一为「运行期算 avg_payload」，与静态口径完全一致；
 // 另外 strided 让位（simd_lowers_to_strided）时 SIMD 不再拿平局加分，确保 SIMT 严格胜出。
+// 结构回退平局的有效 payload（静态可折算路径）：尾轴窗口形态且窗口可整驻 UB（含
+// 预留）、lookup 密度按 cache line 折算覆盖窗口字节时，取整行窗口字节（SIMD dense
+// facade 的真实 staging 单位）；否则取 input_slice_bytes（含尾轴退化的 dtype 字节，
+// 保持既有行为）。动态窗口叶交由运行期发射的同式条件表达式判定。
+bool TryGetMemberTiePayload(const MemberScoreLeaves &member, const bool use_window_payload, const int64_t ub_size,
+                            int64_t &tie_payload) {
+  int64_t slice_bytes = 0L;
+  if (!member.slice_bytes.GetConstValue(slice_bytes)) {
+    return false;
+  }
+  tie_payload = slice_bytes;
+  if (!use_window_payload || !member.has_tail_window) {
+    return true;
+  }
+  int64_t window_bytes = 0L;
+  int64_t lookup_count = 0L;
+  if (member.window_bytes.GetConstValue(window_bytes) && window_bytes > 0L &&
+      member.window_lookup_count.GetConstValue(lookup_count) && lookup_count > 0L &&
+      window_bytes + kIndirectLoadUbReservedBytes <= ub_size && lookup_count * kDenseWindowLineBytes >= window_bytes) {
+    tie_payload = window_bytes;
+  }
+  return true;
+}
+
+// —— 结构回退（能力门控不满足——图结构属性，与 shape 无关） ——
+// strided 让位 / 0 分 + Softmax 加分 + ×4 与平局加分（静态按平均 payload、动态
+// SIMD +1——历史非 capable 行为；组/单 gather 同口径）。
+// 结构回退（能力门控不满足——图结构属性，与 shape 无关）。
+// [动静态对齐] 原实现：静态按 avg_payload 给平局分、动态固定 SIMD +1，同一张非 embedding 图
+// 会得到相反倾向。现在两条分支统一为「运行期算 avg_payload」，与静态口径完全一致；
+// 另外 strided 让位（simd_lowers_to_strided）时 SIMD 不再拿平局加分，确保 SIMT 严格胜出。
+// [尾轴窗口口径] 尾轴 gather 的 input_slice_bytes 恒为 dtype 字节（无 payload 后缀），
+// 平局的「staging 单位 ≥ 2KB 偏 SIMD」判据在该形态退化为恒偏 SIMT。窗口口径把该形态
+// 的有效 payload 修正为整行窗口字节（SIMD dense facade 的真实 staging 单位），启用条件：
+// SIMD 未退化 strided（strided 逐元素组装无窗口经济性，且让位契约要求 SIMT 严格胜出时
+// 两侧口径维持 input_slice_bytes）+ 平台 UB 可得 + 窗口可整驻 UB + lookup 密度折算
+// 覆盖窗口字节。静态/动态同式（动态叶运行期判定），非尾轴成员行为不变。
 std::string EmitStructuralFallbackScoreFunc(const GroupCandidateForm form, const bool simd_lowers_to_strided,
                                             const bool softmax_bonus, const std::vector<MemberScoreLeaves> &members,
-                                            const af::AscGraph &candidate_graph) {
+                                            const af::AscGraph &candidate_graph, const int64_t ub_size) {
   const bool is_simd = form == GroupCandidateForm::kSimd;
   const bool is_simt = form == GroupCandidateForm::kSimt;
   int32_t base_score = (simd_lowers_to_strided && is_simt) ? kSimtStridedFallbackScore : 0;
@@ -379,15 +431,27 @@ std::string EmitStructuralFallbackScoreFunc(const GroupCandidateForm form, const
   }
   // SIMD 让位：strided 降级形态下 SIMD 不参与平局加分（与静态同口径）
   const bool simd_yields = simd_lowers_to_strided && is_simd;
+  // 尾轴窗口口径启用条件（见函数头注释）：让位或平台 UB 缺失时整体停用，两侧平局
+  // 口径与历史行为完全一致。
+  const bool use_window_payload = !simd_lowers_to_strided && ub_size > 0L &&
+                                  std::any_of(members.begin(), members.end(),
+                                              [](const MemberScoreLeaves &member) { return member.has_tail_window; });
 
   // 结构性常量判定：只要叶子里的自由符号全是常量，就按常量折叠。
   // 不用"整棵表达式能否 GetConstValue"——const sizevar 参与的乘法不一定折叠，
   // 那会把静态图误判成动态，发射出"没有任何 t. 读取"的伪运行期函数。
+  // 窗口口径启用时，尾轴成员的窗口两叶同样参与动态性判定（窗口字节来自
+  // sizes[axis]*strides[axis]，动态 shape 下为符号叶）。
   int64_t slice_bytes_sum = 0L;
   bool has_dynamic_leaf = false;
   bool sum_known = true;
   for (const MemberScoreLeaves &member : members) {
-    for (const af::Expression &expr : {member.slice_bytes, member.lookup_extent}) {
+    std::vector<af::Expression> tie_leaves{member.slice_bytes, member.lookup_extent};
+    if (use_window_payload && member.has_tail_window) {
+      tie_leaves.emplace_back(member.window_bytes);
+      tie_leaves.emplace_back(member.window_lookup_count);
+    }
+    for (const af::Expression &expr : tie_leaves) {
       for (const auto &symbol : expr.FreeSymbols()) {
         int64_t symbol_value = 0L;
         if (!symbol.GetConstValue(symbol_value)) {
@@ -395,12 +459,12 @@ std::string EmitStructuralFallbackScoreFunc(const GroupCandidateForm form, const
         }
       }
     }
-    int64_t slice_bytes = 0L;
-    if (!member.slice_bytes.GetConstValue(slice_bytes)) {
+    int64_t tie_payload = 0L;
+    if (!TryGetMemberTiePayload(member, use_window_payload, ub_size, tie_payload)) {
       sum_known = false;
       continue;
     }
-    slice_bytes_sum += slice_bytes;
+    slice_bytes_sum += tie_payload;
   }
   const bool all_const = !has_dynamic_leaf;
 
@@ -423,7 +487,10 @@ std::string EmitStructuralFallbackScoreFunc(const GroupCandidateForm form, const
     }
     for (const MemberScoreLeaves &member : members) {
       std::string rejected_token;
-      if (!ExprMaterializable(member.slice_bytes, var_names, rejected_token)) {
+      if (!ExprMaterializable(member.slice_bytes, var_names, rejected_token) ||
+          (use_window_payload && member.has_tail_window &&
+           (!ExprMaterializable(member.window_bytes, var_names, rejected_token) ||
+            !ExprMaterializable(member.window_lookup_count, var_names, rejected_token)))) {
         GELOGI("[ScoreFunc] fallback member excluded (token[%s]); use constant tie rule.", rejected_token.c_str());
         materialized.clear();
         break;
@@ -454,10 +521,32 @@ std::string EmitStructuralFallbackScoreFunc(const GroupCandidateForm form, const
 
   std::ostringstream oss;
   oss << "int32_t CalcScore(const AutofuseTilingData &tiling_data) {\n"
-      << "  const auto &t = tiling_data." << ascgen_utils::kGroupTilingDataPlaceholder << ";\n"
-      << "  const int64_t slice_sum = " << RuntimeExprToCpp(materialized[0].slice_bytes, subs);
-  for (size_t index = 1UL; index < materialized.size(); ++index) {
-    oss << " + " << RuntimeExprToCpp(materialized[index].slice_bytes, subs);
+      << "  const auto &t = tiling_data." << ascgen_utils::kGroupTilingDataPlaceholder << ";\n";
+  if (use_window_payload) {
+    // 尾轴窗口成员的有效 payload：与静态折叠（TryGetMemberTiePayload）同式的运行期
+    // 条件——窗口整驻 UB（含预留）且 lookup 密度折算覆盖窗口字节时取窗口字节，
+    // 否则回退 input_slice_bytes；非尾轴成员直接取 input_slice_bytes。
+    for (size_t index = 0UL; index < materialized.size(); ++index) {
+      const MemberScoreLeaves &member = materialized[index];
+      if (member.has_tail_window) {
+        const std::string window_text = RuntimeExprToCpp(member.window_bytes, subs);
+        oss << "  const int64_t tie_payload_" << index << " = (" << window_text << " + " << kIndirectLoadUbReservedBytes
+            << "LL <= " << ub_size << "LL && " << RuntimeExprToCpp(member.window_lookup_count, subs) << " * "
+            << kDenseWindowLineBytes << "LL >= " << window_text << ") ? " << window_text << " : "
+            << RuntimeExprToCpp(member.slice_bytes, subs) << ";\n";
+      } else {
+        oss << "  const int64_t tie_payload_" << index << " = " << RuntimeExprToCpp(member.slice_bytes, subs) << ";\n";
+      }
+    }
+    oss << "  const int64_t slice_sum = tie_payload_0";
+    for (size_t index = 1UL; index < materialized.size(); ++index) {
+      oss << " + tie_payload_" << index;
+    }
+  } else {
+    oss << "  const int64_t slice_sum = " << RuntimeExprToCpp(materialized[0].slice_bytes, subs);
+    for (size_t index = 1UL; index < materialized.size(); ++index) {
+      oss << " + " << RuntimeExprToCpp(materialized[index].slice_bytes, subs);
+    }
   }
   oss << ";\n"
       << "  const int64_t avg_payload = slice_sum / " << static_cast<int64_t>(materialized.size()) << "LL;\n"
@@ -474,9 +563,9 @@ std::string EmitStructuralFallbackScoreFunc(const GroupCandidateForm form, const
          "static_cast<long long>(avg_payload), base_score, tie_bonus);\n"
       << "  return base_score * 4 + tie_bonus;\n"
       << "}\n";
-  GELOGI("[ScoreFunc] fallback graph[%s] runtime=1 form=%d members=%zu base=%d simd_yields=%d",
+  GELOGI("[ScoreFunc] fallback graph[%s] runtime=1 form=%d members=%zu base=%d simd_yields=%d use_window=%d",
          candidate_graph.GetName().c_str(), static_cast<int32_t>(form), materialized.size(), base_score,
-         static_cast<int32_t>(simd_yields));
+         static_cast<int32_t>(simd_yields), static_cast<int32_t>(use_window_payload));
   return oss.str();
 }
 
@@ -519,7 +608,8 @@ std::string GenerateGroupScoreFunc(const GroupCandidateForm form, const Template
   // 能力门控不满足：strided 让位 / 0 分的常量回退（组 SIMD 候选退化到逐元素 strided
   // facade 时偏好 SIMT——strided 的逐元素标量组装 offsets + 逐元素重排劣于 SIMT 标量
   // 直读；kSimtStridedFallbackScore 让位语义）。
-  return EmitStructuralFallbackScoreFunc(form, simd_lowers_to_strided, softmax_bonus, stats.members, candidate_graph);
+  return EmitStructuralFallbackScoreFunc(form, simd_lowers_to_strided, softmax_bonus, stats.members, candidate_graph,
+                                         stats.ub_size);
 }
 
 // [单 gather 统一打分] 与组路径同一算法（N=1：vote → SIMD 满足 = votes / SIMT 满足
@@ -547,11 +637,14 @@ std::string GenerateScoreFunc(const TemplateCase &template_case,
     softmax_bonus = norm_info.kind == ascgen_utils::norm::NormInfo::Kind::kSoftmaxDedicated;
   }
   if (capable) {
-    const std::vector<MemberScoreLeaves> members{{access_info.input_slice_bytes, access_info.index_varying_extent}};
+    const std::vector<MemberScoreLeaves> members{MakeMemberScoreLeaves(access_info)};
     return EmitUnifiedScoreFunc(form, members, candidate_graph, softmax_bonus, false, 0L, false, false);
   }
-  const std::vector<MemberScoreLeaves> members{{access_info.input_slice_bytes, access_info.index_varying_extent}};
-  return EmitStructuralFallbackScoreFunc(form, simd_lowers_to_strided, softmax_bonus, members, candidate_graph);
+  int64_t ub_size = 0L;
+  (void)TryGetIndirectLoadPlatformUbSize(ub_size);
+  const std::vector<MemberScoreLeaves> members{MakeMemberScoreLeaves(access_info)};
+  return EmitStructuralFallbackScoreFunc(form, simd_lowers_to_strided, softmax_bonus, members, candidate_graph,
+                                         ub_size);
 }
 
 // ==================== 调度期组候选 UB 可行性预估（硬下界，保守放行） ====================

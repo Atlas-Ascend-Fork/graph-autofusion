@@ -395,7 +395,7 @@ GE_FUNC_DEV_VISIBILITY GE_FUNC_HOST_VISIBILITY graphStatus ExecuteGraphUtils::Co
   const auto src_extend_info = src_node->GetExtendInfo();
   GE_ASSERT_NOTNULL(src_extend_info, "The extend info of src node:%s is null", src_node->GetNamePtr());
   const auto graph = src_extend_info->GetOwnerGraphBarePtr();
-  GE_ASSERT_NOTNULL(graph, "The graph of src node:% is null", src_node->GetNamePtr());
+  GE_ASSERT_NOTNULL(graph, "The graph of src node:%s is null", src_node->GetNamePtr());
   for (const auto in_node : src_ctrl_in_nodes) {
     if ((in_node != nullptr) && (exist_in_ctrl_nodes_set.count(in_node) == 0U)) {
       GE_ASSERT_NOTNULL(graph->AddEdge(in_node, kControlEdgeIndex, dst_node, kControlEdgeIndex),
@@ -415,7 +415,7 @@ GE_FUNC_DEV_VISIBILITY GE_FUNC_HOST_VISIBILITY graphStatus ExecuteGraphUtils::Mo
   const auto src_extend_info = src_node->GetExtendInfo();
   GE_ASSERT_NOTNULL(src_extend_info, "The extend info of src node:%s is null", src_node->GetNamePtr());
   const auto graph = src_extend_info->GetOwnerGraphBarePtr();
-  GE_ASSERT_NOTNULL(graph, "The graph of src node:% is null", src_node->GetNamePtr());
+  GE_ASSERT_NOTNULL(graph, "The graph of src node:%s is null", src_node->GetNamePtr());
   for (const auto src_in_ctrl_edge : src_node->GetAllInControlEdgesRef()) {
     if (src_in_ctrl_edge != nullptr) {
       GE_ASSERT_GRAPH_SUCCESS(graph->RemoveEdge(src_in_ctrl_edge), "Remove in ctrl edge for %s failed.",
@@ -444,7 +444,7 @@ GE_FUNC_DEV_VISIBILITY GE_FUNC_HOST_VISIBILITY graphStatus ExecuteGraphUtils::Co
   const auto src_extend_info = src_node->GetExtendInfo();
   GE_ASSERT_NOTNULL(src_extend_info, "The extend info of src node:%s is null", src_node->GetNamePtr());
   const auto graph = src_extend_info->GetOwnerGraphBarePtr();
-  GE_ASSERT_NOTNULL(graph, "The graph of src node:% is null", src_node->GetNamePtr());
+  GE_ASSERT_NOTNULL(graph, "The graph of src node:%s is null", src_node->GetNamePtr());
   for (const auto out_node : out_ctrl_nodes) {
     if ((out_node != nullptr) && (exist_out_ctrl_nodes_set.count(out_node) == 0U)) {
       GE_ASSERT_NOTNULL(graph->AddEdge(dst_node, kControlEdgeIndex, out_node, kControlEdgeIndex),
@@ -464,7 +464,7 @@ GE_FUNC_DEV_VISIBILITY GE_FUNC_HOST_VISIBILITY graphStatus ExecuteGraphUtils::Mo
   const auto src_extend_info = src_node->GetExtendInfo();
   GE_ASSERT_NOTNULL(src_extend_info, "The extend info of src node:%s is null", src_node->GetNamePtr());
   const auto graph = src_extend_info->GetOwnerGraphBarePtr();
-  GE_ASSERT_NOTNULL(graph, "The graph of src node:% is null", src_node->GetNamePtr());
+  GE_ASSERT_NOTNULL(graph, "The graph of src node:%s is null", src_node->GetNamePtr());
   for (const auto src_out_ctrl_edge : src_node->GetAllOutControlEdgesRef()) {
     if (src_out_ctrl_edge != nullptr) {
       GE_ASSERT_GRAPH_SUCCESS(graph->RemoveEdge(src_out_ctrl_edge), "Remove out ctrl edge for %s failed.",

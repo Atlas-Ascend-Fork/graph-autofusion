@@ -291,6 +291,20 @@ stages:
           ut_type: 'ST_Test_autofuse_framework'
           ut_package: 'coverage_*.info'
           image_version: ${{ jobs.JOB_image.outputs.ST_Test_autofuse_framework }}
+      # MLIR 独立任务(含 LLVM 构建), build.sh 按改动目录门控; 镜像复用 framework ST
+      JOB_MLIR_TEST_autofuse:
+        permissions:
+          repository: read
+          id-token: write
+        name: MLIR_Test_autofuse
+        if: ${{ env.TARGET_BRANCH == 'master' || env.TARGET_BRANCH == 'develop' }}
+        select: selected_by_default
+        needs: []
+        uses: .gitcode/workflows/ut_action.yml
+        with:
+          ut_type: 'MLIR_Test_autofuse'
+          ut_package: 'coverage_*.info'
+          image_version: ${{ jobs.JOB_image.outputs.ST_Test_autofuse_framework }}
       JOB_UT_TEST_autofuse_ascendc_api:
         permissions:
           repository: read
@@ -476,7 +490,7 @@ stages:
               workspace: ${{ steps.process_checkout.outputs.path }}
               cov_mode: "report"
               ut_field: "superkernel"
-              modules: "ST_Test_autofuse_framework ST_Test_Python_superkernel ST_Test_autofuse_ascendc_api ST_Test_autofuse_e2e ST_Test_autofuse_v35_1 ST_Test_autofuse_v35_2 ST_Test_autofuse_v35_3"
+              modules: "ST_Test_autofuse_framework ST_Test_Python_superkernel ST_Test_autofuse_ascendc_api ST_Test_autofuse_e2e ST_Test_autofuse_v35_1 ST_Test_autofuse_v35_2 ST_Test_autofuse_v35_3 MLIR_Test_autofuse"
               source_branch: ${{ env.SOURCE_BRANCH }}
               target_branch: ${{ env.TARGET_BRANCH }}
               obs_path: ${{ env.obs_path }}

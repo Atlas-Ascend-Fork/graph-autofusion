@@ -847,8 +847,10 @@ graphStatus Graph::AddControlEdge(GNode &src_node, GNode &dst_node) {
 GraphPtr Graph::ConstructFromInputs(const std::vector<Operator> &inputs, const AscendString &name) {
   const char_t *const ascend_name = name.GetString();
   if (ascend_name == nullptr) {
-    REPORT_INNER_ERR_MSG("E18888", "ascend string error");
-    GELOGE(GRAPH_PARAM_INVALID, "[Check][Param] ascend string error.");
+    REPORT_INNER_ERR_MSG("E18888",
+                         "ConstructFromInputs failed: input graph name is invalid, expect a non-empty AscendString.");
+    GELOGE(GRAPH_PARAM_INVALID,
+           "[Check][Param] ConstructFromInputs failed: input graph name is invalid, expect a non-empty AscendString.");
     return nullptr;
   }
 

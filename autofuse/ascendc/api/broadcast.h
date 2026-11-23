@@ -582,6 +582,35 @@ inline __aicore__ void BroadcastInt64(const LocalTensor<T> &dst, const LocalTens
   }
 }
 
+// int64 4D 广播 (A,1,A,1) -> (A,B,A,B) 的标量展开实现。
+// codegen 实参语义：dst_k = 每行有效元素数，dst_z = 行步长（含 padding）；
+// src 行步长 = BlkAlign<int64_t>(src_z)（32B 对齐）。
+// AscendC 的向量广播指令不支持 int64 的行内散布布局，标量展开保证行步长语义精确。
+template <typename T>
+inline __aicore__ void BroadcastInt64FourDim(const LocalTensor<T> &dst, const LocalTensor<T> &src, const uint32_t src_m,
+                                             const uint32_t src_n, const uint32_t src_k, const uint32_t src_z,
+                                             const uint32_t dst_m, const uint32_t dst_n, const uint32_t dst_k,
+                                             const uint32_t dst_z) {
+  const uint32_t src_row_stride = KernelUtils::BlkAlign<T>(src_z == 0 ? 1 : src_z);
+  auto event_id_v_to_s = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
+  auto event_id_s_to_v = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::S_V));
+  AscendC::SetFlag<HardEvent::V_S>(event_id_v_to_s);
+  AscendC::WaitFlag<HardEvent::V_S>(event_id_v_to_s);
+  for (uint32_t i = 0; i < dst_m; ++i) {
+    for (uint32_t j = 0; j < dst_n; ++j) {
+      for (uint32_t c = 0; c < src_k; ++c) {
+        const T v = src.GetValue((i * src_n * src_k + c) * src_row_stride);
+        const uint32_t dst_row = ((i * dst_n + j) * dst_k + c) * dst_z;
+        for (uint32_t d = 0; d < dst_k; ++d) {
+          dst.SetValue(dst_row + d, v);
+        }
+      }
+    }
+  }
+  AscendC::SetFlag<HardEvent::S_V>(event_id_s_to_v);
+  AscendC::WaitFlag<HardEvent::S_V>(event_id_s_to_v);
+}
+
 template <typename T>
 inline __aicore__ void Broadcast(const LocalTensor<T> &dst, const LocalTensor<T> &src, const uint32_t src_m,
                                  const uint32_t src_k, const uint32_t src_z, const uint32_t dst_m, const uint32_t dst_k,
@@ -611,12 +640,25 @@ inline __aicore__ void Broadcast(const LocalTensor<T> &dst, const LocalTensor<T>
     const uint32_t offset = dst_n * dst_k * dst_z;
     Broadcast(dst[offset], dst, src_m, offset, 0, dst_m - 1, offset, 0, tmp_buf);  // (1, BAB) -> (A, BAB)
   } else if (src_n == 1 && src_z == 1) {  // (A, 1, A, 1) -> (A, B, A, B), broadcast second and fourth dim
+    if constexpr (AscendC::SupportType<T, int64_t, uint64_t>()) {
+      // int64：向量广播不支持 8 字节行内散布，走标量展开；dst_z 即中间缓冲的行步长
+      BroadcastInt64FourDim(dst, src, src_m, src_n, src_k, src_z, dst_m, dst_n, dst_k, dst_z);
+      return;
+    }
     const uint32_t offset = dst_m * src_n * dst_k;
-    ASSERT((tmp_buf.GetSize() > (offset * dst_z + dst_m * dst_n) * sizeof(T)) && "tmp_buf size is not enough.");
+    // 中间缓冲行步长必须与 dst_z 一致（含 padding），否则第二次广播读取错行。
+    // int64 已在分支开头经 constexpr 提前走 BroadcastInt64FourDim 返回，此处
+    // 三元式的 int64 侧为不可达代码；非 int64 类型恢复实测绿基线（14:54 CI）的
+    // 紧凑布局口径——72ad8faf 将其改为 last_dim_stride 后 fp16 多轴广播 E2E
+    // （broadcast_multi_axes a1a1/11a1）中间缓冲核算与第二次广播的紧凑读取不一致。
+    const uint32_t inter_last_dim_stride = dst_z;
+    ASSERT((tmp_buf.GetSize() > (offset * inter_last_dim_stride + dst_m * dst_n) * sizeof(T)) &&
+           "tmp_buf size is not enough.");
     LocalTensor<T> inter_buf = tmp_buf.template ReinterpretCast<T>();
-    inter_buf.SetSize(offset * dst_z);
-    LocalTensor<uint8_t> left_buf = tmp_buf[offset * dst_z * sizeof(T)];
-    Broadcast(inter_buf, src, offset, 1, 0, offset, dst_z, 0, left_buf, last_dim_stride);  // (A1A, 1) -> (A1A, B)
+    inter_buf.SetSize(offset * inter_last_dim_stride);
+    LocalTensor<uint8_t> left_buf = tmp_buf[offset * inter_last_dim_stride * sizeof(T)];
+    Broadcast(inter_buf, src, offset, 1, 0, offset, dst_z, 0, left_buf,
+              last_dim_stride);  // (A1A, 1) -> (A1A, B)
     AscendC::PipeBarrier<PIPE_V>();
     // (A, 1, AB) -> (A, B, AB)
     Broadcast(dst, inter_buf, src_m, 1, dst_k * dst_z, dst_m, dst_n, dst_k * dst_z, left_buf);

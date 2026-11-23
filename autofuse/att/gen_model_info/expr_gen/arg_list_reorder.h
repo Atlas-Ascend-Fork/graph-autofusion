@@ -60,7 +60,7 @@ class ArgPriorityGraph {
   bool AddEdge(size_t from, size_t to) {
     // 参数检查
     if (from == 0u || from > vertex_count_ || to == 0u || to > vertex_count_) {
-      GELOGE(af::FAILED, "node id invalid");
+      GELOGE(af::FAILED, "node id invalid, from[%zu], to[%zu], vertex_count[%zu]", from, to, vertex_count_);
       return false;
     }
 

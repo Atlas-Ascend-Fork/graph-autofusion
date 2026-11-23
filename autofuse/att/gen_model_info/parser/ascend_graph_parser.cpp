@@ -918,7 +918,7 @@ af::Status AscendGraphParser::ConvertToTuningSpace(const af::AscGraph &graph) {
   SetAxisPriority(graph);
   ParserOptionalInfos(graph);
   for (auto &pair : sub_axes_info_) {
-    GELOGI("[DFX] Axis id[%lu], info [%s], graph[%s]", pair.first, pair.second->ToString().c_str(),
+    GELOGD("[DFX] Axis id[%lu], info [%s], graph[%s]", pair.first, pair.second->ToString().c_str(),
            graph.GetName().c_str());
     tuning_space_->sub_axes.emplace_back(std::move(pair.second));
   }

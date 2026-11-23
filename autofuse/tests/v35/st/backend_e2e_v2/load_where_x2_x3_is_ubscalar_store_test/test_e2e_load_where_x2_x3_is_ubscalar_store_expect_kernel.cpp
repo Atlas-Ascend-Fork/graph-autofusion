@@ -70,5 +70,8 @@ TEST_P(E2E_LoadWhereX2X3IsUbscalarStore_Code, CalculateCorrect) {
   AscendC::GmFree(expect);
 }
 
+// CANN 9.3.0 CPU debug requires the DataCopyPad UB source to be at least 128 B;
+// keep the same x2/x3-UB-scalar path but use an inner extent large enough for the
+// non-contiguous small-shape store to satisfy the debug check.
 INSTANTIATE_TEST_SUITE_P(CalcWithDifferentShape, E2E_LoadWhereX2X3IsUbscalarStore_Code,
-                         ::testing::Values(std::pair<std::vector<int>, std::vector<int>>{{2, 2, 2}, {3, 3, 3}}));
+                         ::testing::Values(std::pair<std::vector<int>, std::vector<int>>{{2, 2, 32}, {3, 3, 3}}));

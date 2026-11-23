@@ -687,6 +687,31 @@ Status ScheduleUtils::RemoveUnusedAxes(af::AscGraph &graph) {
       }
     }
   }
+  // [from 成员保活] 仅 MERGED 轴（成分表仍有效）保活其 from 成员：切图（PartitionByConnectivity）后
+  // 子图内成分轴不再被节点引用，若被当"未使用"删除，重建后 MERGED 轴 from 为空——调度断言失败
+  // （ApplySchedAxisMerge 要求 from.size()>=2）、codegen 的 GenAxisSizeNew merged 分支按 from 连乘
+  // 退化为 1。已降级 Original（MergeContinuousAxis 无 gather 路径 from.clear() 后）不保活，保持
+  // 轴表收缩语义（TestOptimizer.MergeAxes* 断言）。不动点遍历：成员自身也可能是 MERGED 轴。
+  for (bool changed = true; changed;) {
+    changed = false;
+    const auto try_keep = [&prev_id_to_new_id, &changed, &src_axes](af::AxisId axis_id) {
+      if ((axis_id >= 0) && (static_cast<uint64_t>(axis_id) < src_axes.size()) &&
+          (prev_id_to_new_id.find(axis_id) == prev_id_to_new_id.cend())) {
+        prev_id_to_new_id[axis_id] = static_cast<int64_t>(prev_id_to_new_id.size());
+        changed = true;
+      }
+    };
+    for (const auto &src_axis : src_axes) {
+      if (prev_id_to_new_id.find(src_axis->id) == prev_id_to_new_id.cend()) {
+        continue;
+      }
+      if (src_axis->type == af::Axis::Type::kAxisTypeMerged) {
+        for (const auto member : src_axis->from) {
+          try_keep(member);
+        }
+      }
+    }
+  }
   std::vector<af::AxisPtr> new_axes(prev_id_to_new_id.size());
   for (const auto &prev_id_and_new_id : prev_id_to_new_id) {
     const auto &src_axis = src_axes[prev_id_and_new_id.first];
@@ -696,6 +721,24 @@ Status ScheduleUtils::RemoveUnusedAxes(af::AscGraph &graph) {
     axis->name = src_axis->name;
     axis->type = src_axis->type;
     axis->size = src_axis->size;
+    // [重建补全] 原 4 字段拷贝丢失 bind_block/align/from/split_pair 等属性，MERGED 轴的成分表
+    // （from）被清空即上列保活注释所述故障；此处补拷全字段并按新 id 重映射 from/split 配对。
+    axis->bind_block = src_axis->bind_block;
+    axis->align = src_axis->align;
+    axis->allow_oversize_axis = src_axis->allow_oversize_axis;
+    axis->allow_unaligned_tail = src_axis->allow_unaligned_tail;
+    for (const auto member : src_axis->from) {
+      const auto it = prev_id_to_new_id.find(member);
+      if (it != prev_id_to_new_id.cend()) {
+        axis->from.emplace_back(it->second);
+      }
+    }
+    if (src_axis->split_pair_other_id != af::kIdNone) {
+      const auto it = prev_id_to_new_id.find(src_axis->split_pair_other_id);
+      if (it != prev_id_to_new_id.cend()) {
+        axis->split_pair_other_id = it->second;
+      }
+    }
     new_axes[prev_id_and_new_id.second] = std::move(axis);
   }
 

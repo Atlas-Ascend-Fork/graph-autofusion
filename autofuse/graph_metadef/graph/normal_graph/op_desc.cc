@@ -543,7 +543,7 @@ bool OpDescImpl::OpDescGenTensorDescsAreEqual(const OpDescImpl &r_op_desc) const
     REPORT_INNER_ERR_MSG("E18888",
                          "param r_op_desc outputs count(%zu) not equal to %s outputs count(%zu), "
                          "verify failed.",
-                         r_inputs_desc_size, this->GetName().c_str(), inputs_desc_size);
+                         r_outputs_desc_size, this->GetName().c_str(), outputs_desc_size);
     GELOGE(GRAPH_FAILED, "[Check][Param] Size of OpDesc's outputs desc verify failed, node name: %s.",
            this->GetName().c_str());
     return false;

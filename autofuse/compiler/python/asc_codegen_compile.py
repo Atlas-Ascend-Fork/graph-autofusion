@@ -559,6 +559,8 @@ def timestamp_set(is_start_stamp, graph_name, stage, need_report=False):
 def ascendc_clean(temp_dir):
     src_directory = os.getcwd()
     keep_dirs = {"host", "device"}
+    deleted_files = 0
+    deleted_dirs = 0
     # 遍历目录中的所有条目
     for entry in os.listdir(temp_dir):
         entry_path = os.path.join(temp_dir, entry)
@@ -566,16 +568,18 @@ def ascendc_clean(temp_dir):
         if os.path.isfile(entry_path):
             # 如果是文件，直接删除
             os.remove(entry_path)
-            CommonUtility.print_compile_log(
-                "", f"delete file: {entry_path}", AscendCLogLevel.LOG_INFO
-            )
+            deleted_files += 1
         else:
             # 如果是目录，检查是否需要保留
             if entry not in keep_dirs:
                 shutil.rmtree(entry_path)
-                CommonUtility.print_compile_log(
-                    "", f"delete dir: {entry_path}", AscendCLogLevel.LOG_INFO
-                )
+                deleted_dirs += 1
+    if deleted_files > 0 or deleted_dirs > 0:
+        CommonUtility.print_compile_log(
+            "",
+            f"clean {temp_dir}: deleted {deleted_files} files, {deleted_dirs} dirs",
+            AscendCLogLevel.LOG_INFO,
+        )
     os.chdir(src_directory)
 
 
@@ -1985,7 +1989,7 @@ def _apply_safety_fusion(ctx):
         )
     cv_aic_num = new_block_dim if use_launch_aic_num else ctx.cube_block_dim
     logger.info(
-        "CV fusion op, CV_AIC_NUM=[%s] CV_AIV_NUM=[%s] CV_VEC_WSS=[%s]",
+        "CV fusion op, CV_AIC_NUM=[%s] CV_AIV_NUM=[%s] CV_VEC_WSS=[%s] bytes",
         str(cv_aic_num),
         str(vec_block_dim),
         str(wss),

@@ -60,8 +60,8 @@ void PlatformContext::SetPlatformInfo(const PlatformInfo &platform_info) {
   if (!platform_info.soc_ver.empty()) {
     platform_info_ = platform_info;
     initialized_ = true;
-    GELOGI("Set platform info: soc_ver=%s, aiv_num=%lld, ub_size=%lld, l2_size=%lld", platform_info_.soc_ver.c_str(),
-           platform_info_.aiv_num, platform_info_.ub_size, platform_info_.l2_size);
+    GELOGI("Set platform info: soc_ver=%s, aiv_num=%lld, ub_size=%lld bytes, l2_size=%lld bytes",
+           platform_info_.soc_ver.c_str(), platform_info_.aiv_num, platform_info_.ub_size, platform_info_.l2_size);
   }
 }
 
@@ -113,7 +113,7 @@ void PlatformContext::SetUbSizeOverride(int64_t ub_size) {
   std::lock_guard<std::mutex> lg(mutex_);
   ub_size_override_ = ub_size;
   has_ub_size_override_ = true;
-  GELOGI("Set UB size override: ub_size=%lld", ub_size_override_);
+  GELOGI("Set UB size override: ub_size=%lld bytes", ub_size_override_);
 }
 
 af::Status PlatformContext::GetCurrentPlatformString(std::string &platform_name) {
@@ -157,8 +157,8 @@ af::Status PlatformContext::InitPlatformInfo() {
   GE_ASSERT_TRUE(res == RT_ERROR_NONE, "Failed to get l2_size.");
   GE_ASSERT_TRUE(ParseInt64(l2_size_str, "l2_size", platform_info_.l2_size), "Failed to parse l2_size.");
   initialized_ = true;
-  GELOGI("Platform info: soc_ver=%s, aiv_num=%lld, ub_size=%lld, l2_size=%lld", platform_info_.soc_ver.c_str(),
-         platform_info_.aiv_num, platform_info_.ub_size, platform_info_.l2_size);
+  GELOGI("Platform info: soc_ver=%s, aiv_num=%lld, ub_size=%lld bytes, l2_size=%lld bytes",
+         platform_info_.soc_ver.c_str(), platform_info_.aiv_num, platform_info_.ub_size, platform_info_.l2_size);
 
   return af::SUCCESS;
 }

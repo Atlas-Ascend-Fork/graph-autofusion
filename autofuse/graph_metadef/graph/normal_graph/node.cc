@@ -735,7 +735,7 @@ Node::Vistor<std::pair<NodePtr, OutDataAnchorPtr>> Node::NodeImpl::GetInDataNode
   std::vector<std::pair<NodePtr, OutDataAnchorPtr>> vec;
   for (const auto &p : in_data_anchors_) {
     if (p == nullptr) {
-      GELOGW("[Check][Param] In data anchor is nullptr, node=%s, type=%s", GetType().c_str(), GetName().c_str());
+      GELOGW("[Check][Param] In data anchor is nullptr, node=%s, type=%s", GetName().c_str(), GetType().c_str());
       continue;
     }
     auto anchor_ptr = p->GetPeerOutAnchor();
@@ -744,7 +744,7 @@ Node::Vistor<std::pair<NodePtr, OutDataAnchorPtr>> Node::NodeImpl::GetInDataNode
     }
     auto node = anchor_ptr->GetOwnerNode();
     if (node == nullptr) {
-      GELOGW("[Check][Param] Src node is nullptr, node=%s, type=%s", GetType().c_str(), GetName().c_str());
+      GELOGW("[Check][Param] Src node is nullptr, node=%s, type=%s", GetName().c_str(), GetType().c_str());
       continue;
     }
     vec.emplace_back(node, anchor_ptr);
@@ -757,17 +757,17 @@ Node::Vistor<std::pair<NodePtr, InDataAnchorPtr>> Node::NodeImpl::GetOutDataNode
   std::vector<std::pair<NodePtr, InDataAnchorPtr>> vec;
   for (const auto &p : out_data_anchors_) {
     if (p == nullptr) {
-      GELOGW("[Check][Param] Out data anchor is nullptr, node=%s, type=%s", GetType().c_str(), GetName().c_str());
+      GELOGW("[Check][Param] Out data anchor is nullptr, node=%s, type=%s", GetName().c_str(), GetType().c_str());
       continue;
     }
     for (const auto &in_anchor : p->GetPeerInDataAnchors()) {
       if (in_anchor == nullptr) {
-        GELOGW("[Check][Param] Dst in data anchor is nullptr, node=%s, type=%s", GetType().c_str(), GetName().c_str());
+        GELOGW("[Check][Param] Dst in data anchor is nullptr, node=%s, type=%s", GetName().c_str(), GetType().c_str());
         continue;
       }
       auto node = in_anchor->GetOwnerNode();
       if (node == nullptr) {
-        GELOGW("[Check][Param] Dst node is nullptr, node=%s, type=%s", GetType().c_str(), GetName().c_str());
+        GELOGW("[Check][Param] Dst node is nullptr, node=%s, type=%s", GetName().c_str(), GetType().c_str());
         continue;
       }
       vec.emplace_back(node, in_anchor);

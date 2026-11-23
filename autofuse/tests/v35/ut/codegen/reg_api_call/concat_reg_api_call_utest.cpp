@@ -633,7 +633,8 @@ TEST_F(ConcatRegApiCallUTest, Unaligned_B32_padded_concat_last_dim) {
   auto s2_1 = graph.CreateSizeVar("s2_1");
   auto s2_2 = graph.CreateSizeVar(16);
 
-  BuildConcat3DGraph({s0, s1, s2_1, s2_2}, graph, tpipe, tiler, DT_INT32, 8);
+  constexpr uint32_t kElementsPerBlock = 8U;
+  BuildConcat3DGraph({s0, s1, s2_1, s2_2}, graph, tpipe, tiler, DT_INT32, kElementsPerBlock);
 
   auto load = graph.FindNode("load");
   auto load2 = graph.FindNode("load2");
@@ -651,18 +652,22 @@ TEST_F(ConcatRegApiCallUTest, Unaligned_B32_padded_concat_last_dim) {
 
   std::string result;
   EXPECT_EQ(call.Generate(tpipe, vector<af::AxisId>{}, result), af::SUCCESS);
+  const auto dst_stride = tiler.Size(af::sym::Align(s2_1 + s2_2, kElementsPerBlock), true);
   EXPECT_EQ(
       result,
       "const concat::ConcatTilingPadded<2> concat_tiling {\n  .num_rows = static_cast<uint32_t>(t->s0),\n  "
-      ".num_dst_cols = static_cast<uint32_t>(((16 + t->s2_1))/(1)),\n  .num_srcs_cols = "
-      "{static_cast<uint32_t>((t->s2_1)/(1)), 16, },\n  .src_row_strides = "
-      "{static_cast<uint32_t>(((8 * Ceiling((Rational(1 , 8) * t->s2_1))))/(1)), 16, "
-      "},\n  .src_second_last_dim_strides = {static_cast<uint32_t>(((8 * Ceiling((Rational(1 "
-      ", 8) * t->s2_1))))/(1)), 0, },\n  .gather_mask_dim_sizes = {static_cast<uint32_t>(t->s2_1), 0, },\n};\n__ubuf__ "
-      "int32_t "
-      "*concat_src_addrs[] { (__ubuf__ int32_t *)local_0.GetPhyAddr(), (__ubuf__ int32_t *)local_2.GetPhyAddr(), "
-      "};\nconcat::ConcatExtend<int32_t, 2>((__ubuf__ int32_t *)local_3.GetPhyAddr(), concat_src_addrs, tmp_buf_0, "
-      "concat_tiling);\n");
+      ".dst_row_stride = static_cast<uint32_t>(" +
+          dst_stride +
+          "),\n  .num_srcs_cols = "
+          "{static_cast<uint32_t>((t->s2_1)/(1)), 16, },\n  .src_row_strides = "
+          "{static_cast<uint32_t>(((8 * Ceiling((Rational(1 , 8) * t->s2_1))))/(1)), 16, "
+          "},\n  .src_second_last_dim_strides = {static_cast<uint32_t>(((8 * Ceiling((Rational(1 "
+          ", 8) * t->s2_1))))/(1)), 0, },\n  .gather_mask_dim_sizes = {static_cast<uint32_t>(t->s2_1), 0, "
+          "},\n};\n__ubuf__ "
+          "int32_t "
+          "*concat_src_addrs[] { (__ubuf__ int32_t *)local_0.GetPhyAddr(), (__ubuf__ int32_t *)local_2.GetPhyAddr(), "
+          "};\nconcat::ConcatExtend<int32_t, 2>((__ubuf__ int32_t *)local_3.GetPhyAddr(), concat_src_addrs, tmp_buf_0, "
+          "concat_tiling);\n");
 }
 
 TEST_F(ConcatRegApiCallUTest, OneAxis) {

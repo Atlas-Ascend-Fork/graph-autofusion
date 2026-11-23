@@ -1278,14 +1278,20 @@ def link_kernel_so(
 def clean_before_modify(temp_dir):
     src_directory = os.getcwd()
     keep_dirs = {"host", "device", CV_WRAPPER_CACHE_DIR_NAME}
+    deleted_files = 0
+    deleted_dirs = 0
     for entry in os.listdir(temp_dir):
         entry_path = os.path.join(temp_dir, entry)
         if os.path.isfile(entry_path):
             os.remove(entry_path)
-            logger.info("delete file: %s", entry_path)
+            deleted_files += 1
         elif entry not in keep_dirs:
             shutil.rmtree(entry_path)
-            logger.info("delete dir: %s", entry_path)
+            deleted_dirs += 1
+    if deleted_files > 0 or deleted_dirs > 0:
+        logger.info(
+            "clean %s: deleted %d files, %d dirs", temp_dir, deleted_files, deleted_dirs
+        )
     os.chdir(src_directory)
 
 

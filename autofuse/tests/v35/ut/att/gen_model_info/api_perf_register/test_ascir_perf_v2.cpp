@@ -20,9 +20,11 @@
 #include "ascir/generator/v2_ascir_att_impl.h"
 #include "api_perf_register/api_perf_factory.h"
 #include "v35/att/api_perf_register/ascendc_regbase_perf.h"
+#include "v35/att/api_perf_register/ascendc_api_perf/data_move_api_perf_v2.h"
 #include "../../../../../ut/att/testcase/gen_model_info/api_perf_register/runtime_stub.h"
 #include "common/platform_context.h"
 #include "api_perf_register/utils/api_perf_utils.h"
+#include "api_perf_register/utils/vf_perf_utils.h"
 #include "graph_construct_utils.h"
 #include "parser/specific_params_builder.h"
 #include "tests/ut/common/ascir_reduce_test_helpers.h"
@@ -221,6 +223,22 @@ TEST_F(UTestAscirPerfV2, TransposePerfUsesDim3Inner1Formula) {
   EXPECT_EQ(result.pipe_expr, "(((12 * transpose_stride_count) + 98) * 4)");
 }
 
+TEST_F(UTestAscirPerfV2, TransposePerfUsesBankPeriodForAlignedDim3Inner1Fp32) {
+  const auto evaluate = [](const Expr &stride) {
+    return GetTransposePerfExpr(3, 1, {CreateExpr(19), CreateExpr(1), CreateExpr(280)}, {},
+                                {CreateExpr(1), CreateExpr(6720), stride}, true, kFloat32);
+  };
+  EXPECT_EQ(evaluate(CreateExpr(24)).pipe_expr, "1529");
+  EXPECT_EQ(evaluate(CreateExpr(40)).pipe_expr, "1529");
+  EXPECT_EQ(evaluate(CreateExpr(56)).pipe_expr, "1529");
+  EXPECT_EQ(evaluate(CreateExpr(32)).pipe_expr, "5519");
+  const auto tail = GetTransposePerfExpr(3, 1, {CreateExpr(24), CreateExpr(1), CreateExpr(72)}, {},
+                                         {CreateExpr(1), CreateExpr(4032), CreateExpr(56)}, true, kFloat32);
+  EXPECT_EQ(tail.pipe_expr, "575");
+  EXPECT_FALSE(evaluate(CreateExpr(23)).ternary_expr.empty());
+  EXPECT_FALSE(evaluate(CreateExpr("transpose_stride")).ternary_expr.empty());
+}
+
 TEST_F(UTestAscirPerfV2, TransposePerfUsesDim3Inner2Formula) {
   const auto result = GetTransposePerfExpr(3, 2, {CreateExpr(2), CreateExpr(3), CreateExpr(64)}, {CreateExpr(4)},
                                            {CreateExpr(192), CreateExpr(64), CreateExpr(1)});
@@ -336,6 +354,71 @@ TEST_F(UTestAscirPerfV2, TransposeUnitOuterSymbolicPredicateAndGcdMatchConstantD
                   EvaluateTransposeCycles(constant), 1e-6);
     }
   }
+}
+
+TEST_F(UTestAscirPerfV2, TransposeTwoInnerIndexStoreUsesInt32ForWideElements) {
+  for (const auto &item : std::vector<std::pair<std::string, double>>{{kFloat32, 667.0}, {kInt32, 747.0}}) {
+    SCOPED_TRACE(item.first);
+    const auto result = GetTransposePerfExpr(2, 2, {CreateExpr(8), CreateExpr(128)}, {}, {CreateExpr(1), CreateExpr(8)},
+                                             true, item.first);
+    // Sixteen 32-bit index vectors use the existing one-cycle Store entry.
+    // Other arithmetic retains its existing dtype-specific table entries.
+    EXPECT_DOUBLE_EQ(EvaluateTransposeCycles(result), item.second);
+  }
+}
+
+TEST_F(UTestAscirPerfV2, TransposeTwoInnerIndexStoreSymbolicRepeatsMatchConstantCalls) {
+  const Expr width = CreateExpr("index_width");
+  const auto symbolic =
+      GetTransposePerfExpr(2, 2, {CreateExpr(8), width}, {}, {CreateExpr(1), CreateExpr(8)}, true, kFloat32);
+  for (const auto count : {8, 64, 128, 1585}) {
+    const auto constant = GetTransposePerfExpr(2, 2, {CreateExpr(8), CreateExpr(count)}, {},
+                                               {CreateExpr(1), CreateExpr(8)}, true, kFloat32);
+    EXPECT_NEAR(EvaluateTransposeCycles(symbolic, {{width, CreateExpr(count)}}), EvaluateTransposeCycles(constant),
+                1e-6);
+  }
+  const auto pgo =
+      GetTransposePerfExpr(2, 2, {CreateExpr(8), CreateExpr(1585)}, {}, {CreateExpr(1), CreateExpr(8)}, true, kFloat32);
+  EXPECT_DOUBLE_EQ(EvaluateTransposeCycles(pgo), 6157.0);
+}
+
+TEST_F(UTestAscirPerfV2, TransposeDim3Inner1ShortAlignedFp32GatherCountsActiveLanes) {
+  const Expr lanes = CreateExpr("tail_lanes");
+  const Expr stride = CreateExpr("tail_stride");
+  const auto make = [](const Expr &tail, const Expr &pitch) {
+    return GetTransposePerfExpr(3, 1, {CreateExpr(2), CreateExpr(3), tail}, {}, {CreateExpr(1), CreateExpr(32), pitch},
+                                true, kFloat32);
+  };
+  const auto symbolic = make(lanes, stride);
+  for (const auto &sample :
+       {std::make_pair(7, 96), std::make_pair(8, 96), std::make_pair(9, 96), std::make_pair(7, 97)}) {
+    const auto tail = CreateExpr(sample.first);
+    const auto pitch = CreateExpr(sample.second);
+    EXPECT_NEAR(EvaluateTransposeCycles(symbolic, {{lanes, tail}, {stride, pitch}}),
+                EvaluateTransposeCycles(make(tail, pitch)), 1e-6);
+  }
+  EXPECT_DOUBLE_EQ(EvaluateTransposeCycles(make(CreateExpr(7), CreateExpr(96))), 140.0);
+  EXPECT_DOUBLE_EQ(EvaluateTransposeCycles(make(CreateExpr(8), CreateExpr(96))), 146.0);
+  EXPECT_DOUBLE_EQ(EvaluateTransposeCycles(make(CreateExpr(9), CreateExpr(96))), 482.0);
+  EXPECT_DOUBLE_EQ(EvaluateTransposeCycles(make(CreateExpr(7), CreateExpr(97))), 110.0);
+}
+
+TEST_F(UTestAscirPerfV2, TransposeDim2Inner1ShortAlignedFp32GatherCountsActiveLanes) {
+  const Expr lanes = CreateExpr("dim2_tail_lanes");
+  const Expr stride = CreateExpr("dim2_tail_stride");
+  const auto make = [](const Expr &tail, const Expr &pitch) {
+    return GetTransposePerfExpr(2, 1, {CreateExpr(30), tail}, {}, {CreateExpr(1), pitch}, true, kFloat32);
+  };
+  const auto symbolic = make(lanes, stride);
+  const auto eval = [&](int32_t tail, int32_t pitch) {
+    const std::vector<std::pair<Expr, Expr>> bindings{{lanes, CreateExpr(tail)}, {stride, CreateExpr(pitch)}};
+    const double cycles = EvaluateTransposeCycles(symbolic, bindings);
+    EXPECT_NEAR(cycles, EvaluateTransposeCycles(make(CreateExpr(tail), CreateExpr(pitch))), 1e-6);
+    return cycles;
+  };
+  EXPECT_DOUBLE_EQ(eval(8, 32) - eval(7, 32), 30.0);
+  EXPECT_DOUBLE_EQ(eval(9, 32) - eval(8, 32), 1680.0);
+  EXPECT_DOUBLE_EQ(eval(8, 33) - eval(7, 33), 0.0);
 }
 
 TEST_F(UTestAscirPerfV2, TransposeUnitOuterB64SymbolicRowsMatchConstantDescriptors) {
@@ -811,11 +894,10 @@ TEST_F(UTestAscirPerfV2, TestLoadApiForTypev1) {
   const auto ternary_ops = perf_res.ternary_ops;
   const auto ret = ConcursiveReplaceVars(ternary_ops);
   Expr res = SelectLoadCoreBranch(ternary_ops, false);
-  // LoadStride calculation: k=0.005, block_count=z0t_size*z1t_size, stride_used=min(448*4, 4096)=1792
-  // Result: 0.005 * z0t_size * z1t_size * 1792 = 8.96 * z0t_size * z1t_size
+  // The normalized descriptor combines the inner rows into the block count.
   const Expr expected =
-      CreateExpr(256) * z0t_size * z1t_size / (CreateExpr(6.4088F) / CreateExpr("block_dim") + CreateExpr(13.1355F)) +
-      CreateExpr(0.005F) * z0t_size * z1t_size * CreateExpr(1792) + CreateExpr(160.0F);
+      CreateExpr(512) * z0t_size / (CreateExpr(6.4088F) / CreateExpr("block_dim") + CreateExpr(13.1355F)) +
+      CreateExpr(0.005F) * CreateExpr(2 * 1792) * z0t_size + CreateExpr(160.0F);
   EXPECT_EQ(af::SymbolicUtils::StaticCheckEq(res.Replace(ret), expected), af::TriBool::kTrue)
       << Str(res.Replace(ret)) << " vs " << Str(expected);
 }
@@ -973,7 +1055,17 @@ TEST_F(UTestAscirPerfV2, TestLoadApiSingleCoreDynamicCaseNested) {
   const auto if_case = iter->second.DeepCopyIfCase();
   ASSERT_NE(if_case, nullptr);
   EXPECT_EQ(Str(if_case->GetChoiceA()->GetExpr()), "load_single_core_node");
-  EXPECT_EQ(Str(if_case->GetChoiceB()->GetExpr()), "load_node");
+  const Expr legacy_multi_core = CreateExpr("load_node");
+  Expr fallback = if_case->GetChoiceB()->GetExpr();
+  for (size_t i = 0; i < ternary_ops.size() && fallback != legacy_multi_core; ++i) {
+    const auto guard = ternary_ops.find(fallback);
+    ASSERT_NE(guard, ternary_ops.end());
+    const auto fit = guard->second.DeepCopyIfCase();
+    ASSERT_NE(fit, nullptr);
+    ASSERT_NE(fit->GetChoiceB(), nullptr);
+    fallback = fit->GetChoiceB()->GetExpr();
+  }
+  EXPECT_EQ(fallback, legacy_multi_core);
   EXPECT_NE(ternary_ops.find(CreateExpr("load_single_core_node")), ternary_ops.end());
   EXPECT_NE(ternary_ops.find(CreateExpr("load_node")), ternary_ops.end());
 }
@@ -1372,6 +1464,57 @@ TEST_F(UTestAscirPerfV2, TestNddma1DModelSupportsFourDtypeSizes) {
   }
 }
 
+TEST_F(UTestAscirPerfV2, TestNddmaDirectStoreRequiresQueueAndUniqueStoreConsumer) {
+  for (const auto *mode : {"direct", "no_queue", "vector", "shared", "single_buffer", "unknown_queue"}) {
+    SCOPED_TRACE(mode);
+    af::AscGraph graph("direct_store_test");
+    af::ascir_op::Data input("input", graph);
+    af::ascir_op::Load load("load");
+    graph.AddNode(load);
+    load.x = input.y;
+    if (std::string(mode) != "vector") {
+      af::ascir_op::Store store("store");
+      graph.AddNode(store);
+      store.x = load.y;
+    }
+    if (std::string(mode) == "vector" || std::string(mode) == "shared") {
+      af::ascir_op::Abs vector("vector");
+      graph.AddNode(vector);
+      vector.x = load.y;
+    }
+    NodeInfo node;
+    node.node_ptr = graph.FindNode("load");
+    ASSERT_NE(node.node_ptr, nullptr);
+    node.node_ptr->outputs[0].attr.vectorized_axis = {0, 1};
+    node.node_ptr->outputs[0].attr.mem.position = af::Position::kPositionVecIn;
+    node.node_ptr->outputs[0].attr.que.id = std::string(mode) == "unknown_queue" ? af::kIdNone : 0;
+    node.node_ptr->outputs[0].attr.que.buf_num = std::string(mode) == "single_buffer" ? 1 : 2;
+    node.node_ptr->outputs[0].attr.mem.alloc_type =
+        std::string(mode) == "no_queue" ? af::AllocType::kAllocTypeBuffer : af::AllocType::kAllocTypeQueue;
+    TensorShapeInfo shape;
+    shape.data_type = "float32";
+    shape.data_type_size = 4;
+    shape.repeats = {CreateExpr(8), CreateExpr(3960)};
+    shape.dims = shape.repeats;
+    shape.gm_strides = {CreateExpr(1), CreateExpr(8)};
+    shape.strides = {CreateExpr(3960), CreateExpr(1)};
+    const std::vector<TensorShapeInfo> shapes = {shape};
+    const auto api = ApiPerfFactory::Instance().Create("NddmaV2");
+    ASSERT_NE(api, nullptr);
+    PerfOutputInfo perf;
+    ASSERT_EQ(api->GetPerfFunc()(shapes, shapes, node, perf), af::SUCCESS);
+    const auto branch = perf.ternary_ops.find(perf.pipe_res.at(PipeType::AIV_MTE2));
+    ASSERT_NE(branch, perf.ternary_ops.end());
+    auto high = branch->second.DeepCopyIfCase()->GetChoiceB()->GetExpr();
+    high = high.Replace({{CreateExpr("block_dim"), CreateExpr(56)}});
+    high.Simplify();
+    double cycles = 0.0;
+    ASSERT_TRUE(high.GetConstValue(cycles));
+    EXPECT_EQ(cycles > 18000.0, std::string(mode) == "direct");
+    EXPECT_GT(cycles, 9000.0);
+  }
+}
+
 TEST_F(UTestAscirPerfV2, TestNddmaEffectiveRank2To5UsesNewModel) {
   auto nddma = ApiPerfFactory::Instance().Create("NddmaV2");
   ASSERT_NE(nddma, nullptr);
@@ -1477,7 +1620,9 @@ TEST_F(UTestAscirPerfV2, TestNddmaApiSmallBlockLen) {
   // stride = k * block_count * stride_used
   //        = 0.005 * (238*z0z1t_size) * Min(4096, Abs((32-z6t_size))*8)
   const std::string kPenalty = "(64.0 * Abs((32 - z6t_size)))";
-  const std::string kStride = "(1.18999997340143 * Min(4096.0, (8 * Abs((32 - z6t_size)))) * z0z1t_size)";
+  const std::string kStride =
+      "((1 - TernaryOp(IsEqual(LogicAnd(ExpectLt(0, Abs((32 - z6t_size))), ExpectLt(z6t_size, 16)), 0), 0, 1)) * "
+      "1.18999997340143 * Min(4096.0, (8 * Abs((32 - z6t_size)))) * z0z1t_size)";
   // Note: SymEngine may reorder additive terms; the stride term comes before nddma_perf and penalty.
   EXPECT_EQ(Str(res.Replace(ret)), "(" + kStride + " + (1904 * " + kLastAxisLen +
                                        " * z0z1t_size / (((6.3899998664856 / (block_dim)) + 7.6100001335144))) + " +
@@ -1521,12 +1666,11 @@ TEST_F(UTestAscirPerfV2, TestNddmaApiGmStrideTranspose) {
   // NddmaStride with penalty: stride calculation
   // stride = k * block_count * stride_used = 0.005 * (z0t_size * z1t_size) * 4096 = 20.4799995422363 * z0t_size *
   // z1t_size penalty = block_count_idx * stride_used * penalty_coeff = 1 * 4096 * 4 = 16384.0
-  const std::string kStride = "(20.4799995422363 * z0t_size * z1t_size)";
   // Note: The order of terms in the output is (nddma_perf + stride + penalty + constant)
   EXPECT_EQ(Str(res.Replace(ret)),
-            "((17688 * z0t_size * z1t_size / (((6.3899998664856 / (block_dim)) + "
-            "7.6100001335144))) + " +
-                kStride + " + 16802.9789123535)");
+            "(((1 - 0) * 20.4799995422363 * z0t_size * z1t_size) + "
+            "(17688 * z0t_size * z1t_size / (((6.3899998664856 / (block_dim)) + "
+            "7.6100001335144))) + 16802.9789123535)");
 }
 
 // 测试 CalculateStride 函数 - Nddma 节点验证 block_count_idx
@@ -1913,6 +2057,25 @@ TEST_F(UTestAscirPerfV2, TestGetUb2ubApiPerf) {
 TEST_F(UTestAscirPerfV2, TestGetMicroApiPerfTableInvalid) {
   PerfParamTableV2 perf_param_table_v2;
   EXPECT_EQ(perf_param_table_v2.GetVfInstructPerfTable("invalid").size(), 0);
+}
+
+TEST_F(UTestAscirPerfV2, VectorFunctionCountsTrueDivAndRsqrtLowering) {
+  const auto check = [](const std::string &dtype, int64_t elements, int64_t expected_cycles) {
+    const std::vector<NodePerfInfo> nodes = {
+        {kTrueDiv, dtype, dtype, {CreateExpr(elements)}, CreateExpr(0)},
+        {kRsqrt, dtype, dtype, {CreateExpr(elements)}, CreateExpr(0)},
+    };
+    const ascir_param::VectorFuncNodeParams params{};
+    std::map<Expr, TernaryOp, ExprCmp> ternary_ops;
+    Expr perf;
+    ASSERT_EQ(VfPerfUtils::GetVectorFunctionPerf(nodes, params, ternary_ops, perf), af::SUCCESS);
+    int64_t cycles = 0;
+    ASSERT_TRUE(perf.GetConstValue(cycles));
+    EXPECT_EQ(cycles, expected_cycles);
+  };
+  // Two vector repeats. The dependent Sqrt and Div set Rsqrt latency.
+  check(kFloat32, 128, 20 + 28 + 2 * (4 + 9));
+  check(kFloat16, 256, 20 + 38 + 2 * (8 + 17));
 }
 
 TEST_F(UTestAscirPerfV2, TestLoadStoreStrideModelParamsCoverSupportedTypes) {
@@ -2386,9 +2549,9 @@ TEST_F(UTestAscirPerfV2, TestGetOpHeadCostValid) {
   PerfParamTableV2 perf_param_table_v2;
   auto head_cost = perf_param_table_v2.GetOpHeadCost();
   EXPECT_TRUE(head_cost.IsConstExpr());
-  uint64_t head_cost_val = 0L;
+  double head_cost_val = 0.0;
   EXPECT_TRUE(head_cost.GetConstValue(head_cost_val));
-  EXPECT_EQ(head_cost_val, 0);
+  EXPECT_DOUBLE_EQ(head_cost_val, 22.059531283);
 }
 
 TEST_F(UTestAscirPerfV2, TestAbsV2) {
@@ -3939,12 +4102,10 @@ TEST_F(UTestAscirPerfV2, TestLoadApiExpandBlockLenSmallBlock) {
   auto ternary_ops = perf_res.ternary_ops;
   auto ret = ConcursiveReplaceVars(ternary_ops);
   Expr res = SelectLoadCoreBranch(ternary_ops, false);
-  // ExpandLoadBlockLen: block_len(8)*2=16B < 128B, stride>0 → pad to 64(=128/2)
-  // data_size = z0t * z1t * 64 * 2 = 128 * z0t * z1t, SmallBlk case
-  // stride_cost = 0.005 * z0t * z1t * min((64-8)*2, 4096) = 0.56 * z0t * z1t
+  // The normalized descriptor combines the inner rows into the block count.
   const Expr expected =
-      CreateExpr(128) * z0t_size * z1t_size / (CreateExpr(6.4088F) / CreateExpr("block_dim") + CreateExpr(13.1355F)) +
-      CreateExpr(0.005F) * z0t_size * z1t_size * CreateExpr(112) + CreateExpr(160.0F);
+      CreateExpr(256) * z0t_size / (CreateExpr(6.4088F) / CreateExpr("block_dim") + CreateExpr(13.1355F)) +
+      CreateExpr(0.005F) * CreateExpr(2 * 112) * z0t_size + CreateExpr(160.0F);
   EXPECT_EQ(af::SymbolicUtils::StaticCheckEq(res.Replace(ret), expected), af::TriBool::kTrue)
       << Str(res.Replace(ret)) << " vs " << Str(expected);
 }
@@ -4056,6 +4217,586 @@ TEST_F(UTestAscirPerfV2, TestLoadApiCodegenTailAxisSwapUsesVectorizedShape) {
   }
 }
 
+void ExpectDmaDomain(const Expr &condition, const std::vector<Expr> &symbols,
+                     const std::vector<std::vector<int32_t>> &points, af::TriBool expected) {
+  for (const auto &values : points) {
+    ASSERT_EQ(symbols.size(), values.size());
+    std::vector<std::pair<Expr, Expr>> bindings;
+    for (size_t i = 0; i < symbols.size(); ++i) {
+      bindings.emplace_back(symbols[i], CreateExpr(values[i]));
+    }
+    EXPECT_EQ(af::SymbolicUtils::StaticCheckEq(condition.Replace(bindings), af::sym::kSymbolZero), expected);
+  }
+}
+
+bool HasLoadFallbackChain(const std::map<Expr, TernaryOp, ExprCmp> &ternary_ops, Expr current, const Expr &expected) {
+  for (size_t depth = 0; depth <= ternary_ops.size(); ++depth) {
+    if (current == expected) {
+      return true;
+    }
+    const auto it = ternary_ops.find(current);
+    if (it == ternary_ops.end()) {
+      return false;
+    }
+    const auto fallback = it->second.DeepCopyIfCase()->GetChoiceB();
+    if (fallback == nullptr) {
+      return false;
+    }
+    current = fallback->GetExpr();
+  }
+  return false;
+}
+
+TEST_F(UTestAscirPerfV2, TestAlignedSingleRowLoadEstimate) {
+  const Expr rows = CreateExpr("rows");
+  const Expr width = CreateExpr("width");
+  const Expr cores = CreateExpr("block_dim");
+  NodeDetail node;
+  node.name = "Load";
+  node.optype = kLoad;
+  node.input_dtype = {"float32"};
+  node.output_dtype = {"float32"};
+  node.input_dims = {rows, width};
+  node.gm_stride = CreateExpr(32128) - width;
+  PerfOutputInfo perf;
+  ASSERT_EQ(ascendcapi_v2::LoadPerf(node, perf), af::SUCCESS);
+  const auto calibrated = CreateExpr("load_aligned_single_row_node");
+  const auto it = perf.ternary_ops.find(calibrated);
+  ASSERT_NE(it, perf.ternary_ops.end());
+  EXPECT_TRUE(HasLoadFallbackChain(perf.ternary_ops, SelectLoadCoreBranch(perf.ternary_ops, false), calibrated));
+
+  const auto guard = it->second.DeepCopyIfCase();
+  ASSERT_NE(guard, nullptr);
+  const auto condition = guard->GetCondLeft();
+  const auto evaluate = [&](int32_t row_count, int32_t elements, int32_t core_count) {
+    return af::SymbolicUtils::StaticCheckEq(
+        condition.Replace(
+            {{rows, CreateExpr(row_count)}, {width, CreateExpr(elements)}, {cores, CreateExpr(core_count)}}),
+        af::sym::kSymbolZero);
+  };
+  EXPECT_EQ(evaluate(1, 30680, 56), af::TriBool::kTrue);
+  EXPECT_EQ(evaluate(1, 512, 24), af::TriBool::kTrue);
+  EXPECT_EQ(evaluate(2, 30680, 56), af::TriBool::kFalse);
+  EXPECT_EQ(evaluate(1, 30679, 56), af::TriBool::kFalse);
+  EXPECT_EQ(evaluate(1, 504, 56), af::TriBool::kFalse);
+  EXPECT_EQ(evaluate(1, 30688, 56), af::TriBool::kFalse);
+  EXPECT_EQ(evaluate(1, 30680, 23), af::TriBool::kFalse);
+  EXPECT_EQ(evaluate(1, 30680, 57), af::TriBool::kFalse);
+
+  double cycles = 0.0;
+  ASSERT_TRUE(guard->GetChoiceA()
+                  ->GetExpr()
+                  .Replace({{width, CreateExpr(30680)}, {cores, CreateExpr(56)}})
+                  .GetConstValue(cycles));
+  EXPECT_NEAR(cycles, 5498.61, 0.1);
+
+  node.input_dtype = {"float16"};
+  node.output_dtype = {"float16"};
+  PerfOutputInfo fp16_perf;
+  ASSERT_EQ(ascendcapi_v2::LoadPerf(node, fp16_perf), af::SUCCESS);
+  EXPECT_EQ(fp16_perf.ternary_ops.count(calibrated), 0U);
+}
+
+void CheckAlignedLoopLoadDescriptorDomainFallbacks(const TensorShapeInfo &shape, NodeInfo node,
+                                                   const Expr &calibrated) {
+  auto load = ApiPerfFactory::Instance().Create("LoadV2");
+  ASSERT_NE(load, nullptr);
+  const auto expect_fallback = [&](const TensorShapeInfo &input, const NodeInfo &info) {
+    PerfOutputInfo fallback;
+    ASSERT_EQ(load->GetPerfFunc()({input}, {input}, info, fallback), af::SUCCESS);
+    EXPECT_EQ(fallback.ternary_ops.count(calibrated), 0U);
+  };
+  node.is_cv_ub_fusion = true;
+  expect_fallback(shape, node);
+  node.is_cv_ub_fusion = false;
+  auto changed = shape;
+  changed.data_type = "float16";
+  changed.data_type_size = 2;
+  expect_fallback(changed, node);
+  changed = shape;
+  changed.strides.back() = CreateExpr(2);
+  expect_fallback(changed, node);
+  changed = shape;
+  changed.gm_strides.back() = CreateExpr(2);
+  expect_fallback(changed, node);
+  changed = shape;
+  changed.repeats.push_back(CreateExpr(8));
+  changed.strides.push_back(CreateExpr(1));
+  changed.gm_strides.push_back(CreateExpr(1));
+  expect_fallback(changed, node);
+}
+
+TEST_F(UTestAscirPerfV2, TestAlignedLoopLoadDescriptorDomain) {
+  const Expr m = CreateExpr("loop_m");
+  const Expr n = CreateExpr("loop_n");
+  const Expr width = CreateExpr("loop_width");
+  const Expr padding = CreateExpr("loop_padding");
+  const Expr gm_offset = CreateExpr("loop_gm_stride_delta");
+  const Expr cores = CreateExpr("block_dim");
+  TensorShapeInfo shape;
+  shape.data_type = "float32";
+  shape.data_type_size = 4;
+  shape.repeats = {m, n, width};
+  shape.gm_strides = {width + gm_offset, m * width, CreateExpr(1)};
+  shape.strides = {(n + padding) * width, width, CreateExpr(1)};
+  NodeInfo node;
+  node.node_ptr = GraphConstructUtils::ConstructSingleOp("Load", 1, 1);
+  auto load = ApiPerfFactory::Instance().Create("LoadV2");
+  ASSERT_NE(load, nullptr);
+  PerfOutputInfo perf;
+  ASSERT_EQ(load->GetPerfFunc()({shape}, {shape}, node, perf), af::SUCCESS);
+  const Expr calibrated = CreateExpr("load_aligned_loop_payload_node");
+  const Expr narrow = CreateExpr("load_narrow_loop_payload_node");
+  ASSERT_EQ(perf.pipe_res.at(PipeType::AIV_MTE2), narrow);
+  ASSERT_EQ(perf.ternary_ops.at(narrow).DeepCopyIfCase()->GetChoiceB()->GetExpr(), calibrated);
+  const auto it = perf.ternary_ops.find(calibrated);
+  ASSERT_NE(it, perf.ternary_ops.end());
+  auto guard = it->second.DeepCopyIfCase();
+  ASSERT_NE(guard, nullptr);
+
+  ExpectDmaDomain(guard->GetCondLeft(), {m, n, width, padding, gm_offset, cores},
+                  {{24, 2, 32, 0, 0, 16}, {56, 6, 64, 1, 0, 56}, {43, 5, 64, 0, 0, 40}}, af::TriBool::kTrue);
+  ExpectDmaDomain(guard->GetCondLeft(), {m, n, width, padding, gm_offset, cores},
+                  {{23, 4, 64, 0, 0, 32},
+                   {57, 4, 64, 0, 0, 32},
+                   {38, 1, 64, 0, 0, 32},
+                   {38, 7, 64, 0, 0, 32},
+                   {38, 4, 48, 0, 0, 32},
+                   {38, 4, 96, 0, 0, 32},
+                   {38, 4, 64, 2, 0, 32},
+                   {38, 4, 64, 0, 1, 32},
+                   {38, 4, 64, 0, 0, 15},
+                   {38, 4, 64, 0, 0, 57}},
+                  af::TriBool::kFalse);
+
+  double cycles = 0.0;
+  ASSERT_TRUE(guard->GetChoiceA()
+                  ->GetExpr()
+                  .Replace({{m, CreateExpr(38)}, {n, CreateExpr(4)}, {width, CreateExpr(64)}, {cores, CreateExpr(32)}})
+                  .GetConstValue(cycles));
+  EXPECT_NEAR(cycles, 294.009388 + 38912.0 / (32.296047 + 252.871196 / 32), 0.01);
+  ASSERT_NE(guard->GetChoiceB()->GetExpr(), calibrated);
+
+  // The factory retains the legacy path for unsupported API descriptors.
+  CheckAlignedLoopLoadDescriptorDomainFallbacks(shape, node, calibrated);
+}
+
+void CheckNarrowLoopLoadDescriptorDomainFallbacks(const TensorShapeInfo &shape, NodeInfo node, const Expr &calibrated) {
+  auto load = ApiPerfFactory::Instance().Create("LoadV2");
+  ASSERT_NE(load, nullptr);
+  const auto expect_fallback = [&](const TensorShapeInfo &input, const NodeInfo &info) {
+    PerfOutputInfo fallback;
+    ASSERT_EQ(load->GetPerfFunc()({input}, {input}, info, fallback), af::SUCCESS);
+    EXPECT_EQ(fallback.ternary_ops.count(calibrated), 0U);
+  };
+  node.is_cv_ub_fusion = true;
+  expect_fallback(shape, node);
+  node.is_cv_ub_fusion = false;
+  auto changed = shape;
+  changed.data_type = "float16";
+  changed.data_type_size = 2;
+  expect_fallback(changed, node);
+  changed = shape;
+  changed.gm_strides[0] = CreateExpr(17);
+  expect_fallback(changed, node);
+  changed = shape;
+  changed.strides.back() = CreateExpr(2);
+  expect_fallback(changed, node);
+}
+
+TEST_F(UTestAscirPerfV2, TestNarrowLoopLoadDescriptorDomain) {
+  const Expr m = CreateExpr("narrow_m");
+  const Expr n = CreateExpr("narrow_n");
+  const Expr padding = CreateExpr("narrow_padding");
+  const Expr cores = CreateExpr("block_dim");
+  TensorShapeInfo shape;
+  shape.data_type = "float32";
+  shape.data_type_size = 4;
+  shape.repeats = {m, n, CreateExpr(16)};
+  shape.gm_strides = {CreateExpr(16), m * CreateExpr(16), CreateExpr(1)};
+  shape.strides = {(n + padding) * CreateExpr(16), CreateExpr(16), CreateExpr(1)};
+  NodeInfo node;
+  node.node_ptr = GraphConstructUtils::ConstructSingleOp("Load", 1, 1);
+  auto load = ApiPerfFactory::Instance().Create("LoadV2");
+  ASSERT_NE(load, nullptr);
+  PerfOutputInfo perf;
+  ASSERT_EQ(load->GetPerfFunc()({shape}, {shape}, node, perf), af::SUCCESS);
+  const Expr calibrated = CreateExpr("load_narrow_loop_payload_node");
+  const auto it = perf.ternary_ops.find(calibrated);
+  ASSERT_NE(it, perf.ternary_ops.end());
+  EXPECT_EQ(perf.pipe_res.at(PipeType::AIV_MTE2), calibrated);
+  const auto guard = it->second.DeepCopyIfCase();
+  ASSERT_NE(guard, nullptr);
+
+  ExpectDmaDomain(guard->GetCondLeft(), {m, n, padding, cores},
+                  {{24, 2, 0, 16}, {56, 8, 1, 56}, {38, 6, 0, 22}, {50, 4, 0, 32}}, af::TriBool::kTrue);
+  ExpectDmaDomain(
+      guard->GetCondLeft(), {m, n, padding, cores},
+      {{23, 4, 0, 32}, {57, 4, 0, 32}, {38, 1, 0, 32}, {38, 9, 0, 32}, {38, 2, 4, 22}, {38, 4, 0, 15}, {38, 4, 0, 57}},
+      af::TriBool::kFalse);
+
+  double cycles = 0.0;
+  ASSERT_TRUE(guard->GetChoiceA()
+                  ->GetExpr()
+                  .Replace({{m, CreateExpr(38)}, {n, CreateExpr(6)}, {cores, CreateExpr(22)}})
+                  .GetConstValue(cycles));
+  EXPECT_NEAR(cycles, 1303.6138, 0.01);
+  CheckNarrowLoopLoadDescriptorDomainFallbacks(shape, node, calibrated);
+}
+
+TEST_F(UTestAscirPerfV2, TestAlignedDenseBulkLoadKeepsPhysicalDescriptorDomain) {
+  const Expr rows = CreateExpr("bulk_rows");
+  const Expr width = CreateExpr("bulk_width");
+  const Expr cores = CreateExpr("block_dim");
+  const Expr gm_gap = CreateExpr("bulk_gm_gap");
+  const Expr ub_gap = CreateExpr("bulk_ub_gap");
+  NodeDetail node;
+  node.name = "Load";
+  node.optype = kLoad;
+  node.input_dtype = {"float32"};
+  node.output_dtype = {"float32"};
+  node.input_dims = {rows, width};
+  node.gm_stride = gm_gap;
+  node.ub_stride = ub_gap;
+  PerfOutputInfo perf;
+  ASSERT_EQ(ascendcapi_v2::LoadPerf(node, perf), af::SUCCESS);
+  const Expr calibrated = CreateExpr("LoadAlignedDenseBulkPayload_small_dma_node");
+  const auto it = perf.ternary_ops.find(calibrated);
+  ASSERT_NE(it, perf.ternary_ops.end());
+  const auto guard = it->second.DeepCopyIfCase();
+
+  ExpectDmaDomain(guard->GetCondLeft(), {rows, width, cores, gm_gap, ub_gap},
+                  {{512, 8, 16, 0, 0}, {2048, 8, 56, 0, 0}, {1024, 16, 48, 0, 0}, {512, 32, 40, 0, 0}},
+                  af::TriBool::kTrue);
+  ExpectDmaDomain(guard->GetCondLeft(), {rows, width, cores, gm_gap, ub_gap},
+                  {{511, 8, 32, 0, 0},
+                   {2049, 8, 32, 0, 0},
+                   {1024, 7, 32, 0, 0},
+                   {512, 40, 32, 0, 0},
+                   {2048, 16, 32, 0, 0},
+                   {1024, 8, 15, 0, 0},
+                   {1024, 8, 57, 0, 0},
+                   {1024, 8, 32, 8, 0},
+                   {1024, 8, 32, 0, 8}},
+                  af::TriBool::kFalse);
+
+  const auto expect_unchanged = [&](const NodeDetail &input) {
+    PerfOutputInfo fallback;
+    ASSERT_EQ(ascendcapi_v2::LoadPerf(input, fallback), af::SUCCESS);
+    EXPECT_EQ(fallback.ternary_ops.count(calibrated), 0U);
+  };
+  auto control = node;
+  control.input_dtype = {"float16"};
+  control.output_dtype = {"float16"};
+  expect_unchanged(control);
+  control = node;
+  control.input_dims = {af::sym::kSymbolOne, width};
+  expect_unchanged(control);
+  control = node;
+  control.vectorized_shape = {rows, af::sym::kSymbolOne, width};
+  expect_unchanged(control);
+}
+
+void CheckDenseLoadDescriptorEquivalence(NodeDetail node, const Expr &calibrated, double packed) {
+  const Expr rows = CreateExpr("dense_rows");
+  const Expr width = CreateExpr("dense_width");
+  const Expr gm_gap = CreateExpr("dense_gm_gap");
+  const Expr ub_gap = CreateExpr("dense_ub_gap");
+  const Expr cores = CreateExpr("block_dim");
+  node.input_dims = {af::sym::kSymbolOne, width};
+  PerfOutputInfo single_row;
+  ASSERT_EQ(ascendcapi_v2::LoadPerf(node, single_row), af::SUCCESS);
+  const auto single_it = single_row.ternary_ops.find(calibrated);
+  ASSERT_NE(single_it, single_row.ternary_ops.end());
+  const auto single_guard = single_it->second.DeepCopyIfCase();
+  ASSERT_NE(single_guard, nullptr);
+  const auto accepts_single = [&](int32_t w, int32_t c) {
+    return af::SymbolicUtils::StaticCheckEq(single_guard->GetCondLeft().Replace({{width, CreateExpr(w)},
+                                                                                 {gm_gap, af::sym::kSymbolZero},
+                                                                                 {ub_gap, af::sym::kSymbolZero},
+                                                                                 {cores, CreateExpr(c)}}),
+                                            af::sym::kSymbolZero);
+  };
+  for (const auto w : {256, 264, 272, 280, 512, 992, 1016, 1024}) {
+    EXPECT_EQ(accepts_single(w, 16), af::TriBool::kTrue);
+    EXPECT_EQ(accepts_single(w, 56), af::TriBool::kTrue);
+  }
+  for (const auto w : {248, 257, 1032, 1040, 1056, 5344, 5360, 6144, 6152}) {
+    EXPECT_EQ(accepts_single(w, 32), af::TriBool::kFalse);
+  }
+  EXPECT_EQ(accepts_single(512, 15), af::TriBool::kFalse);
+  EXPECT_EQ(accepts_single(512, 57), af::TriBool::kFalse);
+  double single_estimate = 0.0;
+  ASSERT_TRUE(single_guard->GetChoiceA()
+                  ->GetExpr()
+                  .Replace({{width, CreateExpr(1024)}, {cores, CreateExpr(48)}})
+                  .GetConstValue(single_estimate));
+  EXPECT_DOUBLE_EQ(single_estimate, packed);
+  node.input_dims = {rows, width};
+  node.vectorized_shape = {CreateExpr(2), CreateExpr(16), CreateExpr(64)};
+  PerfOutputInfo loop;
+  ASSERT_EQ(ascendcapi_v2::LoadPerf(node, loop), af::SUCCESS);
+  EXPECT_EQ(loop.ternary_ops.count(calibrated), 0U);
+  node.vectorized_shape.clear();
+  node.input_dtype = {"float16"};
+  node.output_dtype = {"float16"};
+  PerfOutputInfo fp16;
+  ASSERT_EQ(ascendcapi_v2::LoadPerf(node, fp16), af::SUCCESS);
+  EXPECT_EQ(fp16.ternary_ops.count(calibrated), 0U);
+}
+
+TEST_F(UTestAscirPerfV2, TestAlignedDenseLoadDomainAndDescriptorEquivalence) {
+  const Expr rows = CreateExpr("dense_rows");
+  const Expr width = CreateExpr("dense_width");
+  const Expr gm_gap = CreateExpr("dense_gm_gap");
+  const Expr ub_gap = CreateExpr("dense_ub_gap");
+  const Expr cores = CreateExpr("block_dim");
+  NodeDetail node;
+  node.name = "Load";
+  node.optype = kLoad;
+  node.input_dtype = {"float32"};
+  node.output_dtype = {"float32"};
+  node.input_dims = {rows, width};
+  node.gm_stride = gm_gap;
+  node.ub_stride = ub_gap;
+  PerfOutputInfo perf;
+  ASSERT_EQ(ascendcapi_v2::LoadPerf(node, perf), af::SUCCESS);
+  const Expr calibrated = CreateExpr("LoadAlignedDensePayload_small_dma_node");
+  const auto it = perf.ternary_ops.find(calibrated);
+  ASSERT_NE(it, perf.ternary_ops.end());
+  EXPECT_EQ(SelectLoadCoreBranch(perf.ternary_ops, false), calibrated);
+  const auto guard = it->second.DeepCopyIfCase();
+  ASSERT_NE(guard, nullptr);
+
+  ExpectDmaDomain(guard->GetCondLeft(), {rows, width, gm_gap, ub_gap, cores},
+                  {{16, 64, 0, 0, 16}, {4, 64, 0, 0, 48}, {1, 1024, 0, 0, 48}}, af::TriBool::kTrue);
+  ExpectDmaDomain(guard->GetCondLeft(), {rows, width, gm_gap, ub_gap, cores},
+                  {{17, 64, 0, 0, 56},
+                   {16, 57, 0, 0, 32},
+                   {3, 64, 0, 0, 32},
+                   {1, 1032, 0, 0, 32},
+                   {16, 64, 1, 0, 32},
+                   {16, 64, 0, 8, 32},
+                   {16, 64, 0, 0, 15},
+                   {16, 64, 0, 0, 57}},
+                  af::TriBool::kFalse);
+
+  const auto estimate = guard->GetChoiceA()->GetExpr();
+  double packed = 0.0;
+  double flat = 0.0;
+  ASSERT_TRUE(estimate.Replace({{rows, CreateExpr(16)}, {width, CreateExpr(64)}, {cores, CreateExpr(48)}})
+                  .GetConstValue(packed));
+  ASSERT_TRUE(estimate.Replace({{rows, CreateExpr(1)}, {width, CreateExpr(1024)}, {cores, CreateExpr(48)}})
+                  .GetConstValue(flat));
+  EXPECT_DOUBLE_EQ(packed, flat);
+  EXPECT_NEAR(packed, 457.52, 0.1);
+  CheckDenseLoadDescriptorEquivalence(node, calibrated, packed);
+}
+
+TEST_F(UTestAscirPerfV2, TestAlignedWideGapLoadEstimate) {
+  const Expr rows = CreateExpr("wide_rows");
+  const Expr width = CreateExpr("wide_width");
+  const Expr pitch = CreateExpr("wide_pitch");
+  const Expr ub_gap = CreateExpr("wide_ub_gap");
+  const Expr cores = CreateExpr("block_dim");
+  NodeDetail node;
+  node.name = "Load";
+  node.optype = kLoad;
+  node.input_dtype = {"float32"};
+  node.output_dtype = {"float32"};
+  node.input_dims = {rows, width};
+  node.gm_stride = pitch - width;
+  node.ub_stride = ub_gap;
+  PerfOutputInfo perf;
+  ASSERT_EQ(ascendcapi_v2::LoadPerf(node, perf), af::SUCCESS);
+  const auto calibrated = CreateExpr("LoadAlignedWideGap_small_dma_node");
+  const auto it = perf.ternary_ops.find(calibrated);
+  ASSERT_NE(it, perf.ternary_ops.end());
+  EXPECT_TRUE(HasLoadFallbackChain(perf.ternary_ops, SelectLoadCoreBranch(perf.ternary_ops, false), calibrated));
+
+  const auto guard = it->second.DeepCopyIfCase();
+  ASSERT_NE(guard, nullptr);
+  const auto evaluate = [&](int32_t row_count, int32_t elements, int32_t gm_pitch, int32_t ub_padding,
+                            int32_t core_count) {
+    return af::SymbolicUtils::StaticCheckEq(guard->GetCondLeft().Replace({{rows, CreateExpr(row_count)},
+                                                                          {width, CreateExpr(elements)},
+                                                                          {pitch, CreateExpr(gm_pitch)},
+                                                                          {ub_gap, CreateExpr(ub_padding)},
+                                                                          {cores, CreateExpr(core_count)}}),
+                                            af::sym::kSymbolZero);
+  };
+  EXPECT_EQ(evaluate(32, 592, 131072, 0, 56), af::TriBool::kTrue);
+  EXPECT_EQ(evaluate(16, 384, 131072, 0, 40), af::TriBool::kTrue);
+  EXPECT_EQ(evaluate(32, 768, 131072, 0, 56), af::TriBool::kTrue);
+  EXPECT_EQ(evaluate(24, 592, 131072, 0, 56), af::TriBool::kFalse);
+  EXPECT_EQ(evaluate(32, 240, 131072, 0, 56), af::TriBool::kFalse);
+  EXPECT_EQ(evaluate(32, 593, 131072, 0, 56), af::TriBool::kFalse);
+  EXPECT_EQ(evaluate(32, 592, 262144, 0, 56), af::TriBool::kFalse);
+  EXPECT_EQ(evaluate(32, 592, 131072, 8, 56), af::TriBool::kFalse);
+  EXPECT_EQ(evaluate(32, 592, 131072, 0, 57), af::TriBool::kFalse);
+
+  double cycles = 0.0;
+  ASSERT_TRUE(guard->GetChoiceA()
+                  ->GetExpr()
+                  .Replace({{rows, CreateExpr(32)}, {width, CreateExpr(592)}, {cores, CreateExpr(56)}})
+                  .GetConstValue(cycles));
+  EXPECT_NEAR(cycles, 4295.07, 0.1);
+}
+
+TEST_F(UTestAscirPerfV2, TestWidePitch128BLoadEstimate) {
+  const Expr rows = CreateExpr("wide_pitch_rows");
+  const Expr width = CreateExpr("wide_pitch_width");
+  const Expr pitch = CreateExpr("wide_pitch_gm");
+  const Expr ub_gap = CreateExpr("wide_pitch_ub_gap");
+  NodeDetail node;
+  node.name = "Load";
+  node.optype = kLoad;
+  node.input_dtype = {"float32"};
+  node.output_dtype = {"float32"};
+  node.input_dims = {rows, width};
+  node.gm_stride = pitch - width;
+  node.ub_stride = ub_gap;
+  PerfOutputInfo perf;
+  ASSERT_EQ(ascendcapi_v2::LoadPerf(node, perf), af::SUCCESS);
+  const auto it = perf.ternary_ops.find(CreateExpr("LoadWidePitch128B_small_dma_node"));
+  ASSERT_NE(it, perf.ternary_ops.end());
+  const auto guard = it->second.DeepCopyIfCase();
+  ASSERT_NE(guard, nullptr);
+  const auto accepts = [&](int32_t row_count, int32_t elements, int32_t gm_pitch, int32_t ub_padding) {
+    const auto condition = guard->GetCondLeft().Replace({{rows, CreateExpr(row_count)},
+                                                         {width, CreateExpr(elements)},
+                                                         {pitch, CreateExpr(gm_pitch)},
+                                                         {ub_gap, CreateExpr(ub_padding)}});
+    return af::SymbolicUtils::StaticCheckEq(condition, af::sym::kSymbolZero);
+  };
+  EXPECT_EQ(accepts(512, 32, 8192, 0), af::TriBool::kTrue);
+  EXPECT_EQ(accepts(256, 32, 4096, 0), af::TriBool::kTrue);
+  EXPECT_EQ(accepts(384, 32, 16384, 0), af::TriBool::kTrue);
+  EXPECT_EQ(accepts(512, 32, 8193, 0), af::TriBool::kFalse);
+  EXPECT_EQ(accepts(513, 32, 8192, 0), af::TriBool::kFalse);
+  EXPECT_EQ(accepts(512, 32, 8192, 8), af::TriBool::kFalse);
+  EXPECT_EQ(accepts(512, 128, 8192, 0), af::TriBool::kFalse);
+  double cycles = 0.0;
+  ASSERT_TRUE(
+      guard->GetChoiceA()
+          ->GetExpr()
+          .Replace({{rows, CreateExpr(512)}, {width, CreateExpr(32)}, {CreateExpr("block_dim"), CreateExpr(52)}})
+          .GetConstValue(cycles));
+  EXPECT_NEAR(cycles, 3147.44, 0.1);
+}
+
+TEST_F(UTestAscirPerfV2, TestSmallDmaCalibratedDomains) {
+  const Expr rows = CreateExpr("dma_rows");
+  const Expr width = CreateExpr("dma_width");
+  const Expr gap = CreateExpr("dma_gap");
+  const Expr cores = CreateExpr("block_dim");
+  NodeDetail node;
+  node.name = "Load";
+  node.optype = kLoad;
+  node.input_dtype = {"float32"};
+  node.output_dtype = {"float32"};
+  node.input_dims = {rows, width};
+  node.gm_stride = gap;
+  PerfOutputInfo perf;
+  ASSERT_EQ(ascendcapi_v2::LoadPerf(node, perf), af::SUCCESS);
+  const auto normal = perf.ternary_ops.find(CreateExpr("LoadSmallPayload_small_dma_node"));
+  const auto compact = perf.ternary_ops.find(CreateExpr("LoadSmallPayloadCompact_small_dma_node"));
+  ASSERT_NE(normal, perf.ternary_ops.end());
+  ASSERT_NE(compact, perf.ternary_ops.end());
+  const auto accepts = [&](const TernaryOp &guard, int32_t r, int32_t w, int32_t g, int32_t c) {
+    return af::SymbolicUtils::StaticCheckEq(
+        guard.DeepCopyIfCase()->GetCondLeft().Replace(
+            {{rows, CreateExpr(r)}, {width, CreateExpr(w)}, {gap, CreateExpr(g)}, {cores, CreateExpr(c)}}),
+        af::sym::kSymbolZero);
+  };
+  EXPECT_EQ(accepts(normal->second, 1, 128, 0, 8), af::TriBool::kTrue);
+  EXPECT_EQ(accepts(normal->second, 1, 2048, 0, 48), af::TriBool::kTrue);
+  EXPECT_EQ(accepts(normal->second, 1, 120, 0, 8), af::TriBool::kFalse);
+  EXPECT_EQ(accepts(normal->second, 1, 2056, 0, 48), af::TriBool::kFalse);
+  EXPECT_EQ(accepts(normal->second, 4, 128, 64, 32), af::TriBool::kFalse);
+  EXPECT_EQ(accepts(normal->second, 4, 128, 0, 7), af::TriBool::kFalse);
+  EXPECT_EQ(accepts(normal->second, 4, 128, 0, 49), af::TriBool::kFalse);
+  EXPECT_EQ(accepts(compact->second, 2, 64, 64, 8), af::TriBool::kTrue);
+  EXPECT_EQ(accepts(compact->second, 18, 64, 4096, 48), af::TriBool::kTrue);
+  EXPECT_EQ(accepts(compact->second, 1, 128, 64, 32), af::TriBool::kFalse);
+  EXPECT_EQ(accepts(compact->second, 19, 128, 64, 32), af::TriBool::kFalse);
+  EXPECT_EQ(accepts(compact->second, 4, 128, 63, 32), af::TriBool::kFalse);
+  EXPECT_EQ(accepts(compact->second, 4, 128, 4097, 32), af::TriBool::kFalse);
+  EXPECT_EQ(accepts(compact->second, 4, 127, 64, 32), af::TriBool::kFalse);
+}
+
+TEST_F(UTestAscirPerfV2, TestSmallStoreCalibratedDomain) {
+  const Expr rows = CreateExpr("dma_rows");
+  const Expr width = CreateExpr("dma_width");
+  const Expr gap = CreateExpr("dma_gap");
+  const Expr cores = CreateExpr("block_dim");
+  NodeDetail node;
+  node.name = "Load";
+  node.optype = kLoad;
+  node.input_dtype = {"float32"};
+  node.output_dtype = {"float32"};
+  node.input_dims = {rows, width};
+  node.gm_stride = gap;
+  PerfOutputInfo perf;
+  ASSERT_EQ(ascendcapi_v2::LoadPerf(node, perf), af::SUCCESS);
+  const auto normal = perf.ternary_ops.find(CreateExpr("LoadSmallPayload_small_dma_node"));
+  const auto compact = perf.ternary_ops.find(CreateExpr("LoadSmallPayloadCompact_small_dma_node"));
+  ASSERT_NE(normal, perf.ternary_ops.end());
+  ASSERT_NE(compact, perf.ternary_ops.end());
+  const auto accepts = [&](const TernaryOp &guard, int32_t r, int32_t w, int32_t g, int32_t c) {
+    return af::SymbolicUtils::StaticCheckEq(
+        guard.DeepCopyIfCase()->GetCondLeft().Replace(
+            {{rows, CreateExpr(r)}, {width, CreateExpr(w)}, {gap, CreateExpr(g)}, {cores, CreateExpr(c)}}),
+        af::sym::kSymbolZero);
+  };
+  node.optype = kStore;
+  node.repeats = node.input_dims;
+  node.gm_stride = CreateExpr(0);
+  PerfOutputInfo store;
+  ASSERT_EQ(ascendcapi_v2::StorePerf(node, store), af::SUCCESS);
+  const auto selected = store.ternary_ops.find(CreateExpr("StoreSmallPayload_small_dma_node"));
+  ASSERT_NE(selected, store.ternary_ops.end());
+  EXPECT_EQ(accepts(selected->second, 1, 256, 0, 8), af::TriBool::kTrue);
+  EXPECT_EQ(accepts(selected->second, 1, 2048, 0, 56), af::TriBool::kTrue);
+  EXPECT_EQ(accepts(selected->second, 1, 248, 0, 8), af::TriBool::kFalse);
+  EXPECT_EQ(accepts(selected->second, 1, 2056, 0, 56), af::TriBool::kFalse);
+  double cycles = 0.0;
+  ASSERT_TRUE(selected->second.DeepCopyIfCase()
+                  ->GetChoiceA()
+                  ->GetExpr()
+                  .Replace({{rows, CreateExpr(4)}, {width, CreateExpr(128)}, {cores, CreateExpr(32)}})
+                  .GetConstValue(cycles));
+  EXPECT_NEAR(cycles, 279.5940, 0.01);
+}
+
+TEST_F(UTestAscirPerfV2, TestSmallDmaUnsupportedDescriptorsKeepLegacy) {
+  NodeDetail node;
+  node.name = "Load";
+  node.optype = kLoad;
+  node.input_dtype = {"float32"};
+  node.output_dtype = {"float32"};
+  node.input_dims = {CreateExpr(4), CreateExpr(128)};
+  node.ub_stride = CreateExpr(8);
+  PerfOutputInfo ub_gap;
+  ASSERT_EQ(ascendcapi_v2::LoadPerf(node, ub_gap), af::SUCCESS);
+  EXPECT_EQ(ub_gap.ternary_ops.count(CreateExpr("LoadSmallPayload_small_dma_node")), 0U);
+  EXPECT_EQ(ub_gap.ternary_ops.count(CreateExpr("LoadSmallPayloadCompact_small_dma_node")), 0U);
+
+  node.ub_stride = CreateExpr(0);
+  node.input_dtype = {"float16"};
+  node.output_dtype = {"float16"};
+  PerfOutputInfo other_dtype;
+  ASSERT_EQ(ascendcapi_v2::LoadPerf(node, other_dtype), af::SUCCESS);
+  EXPECT_EQ(other_dtype.ternary_ops.count(CreateExpr("LoadSmallPayload_small_dma_node")), 0U);
+
+  node.input_dtype = {"float32"};
+  node.output_dtype = {"float32"};
+  node.vectorized_shape = {CreateExpr(2), CreateExpr(2), CreateExpr(128)};
+  PerfOutputInfo loop_mode;
+  ASSERT_EQ(ascendcapi_v2::LoadPerf(node, loop_mode), af::SUCCESS);
+  EXPECT_EQ(loop_mode.ternary_ops.count(CreateExpr("LoadSmallPayload_small_dma_node")), 0U);
+}
+
 TEST_F(UTestAscirPerfV2, TestLoadApiCodegenTailAxisContinuous) {
   TensorShapeInfo shape;
   shape.data_type = "float16";
@@ -4101,12 +4842,10 @@ TEST_F(UTestAscirPerfV2, TestLoadApiExpandBlockLenLargeBlock) {
   auto ternary_ops = perf_res.ternary_ops;
   auto ret = ConcursiveReplaceVars(ternary_ops);
   Expr res = SelectLoadCoreBranch(ternary_ops, false);
-  // block_len=128*2=256B > 128B, 不触发pad; SmallBlk case
-  // data_size = 256 * z0t * z1t
-  // stride = 0.005 * z0t * z1t * min((256-128)*2, 4096) = 1.28 * z0t * z1t
+  // The normalized descriptor combines the inner rows into the block count.
   const Expr expected =
-      CreateExpr(256) * z0t_size * z1t_size / (CreateExpr(6.4088F) / CreateExpr("block_dim") + CreateExpr(13.1355F)) +
-      CreateExpr(0.005F) * z0t_size * z1t_size * CreateExpr(256) + CreateExpr(160.0F);
+      CreateExpr(512) * z0t_size / (CreateExpr(6.4088F) / CreateExpr("block_dim") + CreateExpr(13.1355F)) +
+      CreateExpr(0.005F) * CreateExpr(2 * 256) * z0t_size + CreateExpr(160.0F);
   EXPECT_EQ(af::SymbolicUtils::StaticCheckEq(res.Replace(ret), expected), af::TriBool::kTrue)
       << Str(res.Replace(ret)) << " vs " << Str(expected);
 }

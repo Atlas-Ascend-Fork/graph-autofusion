@@ -133,8 +133,8 @@ bool IsStoreWithoutStride(const af::AscNode &node) {
     size_t concat_dim;
     GE_WARN_ASSERT(GetConcatDim(node, concat_dim));
     GE_WARN_ASSERT((concat_dim > 0) && (concat_dim < output_tensor_attr.repeats.size()),
-                   "concat_dim output range, concat_dim = %zu, repeats = %s, ", concat_dim,
-                   af::ToString(output_tensor_attr.repeats).c_str());
+                   "concat_dim out of range, concat_dim = %zu, valid range is (0, %zu), repeats = %s, ", concat_dim,
+                   output_tensor_attr.repeats.size(), af::ToString(output_tensor_attr.repeats).c_str());
     af::Expression elt_num = output_tensor_attr.repeats[concat_dim];
     for (size_t i = concat_dim + 1UL; i < output_tensor_attr.repeats.size(); ++i) {
       elt_num = elt_num * output_tensor_attr.repeats[i];

@@ -13,6 +13,7 @@
 #include "ascendc_ir.h"
 #include "ascir_ops.h"
 #include "ascir_ops_utils.h"
+#include "codegen/ascendc_api_registry.h"
 #include "codegen_kernel.h"
 #include "common_utils.h"
 #include "graph/ascendc_ir/utils/asc_tensor_utils.h"
@@ -38,6 +39,22 @@ TEST(IndirectLoadCodegenImplTest, LoadsApiHeadersInDeclarationOrder) {
                                              "indirect_load_simd_reg_base.h", "indirect_load_sk_reg_base.h",
                                              "indirect_load_simt_reg_base.h", "transpose_reg_base.h"};
   EXPECT_EQ(headers, expected);
+}
+
+// The affine fast path of BuildIndirectLoadSimdStridedOffsets builds the
+// offsets table row by row with VEC ops (Cast/Muls/Adds). When the row pitch
+// (slice_count * 4B) is not 32B-aligned, odd rows stay 16B-aligned only and
+// the kernel hits a vector core exception (errcode 340, rand_fuzz_0251:
+// index_select(dim=3) with 12 broadcast indices). The inlined simd reg_base
+// content must keep the alignment guard and fall back to the scalar path.
+TEST(IndirectLoadCodegenImplTest, StridedOffsetsAffineFastPathKeepsUbAlignmentGuard) {
+  const auto &content = AscendCApiRegistry::GetInstance().GetFileContent("indirect_load_simd_reg_base.h");
+  ASSERT_NE(content.find("BuildIndirectLoadSimdStridedOffsets"), std::string::npos);
+  EXPECT_NE(content.find("IndirectLoadSimdStridedVecAligned"), std::string::npos);
+  // Row pitch guard: slice_count must be a multiple of 32B / sizeof(int32_t).
+  EXPECT_NE(content.find("dst_align_elems"), std::string::npos);
+  // Source guard: index outer strides must be multiples of 32B / sizeof(Index).
+  EXPECT_NE(content.find("src_align_elems"), std::string::npos);
 }
 
 struct ILTestGraph {
@@ -4654,4 +4671,54 @@ TEST(IndirectLoadApiCallTest, ResolveFusedMemberInputTensorFailsLoudlyOnMultiInp
 
   const auto *resolved = codegen::ResolveFusedMemberInputTensor(tpipe, g.graph.FindNode("indirect_load"));
   EXPECT_EQ(resolved, nullptr);
+}
+
+// 同名节点 post-reduce 与 GM 输出两路由候选在同源文件共存的守护测试
+// （SimtDefinitionSuffix 隔离）。
+TEST(IndirectLoadApiCallTest, GenerateFuncDefinitionSameNodeDistinctRoutesCoexist) {
+  const std::string guard_prefix = "#ifndef AUTOFUSE_INDIRECT_LOAD_SIMT_CONTEXT_DEFINED_";
+  ILTestGraph post_reduce_graph("simt_route_post_reduce");
+  ILTestGraph gm_output_graph("simt_route_gm_output");
+  std::string post_reduce_def;
+  std::string gm_output_def;
+  GenerateSimtPostReduceFuncDefinition(post_reduce_graph, post_reduce_def);
+  GenerateSimtFuncDefinition(gm_output_graph, gm_output_def);
+
+  // 模拟同一源文件：同一 graph node 的 post-reduce 候选先发射、GM 输出候选后发射。
+  const std::string source = post_reduce_def + gm_output_def;
+
+  // 两条路由的 Context/Body 定义在拼接后的源文件中同时存活。
+  EXPECT_NE(source.find("struct IndirectLoadSimtContext_indirect_load_post_reduce"), std::string::npos);
+  EXPECT_NE(source.find("struct IndirectLoadSimtBody_indirect_load_post_reduce"), std::string::npos);
+  EXPECT_NE(source.find("struct IndirectLoadSimtContext_indirect_load_gm_output"), std::string::npos);
+  EXPECT_NE(source.find("struct IndirectLoadSimtBody_indirect_load_gm_output"), std::string::npos);
+
+  // 两条路由的 Context guard 名互不相同：后缀退化回常量时二者合一，第二条定义被
+  // 同名 guard 整体抑制。
+  const auto context_guard_of = [&guard_prefix](const std::string &definition) {
+    const auto begin = definition.find(guard_prefix);
+    EXPECT_NE(begin, std::string::npos);
+    const auto token_begin = begin + guard_prefix.size();
+    const auto token_end = definition.find('\n', token_begin);
+    EXPECT_NE(token_end, std::string::npos);
+    return definition.substr(token_begin, token_end - token_begin);
+  };
+  const std::string post_reduce_guard = context_guard_of(post_reduce_def);
+  const std::string gm_output_guard = context_guard_of(gm_output_def);
+  EXPECT_NE(post_reduce_guard, gm_output_guard);
+
+  // 各路由 Body 的 using Context 指向各自同名 Context，不被统一或交叉引用。
+  EXPECT_NE(post_reduce_def.find("using Context = IndirectLoadSimtContext_indirect_load_post_reduce;"),
+            std::string::npos);
+  EXPECT_NE(gm_output_def.find("using Context = IndirectLoadSimtContext_indirect_load_gm_output;"), std::string::npos);
+  EXPECT_EQ(post_reduce_def.find("using Context = IndirectLoadSimtContext_indirect_load_gm_output;"),
+            std::string::npos);
+  EXPECT_EQ(gm_output_def.find("using Context = IndirectLoadSimtContext_indirect_load_post_reduce;"),
+            std::string::npos);
+
+  // Body guard 同样随路由区分，且 Context/Body guard 对齐同一路由名。
+  EXPECT_NE(post_reduce_def.find("#ifndef AUTOFUSE_INDIRECT_LOAD_SIMT_BODY_DEFINED_indirect_load_post_reduce"),
+            std::string::npos);
+  EXPECT_NE(gm_output_def.find("#ifndef AUTOFUSE_INDIRECT_LOAD_SIMT_BODY_DEFINED_indirect_load_gm_output"),
+            std::string::npos);
 }

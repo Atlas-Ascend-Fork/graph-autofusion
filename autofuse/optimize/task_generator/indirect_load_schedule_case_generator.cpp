@@ -92,6 +92,7 @@ using indirect_load_detail::IsGroupSimtL4UbDoomed;
 using indirect_load_detail::IsGroupSimtNValueTileUbDoomed;
 using indirect_load_detail::IsGroupUbAbsoluteDoomed;
 using indirect_load_detail::IsSimtUbInfeasible;
+using indirect_load_detail::IsSkRedirectRequiredForDynamicTail;
 using indirect_load_detail::IsSkWindowUbInfeasible;
 using indirect_load_detail::kIndirectLoadUbReservedBytes;
 
@@ -212,58 +213,122 @@ using indirect_load_detail::ValidateOutputStoreTargets;
 using indirect_load_detail::ValidateSimdPostReduceLayout;
 using indirect_load_detail::ValidateSimtPostReduceLayout;
 
-af::Status ApplyGraphPass(af::AscGraph &graph, const af::AscNodePtr &indirect_load, ascir::TemplateId template_id,
-                          bool &is_candidate_legal, bool has_live_candidate = true) {
-  GELOGD("[IndirectLoad] Apply graph pass for node[%s], template_id[%d].", indirect_load->GetNamePtr(),
-         static_cast<int32_t>(template_id));
-  is_candidate_legal = true;
+// 记录候选被拒绝：动态尾轴重定向触发的拒绝回传信号（供 Generate 回退常规 SK），
+// 其余拒绝仅打日志。
+void MarkCandidateRejected(ascir::TemplateId template_id, const af::AscNodePtr &indirect_load,
+                           bool sk_dynamic_redirect_fired, bool *sk_dynamic_redirect_rejected) {
+  GELOGI("[IndirectLoad] Reject template[%d] for node[%s]: post-reduce or region validation failed.",
+         static_cast<int32_t>(template_id), indirect_load->GetNamePtr());
+  if (sk_dynamic_redirect_fired && sk_dynamic_redirect_rejected != nullptr) {
+    *sk_dynamic_redirect_rejected = true;
+  }
+}
+
+// 值宽度 × 模板可行性过滤：64 位值（int64/uint64）由 SIMD 8 字节 ValuePolicy
+// （RegTraitNumTwo）与 SIMT 支持；1 字节值（int8/uint8/bool）当前仅 SIMT 标量路径
+// 支持（SIMD b8 gather 语义待定）；SK 的 AscendC::Gather 对 8 字节与 1 字节均不
+// 支持，需跳过。不可行时调用方置 is_candidate_legal=false 结束本候选。
+bool IsValueDtypeSupportedByTemplate(const af::AscNodePtr &indirect_load, ascir::TemplateId template_id) {
   const auto value_dtype = indirect_load->inputs()[ascgen_utils::indirect_load::kInputTensorIndex]->attr.dtype;
   const bool is_64bit_value = value_dtype == af::DT_INT64 || value_dtype == af::DT_UINT64;
   const bool is_1byte_value = value_dtype == af::DT_INT8 || value_dtype == af::DT_UINT8 || value_dtype == af::DT_BOOL;
-  // 64 位值（int64/uint64）由 SIMD 8 字节 ValuePolicy（RegTraitNumTwo）与 SIMT 支持；
-  // 1 字节值（int8/uint8/bool）当前仅 SIMT 标量路径支持（SIMD b8 gather 语义待定）。
-  // SK 的 AscendC::Gather 对 8 字节与 1 字节均不支持，需跳过。
   if ((is_64bit_value || is_1byte_value) && template_id == ascir::TemplateId::kIndirectLoadSK) {
-    is_candidate_legal = false;
     GELOGI("[IndirectLoad] value dtype[%d] is unsupported by SK, skip template[%d] for node[%s].",
            static_cast<int32_t>(value_dtype), static_cast<int32_t>(template_id), indirect_load->GetNamePtr());
-    return af::SUCCESS;
+    return false;
   }
   if (is_1byte_value && template_id != ascir::TemplateId::kIndirectLoadSimt) {
-    is_candidate_legal = false;
     GELOGI("[IndirectLoad] 1-byte value dtype[%d] only supports SIMT, skip template[%d] for node[%s].",
            static_cast<int32_t>(value_dtype), static_cast<int32_t>(template_id), indirect_load->GetNamePtr());
+    return false;
+  }
+  return true;
+}
+
+// [SK段SIMT化] index 源头不收敛且全量窗口超出单核 UB 的形态（如
+// gather(axis=0) 逐元素 index + 尾轴大 R）：IndirectLoadSk 行窗口模型退化为
+// 全量不可行。保留 SK 的 output workspace 边界（消费子图/Reduce 段独立调度，
+// 承载 R 轴分 tile 归约），IL 段整体重定向为 SIMT 模板走全套流程（input/
+// index GM 直读，输出 tile 写 output workspace）——SK 分段设计对 R 非全载
+// 场景的本意。softmax 消费链在此形态下不规范化（见 Generate），以原始
+// Pattern 链作为 Norm Region DAG 进入分段；复合 Norm 区域（多 Reduce）同理。
+// 门禁放宽：SIMT 候选可能因布局校验被拒（如 mean(dim=-2) 中间轴归约，
+// IsSimtUbInfeasible 只看尾轴 UB 下界无法覆盖）——前序 SIMD/SIMT 候选均不可行时
+// SK 是最后活路，此时即使 SIMT 的 UB 下界可行也必须重定向。
+// 动态尾轴（非收敛 index + 尾轴运行期符号）也需重定向；分段候选为任意
+// 运行期 R 提供可解的 UB 兜底，小 R 仍保留可行的 inline 候选。
+// suppress_sk_redirect 置位时跳过重定向走常规 SK 路径，供 Generate 在分段
+// 候选被校验拒绝后回退重试。返回 true 表示已重定向为 SIMT 模板（template_id
+// 由调用方更新）；dynamic_tail_fired 出参标记本次拒绝源是否为动态尾轴重定向。
+bool TryRedirectSkCandidateToSimt(af::AscGraph &graph, const af::AscNodePtr &indirect_load,
+                                  ascir::TemplateId template_id, bool has_live_candidate, bool suppress_sk_redirect,
+                                  bool &dynamic_tail_fired) {
+  if (template_id != ascir::TemplateId::kIndirectLoadSK) {
+    return false;
+  }
+  const bool window_redirect = !suppress_sk_redirect && indirect_load_detail::IsSkWindowUbInfeasible(indirect_load);
+  const bool dynamic_tail_redirect =
+      !suppress_sk_redirect && indirect_load_detail::IsSkRedirectRequiredForDynamicTail(graph, indirect_load);
+  if (!(window_redirect || dynamic_tail_redirect) || !IsNormRegionDag(indirect_load)) {
+    return false;
+  }
+  if (!indirect_load_detail::IsSimtUbInfeasible(graph, indirect_load) && has_live_candidate && !dynamic_tail_redirect) {
+    return false;
+  }
+  GELOGI("[IndirectLoad] SK candidate redirects IL to SIMT (window exceeds UB), node[%s].",
+         indirect_load->GetNamePtr());
+  dynamic_tail_fired = dynamic_tail_redirect;
+  // 先 Norm 边界化再 output 边界：闭包按 IL 下游数据流计算，output 边界插入后
+  // IL 直接消费者变为边界 store，Norm 链被隔断在闭包之外（生产 9.28 复验：
+  // 边界 0 个、分区 0 子图、has_none_graph）。Norm 边界先行，IL 直连 Norm 链首，
+  // 闭包完整；随后 output 边界插在 IL 与 Norm 链首之间。
+  GE_ASSERT_SUCCESS(indirect_load_detail::PartitionNormReduceBoundaries(graph, indirect_load));
+  GE_ASSERT_SUCCESS(indirect_load_detail::PartitionSkGraph(graph, indirect_load, false, false,
+                                                           /*skip_input_boundaries=*/true));
+  GE_ASSERT_SUCCESS(ascir::SetSkSegmentedSimt(indirect_load, true));
+  return true;
+}
+
+// SIMT 候选的 normal-schedule 角色标注：豁免集即 lowering 侧
+// BuildSimtLoweringMetadata 会校验的 index_region，其中与 normal_schedule
+// 闭包重叠的共享节点不能被兜底清理掉角色。
+af::Status AnnotateSimtScheduleRoles(af::AscGraph &graph, const af::AscNodePtr &indirect_load,
+                                     const RewrittenGraphAnalysis &analysis) {
+  NodeSet normal_schedule_nodes;
+  GE_ASSERT_SUCCESS(AnnotateSimtFanoutBranches(indirect_load, analysis, normal_schedule_nodes));
+  NodeSet lowering_exempt;
+  for (const auto &region_node : analysis.index_region) {
+    lowering_exempt.emplace(region_node.get());
+  }
+  return indirect_load_detail::ClearNormalScheduleSimtRoles(graph, normal_schedule_nodes, lowering_exempt);
+}
+
+af::Status ApplyGraphPass(af::AscGraph &graph, const af::AscNodePtr &indirect_load, ascir::TemplateId template_id,
+                          bool &is_candidate_legal, bool has_live_candidate = true,
+                          bool *sk_dynamic_redirect_rejected = nullptr, bool suppress_sk_redirect = false) {
+  GELOGD("[IndirectLoad] Apply graph pass for node[%s], template_id[%d].", indirect_load->GetNamePtr(),
+         static_cast<int32_t>(template_id));
+  is_candidate_legal = true;
+  // [动态重定向回退信号] 分段重定向候选被校验拒绝时由调用方（Generate）回退常规
+  // SK 候选；sk_dynamic_redirect_fired 仅在拒绝源自动态尾轴重定向时置位（静态窗口
+  // 超限的 SK 全载候选必然被 StaticUbTemplateFilter 淘汰，回退无价值）。
+  bool sk_dynamic_redirect_fired = false;
+  if (!IsValueDtypeSupportedByTemplate(indirect_load, template_id)) {
+    is_candidate_legal = false;
     return af::SUCCESS;
   }
   if (template_id == ascir::TemplateId::kIndirectLoadSK) {
-    // [SK段SIMT化] index 源头不收敛且全量窗口超出单核 UB 的形态（如
-    // gather(axis=0) 逐元素 index + 尾轴大 R）：IndirectLoadSk 行窗口模型退化为
-    // 全量不可行。保留 SK 的 output workspace 边界（消费子图/Reduce 段独立调度，
-    // 承载 R 轴分 tile 归约），IL 段整体重定向为 SIMT 模板走全套流程（input/
-    // index GM 直读，输出 tile 写 output workspace）——SK 分段设计对 R 非全载
-    // 场景的本意。softmax 消费链在此形态下不规范化（见 Generate），以原始
-    // Pattern 链作为 Norm Region DAG 进入分段；复合 Norm 区域（多 Reduce）同理。
-    // 门禁放宽：SIMT 候选可能因布局校验被拒（如 mean(dim=-2) 中间轴归约，
-    // IsSimtUbInfeasible 只看尾轴 UB 下界无法覆盖）——前序 SIMD/SIMT 候选均不可行时
-    // SK 是最后活路，此时即使 SIMT 的 UB 下界可行也必须重定向。
-    if (IsSkWindowUbInfeasible(indirect_load) && IsNormRegionDag(indirect_load) &&
-        (IsSimtUbInfeasible(graph, indirect_load) || !has_live_candidate)) {
-      GELOGI("[IndirectLoad] SK candidate redirects IL to SIMT (window exceeds UB), node[%s].",
-             indirect_load->GetNamePtr());
-      // 先 Norm 边界化再 output 边界：闭包按 IL 下游数据流计算，output 边界插入后
-      // IL 直接消费者变为边界 store，Norm 链被隔断在闭包之外（生产 9.28 复验：
-      // 边界 0 个、分区 0 子图、has_none_graph）。Norm 边界先行，IL 直连 Norm 链首，
-      // 闭包完整；随后 output 边界插在 IL 与 Norm 链首之间。
-      GE_ASSERT_SUCCESS(PartitionNormReduceBoundaries(graph, indirect_load));
-      GE_ASSERT_SUCCESS(PartitionSkGraph(graph, indirect_load, false, false, /*skip_input_boundaries=*/true));
+    if (TryRedirectSkCandidateToSimt(graph, indirect_load, template_id, has_live_candidate, suppress_sk_redirect,
+                                     sk_dynamic_redirect_fired)) {
       template_id = ascir::TemplateId::kIndirectLoadSimt;
-      GE_ASSERT_SUCCESS(ascir::SetSkSegmentedSimt(indirect_load, true));
+    } else if (!sk_dynamic_redirect_fired) {
+      return indirect_load_detail::ApplySkGraphPass(graph, indirect_load, is_candidate_legal);
     } else {
-      return ApplySkGraphPass(graph, indirect_load, is_candidate_legal);
+      return af::SUCCESS;
     }
   }
   if (template_id == ascir::TemplateId::kIndirectLoadSimt) {
-    GE_ASSERT_SUCCESS(ClearSimtTemplateRoles(graph));
+    GE_ASSERT_SUCCESS(indirect_load_detail::ClearSimtTemplateRoles(graph));
   }
   RewrittenGraphAnalysis analysis;
   GE_ASSERT_SUCCESS(AnalyzeRewrittenGraph(graph, indirect_load, template_id, is_candidate_legal, analysis));
@@ -277,21 +342,12 @@ af::Status ApplyGraphPass(af::AscGraph &graph, const af::AscNodePtr &indirect_lo
   size_t boundary = indirect_load->outputs()[0]->attr.axis.size();
   GE_ASSERT_SUCCESS(ValidateTemplate(indirect_load, template_id, analysis, boundary, is_candidate_legal));
   if (!is_candidate_legal) {
-    GELOGI("[IndirectLoad] Reject template[%d] for node[%s]: post-reduce or region validation failed.",
-           static_cast<int32_t>(template_id), indirect_load->GetNamePtr());
+    MarkCandidateRejected(template_id, indirect_load, sk_dynamic_redirect_fired, sk_dynamic_redirect_rejected);
     return af::SUCCESS;
   }
   GE_ASSERT_SUCCESS(AnnotateTemplate(indirect_load, template_id, analysis));
   if (template_id == ascir::TemplateId::kIndirectLoadSimt) {
-    NodeSet normal_schedule_nodes;
-    GE_ASSERT_SUCCESS(AnnotateSimtFanoutBranches(indirect_load, analysis, normal_schedule_nodes));
-    // 豁免集即 lowering 侧 BuildSimtLoweringMetadata 会校验的 index_region，
-    // 其中与 normal_schedule 闭包重叠的共享节点不能被兜底清理掉角色。
-    NodeSet lowering_exempt;
-    for (const auto &region_node : analysis.index_region) {
-      lowering_exempt.emplace(region_node.get());
-    }
-    GE_ASSERT_SUCCESS(ClearNormalScheduleSimtRoles(graph, normal_schedule_nodes, lowering_exempt));
+    GE_ASSERT_SUCCESS(AnnotateSimtScheduleRoles(graph, indirect_load, analysis));
   }
   GE_ASSERT_SUCCESS(NormalizeTemplateAxes(graph, indirect_load, template_id, analysis, boundary));
   GE_ASSERT_SUCCESS(CompletePreservedVectorizedViews(graph));
@@ -300,6 +356,7 @@ af::Status ApplyGraphPass(af::AscGraph &graph, const af::AscNodePtr &indirect_lo
   GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::FinalizeLoweringMetadata(indirect_load, metadata_supported));
   if (!metadata_supported) {
     is_candidate_legal = false;
+    MarkCandidateRejected(template_id, indirect_load, sk_dynamic_redirect_fired, sk_dynamic_redirect_rejected);
   }
   return af::SUCCESS;
 }
@@ -436,7 +493,7 @@ Status IndirectLoadScheduleCaseGenerator::Generate(ascir::HintGraph &graph, std:
     }
     ascir::ImplGraph candidate_graph(graph.GetName().c_str());
     GE_ASSERT_TRUE(candidate_graph.CopyFrom(graph), "Failed to copy graph [%s].", graph.GetName().c_str());
-    const af::AscNodePtr candidate_indirect_load = candidate_graph.FindNode(indirect_load_name.c_str());
+    af::AscNodePtr candidate_indirect_load = candidate_graph.FindNode(indirect_load_name.c_str());
     GE_ASSERT_NOTNULL(candidate_indirect_load, "Failed to find copied IndirectLoad node[%s].",
                       indirect_load_name.c_str());
     GE_ASSERT_SUCCESS(
@@ -451,8 +508,13 @@ Status IndirectLoadScheduleCaseGenerator::Generate(ascir::HintGraph &graph, std:
     // Norm Region DAG，可按 SK 分段形态正确归约（重定向见 ApplyGraphPass）；窗口
     // 可行时维持规范化，SIMD/SIMT 候选不受影响仍走 SoftmaxAR 内联路径。
     bool softmax_normalized = false;
+    // [SK段SIMT化·动态shape] 动态尾轴的 SK 候选同样不规范化：规范化 Softmax 的
+    // SoftmaxAR 全载形态对符号 R 不可静态验证（真机大 R 下 tiling 必败），重定向后的
+    // 分段形态才能兜底；见 IsSkRedirectRequiredForDynamicTail。
     const bool keep_softmax_pattern_for_sk_redirect =
-        template_id == ascir::TemplateId::kIndirectLoadSK && IsSkWindowUbInfeasible(candidate_indirect_load);
+        template_id == ascir::TemplateId::kIndirectLoadSK &&
+        (indirect_load_detail::IsSkWindowUbInfeasible(candidate_indirect_load) ||
+         indirect_load_detail::IsSkRedirectRequiredForDynamicTail(candidate_graph, candidate_indirect_load));
     if (!keep_softmax_pattern_for_sk_redirect) {
       GE_ASSERT_SUCCESS(
           softmax_pattern::NormalizeDirectPostSoftmax(candidate_graph, candidate_indirect_load, softmax_normalized));
@@ -464,8 +526,36 @@ Status IndirectLoadScheduleCaseGenerator::Generate(ascir::HintGraph &graph, std:
              static_cast<int32_t>(template_id), candidate_indirect_load->GetNamePtr());
     }
     bool is_candidate_legal = false;
-    GE_ASSERT_SUCCESS(
-        ApplyGraphPass(candidate_graph, candidate_indirect_load, template_id, is_candidate_legal, !graphs.empty()));
+    bool sk_dynamic_redirect_rejected = false;
+    GE_ASSERT_SUCCESS(ApplyGraphPass(candidate_graph, candidate_indirect_load, template_id, is_candidate_legal,
+                                     !graphs.empty(), &sk_dynamic_redirect_rejected));
+    if (!is_candidate_legal && sk_dynamic_redirect_rejected) {
+      // [动态重定向回退] 分段候选被布局/metadata 校验拒绝时，基于原图重新生成常规
+      // SK 全载候选：保持改动前的编译下限（小 R launch 期 tiling 可行，大 R 运行期
+      // 行为与改动前一致），避免重定向使零候选升级为整图编译失败。回退图先规范化
+      // softmax（重定向路径为保留原始 Pattern 链跳过了规范化，常规 SK 依赖规范化产物）。
+      GELOGW("[IndirectLoad] Dynamic-tail segmented candidate rejected for node[%s], retry plain SK candidate.",
+             candidate_indirect_load->GetNamePtr());
+      ascir::ImplGraph fallback_graph(candidate_graph.GetName().c_str());
+      GE_ASSERT_TRUE(fallback_graph.CopyFrom(candidate_graph), "Failed to copy graph [%s] for SK fallback.",
+                     candidate_graph.GetName().c_str());
+      const af::AscNodePtr fallback_il = fallback_graph.FindNode(indirect_load_name.c_str());
+      GE_ASSERT_NOTNULL(fallback_il, "Failed to find copied IndirectLoad node[%s] in SK fallback graph.",
+                        indirect_load_name.c_str());
+      GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::SetImplementation(
+          fallback_il, ascgen_utils::indirect_load::Implementation::kDefault));
+      bool fallback_softmax_normalized = false;
+      GE_ASSERT_SUCCESS(
+          softmax_pattern::NormalizeDirectPostSoftmax(fallback_graph, fallback_il, fallback_softmax_normalized));
+      bool fallback_legal = false;
+      GE_ASSERT_SUCCESS(ApplyGraphPass(fallback_graph, fallback_il, template_id, fallback_legal, !graphs.empty(),
+                                       nullptr, /*suppress_sk_redirect=*/true));
+      if (fallback_legal) {
+        candidate_graph = std::move(fallback_graph);
+        candidate_indirect_load = fallback_il;
+        is_candidate_legal = true;
+      }
+    }
     if (!is_candidate_legal) {
       GELOGW("[IndirectLoad] Skip illegal template candidate[%d] for node[%s].", static_cast<int32_t>(template_id),
              candidate_indirect_load->GetNamePtr());

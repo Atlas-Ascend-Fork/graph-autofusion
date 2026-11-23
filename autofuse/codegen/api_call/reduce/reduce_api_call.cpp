@@ -220,7 +220,7 @@ Status ReduceApiCall::BuildApiParam(const TPipe &tpipe, const std::vector<ascir:
 
       // 后处理段：ArgMaxMultiRPhase1
       GE_ASSERT_TRUE(outputs.size() >= ARGMAXMULTIRPHASE_OUTPUT_AND_INPUT_NUM,
-                     "ArgMaxMultiRPhase1 requires at least 2 outputs.");
+                     "ArgMaxMultiRPhase1 requires at least 2 outputs, actual size: %zu.", outputs.size());
       auto y_value = outputs[0].get();
       auto y_index = outputs[1].get();
 
@@ -263,9 +263,9 @@ Status ReduceApiCall::BuildApiParam(const TPipe &tpipe, const std::vector<ascir:
       // 注意：Phase2也是R轴分核，需要调用ArgmaxExtend和ReduceMax
 
       GE_ASSERT_TRUE(inputs.size() >= ARGMAXMULTIRPHASE_OUTPUT_AND_INPUT_NUM,
-                     "ArgMaxMultiRPhase2 requires at least 2 inputs.");
-      GE_ASSERT_TRUE(outputs.size() >= 1,
-                     "ArgMaxMultiRPhase2 requires at least 1 output.");  // ArgMaxMultiRPhase2有1个输出
+                     "ArgMaxMultiRPhase2 requires at least 2 inputs, actual size: %zu.", inputs.size());
+      GE_ASSERT_TRUE(outputs.size() >= 1, "ArgMaxMultiRPhase2 requires at least 1 output, actual size: %zu.",
+                     outputs.size());  // ArgMaxMultiRPhase2有1个输出
       auto x_value = inputs[0].get();
       auto x_index = inputs[1].get();
 

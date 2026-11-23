@@ -14,10 +14,11 @@
 
 namespace att {
 void OptionRegister::RegisterOption(const std::string &name, const std::string &default_value,
-                                    bool (*validate_func)(const std::string &value)) {
+                                    bool (*validate_func)(const std::string &value), const std::string &expected) {
   OptionInfo option;
   option.name = name;
   option.default_value = default_value;
+  option.expected = expected;
   option.validate_func = validate_func;
   registered_options_.push_back(option);
   registered_options_name_.insert(name);
@@ -30,20 +31,24 @@ bool RegisterOptionsAndInitInnerOptions(std::map<std::string, std::string> &inne
   OptionRegister option_register = OptionRegister();
   // RegisterOption( option名称， option默认值（空字符串视为无默认值）， 校验函数 ）
   // bool类型
-  option_register.RegisterOption(kGenTilingDataDef, kIsTrue, ValidateBoolOption);
-  option_register.RegisterOption(kHighPrecision, kIsFalse, ValidateBoolOption);
-  option_register.RegisterOption(kGenExtraInfo, kIsFalse, ValidateBoolOption);
+  option_register.RegisterOption(kGenTilingDataDef, kIsTrue, ValidateBoolOption, "0|1");
+  option_register.RegisterOption(kHighPrecision, kIsFalse, ValidateBoolOption, "0|1");
+  option_register.RegisterOption(kGenExtraInfo, kIsFalse, ValidateBoolOption, "0|1");
   // 路径信息
-  option_register.RegisterOption(kDumpDebugInfo, kRegisterNoDefault, ValidatePathOption);
-  option_register.RegisterOption(kOutputFilePath, kDefaultFilePath, ValidatePathOption);
+  option_register.RegisterOption(kDumpDebugInfo, kRegisterNoDefault, ValidatePathOption,
+                                 "non-empty path matching [A-Za-z\\d/_.-]+");
+  option_register.RegisterOption(kOutputFilePath, kDefaultFilePath, ValidatePathOption,
+                                 "non-empty path matching [A-Za-z\\d/_.-]+");
   // 命名信息
-  option_register.RegisterOption(kTilingDataTypeName, graphs_name + "TilingData", ValidateIdentifierName);
+  option_register.RegisterOption(kTilingDataTypeName, graphs_name + "TilingData", ValidateIdentifierName,
+                                 "identifier matching ^[a-zA-Z_][a-zA-Z0-9_]*$");
   // DurationLevel
-  option_register.RegisterOption(kDurationLevelName, kDurationLevelDefault, ValidateNotNegativeNumber);
+  option_register.RegisterOption(kDurationLevelName, kDurationLevelDefault, ValidateNotNegativeNumber,
+                                 "non-negative integer");
   // SolverType
-  option_register.RegisterOption(kGenConfigType, kGenConfigTypeDefault, ValidateNotValidType);
+  option_register.RegisterOption(kGenConfigType, kGenConfigTypeDefault, ValidateNotValidType, "HighPerf|AxesReorder");
   // 之后删除的预留信息，变量替换
-  option_register.RegisterOption(kVariableReplace, kIsTrue, ValidateBoolOption);
+  option_register.RegisterOption(kVariableReplace, kIsTrue, ValidateBoolOption, "0|1");
   return option_register.ValidateAndInitInnerOptions(inner_options, options);
 }
 
@@ -62,7 +67,8 @@ bool OptionRegister::ValidateAndInitInnerOptions(std::map<std::string, std::stri
     if (iter != options.cend()) {
       // 开始校验
       if (!registered_option.validate_func(iter->second)) {
-        GELOGE(af::FAILED, "Invalid option[%s] = %s.", iter->first.c_str(), iter->second.c_str());
+        GELOGE(af::FAILED, "Invalid option[%s] = %s, expected %s.", iter->first.c_str(), iter->second.c_str(),
+               registered_option.expected.empty() ? "<see option description>" : registered_option.expected.c_str());
         return false;
       } else {
         inner_options[registered_option.name] = iter->second;

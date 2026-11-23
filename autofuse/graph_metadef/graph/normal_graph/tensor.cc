@@ -781,7 +781,8 @@ graphStatus Tensor::IsValid() {
       GELOGW("[Check][Tensor] Calculate size failed, as mul overflow: %" PRIu64 " * %" PRIu32, shape_size, type_length);
     } else {
       if ((shape_size * type_length) != data_size) {
-        GELOGW("[Check][Tensor] Tensor length not equal: shape_byte_size=%" PRIu64 ", dt_type=%s, data_size=%zu.",
+        GELOGE(ge::GRAPH_FAILED,
+               "[Check][Tensor] Tensor length not equal: shape_byte_size=%" PRIu64 ", dt_type=%s, data_size=%zu.",
                shape_size * type_length, TypeUtils::DataTypeToSerialString(data_type).c_str(), data_size);
         return ge::GRAPH_FAILED;
       }

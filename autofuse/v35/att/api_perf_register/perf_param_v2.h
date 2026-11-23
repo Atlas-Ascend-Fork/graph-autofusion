@@ -16,6 +16,50 @@
 #include "api_perf_register/perf_param.h"
 
 namespace att {
+namespace dma_calibration_v2 {
+struct Range {
+  int32_t lower;
+  int32_t upper;
+};
+
+struct PayloadDomain {
+  Range cores;
+  Range bytes;
+};
+
+// Width, gap and pitch are in FP32 elements. Payload is in bytes.
+inline constexpr int32_t kFloat32Bytes = 4;
+inline constexpr int32_t kAlignedRowElements = 32 / kFloat32Bytes;
+inline constexpr PayloadDomain kLoadSmallPayload{{8, 48}, {512, 8192}};
+inline constexpr PayloadDomain kStoreSmallPayload{{8, 56}, {1024, 8192}};
+inline constexpr PayloadDomain kLoadAlignedDensePayload{{16, 56}, {1024, 4096}};
+inline constexpr PayloadDomain kLoadAlignedDenseBulkPayload{{16, 56}, {16384, 65536}};
+inline constexpr Range kLoadDenseBulkRows{512, 2048};
+inline constexpr Range kLoadDenseBulkWidth{8, 32};
+inline constexpr Range kLoadCompactRows{2, 18};
+inline constexpr Range kLoadCompactWidth{32, 256};
+inline constexpr Range kLoadCompactGap{64, 4096};
+inline constexpr Range kLoadWidePitchRows{256, 512};
+inline constexpr Range kLoadWidePitch{4096, 16384};
+inline constexpr int32_t kLoadWidePitchWidth = 32;
+inline constexpr int32_t kLoadWidePitchAlignment = 4096;
+inline constexpr int32_t kLoadWideGapPitch = 131072;
+inline constexpr int32_t kLoadWideGapRowsCenter = 24;
+inline constexpr int32_t kLoadWideGapRowsDistance = 8;
+inline constexpr int32_t kLoadWideGapWidthCenter = 576;
+inline constexpr int32_t kLoadWideGapWidthRadius = 192;
+inline constexpr int32_t kLoadWideGapCoresCenter = 48;
+inline constexpr int32_t kLoadWideGapCoresRadius = 8;
+inline constexpr Range kLoadSingleRowWidth{512, 30680};
+inline constexpr Range kLoadSingleRowCores{24, 56};
+inline constexpr Range kLoadLoopOuter{24, 56};
+inline constexpr Range kLoadLoopRows{2, 6};
+inline constexpr Range kLoadLoopWidth{32, 64};
+inline constexpr Range kLoadNarrowLoopRows{2, 8};
+inline constexpr Range kLoadNarrowLoopWidth{16, 16};
+inline constexpr Range kLoadLoopCores{16, 56};
+}  // namespace dma_calibration_v2
+
 class PerfParamTableV2 : public PerfParamTable {
  public:
   PerfParamTableV2();
@@ -61,6 +105,13 @@ class TilingScheduleConfigTableV2 : public TilingScheduleConfigTable {
   [[nodiscard]] double GetPerfEffectVal() const override {
     constexpr double kDefaultPerfEffectVal = 2000.0;
     return kDefaultPerfEffectVal;
+  }
+  [[nodiscard]] bool PreferObjectiveForLowUbSingleBlock() const override {
+    return true;
+  }
+  [[nodiscard]] double GetCrossUbThresholdMaxRelativeCostGap() const override {
+    constexpr double kMaxRelativeCostGap = 0.10;
+    return kMaxRelativeCostGap;
   }
   [[nodiscard]] TilingScheduleConfig GetModelTilingScheduleConfig() const override {
     TilingScheduleConfig config;

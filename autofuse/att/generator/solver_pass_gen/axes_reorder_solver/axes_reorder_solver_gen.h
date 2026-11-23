@@ -137,6 +137,9 @@ class AxesReorderSolverGen : public SolverGen,
   void SetHighPerfTiling(const bool enable_high_perf) {
     enable_high_perf_ = enable_high_perf;
   }
+  void SetEnableCoreSearch(const bool enable_core_search) {
+    enable_core_search_ = enable_core_search;
+  }
   void SetEnableEqualOrder(const bool enable_equal_order) {
     enable_equal_order_ = enable_equal_order;
   }
@@ -270,6 +273,7 @@ class AxesReorderSolverGen : public SolverGen,
   Expr reserved_ub_size_{CreateExpr(0)};
   double corenum_threshold_{0.4};
   bool enable_high_perf_{false};
+  bool enable_core_search_{true};
   bool enable_equal_order_{false};
   std::string arrange_code_;
   const TilingScheduleConfigTable *tiling_schedule_config_table_{nullptr};

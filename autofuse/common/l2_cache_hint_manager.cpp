@@ -48,7 +48,7 @@ bool IsSmallTensor(const af::AscNodePtr &node) {
   bool is_small = output_size.IsConstExpr() && output_size.GetConstValue(output_size_value) &&
                   (output_size_value <= 2L * 1024L * 1024L);
   if (is_small) {
-    GELOGD("IsSmallTensor node[%s] output_size[%lld] <= 2MB.", node->GetNamePtr(), output_size_value);
+    GELOGD("IsSmallTensor node[%s] output_size[%lld bytes] <= 2MB.", node->GetNamePtr(), output_size_value);
   }
   return is_small;
 }
@@ -136,7 +136,7 @@ af::Status CalcOutputTensorSizeExpr(const af::AscNodePtr &node, af::Expression &
   const auto dtype_size = ge::GetSizeByDataType(node->outputs[0].attr.dtype);
   total_size = total_size * af::Symbol(static_cast<int64_t>(dtype_size));
   min_size *= static_cast<int64_t>(dtype_size);
-  GELOGD("CalcOutputTensorSizeExpr node:%s, total_size:%s, min_size:%lld.", node->GetNamePtr(),
+  GELOGD("CalcOutputTensorSizeExpr node:%s, total_size:%s bytes, min_size:%lld bytes.", node->GetNamePtr(),
          ExprToStr(total_size).c_str(), min_size);
   return af::SUCCESS;
 }

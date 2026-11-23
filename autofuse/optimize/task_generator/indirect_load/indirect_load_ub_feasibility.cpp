@@ -9,6 +9,8 @@
  */
 
 #include "task_generator/indirect_load/indirect_load_ub_feasibility.h"
+#include "task_generator/indirect_load/indirect_load_sk_partition.h"
+#include "optimize/graph_pass/softmax_pattern_fusion_utils.h"
 #include "task_generator/indirect_load/indirect_load_view_layout.h"
 #include "task_generator/indirect_load/indirect_load_input_path.h"
 #include "task_generator/indirect_load/indirect_load_output_analysis.h"
@@ -80,6 +82,21 @@ bool IsSkWindowUbInfeasible(const af::AscNodePtr &indirect_load) {
     return true;
   }
   return false;
+}
+
+bool IsSkRedirectRequiredForDynamicTail(const af::AscGraph &graph, const af::AscNodePtr &indirect_load) {
+  if (ascgen_utils::indirect_load::IsIndexSourceConverged(indirect_load)) {
+    return false;  // 收敛分片形态：窗口按分片装载，与全载可行性无关
+  }
+  const auto outputs = indirect_load->outputs();
+  int64_t tail = 0;
+  if (outputs.empty() || outputs[0] == nullptr || outputs[0]->attr.repeats.empty() ||
+      outputs[0]->attr.repeats.back().GetConstValue(tail)) {
+    return false;  // 静态尾轴：维持 IsSkWindowUbInfeasible/IsSimtUbInfeasible 既有判定
+  }
+  softmax_pattern::MatchResult softmax_match;
+  return IsNormRegionDag(indirect_load) &&
+         softmax_pattern::FindDirectPostSoftmaxPattern(graph, indirect_load, softmax_match);
 }
 
 // 统计 Norm 闭包内尾轴仍为完整 R 的中间张量，作为 fused SIMT 的附加 R 域因子。

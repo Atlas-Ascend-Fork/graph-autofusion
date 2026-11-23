@@ -49,10 +49,11 @@ struct DoSelectParams {
   uint32_t input0_stride;
   uint32_t input1_stride;
   uint32_t mask_stride;
-  uint32_t dst_offset;   // will calculate number size
-  uint32_t src0_offset;  // will calculate number size
-  uint32_t src1_offset;  // will calculate number size
-  uint32_t mask_offset;  // will calculate number size
+  uint32_t dst_offset;                        // will calculate number size
+  uint32_t src0_offset;                       // will calculate number size
+  uint32_t src1_offset;                       // will calculate number size
+  uint32_t mask_offset;                       // will calculate number size
+  AscendC::LocalTensor<uint8_t> select_pool;  // int64 select 的谓词缓冲池（tmp_buf 复用）
 };
 
 template <typename O, typename I>
@@ -323,21 +324,19 @@ inline __aicore__ void WherePartition3Buffer(AscendC::LocalTensor<uint8_t> &tmp_
 
 inline __aicore__ void WherePartitionBufferInt64(AscendC::LocalTensor<uint8_t> &tmp_buf, DoSelectParams &params,
                                                  uint32_t used_size) {
-  // split the rest tmp_buf to 2 parts:
-  //   1. mask_cast_buf
-  //   2. mask_shift_buf
-  constexpr uint32_t partition_number = sizeof(half) + sizeof(int16_t);
-
-  uint32_t rest_buf_byte_size = tmp_buf.GetSize() - used_size;
-  uint32_t each_part_buf_byte_size =
-      rest_buf_byte_size / partition_number / ONE_REPEAT_BYTE_SIZE * ONE_REPEAT_BYTE_SIZE;
+  // int64 select 用 select_pool 自己做切分：mask_cast_buf / mask_shift_buf 保持为两段互不重叠的临时空间，
+  // 供不走 stride（WhereBase）的 int64 分支继续使用。
+  const uint32_t rest_buf_byte_size = (tmp_buf.GetSize() - used_size) / ONE_REPEAT_BYTE_SIZE * ONE_REPEAT_BYTE_SIZE;
+  const uint32_t each_part_buf_byte_size = rest_buf_byte_size / 2;
 
   params.mask_cast_buf = tmp_buf[used_size].template ReinterpretCast<half>();
   params.mask_cast_buf.SetSize(each_part_buf_byte_size);
 
-  uint32_t offset = used_size + each_part_buf_byte_size * sizeof(half);
-  params.mask_shift_buf = tmp_buf[offset].template ReinterpretCast<int16_t>();
+  params.mask_shift_buf = tmp_buf[used_size + each_part_buf_byte_size].template ReinterpretCast<int16_t>();
   params.mask_shift_buf.SetSize(each_part_buf_byte_size);
+
+  params.select_pool = tmp_buf[used_size];
+  params.select_pool.SetSize(each_part_buf_byte_size * 2);
 }
 
 /**
@@ -628,62 +627,105 @@ inline __aicore__ void CastSelectNormal(const AscendC::LocalTensor<O> &dst,
   }
 }
 
+// int64 select 用到的临时空间按 32 B 对齐
+inline __aicore__ uint32_t Int64SelectAlignBytes(uint32_t bytes) {
+  return (bytes + ONE_BLK_SIZE - 1U) / ONE_BLK_SIZE * ONE_BLK_SIZE;
+}
+
+// int64 select 每个 repeat（一行）需要的临时空间：掩码交织用的 half/int16、按 lane 展开的 half、
+// 0/1 的 float/int32 掩码，以及选择用的两份 int32 暂存。
+inline __aicore__ uint32_t Int64SelectRowBytes(uint32_t lane_cnt) {
+  const uint32_t mask_bytes = lane_cnt / 2;
+  const uint32_t lane_bytes = Int64SelectAlignBytes(lane_cnt * sizeof(int32_t));
+  return Int64SelectAlignBytes(mask_bytes * sizeof(half)) + Int64SelectAlignBytes(mask_bytes * sizeof(int16_t)) +
+         Int64SelectAlignBytes(lane_cnt * sizeof(half)) + 4U * lane_bytes;
+}
+
 inline __aicore__ void CastSelectInt64Normal(const AscendC::LocalTensor<int64_t> &dst,
                                              const AscendC::LocalTensor<uint8_t> &sel_mask,  // condition
                                              const AscendC::LocalTensor<int64_t> &src0,      // then
                                              const AscendC::LocalTensor<int64_t> &src1,      // else
                                              DoSelectParams &params) {
-  const AscendC::LocalTensor<float> dst_buf = dst.ReinterpretCast<float>();
-  const AscendC::LocalTensor<float> src0_buf = src0.ReinterpretCast<float>();
-  const AscendC::LocalTensor<float> src1_buf = src1.ReinterpretCast<float>();
+  // int64 一个元素占两个 32bit lane。Select 的 bit 掩码在“每 repeat 的 lane 数不是 64 的整数倍”时，
+  // 与 Cast/CompareScalar 生成的掩码排布无法对齐（0002 精度问题），因此这里改用 0/1 向量掩码做选择：
+  //   dst = src0 * mask + src1 * (1 - mask)
+  // 每个 32bit lane 上 mask 为 1 或 0，乘以 1/0 只是保留或清零位模式，不会改变 int64 的数值语义。
+  const AscendC::LocalTensor<int32_t> dst_buf = dst.ReinterpretCast<int32_t>();
+  const AscendC::LocalTensor<int32_t> src0_buf = src0.ReinterpretCast<int32_t>();
+  const AscendC::LocalTensor<int32_t> src1_buf = src1.ReinterpretCast<int32_t>();
 
-  // Step1: interleave mask
-  // 1.1 Cast sel_mask.u8 -> sel_mask.half
-  MaskSafeCastInt64Normal(params.mask_cast_buf[0], sel_mask[params.mask_offset], params.mask / 2, params.repeat_times,
-                          params.mask_stride);
-  // 1.2 Cast sel_mask.half -> sel_mask.16
-  uint8_t dstRepStride = 8;
-  uint8_t srcRepStride = 8;
-  // uint8 -> half :: CAST_NONE
-  dstRepStride = static_cast<uint8_t>(KernelUtils::RptSize<float>() / 2 * sizeof(int16_t) / ONE_BLK_SIZE);
-  srcRepStride = static_cast<uint8_t>(KernelUtils::RptSize<float>() / 2 * sizeof(half) / ONE_BLK_SIZE);
-  Cast(params.mask_shift_buf[0], params.mask_cast_buf[0], RoundMode::CAST_RINT, params.mask / 2, params.repeat_times,
-       {1, 1, dstRepStride, srcRepStride});
-  // 1.3 Shift sel_mask.16 LEFT by 8 bits
-  const AscendC::LocalTensor<int16_t> mask_cast_buf_reuse_buf = params.mask_cast_buf.ReinterpretCast<int16_t>();
+  const uint32_t lane_cnt = static_cast<uint32_t>(params.mask);  // 一个 repeat 处理的 32bit lane 数
+  const uint32_t mask_bytes = lane_cnt / 2;                      // 每个 int64 元素对应一个掩码字节
   constexpr int16_t shift_left_size = 8;
-  dstRepStride = static_cast<uint8_t>(KernelUtils::RptSize<float>() / 2 * sizeof(int16_t) / ONE_BLK_SIZE);
-  srcRepStride = static_cast<uint8_t>(KernelUtils::RptSize<float>() / 2 * sizeof(int16_t) / ONE_BLK_SIZE);
-  ShiftLeft(mask_cast_buf_reuse_buf, params.mask_shift_buf[0], shift_left_size, params.mask / 2, params.repeat_times,
-            {1, 1, dstRepStride, srcRepStride});
-  // 1.4 Or low 8 bits and high 8 bits
-  dstRepStride = static_cast<uint8_t>(KernelUtils::RptSize<float>() / 2 * sizeof(int16_t) / ONE_BLK_SIZE);
-  srcRepStride = static_cast<uint8_t>(KernelUtils::RptSize<float>() / 2 * sizeof(int16_t) / ONE_BLK_SIZE);
-  Or(params.mask_shift_buf[0], mask_cast_buf_reuse_buf, params.mask_shift_buf[0], params.mask / 2, params.repeat_times,
-     {1, 1, 1, dstRepStride, srcRepStride, srcRepStride});
 
-  // Step2: Convert mask.u8 to mask.bit
-  const AscendC::LocalTensor<uint8_t> mask_shift_cast_buf = params.mask_shift_buf.ReinterpretCast<uint8_t>();
-  AscendC::LocalTensor<half> mask_cast_buf_resize_buf = params.mask_cast_buf.ReinterpretCast<half>();
-  mask_cast_buf_resize_buf.SetSize(params.mask_cast_buf.GetSize() + params.mask_shift_buf.GetSize());
-  dstRepStride = static_cast<uint8_t>(KernelUtils::RptSize<float>() * sizeof(half) / ONE_BLK_SIZE);
-  srcRepStride = static_cast<uint8_t>(KernelUtils::RptSize<float>() * sizeof(uint8_t) / ONE_BLK_SIZE);
-  Cast(mask_cast_buf_resize_buf, mask_shift_cast_buf, RoundMode::CAST_NONE, params.mask, params.repeat_times,
-       {1, 1, dstRepStride, srcRepStride});
-  uint32_t cmp_size = (KernelUtils::RptSize<float>() * params.repeat_times + ONE_REPEAT_HALF_SIZE - 1) /
-                      ONE_REPEAT_HALF_SIZE * ONE_REPEAT_HALF_SIZE;
-  LocalTensor<uint8_t> mask_tmp_bit_buf = mask_cast_buf_resize_buf.ReinterpretCast<uint8_t>();
-  CompareScalar(mask_tmp_bit_buf, mask_cast_buf_resize_buf, (half)1.0, CMPMODE::EQ, cmp_size);
+  const uint32_t mask_half_bytes = Int64SelectAlignBytes(mask_bytes * sizeof(half));
+  const uint32_t mask_int16_bytes = Int64SelectAlignBytes(mask_bytes * sizeof(int16_t));
+  const uint32_t lane_half_bytes = Int64SelectAlignBytes(lane_cnt * sizeof(half));
+  const uint32_t lane_bytes = Int64SelectAlignBytes(lane_cnt * sizeof(int32_t));
+  const uint8_t mask_half_stride = static_cast<uint8_t>(mask_half_bytes / ONE_BLK_SIZE);
+  const uint8_t mask_int16_stride = static_cast<uint8_t>(mask_int16_bytes / ONE_BLK_SIZE);
+  const uint8_t lane_half_stride = static_cast<uint8_t>(lane_half_bytes / ONE_BLK_SIZE);
+  const uint8_t lane_stride = static_cast<uint8_t>(lane_bytes / ONE_BLK_SIZE);
+  const uint8_t mask_stride = static_cast<uint8_t>(params.mask_stride / ONE_BLK_SIZE);
+  const uint8_t dst_stride = params.rpt_params.dstRepStride;
+  const uint8_t src0_blk_stride = params.rpt_params.src0BlkStride;
+  const uint8_t src0_rpt_stride = params.rpt_params.src0RepStride;
+  const uint8_t src1_blk_stride = params.rpt_params.src1BlkStride;
+  const uint8_t src1_rpt_stride = params.rpt_params.src1RepStride;
 
-  // Step3: Do Select
-  Select(dst_buf[params.dst_offset],                                // output
-         mask_tmp_bit_buf,                                          // condition
-         src0_buf[params.src0_select_offset * params.src0_offset],  // then
-         src1_buf[params.src1_select_offset * params.src1_offset],  // else
-         SELMODE::VSEL_TENSOR_TENSOR_MODE,                          // condition is tensor
-         params.mask,                                               // once repeat number count
-         params.repeat_times,                                       // repeat times
-         params.rpt_params);
+  // 临时空间按 repeat 分段：相邻段之间相差 repeat_times 个单位，避免不同段互相踩踏
+  AscendC::LocalTensor<uint8_t> pool = params.select_pool;
+  const uint32_t mask_area_bytes = mask_half_bytes + mask_int16_bytes;
+  const uint32_t lane_half_offset = mask_area_bytes;
+  const uint32_t lane_float_offset = lane_half_offset + lane_half_bytes;
+  const uint32_t lane_mask_offset = lane_float_offset + lane_bytes;
+  const uint32_t not_mask_offset = lane_mask_offset + lane_bytes;
+  const uint32_t select_tmp_offset = not_mask_offset + lane_bytes;
+  AscendC::LocalTensor<half> mask_half_buf = pool.template ReinterpretCast<half>();
+  AscendC::LocalTensor<int16_t> mask_int16_buf =
+      pool[mask_half_bytes * params.repeat_times].template ReinterpretCast<int16_t>();
+  AscendC::LocalTensor<half> lane_half_buf =
+      pool[lane_half_offset * params.repeat_times].template ReinterpretCast<half>();
+  AscendC::LocalTensor<float> lane_float_buf =
+      pool[lane_float_offset * params.repeat_times].template ReinterpretCast<float>();
+  AscendC::LocalTensor<int32_t> lane_mask_buf =
+      pool[lane_mask_offset * params.repeat_times].template ReinterpretCast<int32_t>();
+  AscendC::LocalTensor<int32_t> not_mask_buf =
+      pool[not_mask_offset * params.repeat_times].template ReinterpretCast<int32_t>();
+  AscendC::LocalTensor<int32_t> select_tmp_buf =
+      pool[select_tmp_offset * params.repeat_times].template ReinterpretCast<int32_t>();
+
+  // Step1: 掩码字节(0/1) -> half(0.0/1.0)，每个 int64 元素一个值
+  Cast(mask_half_buf[0], sel_mask[params.mask_offset], RoundMode::CAST_NONE, mask_bytes, params.repeat_times,
+       {1, 1, mask_half_stride, mask_stride});
+  // Step2: half -> int16，再把每个 int16 左移 8bit 后与自身按位或，得到 0x0101（一个元素两个掩码字节）
+  Cast(mask_int16_buf[0], mask_half_buf[0], RoundMode::CAST_RINT, mask_bytes, params.repeat_times,
+       {1, 1, mask_int16_stride, mask_half_stride});
+  const AscendC::LocalTensor<int16_t> mask_half_i16_buf = pool.template ReinterpretCast<int16_t>();
+  ShiftLeft(mask_half_i16_buf[0], mask_int16_buf[0], shift_left_size, mask_bytes, params.repeat_times,
+            {1, 1, mask_int16_stride, mask_int16_stride});
+  Or(mask_int16_buf[0], mask_half_i16_buf[0], mask_int16_buf[0], mask_bytes, params.repeat_times,
+     {1, 1, 1, mask_int16_stride, mask_int16_stride, mask_int16_stride});
+  // Step3: 按字节展开，使 int64 的两个 32bit lane 都拿到自己那一位掩码
+  Cast(lane_half_buf[0], mask_int16_buf.template ReinterpretCast<uint8_t>()[0], RoundMode::CAST_NONE, lane_cnt,
+       params.repeat_times, {1, 1, lane_half_stride, mask_int16_stride});
+  // Step4: half(0.0/1.0) -> float -> int32，得到每个 lane 的 0/1 掩码
+  Cast(lane_float_buf[0], lane_half_buf[0], RoundMode::CAST_NONE, lane_cnt, params.repeat_times,
+       {1, 1, lane_stride, lane_half_stride});
+  Cast(lane_mask_buf[0], lane_float_buf[0], RoundMode::CAST_RINT, lane_cnt, params.repeat_times,
+       {1, 1, lane_stride, lane_stride});
+  // Step5: 1 - mask
+  Adds(not_mask_buf[0], lane_mask_buf[0], static_cast<int32_t>(-1), lane_cnt, params.repeat_times,
+       {1, 1, lane_stride, lane_stride});
+  Muls(not_mask_buf[0], not_mask_buf[0], static_cast<int32_t>(-1), lane_cnt, params.repeat_times,
+       {1, 1, lane_stride, lane_stride});
+  // Step6: dst = src0 * mask + src1 * (1 - mask)
+  Mul(select_tmp_buf[0], src0_buf[params.src0_select_offset * params.src0_offset], lane_mask_buf[0], lane_cnt,
+      params.repeat_times, {1, src0_blk_stride, 1, lane_stride, src0_rpt_stride, lane_stride});
+  Mul(not_mask_buf[0], not_mask_buf[0], src1_buf[params.src1_select_offset * params.src1_offset], lane_cnt,
+      params.repeat_times, {1, 1, src1_blk_stride, lane_stride, lane_stride, src1_rpt_stride});
+  Add(dst_buf[params.dst_offset], select_tmp_buf[0], not_mask_buf[0], lane_cnt, params.repeat_times,
+      {1, 1, 1, dst_stride, lane_stride, lane_stride});
 }
 
 template <typename T, typename T1, typename T2>
@@ -755,14 +797,21 @@ inline __aicore__ void WhereExtend(const AscendC::LocalTensor<int64_t> &dst,
                                    const AscendC::LocalTensor<int64_t> &src0,      // then
                                    const AscendC::LocalTensor<int64_t> &src1,      // else
                                    const uint32_t first_axis, const uint32_t last_axis, DoSelectParams &params) {
-  const uint32_t size = last_axis << 1;
+  // 1. int64 一个元素占两个 32bit lane，按 64 lane（一个 repeat）为单位切分尾轴
   constexpr uint32_t ONE_RPT_SIZE = KernelUtils::RptSize<float>();
-  // 1. 以256 B为单位长度，根据临时空间计算切分尾轴
+  const uint32_t size = last_axis << 1;
   uint32_t element_extent = size / ONE_RPT_SIZE;
   uint32_t element_reminder = size - element_extent * ONE_RPT_SIZE;
-  // 2. 根据临时空间，计算外抛实际一次能计算的repeat times
-  uint32_t max_do_rpt_num =
-      KernelUtils::Min(MAX_REPEAT_TIME, params.mask_shift_buf.GetSize() / sizeof(float) / ONE_RPT_SIZE);
+  // 2. 根据临时空间计算一次能处理的 repeat（行）数
+  const uint32_t max_lane_cnt = KernelUtils::Min(static_cast<uint32_t>(ONE_RPT_SIZE), size);
+  const uint32_t row_bytes = Int64SelectRowBytes(max_lane_cnt);
+  uint32_t max_do_rpt_num = KernelUtils::Min(MAX_REPEAT_TIME, params.select_pool.GetSize() / row_bytes);
+  if (max_do_rpt_num == 0U) {
+    KERNEL_LOG(KERNEL_ERROR, "select tmp buf is too small for int64 where: buf=%u, one row needs %u.",
+               params.select_pool.GetSize(), row_bytes);
+    ASSERT(false);
+    return;
+  }
 
   uint32_t repeat_throw_for_extent = first_axis / max_do_rpt_num;
   uint32_t repeat_reminder = first_axis - repeat_throw_for_extent * max_do_rpt_num;
@@ -788,11 +837,8 @@ inline __aicore__ void WhereExtend(const AscendC::LocalTensor<int64_t> &dst,
     }
   }
   if (element_reminder != 0) {
-    // 5. 尾轴剩余数据不足1个repeat后, 调整mask
-    params.mask = KernelUtils::BlkNum<float>(element_reminder + KernelUtils::BlkSize<float>() - 1) *
-                  KernelUtils::BlkSize<float>();
-
-    // 按照一次指令最大repeat times计算
+    // 5. 尾轴剩余数据不足1个repeat：按剩余 lane 数计算，多算的 lane 会落在行尾 32 B 对齐的填充上
+    params.mask = element_reminder;
     params.mask_offset = element_extent * ONE_RPT_SIZE / 2;
     params.dst_offset = element_extent * ONE_RPT_SIZE;
     params.src0_offset = element_extent * ONE_RPT_SIZE;

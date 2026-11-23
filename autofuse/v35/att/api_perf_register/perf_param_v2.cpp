@@ -9,6 +9,7 @@
  */
 
 #include "perf_param_v2.h"
+#include <algorithm>
 #include "base/att_const_values.h"
 
 namespace att {
@@ -56,6 +57,17 @@ Expr PerfParamTableV2::GetMTE2PipeHead(const std::vector<NodeInfo> &node_infos,
 }
 // 当前仅根据输出类型来判断
 const std::map<std::string, std::vector<VfInstructPerf>> &PerfParamTableV2::GetVfInstructPerfTable() const {
+  static const VfInstructPerf kFloat16Sqrt{{kFloat16}, 19, 8};
+  static const VfInstructPerf kFloat32Sqrt{{kFloat32}, 14, 4};
+  static const VfInstructPerf kFloat16Div{{kFloat16}, 19, 8};
+  static const VfInstructPerf kFloat32Div{{kFloat32}, 14, 4};
+  static const VfInstructPerf kDuplicatePerf{
+      {kUInt8, kInt8, kUInt16, kInt16, kUInt32, kInt32, kFloat16, kFloat32, kBfloat16}, 8, 1};
+  // MicroRsqrtApiCall emits Duplicate and Sqrt before their dependent Div.
+  const auto rsqrt_perf = [](const VfInstructPerf &sqrt, const VfInstructPerf &div) {
+    return VfInstructPerf{sqrt.support_data_types, std::max(kDuplicatePerf.latency, sqrt.latency) + div.latency,
+                          kDuplicatePerf.throughput + sqrt.throughput + div.throughput};
+  };
   static const std::map<std::string, std::vector<VfInstructPerf>> kVfInstructPerfTable = {
       {kAdd,
        {{VfInstructPerf{{kUInt8, kInt8, kUInt16, kInt16, kUInt32, kInt32}, 4, 2}},
@@ -190,13 +202,8 @@ const std::map<std::string, std::vector<VfInstructPerf>> &PerfParamTableV2::GetV
               {VfInstructPerf{{kFloat32}, 15, 4}},
           },
       },
-      {
-          kSqrt,
-          {
-              {VfInstructPerf{{kFloat16}, 19, 8}},
-              {VfInstructPerf{{kFloat32}, 14, 4}},
-          },
-      },
+      {kSqrt, {kFloat16Sqrt, kFloat32Sqrt}},
+      {kRsqrt, {rsqrt_perf(kFloat16Sqrt, kFloat16Div), rsqrt_perf(kFloat32Sqrt, kFloat32Div)}},
       {
           kMul,
           {
@@ -230,13 +237,8 @@ const std::map<std::string, std::vector<VfInstructPerf>> &PerfParamTableV2::GetV
               {VfInstructPerf{{kFloat16, kFloat32}, 2, 1}},
           },
       },
-      {
-          kDiv,
-          {
-              {VfInstructPerf{{kFloat16}, 19, 8}},
-              {VfInstructPerf{{kFloat32}, 14, 4}},
-          },
-      },
+      {kDiv, {kFloat16Div, kFloat32Div}},
+      {kTrueDiv, {kFloat16Div, kFloat32Div}},
       {
           kLeakyRelu,
           {
@@ -271,12 +273,7 @@ const std::map<std::string, std::vector<VfInstructPerf>> &PerfParamTableV2::GetV
               {VfInstructPerf{{kUInt8, kInt8, kUInt16, kInt16, kUInt32, kInt32, kFloat16, kFloat32, kBfloat16}, 15, 5}},
           },
       },
-      {
-          kDuplicate,
-          {
-              {VfInstructPerf{{kUInt8, kInt8, kUInt16, kInt16, kUInt32, kInt32, kFloat16, kFloat32, kBfloat16}, 8, 1}},
-          },
-      },
+      {kDuplicate, {kDuplicatePerf}},
       // VCI
       {
           kArange,
@@ -519,7 +516,8 @@ Expr PerfParamTableV2::GetVectorFunctionHeadCost() const {
 }
 
 Expr PerfParamTableV2::GetOpHeadCost() const {
-  constexpr auto kOpHeadCost = 0;
+  // Common entry/exit and dispatch slope in cycles per active core, calibrated independently of API costs.
+  constexpr double kOpHeadCost = 22.059531283;
   return CreateExpr(kOpHeadCost);
 }
 
@@ -947,6 +945,66 @@ const std::string kParamV2Info = R"(
             "bfloat16tobfloat16": {"h": 160, "b": 6.6155, "a": 11.8292, "hl": 0, "data_type_size": 2}
         }
     },
+    "LoadSmallPayload": {
+        "model_type": "LoadStoreFunc",
+        "model_params": {
+            "float32tofloat32": {"h": 292.936412, "a": 20.724828, "b": 873.958753, "hl": 0, "data_type_size": 4}
+        }
+    },
+    "LoadAlignedLoopPayload": {
+        "model_type": "LoadStoreFunc",
+        "model_params": {
+            "float32tofloat32": {"h": 294.009388, "a": 32.296047, "b": 252.871196, "hl": 0, "data_type_size": 4}
+        }
+    },
+    "LoadNarrowLoopPayload": {
+        "model_type": "LoadStoreFunc",
+        "model_params": {
+            "float32tofloat32": {"h": 531.6421388441569, "a": 18.86785800658518, "b": 0.7583841815917162, "hl": 0, "data_type_size": 4}
+        }
+    },
+    "LoadAlignedDensePayload": {
+        "model_type": "LoadStoreFunc",
+        "model_params": {
+            "float32tofloat32": {"h": 394.947854, "a": 41.831205, "b": 1134.576300, "hl": 0, "data_type_size": 4}
+        }
+    },
+    "LoadAlignedDenseBulkPayload": {
+        "model_type": "LoadStoreFunc",
+        "model_params": {
+            "float32tofloat32": {"h": 142.17870407217006, "a": 1.1266553015411542, "b": 1126.6553015411544, "hl": 0, "data_type_size": 4}
+        }
+    },
+    "LoadSmallPayloadCompact": {
+        "model_type": "LoadStoreFunc",
+        "model_params": {
+            "float32tofloat32": {"h": 282.480993, "a": 20.736478, "b": 779.354414, "hl": 0, "data_type_size": 4}
+        }
+    },
+    "StoreSmallPayload": {
+        "model_type": "LoadStoreFunc",
+        "model_params": {
+            "float32tofloat32": {"h": 221.962839, "a": 23.856552, "b": 373.752654, "hl": 0, "data_type_size": 4}
+        }
+    },
+    "LoadAlignedWideGap": {
+        "model_type": "LoadStoreFunc",
+        "model_params": {
+            "float32tofloat32": {"h": 0, "a": 0, "b": 987.983765, "hl": 0, "data_type_size": 4}
+        }
+    },
+    "LoadWidePitch128B": {
+        "model_type": "LoadStoreFunc",
+        "model_params": {
+            "float32tofloat32": {"h": 160, "a": 21.813945, "b": 6.4088, "hl": 0, "data_type_size": 4}
+        }
+    },
+    "LoadAlignedSingleRow": {
+        "model_type": "LoadStoreFunc",
+        "model_params": {
+            "float32tofloat32": {"h": 253.290566, "b": 1310.182034, "a": 0, "hl": 0, "data_type_size": 4}
+        }
+    },
     "LoadStride": {
         "model_type": "LoadStoreStrideV2Func",
         "model_params": {
@@ -1004,11 +1062,11 @@ const std::string kParamV2Info = R"(
     "NddmaStride": {
         "model_type": "LoadStoreStrideV2WithPenaltyFunc",
         "model_params": {
-            "int64toint64": {"k": 0.005, "u": 4096.0, "penalty_coeff": 4.0},
-            "float16tofloat16": {"k": 0.005, "u": 4096.0, "penalty_coeff": 4.0},
-            "float32tofloat32": {"k": 0.005, "u": 4096.0, "penalty_coeff": 4.0},
-            "uint8touint8": {"k": 0.005, "u": 4096.0, "penalty_coeff": 4.0},
-            "bfloat16tobfloat16": {"k": 0.005, "u": 4096.0, "penalty_coeff": 4.0}
+            "int64toint64": {"k": 0.005, "u": 4096.0, "penalty_coeff": 4.0, "cacheline_padded": 1.0},
+            "float16tofloat16": {"k": 0.005, "u": 4096.0, "penalty_coeff": 4.0, "cacheline_padded": 1.0},
+            "float32tofloat32": {"k": 0.005, "u": 4096.0, "penalty_coeff": 4.0, "cacheline_padded": 1.0},
+            "uint8touint8": {"k": 0.005, "u": 4096.0, "penalty_coeff": 4.0, "cacheline_padded": 1.0},
+            "bfloat16tobfloat16": {"k": 0.005, "u": 4096.0, "penalty_coeff": 4.0, "cacheline_padded": 1.0}
         }
     },
     "Store": {

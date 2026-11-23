@@ -126,6 +126,9 @@ Status GatherRegApiCall::GenerateComputeTypeGather(const TPipe &tpipe, const std
     ss << GenerateNonLastAxisGatherSimt(current_axis, inputs, outputs, this->axis, tpipe);
   } else {
     GE_ASSERT_TRUE(tmp_buf_id != -1, "GatherRegApiCall cannot find tmp buffer id to use.");
+    // y.actual_size 为向量化视图的物理跨度（含行 padding）：SIMT 路径当前仅支持紧凑视图，
+    // padded 两轴布局由向量路径 GatherApiCall 展开 inner/row_stride 承载（见
+    // gather_api_call.cpp 的 GetGatherCallLayout）；SIMT 侧出现 padded 视图前需同步展开。
     if (x1_axis_size == 1) {
       ss << this->api_name_ << "(" << y << ", " << x1 << ", " << x2 << "[" << dst_offset << "], "
          << tpipe.tiler.Size(x1.axis_size[0], true) << ", " << y.actual_size << ", " << tpipe.tmp_buf << "_"

@@ -446,7 +446,7 @@ bool PluginManager::CheckOppAndCompilerVersions(const std::string &opp_version, 
         return false;
       }
       if (!IsVersionWithInRequiredRange(effective_compiler_version, required_version)) {
-        GELOGW("compiler version:%s is not within required_opp_abi_version:%s", opp_version.c_str(),
+        GELOGW("compiler version:%s is not within required_opp_abi_version:%s", it.c_str(),
                TransRequiredOppAbiVersionToString(required_version).c_str());
         return false;
       }
@@ -800,8 +800,8 @@ Status PluginManager::LoadSoWithFlags(const std::string &path, const int32_t fla
         const char_t *error = mmDlerror();
         GE_IF_BOOL_EXEC(error == nullptr, error = "");
         REPORT_INNER_ERR_MSG("E19999", "[Check][So]%s is skipped since function %s does not exist! errmsg:%s",
-                             func_name.c_str(), func_name.c_str(), error);
-        GELOGE(PARAM_INVALID, "[Check][So]%s is skipped since function %s does not exist! errmsg:%s", func_name.c_str(),
+                             file_name.c_str(), func_name.c_str(), error);
+        GELOGE(PARAM_INVALID, "[Check][So]%s is skipped since function %s does not exist! errmsg:%s", file_name.c_str(),
                func_name.c_str(), error);
         is_valid = false;
         break;
@@ -1197,7 +1197,7 @@ void PluginManager::GetFileListWithSuffix(const std::string &path, const std::st
     }
   }
   mmScandirFree(entries, file_num);
-  GELOGI("Found %d libs.", file_list.size());
+  GELOGI("Found %zu libs.", file_list.size());
 }
 
 void PluginManager::FindSoFilesInCustomPassDirs(const std::string &directory, std::vector<std::string> &so_files) {

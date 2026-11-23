@@ -32,7 +32,9 @@ graphStatus GraphUtilsEx::InferOriginFormat(const ComputeGraphPtr &graph) {
 }
 
 graphStatus GraphUtilsEx::InferShapeInNeed(const ComputeGraphPtr &graph) {
-  GE_LOGW_IF(graph->TopologicalSorting() != GRAPH_SUCCESS, "Verify failed.");
+  const auto topological_ret = graph->TopologicalSorting();
+  GE_LOGW_IF(topological_ret != GRAPH_SUCCESS, "[Check][Graph] TopologicalSorting failed, graph name:%s, ret:%d.",
+             graph->GetName().c_str(), static_cast<int32_t>(topological_ret));
   for (const auto &node_ptr : graph->GetAllNodes()) {
     GE_CHECK_NOTNULL(node_ptr);
     const auto op_desc = node_ptr->GetOpDesc();

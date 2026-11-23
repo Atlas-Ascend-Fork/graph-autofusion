@@ -227,6 +227,84 @@ class TestApiCompareV2UT : public testing::Test {
     AscendC::GmFree(param.src1);
   }
 
+  // 尾块向量化对拍测试：覆盖 last_axis ∈ {4,10,23,24,31}（< 32 走 staging 尾块），
+  // 值域含 INT64_MIN/MAX、±(1<<31)、跨 hi 相等/不等、lo 无符号翻转边界（0 vs 0xFFFFFFFF）。
+  template <CMPMODE mode>
+  static void TensorCompareV2Int64TailVectorTest(uint32_t row_size) {
+    constexpr uint32_t rows = 8;
+    const uint32_t size = rows * row_size;
+    // 覆盖：相等、hi 不等、hi 相等 lo 无符号边界、符号位翻转边界、INT64 极值
+    const int64_t src0_values[] = {0, 1, -1, INT64_MAX, INT64_MIN, 4294967295LL, 1LL << 31, -(1LL << 31)};
+    const int64_t src1_values[] = {0, 1, 1, INT64_MIN, INT64_MAX, 4294967296LL, -(1LL << 31), 1LL << 31};
+    constexpr uint32_t val_cnt = sizeof(src0_values) / sizeof(src0_values[0]);
+    TensorCompareV2InputParam<uint8_t, int64_t> param{};
+    param.size = size;
+    param.y = static_cast<uint8_t *>(AscendC::GmAlloc(sizeof(uint8_t) * size));
+    param.exp = static_cast<bool *>(AscendC::GmAlloc(sizeof(bool) * size));
+    param.src0 = static_cast<int64_t *>(AscendC::GmAlloc(sizeof(int64_t) * size));
+    param.src1 = static_cast<int64_t *>(AscendC::GmAlloc(sizeof(int64_t) * size));
+    for (uint32_t i = 0; i < size; i++) {
+      const uint32_t index = i % val_cnt;
+      param.src0[i] = src0_values[index];
+      param.src1[i] = src1_values[index];
+      switch (mode) {
+        case CMPMODE::EQ:
+          param.exp[i] = param.src0[i] == param.src1[i];
+          break;
+        case CMPMODE::NE:
+          param.exp[i] = param.src0[i] != param.src1[i];
+          break;
+        case CMPMODE::GT:
+          param.exp[i] = param.src0[i] > param.src1[i];
+          break;
+        case CMPMODE::GE:
+          param.exp[i] = param.src0[i] >= param.src1[i];
+          break;
+        case CMPMODE::LE:
+          param.exp[i] = param.src0[i] <= param.src1[i];
+          break;
+        default:
+          param.exp[i] = false;
+          break;
+      }
+    }
+
+    auto kernel = [&param, row_size] {
+      const uint32_t input_stride = AlignUp(row_size, ONE_BLK_SIZE / sizeof(int64_t));
+      const uint32_t output_stride = AlignUp(row_size, ONE_BLK_SIZE / sizeof(uint8_t));
+      TPipe tpipe;
+      TBuf<TPosition::VECCALC> x1buf, x2buf, ybuf, tmp;
+      tpipe.InitBuffer(x1buf, sizeof(int64_t) * rows * input_stride);
+      tpipe.InitBuffer(x2buf, sizeof(int64_t) * rows * input_stride);
+      tpipe.InitBuffer(ybuf, rows * output_stride);
+      // 尾块 staging 实现的 tmp 需求与行数无关（Int64CompareTailRowBytes ≈ 2.5KB+），给足裕量
+      tpipe.InitBuffer(tmp, 32 * 1024);
+      auto lhs = x1buf.Get<int64_t>();
+      auto rhs = x2buf.Get<int64_t>();
+      auto output = ybuf.Get<uint8_t>();
+      auto scratch = tmp.Get<uint8_t>();
+      for (uint32_t row = 0; row < rows; ++row) {
+        auto lhs_row = lhs[row * input_stride];
+        auto rhs_row = rhs[row * input_stride];
+        GmToUb(lhs_row, param.src0 + row * row_size, row_size);
+        GmToUb(rhs_row, param.src1 + row * row_size, row_size);
+      }
+      CompareExtend<int64_t, mode>(output, lhs, rhs, rows, row_size, input_stride, output_stride, scratch);
+      for (uint32_t row = 0; row < rows; ++row) {
+        auto output_row = output[row * output_stride];
+        UbToGm(param.y + row * row_size, output_row, row_size);
+      }
+    };
+    AscendC::SetKernelMode(KernelMode::AIV_MODE);
+    ICPU_RUN_KF(kernel, 1);
+
+    EXPECT_EQ(Valid(param.y, param.exp, param.size), 0);
+    AscendC::GmFree(param.y);
+    AscendC::GmFree(param.exp);
+    AscendC::GmFree(param.src0);
+    AscendC::GmFree(param.src1);
+  }
+
   template <CMPMODE mode, typename O, typename I>
   static void InvokeKernelWithBroadcastTensorInput(TensorCompareV2InputParam<O, I> &param, uint32_t first_axis,
                                                    uint32_t row_size, uint32_t out_stride) {
@@ -445,6 +523,51 @@ TEST_F(TestApiCompareV2UT, CompareV2_Gt_input_tensor_int64_output_uint8) {
   TensorCompareV2Int64RegressionTest<CMPMODE::GT>(128);
 }
 
+// 场景5.3：EQ-int64 尾块（staging），last_axis ∈ {4,10,23,24,31}
+TEST_F(TestApiCompareV2UT, CompareV2_Eq_input_tensor_int64_tail_vector) {
+  TensorCompareV2Int64TailVectorTest<CMPMODE::EQ>(4);
+  TensorCompareV2Int64TailVectorTest<CMPMODE::EQ>(10);
+  TensorCompareV2Int64TailVectorTest<CMPMODE::EQ>(23);
+  TensorCompareV2Int64TailVectorTest<CMPMODE::EQ>(24);
+  TensorCompareV2Int64TailVectorTest<CMPMODE::EQ>(31);
+}
+
+// 场景5.4：NE-int64 尾块（staging）
+TEST_F(TestApiCompareV2UT, CompareV2_Ne_input_tensor_int64_tail_vector) {
+  TensorCompareV2Int64TailVectorTest<CMPMODE::NE>(4);
+  TensorCompareV2Int64TailVectorTest<CMPMODE::NE>(10);
+  TensorCompareV2Int64TailVectorTest<CMPMODE::NE>(23);
+  TensorCompareV2Int64TailVectorTest<CMPMODE::NE>(24);
+  TensorCompareV2Int64TailVectorTest<CMPMODE::NE>(31);
+}
+
+// 场景5.5：GT-int64 尾块（staging）
+TEST_F(TestApiCompareV2UT, CompareV2_Gt_input_tensor_int64_tail_vector) {
+  TensorCompareV2Int64TailVectorTest<CMPMODE::GT>(4);
+  TensorCompareV2Int64TailVectorTest<CMPMODE::GT>(10);
+  TensorCompareV2Int64TailVectorTest<CMPMODE::GT>(23);
+  TensorCompareV2Int64TailVectorTest<CMPMODE::GT>(24);
+  TensorCompareV2Int64TailVectorTest<CMPMODE::GT>(31);
+}
+
+// 场景5.6：GE-int64 尾块（staging）
+TEST_F(TestApiCompareV2UT, CompareV2_Ge_input_tensor_int64_tail_vector) {
+  TensorCompareV2Int64TailVectorTest<CMPMODE::GE>(4);
+  TensorCompareV2Int64TailVectorTest<CMPMODE::GE>(10);
+  TensorCompareV2Int64TailVectorTest<CMPMODE::GE>(23);
+  TensorCompareV2Int64TailVectorTest<CMPMODE::GE>(24);
+  TensorCompareV2Int64TailVectorTest<CMPMODE::GE>(31);
+}
+
+// 场景5.7：LE-int64 尾块（staging）
+TEST_F(TestApiCompareV2UT, CompareV2_Le_input_tensor_int64_tail_vector) {
+  TensorCompareV2Int64TailVectorTest<CMPMODE::LE>(4);
+  TensorCompareV2Int64TailVectorTest<CMPMODE::LE>(10);
+  TensorCompareV2Int64TailVectorTest<CMPMODE::LE>(23);
+  TensorCompareV2Int64TailVectorTest<CMPMODE::LE>(24);
+  TensorCompareV2Int64TailVectorTest<CMPMODE::LE>(31);
+}
+
 // 场景5：LT-int32
 TEST_F(TestApiCompareV2UT, CompareV2_Lt_input_tensor_int32_output_uint8) {
   TensorCompareV2Test<CMPMODE::LT, uint8_t, int32_t>(ONE_BLK_SIZE / sizeof(int32_t));
@@ -483,5 +606,103 @@ TEST_F(TestApiCompareV2UT, CompareV2_Ne_input_broadcast_half_output_uint8) {
 }
 
 /* End: 输入是tensor广播单block tensor的 compare 测试-------------------------- */
+
+/* Begin: ST 门禁（5.2 节）—— Compare+Select 满 repeat、PairReduceSum 打包语义 ---- */
+
+// ST-1：Compare(EQ)+Select(TENSOR_TENSOR) 在 64 lane 满 repeat 下的逐 lane 语义。
+// 注：ICPU 上 int32 的 vcmpv 特化只支持 EQ（dav_c220），非 EQ 比较由整块 int64 路径的
+// sign/value bits 组合实现，此处仅钉死 EQ 语义。
+TEST_F(TestApiCompareV2UT, ST1_CompareSelectBitPredicate) {
+  constexpr uint32_t kLanes = 64;  // 256B / 4B
+  auto *a = static_cast<int32_t *>(AscendC::GmAlloc(sizeof(int32_t) * kLanes));
+  auto *b = static_cast<int32_t *>(AscendC::GmAlloc(sizeof(int32_t) * kLanes));
+  auto *out = static_cast<float *>(AscendC::GmAlloc(sizeof(float) * kLanes));
+  auto *bits_out = static_cast<uint8_t *>(AscendC::GmAlloc(sizeof(uint8_t) * 16));
+  for (uint32_t i = 0; i < kLanes; i++) {
+    a[i] = static_cast<int32_t>(i);
+    b[i] = static_cast<int32_t>(32);  // EQ(i, 32)：仅 lane 32 为真
+  }
+  auto kernel = [a, b, out, bits_out] {
+    TPipe tpipe;
+    TBuf<TPosition::VECCALC> x1buf, x2buf, tmp;
+    tpipe.InitBuffer(x1buf, sizeof(int32_t) * kLanes);
+    tpipe.InitBuffer(x2buf, sizeof(int32_t) * kLanes);
+    tpipe.InitBuffer(tmp, TMP_UB_SIZE);
+    auto la = x1buf.Get<int32_t>();
+    auto lb = x2buf.Get<int32_t>();
+    auto scratch = tmp.Get<uint8_t>();
+    GmToUb(la, a, kLanes);
+    GmToUb(lb, b, kLanes);
+    LocalTensor<uint8_t> bits = scratch[0].template ReinterpretCast<uint8_t>();
+    bits.SetSize(kLanes / 8);
+    LocalTensor<float> ones = scratch[32].template ReinterpretCast<float>();
+    ones.SetSize(kLanes);
+    LocalTensor<float> zeros = scratch[32 + ONE_REPEAT_BYTE_SIZE].template ReinterpretCast<float>();
+    zeros.SetSize(kLanes);
+    LocalTensor<float> res = scratch[32 + 2 * ONE_REPEAT_BYTE_SIZE].template ReinterpretCast<float>();
+    res.SetSize(kLanes);
+    Duplicate(ones, 1.0f, kLanes);
+    Duplicate(zeros, 0.0f, kLanes);
+    const BinaryRepeatParams rpt = {1, 1, 1, 8, 8, 8};
+    Compare(bits, la, lb, CMPMODE::EQ, kLanes, 1, rpt);
+    UbToGm(bits_out, bits, 8);
+    Select<float, uint8_t, true>(res, bits, ones, zeros, SELMODE::VSEL_TENSOR_TENSOR_MODE, kLanes, 1, rpt);
+    UbToGm(out, res, kLanes);
+  };
+  AscendC::SetKernelMode(KernelMode::AIV_MODE);
+  ICPU_RUN_KF(kernel, 1);
+  uint32_t diff = 0;
+  for (uint32_t i = 0; i < kLanes; i++) {
+    bool exp = static_cast<int32_t>(i) == 32;
+    if ((exp && out[i] != 1.0f) || (!exp && out[i] != 0.0f)) {
+      diff++;
+    }
+  }
+  EXPECT_EQ(diff, 0);
+  // packed bits：byte 4 的 bit 0 置位（lane 32）
+  EXPECT_EQ(bits_out[4], 0x01);
+  AscendC::GmFree(a);
+  AscendC::GmFree(b);
+  AscendC::GmFree(out);
+  AscendC::GmFree(bits_out);
+}
+
+// ST-2：PairReduceSum 的相邻 lane 成对求和与紧凑打包布局。
+TEST_F(TestApiCompareV2UT, ST2_PairReduceSumPacking) {
+  constexpr uint32_t kLanes = 64;  // float lane 数
+  constexpr uint32_t kPairs = 32;
+  auto *src = static_cast<float *>(AscendC::GmAlloc(sizeof(float) * kLanes));
+  auto *out = static_cast<float *>(AscendC::GmAlloc(sizeof(float) * kPairs));
+  for (uint32_t i = 0; i < kLanes; i++) {
+    src[i] = static_cast<float>(i);  // [0,1,2,3,...]
+  }
+  auto kernel = [src, out] {
+    TPipe tpipe;
+    TBuf<TPosition::VECCALC> x1buf, tmp;
+    tpipe.InitBuffer(x1buf, sizeof(float) * kLanes);
+    tpipe.InitBuffer(tmp, TMP_UB_SIZE);
+    auto lsrc = x1buf.Get<float>();
+    auto scratch = tmp.Get<uint8_t>();
+    LocalTensor<float> res = scratch[0].template ReinterpretCast<float>();
+    res.SetSize(kPairs);
+    GmToUb(lsrc, src, kLanes);
+    PairReduceSum(res, lsrc, 1, kLanes, 1, 1, 4);
+    UbToGm(out, res, kPairs);
+  };
+  AscendC::SetKernelMode(KernelMode::AIV_MODE);
+  ICPU_RUN_KF(kernel, 1);
+  uint32_t diff = 0;
+  for (uint32_t i = 0; i < kPairs; i++) {
+    float exp = src[2 * i] + src[2 * i + 1];
+    if (out[i] != exp) {
+      diff++;
+    }
+  }
+  EXPECT_EQ(diff, 0);
+  AscendC::GmFree(src);
+  AscendC::GmFree(out);
+}
+
+/* End: ST 门禁 ---------------------------------------------------------------- */
 
 }  // namespace af

@@ -636,7 +636,7 @@ std::vector<std::pair<std::string, std::string>> TilingDataGenerator::GetTilingD
     return res;
   }
   for (const auto &tiling_data_gen : iter->second) {
-    GELOGI("GetTilingDataWithAnnotation tiling_data_gen_type[%d] gen_type[%d]",
+    GELOGD("GetTilingDataWithAnnotation tiling_data_gen_type[%d] gen_type[%d]",
            static_cast<int32_t>(tiling_data_gen_type), static_cast<int32_t>(tiling_data_gen->GetTilingDataGenType()));
     if (((tiling_data_gen_type == TilingDataGenType::ALL_TILING_DATA_GEN) ||
          (tiling_data_gen->GetTilingDataGenType() == tiling_data_gen_type)) &&
@@ -654,7 +654,7 @@ std::vector<std::pair<std::string, std::string>> TilingDataGenerator::GetTilingD
   std::vector<std::pair<std::string, std::string>> res;
   for (const auto &iter : graphs_tiling_data_gens_) {
     for (const auto &tiling_data_gen : iter.second) {
-      GELOGI("GetTilingDataWithAnnotation tiling_data_gen_type[%d] gen_type[%d]",
+      GELOGD("GetTilingDataWithAnnotation tiling_data_gen_type[%d] gen_type[%d]",
              static_cast<int32_t>(tiling_data_gen_type), static_cast<int32_t>(tiling_data_gen->GetTilingDataGenType()));
       if ((tiling_data_gen->GetTilingDataGenType() == tiling_data_gen_type) && (IsGenEnable(tiling_data_gen_type))) {
         const auto &data_with_annotation = tiling_data_gen->GetTilingDataWithAnnotation();

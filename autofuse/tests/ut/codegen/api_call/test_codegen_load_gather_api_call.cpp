@@ -994,3 +994,95 @@ TEST(CodegenKernel, LoadGatherApiCall_WhenAixsIsLastAxisAndParamHasMoreThanOneAx
   EXPECT_EQ(result, std::string{"GatherExtend(local_2, global_0[z0z1z2z3 * (s4)/(1)], global_1[(int64_t)z5z6T * "
                                 "(int64_t)z5z6t_size], (s4)/(1), local_2_actual_size, tmp_buf_0);\n"});
 }
+
+TEST(CodegenKernel, LoadGatherApiCall_WhenLastAxisOutputIsPadded) {
+  std::string binaryname = "GatherExtend";
+  codegen::Tiler tiler;
+  codegen::TPipe tpipe("tpipe", tiler);
+  af::AscGraph graph("test");
+  auto current_axis = CreateGraphAttrAxisIsLastAxisAndParamHasMoreThanOneAxis<ge::DT_FLOAT>(graph, tiler, 4);
+  auto node = graph.FindNode("gather");
+  node->attr.tmp_buffers = {{{af::Symbol(8192), -1}, af::MemAttr(), 0}};
+  af::AxisId block_inner_id = af::kIdNone;
+  af::AxisId tile_inner_id = af::kIdNone;
+  for (const auto &axis : graph.GetAllAxis()) {
+    if (axis->name == "z0z1z2z3b") {
+      block_inner_id = axis->id;
+    }
+    if (axis->name == "z5z6t") {
+      tile_inner_id = axis->id;
+    }
+  }
+  ASSERT_NE(block_inner_id, af::kIdNone);
+  ASSERT_NE(tile_inner_id, af::kIdNone);
+  const auto size = ge::GetSizeByDataType(ge::DT_FLOAT);
+  node->outputs[0].attr.vectorized_axis = {block_inner_id, tile_inner_id};
+  node->outputs[0].attr.vectorized_strides = {af::sym::Align(graph.FindAxis(tile_inner_id)->size, 32 / size), One};
+  std::vector<af::AxisId> padded_axis;
+  for (const auto axis_id : current_axis) {
+    if (axis_id != block_inner_id) {
+      padded_axis.push_back(axis_id);
+    }
+  }
+  tpipe.AddTensor(node->inputs[0]);
+  tpipe.AddTensor(node->inputs[1]);
+  tpipe.AddTensor(node->outputs[0]);
+  codegen::ApiTensor x1;
+  codegen::ApiTensor x2;
+  x1.id = node->inputs[0].attr.mem.tensor_id;
+  x2.id = node->inputs[1].attr.mem.tensor_id;
+  codegen::GatherApiCall call("GatherExtend");
+  EXPECT_EQ(call.Init(node), 0);
+  call.inputs.push_back(&x1);
+  call.inputs.push_back(&x2);
+  std::string result;
+  auto status = call.Generate(tpipe, padded_axis, result);
+  EXPECT_EQ(status, af::SUCCESS);
+  EXPECT_EQ(result, std::string{"GatherExtend(local_2, global_0[0 * (s4)/(1)], global_1[(int64_t)z5z6T * "
+                                "(int64_t)z5z6t_size], (s4)/(1), (z0z1z2z3b_size * z5z6t_size), tmp_buf_0, "
+                                "z5z6t_size, ((8 * Ceiling((Rational(1 , 8) * z5z6t_size))))/(1));\n"});
+}
+
+// 与上一用例同布局，但 current_axis 保留 block_inner（真实 split 场景）：
+// first_merge_axis 取块内轴未切分前缀，param 偏移携带 z0z1z2z3，padded 参数不变。
+TEST(CodegenKernel, LoadGatherApiCall_WhenLastAxisOutputIsPaddedWithBlockInnerAxis) {
+  std::string binaryname = "GatherExtend";
+  codegen::Tiler tiler;
+  codegen::TPipe tpipe("tpipe", tiler);
+  af::AscGraph graph("test");
+  auto current_axis = CreateGraphAttrAxisIsLastAxisAndParamHasMoreThanOneAxis<ge::DT_FLOAT>(graph, tiler, 4);
+  auto node = graph.FindNode("gather");
+  node->attr.tmp_buffers = {{{af::Symbol(8192), -1}, af::MemAttr(), 0}};
+  af::AxisId block_inner_id = af::kIdNone;
+  af::AxisId tile_inner_id = af::kIdNone;
+  for (const auto &axis : graph.GetAllAxis()) {
+    if (axis->name == "z0z1z2z3b") {
+      block_inner_id = axis->id;
+    }
+    if (axis->name == "z5z6t") {
+      tile_inner_id = axis->id;
+    }
+  }
+  ASSERT_NE(block_inner_id, af::kIdNone);
+  ASSERT_NE(tile_inner_id, af::kIdNone);
+  const auto size = ge::GetSizeByDataType(ge::DT_FLOAT);
+  node->outputs[0].attr.vectorized_axis = {block_inner_id, tile_inner_id};
+  node->outputs[0].attr.vectorized_strides = {af::sym::Align(graph.FindAxis(tile_inner_id)->size, 32 / size), One};
+  tpipe.AddTensor(node->inputs[0]);
+  tpipe.AddTensor(node->inputs[1]);
+  tpipe.AddTensor(node->outputs[0]);
+  codegen::ApiTensor x1;
+  codegen::ApiTensor x2;
+  x1.id = node->inputs[0].attr.mem.tensor_id;
+  x2.id = node->inputs[1].attr.mem.tensor_id;
+  codegen::GatherApiCall call("GatherExtend");
+  EXPECT_EQ(call.Init(node), 0);
+  call.inputs.push_back(&x1);
+  call.inputs.push_back(&x2);
+  std::string result;
+  auto status = call.Generate(tpipe, current_axis, result);
+  EXPECT_EQ(status, af::SUCCESS);
+  EXPECT_EQ(result, std::string{"GatherExtend(local_2, global_0[z0z1z2z3 * (s4)/(1)], global_1[(int64_t)z5z6T * "
+                                "(int64_t)z5z6t_size], (s4)/(1), (z0z1z2z3b_size * z5z6t_size), tmp_buf_0, "
+                                "z5z6t_size, ((8 * Ceiling((Rational(1 , 8) * z5z6t_size))))/(1));\n"});
+}

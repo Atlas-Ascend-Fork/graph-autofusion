@@ -30,6 +30,15 @@ bool TryGetTensorLogicalBytes(const af::AscTensor &tensor, int64_t &bytes);
 
 bool IsSkWindowUbInfeasible(const af::AscNodePtr &indirect_load);
 
+// [SK段SIMT化·动态shape] 非收敛 index 且 IL 输出尾轴尺寸为运行期符号时，SK 候选
+// 必须以分段兜底形态生成（重定向）。SK 行窗口与 inline 模板对 R 的全载 UB 需求均
+// 不可静态验证，任一运行期取值超出 UB 即令候选真机 tiling 失败；分段候选的 R 轴由
+// tiling 自由度承载（任意运行期取值可解），与 inline 候选并存、launch 期按实际
+// shape 择优。仅直接后置稳定 Softmax 的 Norm Region DAG 触发（其他 Norm DAG 保留
+// 原 SK 模板选择，避免扩大既有模板契约）；收敛 index（分片窗口）与静态尾轴不受
+// 此限。
+bool IsSkRedirectRequiredForDynamicTail(const af::AscGraph &graph, const af::AscNodePtr &indirect_load);
+
 int64_t CountRDomainChainTensors(const af::AscNodePtr &indirect_load, int64_t tail);
 
 bool IsSimtUbInfeasible(const af::AscGraph &graph, const af::AscNodePtr &indirect_load);

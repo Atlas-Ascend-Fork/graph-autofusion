@@ -2498,6 +2498,64 @@ TEST_F(TestOptimizerV2, NddmaScoreFuncTailAxisSplitted_Static) {
   EXPECT_EQ(score_func, res);
 }
 
+TEST_F(TestOptimizerV2, NddmaScoreFuncTailAxisOverflow_Static) {
+  af::AscGraph graph("gen_nddma");
+  auto s0 = graph.CreateSizeVar(64);
+  // 尾轴 2^30 * 4B = 2^32，旧实现先截断到 uint32 再乘法会回绕为 0
+  auto s1 = graph.CreateSizeVar(1LL << 30);
+  auto z0 = graph.CreateAxis("z0", s0);
+  auto z1 = graph.CreateAxis("z1", s1);
+
+  Data data0("data0", graph);
+  data0.y.dtype = af::DT_FLOAT;
+  data0.ir_attr.SetIndex(0);
+
+  Load load0("load0");
+  load0.attr.sched.axis = {z0.id, z1.id};
+  load0.x = data0.y;
+  *load0.y.axis = {z0.id, z1.id};
+  load0.y.dtype = af::DT_FLOAT;
+  *load0.y.strides = {af::Symbol(1), af::Symbol(0)};
+  *load0.y.repeats = {s0, af::Symbol(1)};
+
+  Broadcast broadcast("broadcast");
+  broadcast.x = load0.y;
+  broadcast.attr.sched.axis = {z0.id, z1.id};
+  *broadcast.y.axis = {z0.id, z1.id};
+  broadcast.y.dtype = af::DT_FLOAT;
+  *broadcast.y.strides = {s1, One};
+  *broadcast.y.repeats = {s0, s1};
+
+  Store store_op("store");
+  store_op.attr.sched.axis = {z0.id, z1.id};
+  store_op.x = broadcast.y;
+  *store_op.y.axis = {z0.id, z1.id};
+  store_op.y.dtype = af::DT_FLOAT;
+  *store_op.y.strides = {s1, One};
+  *store_op.y.repeats = {s0, s1};
+
+  Output output_op("output");
+  output_op.x = store_op.y;
+  output_op.y.dtype = af::DT_FLOAT;
+  output_op.ir_attr.SetIndex(8);
+  optimize::AscGraphInfoComplete::CompleteApiInfo(graph);
+  EXPECT_EQ(Optimizer::MergeContinuousAxis(graph), af::SUCCESS);
+  std::vector<autoschedule::AutoScheduleOutput> impl_graphs;
+  optimize::autoschedule::AutoSchedule autoschedule(graph, impl_graphs);
+  autoschedule.DoAutoSchedule();
+  ASSERT_EQ(impl_graphs.size(), 4);
+  EXPECT_EQ(impl_graphs[3].scheduled_graph.GetName(), "gen_nddma_B0Y1_nddma");
+
+  const auto nddma_template = af::ComGraphMakeUnique<NddmaTemplate>();
+  const auto score_func = nddma_template->GetScoreFunc(graph, impl_graphs[3].scheduled_graph);
+  // 真实尾轴字节数 2^32 > 4096B，case2 应打低分
+  const auto res =
+      "int32_t CalcScore(const AutofuseTilingData &tiling_data) {\n"
+      "  return -1;\n"
+      "}\n";
+  EXPECT_EQ(score_func, res);
+}
+
 TEST_F(TestOptimizerV2, NddmaScoreFuncTailAxisBacktrackFallback) {
   af::AscGraph graph("gen_nddma");
 

@@ -10,6 +10,8 @@ add_executable(optimize_st
         ${CODE_ROOT_DIR}/tests/framework/easy_asc_graph/asc_graph_builder.cpp
         # Schedule 校验契约由 UT 维护，ST 复用同一组用例以保证 ST 增量覆盖率覆盖失败分支。
         ${CODE_ROOT_DIR}/tests/ut/optimize/test_schedule_graph_validator.cpp
+        # Gather padded 尾轴 codegen 用例由 UT 维护，ST 复用同一组用例，保证 ST 增量覆盖率覆盖 codegen host 路径。
+        ${CODE_ROOT_DIR}/tests/ut/codegen/api_call/test_codegen_load_gather_api_call.cpp
 )
 
 if (ENABLE_ASAN)
@@ -56,6 +58,7 @@ target_link_libraries(optimize_st ${ASCGEN_COMMON_LINK_OPTION}
         -Wl,--no-as-needed
         atrace
         optimize
+        codegen
         ascir
         aihac_ir
         aihac_ir_register

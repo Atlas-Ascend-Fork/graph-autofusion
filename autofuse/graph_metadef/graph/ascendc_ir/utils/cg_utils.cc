@@ -63,12 +63,12 @@ void CgContext::PushLoopAxis(const Axis &axis) {
 }
 void CgContext::PopBackLoopAxis(const Axis &axis) {
   if (loop_axis_ids_cache_.empty()) {
-    GELOGE(FAILED, "Axes stack is empty", "");
+    GELOGE(FAILED, "Axes stack is empty");
     return;
   }
   auto last_id = *(loop_axis_ids_cache_.rbegin());
   if (last_id != axis.id) {
-    GELOGE(FAILED, "Pop axis order mismatch", "");
+    GELOGE(FAILED, "Pop axis order mismatch");
     return;
   }
   loop_axis_ids_cache_.pop_back();
