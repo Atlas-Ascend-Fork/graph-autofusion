@@ -847,6 +847,69 @@ __aicore__ inline bool TryIndirectLoadSimtEmbeddingMte(__gm__ X *x, typename Fus
   }
 }
 
+// Keep at most eight elements per thread and at least one warp per row.
+// Fixed payloads permit unrolling and hoisting row-invariant fused inputs.
+template <uint32_t Payload, typename X, typename FusedBody, typename Context, typename AddressPolicy>
+__simt_vf__ __aicore__ LAUNCH_BOUND(2048U) inline void IndirectLoadSimtEmbeddingRowsKernel(
+    __gm__ X *x, typename FusedBody::OutputTargets targets, Context context, uint32_t actual_size,
+    typename AddressPolicy::OffsetType output_offset) {
+  using OffsetT = typename AddressPolicy::OffsetType;
+  constexpr uint32_t kRowThreads = Payload < 256U ? 32U : Payload / 8U;
+  const uint32_t lane = threadIdx.x % kRowThreads;
+  const uint32_t group = threadIdx.x / kRowThreads;
+  const OffsetT last_row = (output_offset + static_cast<OffsetT>(actual_size)) / Payload;
+  for (OffsetT row = output_offset / Payload + group; row < last_row; row += blockDim.x / kRowThreads) {
+    const OffsetT row_begin = row * Payload;
+    const OffsetT index = static_cast<OffsetT>(FusedBody::Index(row_begin, row, context));
+#pragma unroll
+    for (uint32_t part = 0U; part < Payload / kRowThreads; ++part) {
+      const OffsetT column = lane + part * kRowThreads;
+      const OffsetT output_index = row_begin + column;
+      const X value = x[index * Payload + column];
+      const auto outputs = FusedBody::Outputs(value, output_index, row, row, row, context);
+      FusedBody::Store(targets, output_index, output_index - output_offset, context, outputs);
+    }
+  }
+}
+
+template <typename X, typename FusedBody, typename Context, typename AddressPolicy>
+__aicore__ inline bool TryIndirectLoadSimtEmbeddingRows(__gm__ X *x, typename FusedBody::OutputTargets targets,
+                                                        Context context, uint32_t actual_size,
+                                                        typename AddressPolicy::OffsetType output_offset,
+                                                        AddressPolicy address_policy) {
+  if constexpr (!AddressPolicy::kEmbedding || sizeof(typename AddressPolicy::OffsetType) != sizeof(uint32_t) ||
+                !std::is_same<X, float>::value || FusedBody::kGmOutputCount != 1U || FusedBody::kUbOutputCount != 0U) {
+    return false;
+  } else {
+    const auto payload = address_policy.shape[1];
+    if (payload == 0U || address_policy.input_axis_stride != payload || address_policy.shape[3] != 1U ||
+        address_policy.shape[4] != 1U || actual_size / payload < 64U || output_offset % payload != 0U ||
+        actual_size % payload != 0U) {
+      return false;
+    }
+    switch (payload) {
+      case 128U:
+        Simt::VF_CALL<IndirectLoadSimtEmbeddingRowsKernel<128U, X, FusedBody, Context, AddressPolicy>>(
+            Simt::Dim3(2048U), x, targets, context, actual_size, output_offset);
+        return true;
+      case 256U:
+        Simt::VF_CALL<IndirectLoadSimtEmbeddingRowsKernel<256U, X, FusedBody, Context, AddressPolicy>>(
+            Simt::Dim3(2048U), x, targets, context, actual_size, output_offset);
+        return true;
+      case 512U:
+        Simt::VF_CALL<IndirectLoadSimtEmbeddingRowsKernel<512U, X, FusedBody, Context, AddressPolicy>>(
+            Simt::Dim3(2048U), x, targets, context, actual_size, output_offset);
+        return true;
+      case 1024U:
+        Simt::VF_CALL<IndirectLoadSimtEmbeddingRowsKernel<1024U, X, FusedBody, Context, AddressPolicy>>(
+            Simt::Dim3(2048U), x, targets, context, actual_size, output_offset);
+        return true;
+      default:
+        return false;
+    }
+  }
+}
+
 template <typename X, typename FusedBody, typename Context, typename AddressPolicy>
 __aicore__ inline void DispatchIndirectLoadSimt(__gm__ X *x, typename FusedBody::OutputTargets targets, Context context,
                                                 uint32_t actual_size, typename AddressPolicy::OffsetType output_offset,
@@ -856,6 +919,9 @@ __aicore__ inline void DispatchIndirectLoadSimt(__gm__ X *x, typename FusedBody:
                                                       address_policy)) {
       return;
     }
+  }
+  if (TryIndirectLoadSimtEmbeddingRows<X, FusedBody>(x, targets, context, actual_size, output_offset, address_policy)) {
+    return;
   }
   // A tile fitting in one warp needs no additional idle warps.
   if (actual_size <= 32U) {
