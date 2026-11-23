@@ -4475,7 +4475,7 @@ class AtanAscIrCodegenImplV2 : public SimtFloatUnaryAscIrCodegenImplV2 {
   }
   [[nodiscard]] std::pair<std::vector<ge::DataType>, std::vector<ge::DataType>> GetConversionDtype(
       const AscNode &node) override {
-    std::map<ge::DataType, ge::DataType> dtype_conversion_map = {{DT_BF16, DT_FLOAT}};
+    std::map<ge::DataType, ge::DataType> dtype_conversion_map = {{DT_BF16, DT_FLOAT}, {DT_FLOAT16, DT_FLOAT}};
     return GetConversionFromDtypeMap(node, dtype_conversion_map);
   }
   [[nodiscard]] std::vector<std::string> LoadApiHeaderFiles([[maybe_unused]] bool is_dynamic) const override {
