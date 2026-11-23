@@ -240,9 +240,6 @@ bool SuperKernelOptimizer::BuildTaskListWithCustomEvents(
   scheduled.reserve(taskNodes.size() + eventNodes.size());
   for (auto *task : taskNodes) {
     scheduled.push_back(task);
-    if (task == nullptr) {
-      continue;
-    }
     const auto it = tasksWithTrailingCustomEvents.find(task->GetNodeId());
     if (it == tasksWithTrailingCustomEvents.end()) {
       continue;
@@ -253,7 +250,7 @@ bool SuperKernelOptimizer::BuildTaskListWithCustomEvents(
       if (event->GetStreamIdxInGraph() != task->GetStreamIdxInGraph() &&
           (task != taskNodes.back() ||
            std::any_of(taskNodes.begin(), taskNodes.end(), [event](const SuperKernelBaseNode *node) {
-             return node != nullptr && node->GetStreamIdxInGraph() == event->GetStreamIdxInGraph();
+             return node->GetStreamIdxInGraph() == event->GetStreamIdxInGraph();
            }))) {
         SK_LOGE(
             "cannot schedule custom event: owner is on a different stream, eventId=%lu, streamIdx=%u, ownerNodeId=%lu",
