@@ -201,7 +201,8 @@ bool ParseAndValidateExtendOptionValue(const char *rawValue, const std::string &
 
   const std::string input(rawValue);
   if (input.size() > kMaxExtendOptionLength) {
-    SK_LOGW("OptionName:%s, raw extend value is too long: %zu", optionName.c_str(), input.size());
+    SK_LOGW("OptionName:%s, raw extend value is too long: %zu, max length is %zu", optionName.c_str(), input.size(),
+            kMaxExtendOptionLength);
     return false;
   }
 
@@ -223,13 +224,17 @@ bool ParseAndValidateExtendOptionValue(const char *rawValue, const std::string &
     const size_t eqPos = pair.find('=');
     if (eqPos == std::string::npos || eqPos == 0 || eqPos == pair.size() - 1 ||
         pair.find('=', eqPos + 1) != std::string::npos) {
-      SK_LOGW("OptionName:%s, extend pair format is invalid: %s", optionName.c_str(), pair.c_str());
+      SK_LOGW(
+          "OptionName:%s, extend pair format is invalid: %s, expected key=value pairs separated by ':' with one '=' "
+          "per pair",
+          optionName.c_str(), pair.c_str());
       return false;
     }
 
     const std::string key = sk::TrimString(pair.substr(0, eqPos));
     if (!IsValidExtendOptionToken(key, false)) {
-      SK_LOGW("OptionName:%s, extend key is invalid: %s", optionName.c_str(), key.c_str());
+      SK_LOGW("OptionName:%s, extend key is invalid: %s, expected non-empty alphanumeric/_/-/. token",
+              optionName.c_str(), key.c_str());
       return false;
     }
     if (tmpResult.find(key) != tmpResult.end()) {
@@ -243,7 +248,10 @@ bool ParseAndValidateExtendOptionValue(const char *rawValue, const std::string &
     for (const std::string &rawSubValue : rawValues) {
       const std::string value = sk::TrimString(rawSubValue);
       if (!IsValidExtendOptionToken(value, true)) {
-        SK_LOGW("OptionName:%s, extend value is invalid: %s", optionName.c_str(), value.c_str());
+        SK_LOGW(
+            "OptionName:%s, extend value is invalid: %s, expected non-empty token using alphanumeric, '_', '-', '.', "
+            "or '/'",
+            optionName.c_str(), value.c_str());
         return false;
       }
       valueList.push_back(value);
@@ -369,7 +377,7 @@ bool SuperKernelOptionsManager::JudgeUbufLockIgnoreKernel(const std::vector<std:
                                                           const std::string &opName) const {
   for (const auto &ignoredKernel : ignoredKernels) {
     if (MatchRegex(ignoredKernel, opName)) {
-      SK_LOGI("op: %s match ubuf lock ignore kernel option: %s, op will ignore mix kernel split", opName.c_str(),
+      SK_LOGI("op: %s matches ubuf lock ignore kernel option: %s, op will ignore mix kernel split", opName.c_str(),
               ignoredKernel.c_str());
       return true;
     }
