@@ -380,7 +380,7 @@ bool SuperKernelOptimizer::Schedule(SuperKernelScopeInfo &scopeInfo, SuperKernel
   const auto &eventNodes = scopeInfo.GetExtInfo().eventNodes;
   std::vector<SuperKernelBaseNode *> tasks;
   if (!BuildTaskListWithCustomEvents(reorderedTaskNodes, eventNodes, tasks)) {
-    SK_LOGE("failed to prepare synthetic custom events: scopeId=%u", scopeInfo.GetScopeId());
+    SK_LOGE("failed to build task list with custom events: scopeId=%u", scopeInfo.GetScopeId());
     return false;
   }
 
