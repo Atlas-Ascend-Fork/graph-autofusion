@@ -1037,7 +1037,7 @@ def AFIR_ReluOp : AFIR_BufferizableUnaryElementwiseOp<"relu", [I32, F16, F32, UI
   let summary = "Element-wise rectified linear unit of a tile";
   let description = [{
     逐元素取 `max(x, 0)`。其余与 `afir.exp` 相同：同形同 dtype、destination-style、
-    单实现（`relu.tensor`）、`compute` pipe。
+    `compute` pipe。A5 在共用实现之外还支持连续 i64。
   }];
 }
 // 两套 API 家族都只有 `NegExtend` 包装，签名也一样，只有头文件不同（`neg.h` /
@@ -1674,8 +1674,7 @@ def AFIR_AxpyOp : AFIR_BufferizableBinaryElementwiseOp<"axpy",
 
     buffer 形态是 destination-style，**两套 API 家族共用同一个包装**
     `AxpyExtend(dst, x1, x2, alpha, tmp, size)`（`axpy.h`）：`api_regbase/` 下没有
-    axpy，reg 侧不是另有一份实现，而是就用这一份。所以只有一个 implementation
-    （`axpy.tensor_tensor`，`ApiFamily::Shared`），不按 target 分流。
+    axpy，两侧使用同一个包装。f16/f32 共用实现，bf16/i64/ui64 由 A5 专属注册选择。
 
     tmp buffer 两个 dtype 分支都收：f16 那支真用它（切两段做 `Cast` / `CAST_RINT`），
     f32 那支一次没用，但形参在签名里，少一个实参就调不上。

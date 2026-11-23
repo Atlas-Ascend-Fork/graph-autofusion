@@ -1093,17 +1093,19 @@ LogicalResult registerScalarBinaryInPlace(ImplementationRegistry &registry, llvm
       });
 }
 
-// `afir.axpy`：两张支持表共用同一个扩展包装（tier D1），所以家族恒为 `Shared`、
-// 只有一个 implementation。tmp buffer 恒收，见 pattern 那段。
+// `afir.axpy` 专属的标量-属性注册：两个平台共用同一个扩展包装 `AxpyExtend`（`axpy.h`
+// 中立名），tmp 契约相同。家族与元素类型由实参指定，供 axpy 拆成共用行与 RegBased 行；
+// 头文件校验按 `Shared` 走——中立头对 RegBased 家族不匹配（`headersMatchFamily`）。
 template <typename SourceOp, typename TargetOp>
-LogicalResult registerBinaryScalarAttr(ImplementationRegistry &registry, llvm::StringRef id, uint32_t elementTypes) {
+LogicalResult registerBinaryScalarAttrWithFamily(ImplementationRegistry &registry, llvm::StringRef id, ApiFamily family,
+                                                 uint32_t elementTypes) {
   if (failed(elementwise::checkFamilyMatchesHeader<TargetOp>(ApiFamily::Shared))) {
     return failure();
   }
-  elementwise::recordRegisteredFamily(SourceOp::getOperationName(), id, ApiFamily::Shared, elementTypes);
+  elementwise::recordRegisteredFamily(SourceOp::getOperationName(), id, family, elementTypes);
   return registry.registerImplementation<SourceOp, BinaryElementwiseMapping, BinaryElementwiseCapabilityProvider>(
       ascend::instruction::ImplementationKind::AscendC, ascend::instruction::ImplementationId{id.str()},
-      BinaryElementwiseMapping{ApiFamily::Shared, ScalarOperand::None, ResultElementRule::Same, elementTypes,
+      BinaryElementwiseMapping{family, ScalarOperand::None, ResultElementRule::Same, elementTypes,
                                schedulerGivesTmpBuffer(TmpBufferUse::Passed)},
       [](RewritePatternSet &patterns, const PatternBuildContext &context, const ImplementationKey &key,
          std::shared_ptr<const BinaryElementwiseMapping> mapping) {
@@ -1560,6 +1562,21 @@ LogicalResult registerLogicalScalarImplementations(ImplementationRegistry &regis
   return success();
 }
 
+// `axpy`：两个平台共用同一个扩展包装 `AxpyExtend`（`axpy.h`，`api_regbase/` 下没有
+// 对应文件）与 tmp 契约。f16/f32 由两侧共用行收；bf16/i64/ui64 只在 reg 侧可选，按
+// 家族拆一行 RegBased 注册。它与上面所有 op 差的不是可用实现，是生成的形状：二元 +
+// 一个由 ODS 属性来的实参 + 一块 tmp buffer，所以走自己的 pattern
+// （`BinaryScalarAttrConversionPattern`），不走 `registerBinary` 那条。
+LogicalResult registerAxpyImplementations(ImplementationRegistry &registry) {
+  if (failed(registerBinaryScalarAttrWithFamily<AxpyOp, ascendc::AxpyExtendContiguousOp>(
+          registry, "axpy.tensor_tensor", ApiFamily::Shared, kF16 | kF32)) ||
+      failed(registerBinaryScalarAttrWithFamily<AxpyOp, ascendc::AxpyExtendContiguousOp>(
+          registry, "axpy.tensor_tensor.reg_base", ApiFamily::RegBased, kBF16 | kI64 | kUI64))) {
+    return failure();
+  }
+  return success();
+}
+
 LogicalResult registerTrueDivPowAxpyImplementations(ImplementationRegistry &registry) {
   // `truediv`：**第一个结果 dtype 逐行不同的 op**，也是第一个 mem 侧要说出**两个**扩展头
   // 的二元 op（`scalar_div.h` + `true_div.h`，`sign` 在一元那边先兑现过前置 A）。
@@ -1633,18 +1650,7 @@ LogicalResult registerTrueDivPowAxpyImplementations(ImplementationRegistry &regi
     return failure();
   }
 
-  // `axpy`：**这条路上第一个 tier D1** ——两张支持表共用同一个扩展包装
-  // `AxpyExtend`（`axpy.h`，`api_regbase/` 下没有对应文件）。于是只有一个
-  // implementation、不按 target 分流，id 上也没有 `_reg_base` 那一半。
-  //
-  // 它与上面所有 op 差的不是可用实现，是生成的形状：二元 + 一个由 ODS 属性来的实参
-  // + 一块 tmp buffer。所以它走自己的 pattern（`BinaryScalarAttrConversionPattern`），
-  // 不走 `registerBinary` 那条。
-  //
-  // 元素类型 {f16, f32}：v1 的 `T` 就是这两个。v2 多出 bf16 / u64 / i64，AFIR 这一层
-  // 的 `ElementTypes` 拼不出来，所以一个 implementation 覆两侧不丢东西。
-  if (failed(registerBinaryScalarAttr<AxpyOp, ascendc::AxpyExtendContiguousOp>(registry, "axpy.tensor_tensor",
-                                                                               kF16 | kF32))) {
+  if (failed(registerAxpyImplementations(registry))) {
     return failure();
   }
   return success();

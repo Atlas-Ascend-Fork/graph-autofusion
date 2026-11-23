@@ -99,40 +99,57 @@ CastTypeId getTypeId(Type type) {
 
 using CastPairSet = llvm::DenseSet<std::pair<CastTypeId, CastTypeId>>;
 
-// mem 侧：`ascir_builtin_ops_v1.cpp` 的 `kCastTypePairs`，36 对，逐行抄来的。
+// mem 侧：`ascir_builtin_ops_v1.cpp` 的 `kCastTypePairs`，37 对。
 const CastPairSet &getMemBasedCastPairs() {
   using CT = CastTypeId;
-  static const CastPairSet pairs = {{CT::F32, CT::F32},  {CT::F32, CT::F16},  {CT::F32, CT::I64},  {CT::F32, CT::I32},
-                                    {CT::F32, CT::I16},  {CT::F32, CT::BF16}, {CT::F16, CT::F32},  {CT::F16, CT::I32},
-                                    {CT::F16, CT::I16},  {CT::F16, CT::I8},   {CT::F16, CT::UI8},  {CT::F16, CT::I4},
-                                    {CT::F16, CT::I64},  {CT::I4, CT::F16},   {CT::UI8, CT::F16},  {CT::UI8, CT::F32},
-                                    {CT::UI8, CT::I32},  {CT::UI8, CT::I16},  {CT::UI8, CT::I8},   {CT::UI8, CT::I4},
-                                    {CT::I8, CT::F16},   {CT::I8, CT::UI8},   {CT::I16, CT::F16},  {CT::I16, CT::F32},
-                                    {CT::I16, CT::UI16}, {CT::I32, CT::F32},  {CT::I32, CT::I64},  {CT::I32, CT::I16},
-                                    {CT::I32, CT::F16},  {CT::I32, CT::UI32}, {CT::I64, CT::I32},  {CT::BF16, CT::F32},
-                                    {CT::BF16, CT::I32}, {CT::UI32, CT::I32}, {CT::UI16, CT::I16}, {CT::UI64, CT::I64}};
-  return pairs;
-}
-
-// reg 侧：`ascir_builtin_ops_v2.cpp` 的同名表，44 对里的 43 对。
-// 少的那一对是 `{DT_FLOAT, DT_BOOL}`——AFIR 不建模 bool（`ui8` 在这一层是一个字节的
-// 无符号整数，不是真值类型），把它写成 `f32 -> ui8` 会多说一件 reg 侧没有的可用实现。
-const CastPairSet &getRegBasedCastPairs() {
-  using CT = CastTypeId;
   static const CastPairSet pairs = {
-      {CT::F32, CT::F32},  {CT::F32, CT::F16},  {CT::F32, CT::I64},  {CT::F32, CT::I32},  {CT::F32, CT::I16},
-      {CT::F32, CT::BF16}, {CT::F32, CT::I8},   {CT::F16, CT::F32},  {CT::F16, CT::I32},  {CT::F16, CT::I16},
-      {CT::F16, CT::I8},   {CT::F16, CT::UI8},  {CT::F16, CT::I64},  {CT::UI8, CT::F16},  {CT::UI8, CT::F32},
-      {CT::UI8, CT::I32},  {CT::UI8, CT::I16},  {CT::UI8, CT::I8},   {CT::UI8, CT::I64},  {CT::I8, CT::F16},
-      {CT::I8, CT::UI8},   {CT::I8, CT::F32},   {CT::I8, CT::I16},   {CT::I16, CT::F16},  {CT::I16, CT::F32},
-      {CT::I16, CT::UI16}, {CT::I16, CT::I8},   {CT::I16, CT::UI8},  {CT::I32, CT::F32},  {CT::I32, CT::I64},
-      {CT::I32, CT::I16},  {CT::I32, CT::F16},  {CT::I32, CT::UI32}, {CT::I64, CT::I32},  {CT::I64, CT::F32},
-      {CT::I64, CT::UI8},  {CT::I64, CT::UI64}, {CT::I64, CT::F16},  {CT::BF16, CT::F32}, {CT::BF16, CT::I32},
-      {CT::UI32, CT::I32}, {CT::UI16, CT::I16}, {CT::UI64, CT::I64}};
+      {CT::F32, CT::F32},  {CT::F32, CT::F16}, {CT::F32, CT::I64},  {CT::F32, CT::I32},  {CT::F32, CT::I16},
+      {CT::F32, CT::BF16}, {CT::F16, CT::F32}, {CT::F16, CT::I32},  {CT::F16, CT::I16},  {CT::F16, CT::I8},
+      {CT::F16, CT::UI8},  {CT::F16, CT::I4},  {CT::F16, CT::I64},  {CT::I4, CT::F16},   {CT::UI8, CT::F16},
+      {CT::UI8, CT::F32},  {CT::UI8, CT::I32}, {CT::UI8, CT::I16},  {CT::UI8, CT::I8},   {CT::UI8, CT::I4},
+      {CT::UI8, CT::I64},  {CT::I8, CT::F16},  {CT::I8, CT::UI8},   {CT::I16, CT::F16},  {CT::I16, CT::F32},
+      {CT::I16, CT::UI16}, {CT::I32, CT::F32}, {CT::I32, CT::I64},  {CT::I32, CT::I16},  {CT::I32, CT::F16},
+      {CT::I32, CT::UI32}, {CT::I64, CT::I32}, {CT::BF16, CT::F32}, {CT::BF16, CT::I32}, {CT::UI32, CT::I32},
+      {CT::UI16, CT::I16}, {CT::UI64, CT::I64}};
   return pairs;
 }
 
-// 并集，46 对。ODS 的 `verify()` 查它：这一层只说「有没有哪一侧供得起」，
+// reg 侧：v2 白名单的 59 个非 bool 转换对。bool 尚未接入 AFIR 的元素类型模型。
+// 对表放文件作用域：类型对随白名单只增不减，函数内联初始化会把函数体行数顶破基线。
+constexpr std::pair<CastTypeId, CastTypeId> kRegBasedCastTypePairs[] = {
+    {CastTypeId::F32, CastTypeId::F32},  {CastTypeId::F32, CastTypeId::F16},  {CastTypeId::F32, CastTypeId::I64},
+    {CastTypeId::F32, CastTypeId::I32},  {CastTypeId::F32, CastTypeId::I16},  {CastTypeId::F32, CastTypeId::BF16},
+    {CastTypeId::F32, CastTypeId::I8},   {CastTypeId::F16, CastTypeId::F32},  {CastTypeId::F16, CastTypeId::I32},
+    {CastTypeId::F16, CastTypeId::I16},  {CastTypeId::F16, CastTypeId::I8},   {CastTypeId::F16, CastTypeId::UI8},
+    {CastTypeId::F16, CastTypeId::I64},  {CastTypeId::UI8, CastTypeId::F16},  {CastTypeId::UI8, CastTypeId::F32},
+    {CastTypeId::UI8, CastTypeId::I32},  {CastTypeId::UI8, CastTypeId::I16},  {CastTypeId::UI8, CastTypeId::I8},
+    {CastTypeId::UI8, CastTypeId::I64},  {CastTypeId::I8, CastTypeId::F16},   {CastTypeId::I8, CastTypeId::UI8},
+    {CastTypeId::I8, CastTypeId::F32},   {CastTypeId::I8, CastTypeId::I16},   {CastTypeId::I16, CastTypeId::F16},
+    {CastTypeId::I16, CastTypeId::F32},  {CastTypeId::I16, CastTypeId::UI16}, {CastTypeId::I16, CastTypeId::I8},
+    {CastTypeId::I16, CastTypeId::UI8},  {CastTypeId::I32, CastTypeId::F32},  {CastTypeId::I32, CastTypeId::I64},
+    {CastTypeId::I32, CastTypeId::I16},  {CastTypeId::I32, CastTypeId::F16},  {CastTypeId::I32, CastTypeId::UI32},
+    {CastTypeId::I64, CastTypeId::I32},  {CastTypeId::I64, CastTypeId::F32},  {CastTypeId::I64, CastTypeId::UI8},
+    {CastTypeId::I64, CastTypeId::UI64}, {CastTypeId::I64, CastTypeId::F16},  {CastTypeId::BF16, CastTypeId::F32},
+    {CastTypeId::BF16, CastTypeId::I32}, {CastTypeId::UI32, CastTypeId::I32}, {CastTypeId::UI16, CastTypeId::I16},
+    {CastTypeId::UI64, CastTypeId::I64}, {CastTypeId::F32, CastTypeId::UI8},  {CastTypeId::F32, CastTypeId::UI16},
+    {CastTypeId::F32, CastTypeId::UI32}, {CastTypeId::F32, CastTypeId::UI64}, {CastTypeId::I8, CastTypeId::I32},
+    {CastTypeId::I8, CastTypeId::I64},   {CastTypeId::I16, CastTypeId::I32},  {CastTypeId::I16, CastTypeId::I64},
+    {CastTypeId::I32, CastTypeId::I8},   {CastTypeId::I32, CastTypeId::UI8},  {CastTypeId::I64, CastTypeId::I8},
+    {CastTypeId::I64, CastTypeId::I16},  {CastTypeId::I64, CastTypeId::BF16}, {CastTypeId::UI16, CastTypeId::F32},
+    {CastTypeId::UI32, CastTypeId::F32}, {CastTypeId::UI64, CastTypeId::F32}};
+
+const CastPairSet &getRegBasedCastPairs() {
+  static const CastPairSet pairs = [] {
+    CastPairSet set;
+    for (const auto &pair : kRegBasedCastTypePairs) {
+      set.insert(pair);
+    }
+    return set;
+  }();
+  return pairs;
+}
+
+// 两侧的并集。ODS 的 `verify()` 查它：这一层只说「有没有哪一侧供得起」，
 // 选哪一侧是 lowering 的事。
 const CastPairSet &getSupportedCastPairs() {
   static const CastPairSet pairs = [] {

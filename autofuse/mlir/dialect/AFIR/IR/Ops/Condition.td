@@ -22,11 +22,9 @@ include "mlir/IR/CommonTypeConstraints.td"
 
 // 选择条件为 ui8，两个候选值与结果同 dtype。mem 侧使用 Where，reg 侧使用 WhereExtend，
 // 具体实现区分 scratch 需求和标量位置。
-// select 与 where 的类型集合分开：mem 侧相同，但 reg 侧 Where 额外接受 ui8 / ui16。
-// 不能因共享包装而同时放宽 Select。
-// 两侧 legacy 可用实现均未声明 bf16，因此不在 ODS 中开放；ElementTypeMatrixTest
-// 检查 ODS、注册实现与 legacy 的一致性。计算族的 bf16 支持不能直接推广到选择族。
-defvar AFIR_SelectElementTypes = [I16, I32, I64, F16, F32];
+// Select 和 Where 的 mem 侧类型相同。reg 侧还收整数扩展类型和 bf16。
+// Select 的 bf16 服务调度前改写的 MaskedFill。
+defvar AFIR_SelectElementTypes = [I8, I16, I32, I64, UI8, UI16, UI32, UI64, F16, F32, BF16];
 defvar AFIR_WhereElementTypes = [UI8, UI16, I16, I32, I64, F16, F32, BF16, I8, UI32, UI64];
 
 // `scalarInputs = 1`：`then` / `else` 各自可以是标量（`where.h` 的场景 1/2/3），`mask` 不行

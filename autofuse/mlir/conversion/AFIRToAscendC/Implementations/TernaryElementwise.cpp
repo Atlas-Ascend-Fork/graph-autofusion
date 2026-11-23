@@ -506,12 +506,11 @@ LogicalResult registerTernaryElementwiseImplementations(ImplementationRegistry &
   // 与 `WhereAscIrCodegenImpl` 逐字相同，只有 tmp 尺寸函数换了个名字而两者互相调用),
   // 差别只在 legacy 的 `IsScalarInputSupported` 允许哪个输入是标量，而两者允许的位置相同
   // （后两个），所以两者在 AFIR 这一层完全一样——标量形态也一样，各自多两个 implementation。
-  // 两者的集合不一样：legacy 的 mem 侧相同（f16 / f32 / i16 / i32 / i64），reg 侧只有
-  // `Where` 多收 ui8 / ui16。i16 原先两个都漏了——ODS 有、legacy 两侧也有，只有注册处没写。
   constexpr uint32_t kSelectionElementTypes = kF16 | kF32 | kI16 | kI32 | kI64;
-  constexpr uint32_t kWhereRegElementTypes = kSelectionElementTypes | kUI8 | kUI16 | kBF16 | kI8 | kUI32 | kUI64;
-  if (failed(registerSelection<SelectOp>(registry, "select", kSelectionElementTypes, kSelectionElementTypes)) ||
-      failed(registerSelection<WhereOp>(registry, "where", kSelectionElementTypes, kWhereRegElementTypes))) {
+  // A5 的 MaskedFill 在调度前改写成 Select，沿用 WhereExtend 的 bf16 实现。
+  constexpr uint32_t kSelectionRegElementTypes = kSelectionElementTypes | kUI8 | kUI16 | kI8 | kUI32 | kUI64 | kBF16;
+  if (failed(registerSelection<SelectOp>(registry, "select", kSelectionElementTypes, kSelectionRegElementTypes)) ||
+      failed(registerSelection<WhereOp>(registry, "where", kSelectionElementTypes, kSelectionRegElementTypes))) {
     return failure();
   }
 

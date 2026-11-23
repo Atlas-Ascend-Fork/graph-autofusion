@@ -728,20 +728,27 @@ LogicalResult registerPredicate(ImplementationRegistry &registry, llvm::StringRe
 
 }  // namespace
 
-LogicalResult registerUnaryElementwiseImplementations(ImplementationRegistry &registry,
-                                                      ascend::instruction::SelectionPolicyRegistry *) {
-  // 两张支持表给的是同一个 `AscendC::` 调用，都不要 tmp buffer：一个 id，不问 feature。
+// exp / ln / relu / sqrt 四件:两张支持表同调用、无 tmp,家族 Any(relu 另有 A5 的 i64 拆行)。
+// 抽成 helper 给主函数的 nbnc 棘轮留额度,注册顺序不变。
+LogicalResult registerExpLnReluSqrtBatch(ImplementationRegistry &registry) {
+  // 共用标准调用无需 tmp buffer。A5 的连续 Relu 另外接受 i64。
   if (failed(registerUnary<ExpOp, ascendc::ExpL2Op>(registry, "exp.tensor", ApiFamily::Any, ResultElementRule::Same,
                                                     kFloatElementTypes)) ||
       failed(registerUnary<LnOp, ascendc::LnL2Op>(registry, "ln.tensor", ApiFamily::Any, ResultElementRule::Same,
                                                   kFloatElementTypes)) ||
       failed(registerUnary<ReluOp, ascendc::ReluL2Op>(registry, "relu.tensor", ApiFamily::Any, ResultElementRule::Same,
                                                       kFloatAndI32ElementTypes)) ||
+      failed(registerUnary<ReluOp, ascendc::ReluL2Op>(registry, "relu.tensor.reg_base", ApiFamily::RegBased,
+                                                      ResultElementRule::Same, kI64)) ||
       failed(registerUnary<SqrtOp, ascendc::SqrtL2Op>(registry, "sqrt.tensor", ApiFamily::Any, ResultElementRule::Same,
                                                       kFloatElementTypes))) {
     return failure();
   }
+  return success();
+}
 
+// 一元基础件：`ub2ub`（DataCopy）、`abs` / `reciprocal` / `neg` / `sigmoid`。
+LogicalResult registerUb2ubAndSimpleMathBatch(ImplementationRegistry &registry) {
   // `afir.ub2ub`：两侧供给表给的是同一个 `AscendC::DataCopy`，count 经
   // `KernelUtils::BlkAlign<T>` 抬到 32B 对齐（矩阵 tier D0，`Ub2ubApiCall`）。目标 op 与
   // `afir.pad` 没补位那一支共用——那条退化形态发的就是同一句调用，形参表逐字相同，所以
@@ -781,7 +788,11 @@ LogicalResult registerUnaryElementwiseImplementations(ImplementationRegistry &re
           registry, "sigmoid.tensor.extend", ApiFamily::MemBased, ResultElementRule::Same, kFloatElementTypes))) {
     return failure();
   }
+  return success();
+}
 
+// 浮点谓词族与 `MathLibraryOp` 标准调用族（`gelu` / `sign` / `tanh` / `erf`）。
+LogicalResult registerPredicateAndMathLibraryBatch(ImplementationRegistry &registry) {
   // 浮点谓词族：结果 dtype 与输入不同（ui8）。标准调用在 reg-base 一侧且不要 tmp buffer。
   if (failed(registerPredicate<IsnanOp, ascendc::IsNanL2Op, ascendc::IsnanExtendOp>(registry, "isnan")) ||
       failed(registerPredicate<IsFiniteOp, ascendc::IsFiniteL2Op, ascendc::IsFiniteExtendOp>(registry, "isfinite")) ||
@@ -843,7 +854,11 @@ LogicalResult registerUnaryElementwiseImplementations(ImplementationRegistry &re
           registry, "erf.tensor.extend_reg_base", ApiFamily::RegBased, ResultElementRule::Same, kF16 | kF32 | kBF16))) {
     return failure();
   }
+  return success();
+}
 
+// 第 6 批前半：特殊函数一元族的包装件（`ndtr` 起步到 Bessel K1）。
+LogicalResult registerSpecialFunctionBatch(ImplementationRegistry &registry) {
   // `ndtr`：特殊函数一元族的第一个，形状与上面 `erf` 的 reg 那一半逐项相同——
   // `NdtrExtend(dst, src, tmp, count)`、tmp 尺寸 0 但形参在、不物化 `isReuseSource`。
   //
@@ -888,12 +903,19 @@ LogicalResult registerUnaryElementwiseImplementations(ImplementationRegistry &re
                                                     ApiFamily::RegBased, ResultElementRule::Same, kF32)) ||
       failed(registerUnary<afir::ModifiedBesselK1Op, ascendc::ModifiedBesselK1ExtendRegBaseOp,
                            /*TakesTmpBuffer=*/true>(registry, "modified_bessel_k1.tensor.extend_reg_base",
-                                                    ApiFamily::RegBased, ResultElementRule::Same, kF32)) ||
-      // 第 6 批（一元六个里的六个；`log10` 不在这一批——它是 `MathLibraryOp` 却不要 tmp，
-      // 正是 `UnaryElementwiseConversionPattern` 的 `static_assert` 挡住的那个空组合）。
-      //
-      // `erfinv` 的包装有 3 参和 4 参两个重载，legacy 生成的是 3 参那个，所以不带 tmp。
-      failed(registerUnary<afir::ErfinvOp, ascendc::ErfinvExtendRegBaseOp>(
+                                                    ApiFamily::RegBased, ResultElementRule::Same, kF32))) {
+    return failure();
+  }
+  return success();
+}
+
+// 第 6 批的后半：不要 tmp 的 erfinv / exp2 与标准调用件（log2 / floor / lgamma）。
+LogicalResult registerSpecialFunctionTailBatch(ImplementationRegistry &registry) {
+  // 第 6 批（一元六个里的六个；`log10` 不在这一批——它是 `MathLibraryOp` 却不要 tmp，
+  // 正是 `UnaryElementwiseConversionPattern` 的 `static_assert` 挡住的那个空组合）。
+  //
+  // `erfinv` 的包装有 3 参和 4 参两个重载，legacy 生成的是 3 参那个，所以不带 tmp。
+  if (failed(registerUnary<afir::ErfinvOp, ascendc::ErfinvExtendRegBaseOp>(
           registry, "erfinv.tensor.extend_reg_base", ApiFamily::RegBased, ResultElementRule::Same, kF32)) ||
       failed(registerUnary<afir::Exp2Op, ascendc::Exp2ExtendRegBaseOp, /*TakesTmpBuffer=*/true>(
           registry, "exp2.tensor.extend_reg_base", ApiFamily::RegBased, ResultElementRule::Same,
@@ -912,7 +934,11 @@ LogicalResult registerUnaryElementwiseImplementations(ImplementationRegistry &re
                                                              ResultElementRule::Same, kFloatElementTypes | kBF16))) {
     return failure();
   }
+  return success();
+}
 
+// 第 7 批前半：fork 的包装、要 tmp 的三角 / 双曲 / 取整（acos..cosh）。
+LogicalResult registerTrigHyperbolicRoundBatch(ImplementationRegistry &registry) {
   // 第 7 批（一元 24 个），全部 reg-only。三段：
   //
   //   1. 19 个走 fork 的包装、要 tmp。**它们在 `Adv/Math.td` 多半有同名的 `UnaryMathOp`，
@@ -951,8 +977,15 @@ LogicalResult registerUnaryElementwiseImplementations(ImplementationRegistry &re
           kFloatElementTypes | kBF16)) ||
       failed(registerUnary<afir::CoshOp, ascendc::CoshExtendRegBaseOp, /*TakesTmpBuffer=*/true>(
           registry, "cosh.tensor.extend_reg_base", ApiFamily::RegBased, ResultElementRule::Same,
-          kFloatElementTypes | kBF16)) ||
-      failed(registerUnary<afir::ErfcxOp, ascendc::ErfcxExtendRegBaseOp, /*TakesTmpBuffer=*/true>(
+          kFloatElementTypes | kBF16))) {
+    return failure();
+  }
+  return success();
+}
+
+// 第 7 批前半的其余件：erfcx / round / sin / sinh / tan。
+LogicalResult registerRoundAndTrigTailBatch(ImplementationRegistry &registry) {
+  if (failed(registerUnary<afir::ErfcxOp, ascendc::ErfcxExtendRegBaseOp, /*TakesTmpBuffer=*/true>(
           registry, "erfcx.tensor.extend_reg_base", ApiFamily::RegBased, ResultElementRule::Same,
           kFloatElementTypes | kBF16)) ||
       failed(registerUnary<afir::RoundOp, ascendc::RoundExtendRegBaseOp, /*TakesTmpBuffer=*/true>(
@@ -966,8 +999,15 @@ LogicalResult registerUnaryElementwiseImplementations(ImplementationRegistry &re
           kFloatElementTypes | kBF16)) ||
       failed(registerUnary<afir::TanOp, ascendc::TanExtendRegBaseOp, /*TakesTmpBuffer=*/true>(
           registry, "tan.tensor.extend_reg_base", ApiFamily::RegBased, ResultElementRule::Same,
-          kFloatElementTypes | kBF16)) ||
-      failed(registerUnary<afir::BesselY0Op, ascendc::BesselY0ExtendRegBaseOp, /*TakesTmpBuffer=*/true>(
+          kFloatElementTypes | kBF16))) {
+    return failure();
+  }
+  return success();
+}
+
+// 第 7 批后半：Bessel 五件（legacy 域只有 f32）、标准调用三件与不要 tmp 的 expm1 / log1p。
+LogicalResult registerBesselAndStockMathBatch(ImplementationRegistry &registry) {
+  if (failed(registerUnary<afir::BesselY0Op, ascendc::BesselY0ExtendRegBaseOp, /*TakesTmpBuffer=*/true>(
           registry, "bessel_y0.tensor.extend_reg_base", ApiFamily::RegBased, ResultElementRule::Same, kF32)) ||
       failed(registerUnary<afir::BesselY1Op, ascendc::BesselY1ExtendRegBaseOp, /*TakesTmpBuffer=*/true>(
           registry, "bessel_y1.tensor.extend_reg_base", ApiFamily::RegBased, ResultElementRule::Same, kF32)) ||
@@ -998,7 +1038,11 @@ LogicalResult registerUnaryElementwiseImplementations(ImplementationRegistry &re
                                                                          kFloatElementTypes | kBF16))) {
     return failure();
   }
+  return success();
+}
 
+// 第 8 批（`log10`）、第 9 批（多项式族）与 step 2a（取整到 i32）。
+LogicalResult registerPolyAndIntRoundingBatch(ImplementationRegistry &registry) {
   // 第 8 批（一元 1 个）。`log10` 是第 6 批那段注释点名留下的那个空组合：标准调用、
   // 不要 tmp。那一轮以为它只能是 `MathLibraryOp`，于是撞上
   // `UnaryElementwiseConversionPattern` 的 `static_assert`；这里换的是**可用实现**而不是
@@ -1051,7 +1095,11 @@ LogicalResult registerUnaryElementwiseImplementations(ImplementationRegistry &re
           registry, "floor_to_int.tensor", ResultElementRule::Int32, kFloatElementTypes | kBF16))) {
     return failure();
   }
+  return success();
+}
 
+// `cast`、要预填常量 block 的 `rsqrt` / `logical_not`、`leaky_relu` 与 `bitwise_not`。
+LogicalResult registerCastConstBlockBatch(ImplementationRegistry &registry) {
   // `cast`：**这条路上第一个输入与结果必须不同 dtype 的 op**，也是第一个合法组合是一张
   // 逐行对表而不是一个集合的 op（`ResultElementRule::CastPair`，表在 `Ops/Cast.cpp`）。
   //
@@ -1123,6 +1171,23 @@ LogicalResult registerUnaryElementwiseImplementations(ImplementationRegistry &re
   // legacy 另有一条走 `MicroAPI::Not` 的 VF 融合路，本 Op 不建模那一条。
   return registerUnary<afir::BitwiseNotOp, ascendc::BitwiseNotExtendRegBaseOp>(
       registry, "bitwise_not.tensor", ApiFamily::RegBased, ResultElementRule::Same, kBitwiseNotRegElementTypes);
+}
+
+LogicalResult registerUnaryElementwiseImplementations(ImplementationRegistry &registry,
+                                                      ascend::instruction::SelectionPolicyRegistry *) {
+  if (failed(registerExpLnReluSqrtBatch(registry))) {
+    return failure();
+  }
+
+  // 主体按主题拆成下面的注册函数：这里只做编排，各块的依据与坑都写在各自函数里。
+  if (failed(registerUb2ubAndSimpleMathBatch(registry)) || failed(registerPredicateAndMathLibraryBatch(registry)) ||
+      failed(registerSpecialFunctionBatch(registry)) || failed(registerSpecialFunctionTailBatch(registry)) ||
+      failed(registerTrigHyperbolicRoundBatch(registry)) || failed(registerRoundAndTrigTailBatch(registry)) ||
+      failed(registerBesselAndStockMathBatch(registry)) || failed(registerPolyAndIntRoundingBatch(registry)) ||
+      failed(registerCastConstBlockBatch(registry))) {
+    return failure();
+  }
+  return success();
 }
 
 }  // namespace mlir::ascend::kernel
