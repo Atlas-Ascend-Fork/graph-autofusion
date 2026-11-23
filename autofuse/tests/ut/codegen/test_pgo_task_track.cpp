@@ -23,18 +23,28 @@ namespace {
 
 TEST(PgoTimestamp, MatchesMsptiIntegerConversion) {
   PgoDeviceTimeInfo info;
-  info.frequency = 50;
+  info.ticks_per_ms = 50;
   info.start_sys_count = 1000;
   info.start_real_time_ns = 5000000000ULL;
   uint64_t start = 0;
   uint64_t end = 0;
   ASSERT_EQ(ConvertCounterToRealTime(1050, info, &start), 0);
   ASSERT_EQ(ConvertCounterToRealTime(1100, info, &end), 0);
-  EXPECT_EQ(start, 6000000000ULL);
-  EXPECT_EQ(end, 7000000000ULL);
+  EXPECT_EQ(start, 5001000000ULL);
+  EXPECT_EQ(end, 5002000000ULL);
   uint64_t duration = 0;
   ASSERT_EQ(ConvertTaskDuration(1050, 1100, info, &duration), 0);
-  EXPECT_EQ(duration, 1000000000ULL);
+  EXPECT_EQ(duration, 1000000ULL);
+}
+
+TEST(PgoTimestamp, ConvertsOneMillionTicksPerMillisecond) {
+  PgoDeviceTimeInfo info;
+  info.ticks_per_ms = 1000000U;
+  info.start_sys_count = 500000000U;
+  info.start_real_time_ns = 1000000000ULL;
+  uint64_t duration = 0;
+  ASSERT_EQ(ConvertTaskDuration(500001000U, 500002355U, info, &duration), 0);
+  EXPECT_EQ(duration, 1355U);
 }
 
 TEST(PgoTimestamp, UsesRawCounterWhenFrequencyUnavailable) {
@@ -49,45 +59,45 @@ TEST(PgoTimestamp, UsesRawCounterWhenFrequencyUnavailable) {
 
 TEST(PgoTimestamp, PreservesSingleCounterWrapWithSignedDelta) {
   PgoDeviceTimeInfo info;
-  info.frequency = 1;
+  info.ticks_per_ms = 1;
   info.start_sys_count = UINT64_MAX - 5U;
   info.start_real_time_ns = 1000U;
   uint64_t duration = 0;
   ASSERT_EQ(ConvertTaskDuration(UINT64_MAX - 2U, 2U, info, &duration), 0);
-  EXPECT_EQ(duration, 5ULL * 1000000000ULL);
+  EXPECT_EQ(duration, 5ULL * 1000000ULL);
 }
 
 TEST(PgoTimestamp, RejectsMultipleOrBackwardCounterRange) {
   PgoDeviceTimeInfo info;
-  info.frequency = 1;
+  info.ticks_per_ms = 1;
   uint64_t duration = 0;
   EXPECT_NE(ConvertTaskDuration(100U, 50U, info, &duration), 0);
 }
 
 TEST(PgoTimestamp, TruncatesFractionalTicksTowardZero) {
   PgoDeviceTimeInfo info;
-  info.frequency = 3;
+  info.ticks_per_ms = 3;
   info.start_sys_count = 10;
   info.start_real_time_ns = 2000000000ULL;
   uint64_t converted = 0;
   ASSERT_EQ(ConvertCounterToRealTime(14, info, &converted), 0);
-  EXPECT_EQ(converted, 3333333333ULL);
+  EXPECT_EQ(converted, 2001333333ULL);
   ASSERT_EQ(ConvertCounterToRealTime(6, info, &converted), 0);
-  EXPECT_EQ(converted, 666666667ULL);
+  EXPECT_EQ(converted, 1998666667ULL);
   ASSERT_EQ(ConvertCounterToRealTime(11, info, &converted), 0);
-  EXPECT_EQ(converted, 2333333333ULL);
+  EXPECT_EQ(converted, 2000333333ULL);
   ASSERT_EQ(ConvertCounterToRealTime(9, info, &converted), 0);
-  EXPECT_EQ(converted, 1666666667ULL);
+  EXPECT_EQ(converted, 1999666667ULL);
 }
 
 TEST(PgoTimestamp, ConvertsFullSignedCounterRange) {
   PgoDeviceTimeInfo info;
-  info.frequency = UINT64_MAX;
+  info.ticks_per_ms = UINT64_MAX;
   info.start_sys_count = uint64_t{1} << 63;
-  info.start_real_time_ns = 1000000000ULL;
+  info.start_real_time_ns = 1000000ULL;
   uint64_t converted = 0;
   ASSERT_EQ(ConvertCounterToRealTime(INT64_MAX, info, &converted), 0);
-  EXPECT_EQ(converted, 2000000000ULL);
+  EXPECT_EQ(converted, 2000000ULL);
   info.start_sys_count = INT64_MAX;
   ASSERT_EQ(ConvertCounterToRealTime(uint64_t{1} << 63, info, &converted), 0);
   EXPECT_EQ(converted, 0ULL);
@@ -95,7 +105,7 @@ TEST(PgoTimestamp, ConvertsFullSignedCounterRange) {
 
 TEST(PgoTimestamp, RejectsOutOfRangeRealTime) {
   PgoDeviceTimeInfo info;
-  info.frequency = 1;
+  info.ticks_per_ms = 1;
   info.start_sys_count = 1;
   uint64_t converted = 0;
   EXPECT_NE(ConvertCounterToRealTime(0, info, &converted), 0);
@@ -178,7 +188,7 @@ TEST(PgoStarsParser, RejectsUnknownChipFormatInsteadOfGuessingRecordSize) {
 
 TEST(PgoTaskRecord, PairsStableDeviceStreamTaskAndLaunch) {
   PgoDeviceTimeInfo info;
-  info.frequency = 1;
+  info.ticks_per_ms = 1;
   std::vector<PgoStarsEvent> events;
   for (size_t i = 0U; i < kPgoMeasureSamples; ++i) {
     const uint64_t start = 10U + i * 10U;
@@ -192,13 +202,13 @@ TEST(PgoTaskRecord, PairsStableDeviceStreamTaskAndLaunch) {
   ASSERT_EQ(records.size(), kPgoMeasureSamples);
   EXPECT_EQ(records[0].launch_sequence, 7U);
   EXPECT_EQ(records[1].launch_sequence, 8U);
-  EXPECT_EQ(records[0].duration_ns, 2000000000ULL);
-  EXPECT_EQ(records[1].duration_ns, 3000000000ULL);
+  EXPECT_EQ(records[0].duration_ns, 2000000ULL);
+  EXPECT_EQ(records[1].duration_ns, 3000000ULL);
 }
 
 TEST(PgoTaskRecord, PairsBatchEventsByCandidateOrder) {
   PgoDeviceTimeInfo info;
-  info.frequency = 1;
+  info.ticks_per_ms = 1;
   std::vector<PgoStarsEvent> events;
   for (size_t candidate = 0U; candidate < 2U; ++candidate) {
     for (size_t sample = 0U; sample < kPgoMeasureSamples; ++sample) {
@@ -227,12 +237,12 @@ TEST(PgoTaskRecord, PairsBatchEventsByCandidateOrder) {
 
   uint64_t duration = 0U;
   ASSERT_EQ(CalculatePgoDurationNs(records[0], &duration), 0);
-  EXPECT_EQ(duration, 18000000000ULL);
+  EXPECT_EQ(duration, 18000000ULL);
 }
 
 TEST(PgoTaskRecord, RejectsBatchEventsAcrossStreams) {
   PgoDeviceTimeInfo info;
-  info.frequency = 1;
+  info.ticks_per_ms = 1;
   std::vector<PgoStarsEvent> events;
   for (size_t sample = 0U; sample < kPgoMeasureSamples; ++sample) {
     const uint64_t start = 10U + sample * 10U;
@@ -250,7 +260,7 @@ TEST(PgoTaskRecord, RejectsBatchEventsAcrossStreams) {
 
 TEST(PgoTaskRecord, RejectsMissingAndDuplicateEndEvents) {
   PgoDeviceTimeInfo info;
-  info.frequency = 1;
+  info.ticks_per_ms = 1;
   std::vector<PgoTaskRecord> records;
   const PgoStarsEvent begin{PgoStarsFuncType::kBegin, 0, 0, 1, 1, 1};
   const PgoStarsEvent end{PgoStarsFuncType::kEnd, 0, 0, 1, 1, 2};
@@ -272,7 +282,7 @@ TEST(PgoTaskRecord, RejectsMissingAndDuplicateEndEvents) {
 
 TEST(PgoTaskRecord, RejectsMoreTaskPairsThanLaunches) {
   PgoDeviceTimeInfo info;
-  info.frequency = 1;
+  info.ticks_per_ms = 1;
   const PgoStarsEvent begin{PgoStarsFuncType::kBegin, 0, 0, 1, 1, 1};
   const PgoStarsEvent end{PgoStarsFuncType::kEnd, 0, 0, 1, 1, 2};
   std::vector<PgoTaskRecord> records;

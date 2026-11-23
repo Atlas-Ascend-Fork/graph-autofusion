@@ -18,6 +18,7 @@ import tempfile
 import platform
 import json
 import time
+import fcntl
 from collections import namedtuple
 from contextlib import contextmanager
 
@@ -50,6 +51,9 @@ PYF_PATH = os.path.dirname(os.path.realpath(__file__))
 ASCEND_PATH = os.path.join(PYF_PATH, "..", "..", "..")
 timestamp_list = []
 HOST_TILING_COMPILE_JOBS = 32
+# A negative runner return is reported by the POSIX process exit status.
+PGO_PREFLIGHT_EXITS = (256 - 13, 256 - 12)
+PGO_STOP_FAILED_EXIT = 256 - 6
 _HOST_SOURCE_EXTENSIONS = (".cpp", ".h", ".hpp")
 TILING_FIXED_CPP_FILES = {
     "BCubeKernelTilingWrapperCpp": "cube_kernel_tiling_wrapper.cpp",
@@ -393,7 +397,12 @@ def generate_file(dst_dir, file_name, text, append=False):
         file.write(text)
 
 
-def ascbc_host_compile(host_ctx, cross_info=None, slim_export=None):
+def ascbc_host_compile(
+    host_ctx,
+    cross_info=None,
+    slim_export=None,
+    failure_log_level=AscendCLogLevel.LOG_ERROR,
+):
     (
         graph_name,
         kernel_name,
@@ -404,9 +413,6 @@ def ascbc_host_compile(host_ctx, cross_info=None, slim_export=None):
     ) = host_ctx
     cross_compiler_prefix = cross_info.cross_compiler_prefix if cross_info else None
     generate_cmake_lists(host_ctx, cross_info=cross_info, slim_export=slim_export)
-    ori_directory = os.getcwd()
-    # 切换到临时工作目录
-    os.chdir(host_build_dir)
 
     if cross_compiler_prefix:
         cmake_command = [
@@ -430,11 +436,12 @@ def ascbc_host_compile(host_ctx, cross_info=None, slim_export=None):
         ]
 
     # 运行CMake
-    cmake_ret = subprocess.run(cmake_command, capture_output=True, text=True)
+    cmake_ret = subprocess.run(
+        cmake_command, cwd=host_build_dir, capture_output=True, text=True
+    )
     if cmake_ret.returncode != 0:
-        os.chdir(ori_directory)
         CommonUtility.print_compile_log(
-            "", f"cmake fail: {cmake_ret.stderr}", AscendCLogLevel.LOG_ERROR
+            "", f"cmake fail: {cmake_ret.stderr}", failure_log_level
         )
         error_msg = f"execute cmake failed with return code {cmake_ret.returncode}\n"
         error_msg += f"Standard Output:\n{cmake_ret.stdout}\n"
@@ -444,18 +451,17 @@ def ascbc_host_compile(host_ctx, cross_info=None, slim_export=None):
     # 定义 CMake 编译命令
     make_command = ["make", "-C", "./", "-j", str(HOST_TILING_COMPILE_JOBS)]
     # 编译生成so
-    make_ret = subprocess.run(make_command, capture_output=True, text=True)
+    make_ret = subprocess.run(
+        make_command, cwd=host_build_dir, capture_output=True, text=True
+    )
     if make_ret.returncode != 0:
-        os.chdir(ori_directory)
         CommonUtility.print_compile_log(
-            "", f"make fail: {make_ret.stderr}", AscendCLogLevel.LOG_ERROR
+            "", f"make fail: {make_ret.stderr}", failure_log_level
         )
         error_msg = f"execute cmake failed with return code {make_ret.returncode}\n"
         error_msg += f"Standard Output:\n{make_ret.stdout}\n"
         error_msg += f"Standard Error:\n{make_ret.stderr}\n"
         raise Exception(error_msg)
-    # 回退到原始工作目录
-    os.chdir(ori_directory)
 
 
 def gen_valid_name(t_name):
@@ -743,7 +749,9 @@ def static_shape_compile(
     is_cross_compile_flag=False,
     cross_compiler_prefix=None,
     target_machine=None,
+    pgo_config_path=None,
 ):
+    trial_compile = pgo_config_path is not None
     if use_cv_common and use_cv_common[0]:
         host_build_dir = os.path.join(temp_dir, "host", "cv_common")
     else:
@@ -755,6 +763,9 @@ def static_shape_compile(
         cross_info=CrossCompileInfo(
             is_cross_compile_flag, cross_compiler_prefix, target_machine
         ),
+        failure_log_level=AscendCLogLevel.LOG_WARNING
+        if trial_compile
+        else AscendCLogLevel.LOG_ERROR,
     )
     if is_cross_compile_flag:
         compile_native_host_so(
@@ -767,9 +778,15 @@ def static_shape_compile(
     host_so = os.path.join(host_build_dir, f"lib{kernel_name}.so")
     if is_cross_compile_flag:
         host_so = get_native_host_so_path(host_build_dir, kernel_name)
-    pgo_config_path = os.path.abspath(
-        os.path.join(temp_dir, "..", "..", "pgo", f"{graph_name}_config.txt")
-    )
+    if not trial_compile:
+        pgo_config_path = os.path.join(
+            get_pgo_dir(temp_dir), f"{graph_name}_config.txt"
+        )
+        if os.path.isfile(pgo_config_path):
+            from .compile_adapter import pgo_read_config
+
+            if not pgo_read_config(pgo_config_path):
+                pgo_config_path = ""
 
     import ctypes
 
@@ -791,6 +808,11 @@ def static_shape_compile(
 
     if not result:
         raise RuntimeError("GenConstTilingData returned empty const tiling data")
+    if trial_compile:
+        lib.AutofusePgoConfigApplied.argtypes = []
+        lib.AutofusePgoConfigApplied.restype = ctypes.c_bool
+        if not lib.AutofusePgoConfigApplied():
+            raise RuntimeError("Static tiling rejected the PGO trial configuration")
     const_tiling_data = result.decode("utf-8")
     if hasattr(lib, "GetCVUBFusionStageSizeName"):
         stage_size_name = get_cv_ub_fusion_stage_size_name(
@@ -1159,7 +1181,7 @@ def generate_device_and_host_code(graph_name, temp_dir, params, code_gen):
     return ret_op_kernel_src, ret_tiling_func_srcs
 
 
-def pgo_kernel_compile(*args, temp_dir, params, op_kernel_src, code_gen):
+def pgo_kernel_compile(*args, temp_dir, params, op_kernel_src, code_gen, pgo_dir):
     """PGO依赖的动态so编译"""
     schedule_results = params["schedule_results"]
     kernel_name = args[-1]
@@ -1169,13 +1191,8 @@ def pgo_kernel_compile(*args, temp_dir, params, op_kernel_src, code_gen):
     host_build_dir = os.path.join(temp_dir, "host")
     use_list_tensor_desc = op_kernel_src.find("kernel_operator_list_tensor_intf.h") > 0
     enable_parallel_compile = op_kernel_src.rfind("void fake_tiling_ids()") > 0
-    pgo_dir = get_pgo_dir(temp_dir)
     graph_name = gen_valid_name(schedule_results.get_name())
     graph_name = camel_to_snake(graph_name)
-
-    kernel_file_path = None
-    json_file_path = None
-    target_lib_path = None
 
     try:
         kernel_file, json_file = ascbc_kernel_compile(
@@ -1195,42 +1212,19 @@ def pgo_kernel_compile(*args, temp_dir, params, op_kernel_src, code_gen):
         shutil.copy(json_file, json_file_path)
     except Exception as e:
         msg = f"pgo kernel compile for {kernel_name} failed: {str(e)}. skip pgo tune."
-        CommonUtility.print_compile_log("", msg, AscendCLogLevel.LOG_ERROR)
-        return False, []
+        CommonUtility.print_compile_log("", msg, AscendCLogLevel.LOG_WARNING)
+        return False
     get_kernel_src = code_gen.get_kernel_and_json_generator(kernel_file, json_file)
     generate_file(host_build_dir, graph_name + "_get_kernel.cpp", get_kernel_src)
     ascbc_host_compile(
         HostCompileContext(graph_name, kernel_name, host_build_dir, True, False, False),
         slim_export=False,
+        failure_log_level=AscendCLogLevel.LOG_WARNING,
     )
     source_lib_path = os.path.join(host_build_dir, f"lib{kernel_name}.so")
     target_lib_path = os.path.join(pgo_dir, f"lib{graph_name}.so")
     shutil.copy(source_lib_path, target_lib_path)
-    return True, [kernel_file_path, json_file_path, target_lib_path]
-
-
-def pgo_cleanup_kernel_and_json(pgo_temp_files, config_path=None):
-    """清理PGO流程中生成的其他中间文件"""
-    if config_path is not None:
-        if os.path.exists(config_path):
-            os.remove(config_path)
-
-    from autofuse.compile_adapter import get_debug_flag
-
-    compile_debug = get_debug_flag()
-    if compile_debug:
-        return
-    if not pgo_temp_files:
-        return
-    for item in pgo_temp_files:
-        if not item:
-            continue
-        try:
-            if os.path.exists(item):
-                os.remove(item)
-                logger.info("[PGO] cleanup file: %s", item)
-        except Exception as e:
-            _log_warning("[PGO] cleanup file failed: %s, err: %s", item, str(e))
+    return True
 
 
 def check_dir_permissions(path):
@@ -1394,7 +1388,14 @@ def _run_pgo_and_clean_cache(
     pgo_env = get_pgo_env_flag()
     use_list_tensor_desc = op_kernel_src.find("kernel_operator_list_tensor_intf.h") > 0
     enable_parallel_compile = op_kernel_src.rfind("void fake_tiling_ids()") > 0
-    if not pgo_env or enable_parallel_compile or use_list_tensor_desc:
+    if (
+        not pgo_env
+        or enable_parallel_compile
+        or use_list_tensor_desc
+        or os.environ.get("AF_BATCH_PGO_REPLAY_ONLY") == "1"
+        # TF/GE can reuse a compiler worker forked before the replay starts.
+        or os.path.isfile(os.path.join(get_pgo_dir(temp_dir), ".replay-only"))
+    ):
         return
     asc_pgo_exec(
         *args,
@@ -1478,13 +1479,13 @@ def pgo_compile(graph_name, host_build_dir):
         msg += f"stdout: {result.stdout}\n"
         msg += f"stderr: {result.stderr}\n"
         CommonUtility.print_compile_log(
-            "", f"pgo compile fail: {msg}", AscendCLogLevel.LOG_ERROR
+            "", f"pgo compile fail: {msg}", AscendCLogLevel.LOG_WARNING
         )
         return None
     return output_file
 
 
-def pgo_program_exec(temp_dir, exec_type=0, *, pgo_exec_params):
+def pgo_program_exec(temp_dir, exec_type=0, *, pgo_exec_params, lock_dir):
     """执行PGO, 0表示首次动态调优，1表示二次调优"""
     host_build_dir = os.path.join(temp_dir, "host")
     pgo_file = os.path.join(host_build_dir, "pgo")
@@ -1507,6 +1508,7 @@ def pgo_program_exec(temp_dir, exec_type=0, *, pgo_exec_params):
                 str(aiv_num),
                 str(ub_size),
                 str(kernel_name),
+                lock_dir,
             ],
             text=True,
             env={
@@ -1516,16 +1518,27 @@ def pgo_program_exec(temp_dir, exec_type=0, *, pgo_exec_params):
             timeout=1800,  # 暂定，设置超时时间为1800秒，防止大解集case提前退出
         )
         if result.returncode != 0:
-            msg = f"pgo exec fail, return code: {result.returncode}\n"
-            # 执行失败时，回退原始解，不打断模型正常执行流程
-            CommonUtility.print_compile_log("", msg, AscendCLogLevel.LOG_ERROR)
-            return False
-        return True
-    except Exception as e:
+            msg = (
+                f"[PGO] {kernel_name} stage={exec_type} runner exit={result.returncode}"
+            )
+            CommonUtility.print_compile_log("", msg, AscendCLogLevel.LOG_WARNING)
+        return result.returncode
+    except (OSError, subprocess.TimeoutExpired) as e:
         CommonUtility.print_compile_log(
-            "", f"pgo exec fail: {str(e)}", AscendCLogLevel.LOG_ERROR
+            "",
+            f"[PGO] {kernel_name} stage={exec_type} runner failed: {e}",
+            AscendCLogLevel.LOG_WARNING,
         )
-        return False
+        return None
+
+
+def _pgo_runner_cannot_continue(status):
+    return (
+        status is None
+        or status < 0
+        or status in PGO_PREFLIGHT_EXITS
+        or status == PGO_STOP_FAILED_EXIT
+    )
 
 
 def get_pgo_exec_params(*args, params):
@@ -1539,13 +1552,7 @@ def get_pgo_exec_params(*args, params):
         "0" if device_id is None or not str(device_id).isdigit() else str(device_id)
     )
 
-    soc_vector_core_cnt = int(get_soc_spec("vector_core_cnt"))
-    param_vector_core_num = (
-        soc_vector_core_cnt
-        if params["vector_core_num"] is None
-        else int(params["vector_core_num"])
-    )
-    aiv_num = str(min(param_vector_core_num, soc_vector_core_cnt))
+    aiv_num = str(get_static_compile_vector_core_num(params.get("vector_core_num")))
     ub_size = str(get_soc_spec("ub_size"))
     kernel_name = args[-1]
 
@@ -1557,35 +1564,25 @@ def get_pgo_exec_params(*args, params):
     }
 
 
-def pgo_second_optimization(*args, temp_dir, params, op_kernel_src):
-    """静态tiling的二次调优"""
-    from autofuse.compile_adapter import (
-        pgo_get_top_result,
-        pgo_write_config,
-        pgo_generate_config,
-    )
+def pgo_compile_candidate(
+    args, *, line, config_path, temp_dir, params, graph_name, op_kernel_src
+):
+    """Compile a candidate from the original source and the private trial config."""
+    from .compile_adapter import pgo_write_config
 
-    pgo_exec_params = get_pgo_exec_params(*args, params=params)
-    kernel_name = pgo_exec_params["kernel_name"]
+    kernel_name = args[-1]
     schedule_results = params["schedule_results"]
-    graph_name = camel_to_snake(gen_valid_name(schedule_results.get_name()))
-    input_num = schedule_results.get_input_num()
-    output_num = schedule_results.get_output_num()
-    use_list_tensor_desc = op_kernel_src.find("kernel_operator_list_tensor_intf.h") > 0
-    enable_parallel_compile = op_kernel_src.rfind("void fake_tiling_ids()") > 0
     kernel_build_dir = os.path.join(temp_dir, "device")
-    pgo_dir = get_pgo_dir(temp_dir)
-    config_path = os.path.join(pgo_dir, f"{graph_name}_config.txt")
-    search_path = os.path.join(pgo_dir, f"{graph_name}_search.txt")
-    top_n = get_pgo_topn()
+    source_name = os.path.join(kernel_build_dir, f"{graph_name}_op_kernel.cpp")
+    header_name = os.path.join(kernel_build_dir, "autofuse_tiling_data.h")
+    with open(header_name, "rb") as file:
+        original_header = file.read()
+    with open(source_name, "rb") as file:
+        original_source = file.read()
 
-    top_lines, origin_line, top_n = pgo_get_top_result(search_path, top_n)
-    if top_lines is None or origin_line is None or top_n is None:
-        return False
-
-    def comile_and_exec(config_line):
-        tiling_key_list, kernel_type_list = [-1], ["KERNEL_TYPE_AIV_ONLY"]
-        pgo_write_config(config_path, config_line)
+    tiling_key_list, kernel_type_list = [-1], ["KERNEL_TYPE_AIV_ONLY"]
+    try:
+        pgo_write_config(config_path, line)
         static_shape_compile(
             kernel_name=kernel_name,
             temp_dir=temp_dir,
@@ -1593,124 +1590,279 @@ def pgo_second_optimization(*args, temp_dir, params, op_kernel_src):
             tiling_key_list=tiling_key_list,
             kernel_type_list=kernel_type_list,
             vector_core_num=params.get("vector_core_num"),
+            pgo_config_path=config_path,
         )
+        return ascbc_kernel_compile(
+            args,
+            graph_name=graph_name,
+            kernel_name=kernel_name,
+            input_num=schedule_results.get_input_num(),
+            output_num=schedule_results.get_output_num(),
+            temp_build_dir=kernel_build_dir,
+            impl_mode=params.get("impl_mode"),
+            use_list_tensor_desc="kernel_operator_list_tensor_intf.h" in op_kernel_src,
+            enable_parallel_compile="void fake_tiling_ids()" in op_kernel_src,
+            tiling_key=tiling_key_list[0],
+            kernel_type=kernel_type_list[0],
+            is_cube=False,
+        )
+    except Exception as e:
+        _log_warning("[PGO] %s trial compile failed: %s", graph_name, e)
+        return None
+    finally:
+        with open(header_name, "wb") as file:
+            file.write(original_header)
+        with open(source_name, "wb") as file:
+            file.write(original_source)
+
+
+def pgo_second_optimization(compile_candidate, run_candidate, first_round, search_path):
+    """Associate each new runner result with the candidate that requested it."""
+    from .compile_adapter import (
+        pgo_get_top_result,
+        pgo_read_search,
+        pgo_tiling_identity,
+    )
+
+    top_lines, origin_line, _ = pgo_get_top_result(
+        search_path, get_pgo_topn(), first_round=first_round
+    )
+    if origin_line is None:
+        return [], set()
+
+    retest_path = f"{search_path}.retest"
+    measured = []
+    compiled = set()
+    seen = set()
+    for line in [*top_lines, origin_line]:
+        identity = pgo_tiling_identity(line)
+        if not identity or identity in seen:
+            continue
+        seen.add(identity)
+        if not compile_candidate(line):
+            continue
+        compiled.add(identity)
         try:
-            kernel_file, json_file = ascbc_kernel_compile(
-                args,
-                graph_name=graph_name,
-                kernel_name=kernel_name,
-                input_num=input_num,
-                output_num=output_num,
-                temp_build_dir=kernel_build_dir,
-                impl_mode=params.get("impl_mode"),
-                use_list_tensor_desc=use_list_tensor_desc,
-                enable_parallel_compile=enable_parallel_compile,
-                tiling_key=tiling_key_list[0],
-                kernel_type=kernel_type_list[0],
-                is_cube=False,
+            os.unlink(retest_path)
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            _log_warning(
+                "[PGO] %s cannot clear the previous static result: %s", search_path, e
             )
-            shutil.copy(
-                kernel_file, os.path.join(pgo_dir, os.path.basename(kernel_file))
-            )
-            shutil.copy(json_file, os.path.join(pgo_dir, os.path.basename(json_file)))
-        except Exception as e:
-            logger.error(
-                "[pgo] kernel compile for %s failed: %s. revert pgo tune.",
-                kernel_name,
-                str(e),
-            )
-            return False
-
-        result = pgo_program_exec(
-            temp_dir=temp_dir,
-            exec_type=1,
-            pgo_exec_params=pgo_exec_params,
-        )
-        return result
-
-    for line in top_lines:
-        result = comile_and_exec(line)
-        if result is False:
-            return False
-
-    result = comile_and_exec(origin_line)
-    if result is False:
-        return False
-
-    pgo_generate_config(search_path, config_path, top_n)
-    return True
+            break
+        status = run_candidate()
+        if _pgo_runner_cannot_continue(status):
+            break
+        if status != 0:
+            continue
+        results = pgo_read_search(retest_path)
+        if len(results) != 1 or pgo_tiling_identity(results[0]) != identity:
+            _log_warning("[PGO] %s missing or mismatched static result", search_path)
+            continue
+        measured.extend(results)
+    return measured, compiled
 
 
 def asc_pgo_exec(*args, temp_dir, params, op_kernel_src, code_gen):
-    """执行PGO"""
+    """Tune one static GE fusion and publish only a verified configuration."""
+    from .compile_adapter import get_debug_flag, pgo_read_config
+
     schedule_results = params["schedule_results"]
     graph_name = camel_to_snake(gen_valid_name(schedule_results.get_name()))
-    logger.info(f"[PGO] Start PGO tuning for graph: {graph_name}")
     pgo_dir = get_pgo_dir(temp_dir)
-    os.makedirs(pgo_dir, exist_ok=True)
-    host_build_dir = os.path.join(temp_dir, "host")
-
-    pgo_temp_files = []
-
     config_path = os.path.join(pgo_dir, f"{graph_name}_config.txt")
-    if os.path.exists(config_path):
-        logger.info(f"[PGO] {config_path} exists, skip pgo tuning")
+    if pgo_read_config(config_path):
+        logger.info("[PGO] %s reuse committed config", graph_name)
         return
 
-    timestamp_set(True, graph_name, "CompileKernelForPGO")
-    result, pgo_temp_files = pgo_kernel_compile(
-        *args,
-        temp_dir=temp_dir,
-        params=params,
-        op_kernel_src=op_kernel_src,
-        code_gen=code_gen,
+    try:
+        os.makedirs(pgo_dir, exist_ok=True)
+        work_dir = tempfile.mkdtemp(prefix=".pgo-tune-", dir=pgo_dir)
+        try:
+            _asc_pgo_tune(
+                args,
+                temp_dir,
+                params,
+                op_kernel_src,
+                code_gen,
+                graph_name,
+                pgo_dir,
+                work_dir,
+                config_path,
+            )
+        finally:
+            if get_debug_flag():
+                logger.info(
+                    "[PGO] %s trial artifacts retained in %s", graph_name, work_dir
+                )
+            else:
+                shutil.rmtree(work_dir)
+    except Exception as e:
+        CommonUtility.print_compile_log(
+            "",
+            f"[PGO] {graph_name} tuning preparation or I/O failed: {e}",
+            AscendCLogLevel.LOG_WARNING,
+        )
+
+
+def _asc_pgo_tune(
+    args,
+    temp_dir,
+    params,
+    op_kernel_src,
+    code_gen,
+    graph_name,
+    pgo_dir,
+    work_dir,
+    config_path,
+):
+    from .compile_adapter import (
+        pgo_generate_config,
+        pgo_rank_measured,
+        pgo_read_config,
+        pgo_read_search,
+        pgo_tiling_identity,
     )
-    timestamp_set(False, graph_name, "CompileKernelForPGO")
-    if result is False:
-        pgo_cleanup_kernel_and_json(pgo_temp_files)
+
+    trial_dir = os.path.join(work_dir, "compile")
+    for directory in ("host", "device"):
+        shutil.copytree(
+            os.path.join(temp_dir, directory),
+            os.path.join(trial_dir, directory),
+            ignore=shutil.ignore_patterns(
+                "CMakeCache.txt", "CMakeFiles", "cmake_install.cmake"
+            ),
+        )
+    host_build_dir = os.path.join(trial_dir, "host")
+    trial_config = os.path.join(work_dir, f"{graph_name}_config.txt")
+    search_path = os.path.join(work_dir, f"{graph_name}_search.txt")
+
+    timestamp_set(True, graph_name, "CompileKernelForPGO")
+    try:
+        ready = pgo_kernel_compile(
+            *args,
+            temp_dir=trial_dir,
+            params=params,
+            op_kernel_src=op_kernel_src,
+            code_gen=code_gen,
+            pgo_dir=work_dir,
+        )
+    finally:
+        timestamp_set(False, graph_name, "CompileKernelForPGO")
+    if not ready:
         return
 
     timestamp_set(True, graph_name, "GenerateForPGO")
-    generate_pgo_code(
-        params=params, code_gen=code_gen, pgo_dir=pgo_dir, host_build_dir=host_build_dir
-    )
-    timestamp_set(False, graph_name, "GenerateForPGO")
-
+    try:
+        generate_pgo_code(params, code_gen, work_dir, host_build_dir)
+    finally:
+        timestamp_set(False, graph_name, "GenerateForPGO")
     timestamp_set(True, graph_name, "CompilePGO")
-    output = pgo_compile(
-        graph_name=graph_name,
-        host_build_dir=host_build_dir,
-    )
-    timestamp_set(False, graph_name, "CompilePGO")
-    if output is None:
-        pgo_cleanup_kernel_and_json(pgo_temp_files)
+    try:
+        runner = pgo_compile(graph_name, host_build_dir)
+    finally:
+        timestamp_set(False, graph_name, "CompilePGO")
+    if runner is None:
         return
+
+    exec_params = get_pgo_exec_params(*args, params=params)
+
+    def run_runner(exec_type):
+        return pgo_program_exec(
+            trial_dir,
+            exec_type,
+            pgo_exec_params=exec_params,
+            lock_dir=pgo_dir,
+        )
+
+    def compile_candidate(line):
+        artifact = pgo_compile_candidate(
+            args,
+            line=line,
+            config_path=trial_config,
+            temp_dir=trial_dir,
+            params=params,
+            graph_name=graph_name,
+            op_kernel_src=op_kernel_src,
+        )
+        if artifact is None:
+            return False
+        try:
+            for filename in artifact:
+                shutil.copy(
+                    filename, os.path.join(work_dir, os.path.basename(filename))
+                )
+        except OSError as e:
+            _log_warning("[PGO] %s cannot stage trial kernel: %s", graph_name, e)
+            return False
+        return True
 
     timestamp_set(True, graph_name, "RunForPGO")
-    pgo_exec_params = get_pgo_exec_params(*args, params=params)
-    result = pgo_program_exec(
-        temp_dir=temp_dir,
-        exec_type=0,
-        pgo_exec_params=pgo_exec_params,
-    )
-    timestamp_set(False, graph_name, "RunForPGO")
-    if result is False:
-        pgo_cleanup_kernel_and_json(pgo_temp_files, config_path=config_path)
-        return
+    try:
+        status = run_runner(0)
+    finally:
+        timestamp_set(False, graph_name, "RunForPGO")
+    first_round = pgo_read_search(search_path)
+    static_round = []
+    compiled = set()
+    if first_round and not _pgo_runner_cannot_continue(status):
+        timestamp_set(True, graph_name, "SecondOptimizeForPGO")
+        try:
+            static_round, compiled = pgo_second_optimization(
+                compile_candidate, lambda: run_runner(1), first_round, search_path
+            )
+        finally:
+            timestamp_set(False, graph_name, "SecondOptimizeForPGO")
 
-    timestamp_set(True, graph_name, "SecondOptimizeForPGO")
-    result = pgo_second_optimization(
-        *args,
-        temp_dir=temp_dir,
-        params=params,
-        op_kernel_src=op_kernel_src,
-    )
-    timestamp_set(False, graph_name, "SecondOptimizeForPGO")
-    if result is False:
-        pgo_cleanup_kernel_and_json(pgo_temp_files, config_path=config_path)
-        return
+    ranked_static = pgo_rank_measured(static_round)
+    ranked_first = pgo_rank_measured(first_round)
+    attempted = os.path.isfile(search_path + ".attempted")
+    selected = ranked_static[0] if ranked_static else None
+    if selected is None:
+        for line in ranked_first:
+            if pgo_tiling_identity(line) in compiled or compile_candidate(line):
+                selected = line
+                break
+    published = False
+    try:
+        with open(config_path + ".lock", "a", encoding="utf-8") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            existing_config = pgo_read_config(config_path)
+            archive_path = os.path.join(pgo_dir, os.path.basename(search_path))
+            if selected is not None:
+                published = bool(existing_config) or pgo_generate_config(
+                    config_path, selected
+                )
+            if os.path.isfile(search_path) and not (
+                existing_config and os.path.exists(archive_path)
+            ):
+                with open(search_path, "a", encoding="utf-8") as search:
+                    for line in static_round:
+                        search.write(f"{line}\n")
+                os.replace(search_path, archive_path)
+    except OSError as e:
+        _log_warning(
+            "[PGO] %s configuration or search archive I/O failed: %s", graph_name, e
+        )
 
-    pgo_cleanup_kernel_and_json(pgo_temp_files)
+    if attempted and not ranked_static and not ranked_first:
+        message = f"[PGO] {graph_name} profiling exhausted with zero valid candidates"
+        level = AscendCLogLevel.LOG_ERROR
+    elif published:
+        message = f"[PGO] {graph_name} configuration ready"
+        level = AscendCLogLevel.LOG_INFO
+    elif ranked_static or ranked_first:
+        message = f"[PGO] {graph_name} valid profiling data but configuration publication failed"
+        level = AscendCLogLevel.LOG_WARNING
+    else:
+        message = f"[PGO] {graph_name} skipped before profiling started"
+        level = AscendCLogLevel.LOG_WARNING
+    CommonUtility.print_compile_log(
+        "",
+        f"{message}; first_valid={len(ranked_first)} static_valid={len(ranked_static)}",
+        level,
+    )
 
 
 def _resolve_static_mm_args(args_list, input_num, input_shapes):

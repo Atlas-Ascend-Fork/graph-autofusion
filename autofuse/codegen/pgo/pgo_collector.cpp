@@ -9,6 +9,8 @@
  */
 #include "pgo_collector.h"
 
+#include <cstdlib>
+#include <cstring>
 #include <new>
 #include <securec.h>
 #include <string>
@@ -17,6 +19,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "common/ge_common/debug/log.h"
 #include "pgo_profapi_adapter.h"
 #include "pgo_candidate_identity.h"
 #include "pgo_runtime_track.h"
@@ -30,6 +33,17 @@ constexpr int32_t kSysCount = 13;
 constexpr size_t kReadBufferSize = 2U * 1024U * 1024U;
 constexpr size_t kCompactTypeOffset = 4U;
 constexpr uint32_t kTaskTrackType = 802;
+// Legacy64 records share the funcType field. FFTS+ start/end values are
+// defined in MSPTI's channel_data.h and are only counted for diagnosis here.
+constexpr uint8_t kFftsBegin = 34U;
+constexpr uint8_t kFftsEnd = 35U;
+#define PGO_WINDOW_LOG_FORMAT                                                                  \
+  "[PGO] graph=%s device=%u stage=%s status=%d mode=%s candidates=%zu expected=%zu valid=%zu " \
+  "bytes=%zu acsq=%zu ffts=%zu filtered_events=%zu tracks=%zu"
+
+uint16_t ReadLegacyIdentityField(const uint8_t *data) {
+  return static_cast<uint16_t>(data[0]) | (static_cast<uint16_t>(data[1]) << 8U);
+}
 
 int CompactSink(uint32_t aging_flag, const void *data, uint32_t length) {
   const int ret = DispatchRuntimeTrack(aging_flag, data, length);
@@ -64,13 +78,17 @@ class CollectorImpl final : public PgoCollector {
     device_id_ = device_id;
     const int capability_status =
         ProbePgoCapability(PgoReporterOwnership::kExclusive, device_id_, stream, &capability_);
-    if (capability_status != PGO_SUCCESS) return capability_status;
-    if (RegisterRuntimeTrackReporter(PgoReporterOwnership::kExclusive, &QueueRuntimeTrack) != PGO_SUCCESS) {
-      return -1;
+    if (capability_status != PGO_SUCCESS) {
+      return WindowStatus("capability", capability_status);
     }
-    if (adapter_.Initialize(&CompactSink, PgoReporterOwnership::kExclusive) != PGO_SUCCESS) {
-      (void)UnregisterRuntimeTrackReporter();
-      return -1;
+    const int reporter_status = RegisterRuntimeTrackReporter(PgoReporterOwnership::kExclusive, &QueueRuntimeTrack);
+    if (reporter_status != PGO_SUCCESS) {
+      return WindowStatus("reporter", reporter_status);
+    }
+    reporter_registered_ = true;
+    const int adapter_status = adapter_.Initialize(&CompactSink, PgoReporterOwnership::kExclusive);
+    if (adapter_status != PGO_SUCCESS) {
+      return WindowStatus("initialize", adapter_status);
     }
     ClearRuntimeTracks();
     const uint64_t host_before = HostRealTimeNs();
@@ -78,12 +96,13 @@ class CollectorImpl final : public PgoCollector {
     const PgoStarsFormat stars_format = ResolveStarsFormat(capability_.platform);
     record_size_ = StarsRecordSize(stars_format);
     if (record_size_ == 0U) {
-      adapter_.Finalize();
-      (void)UnregisterRuntimeTrackReporter();
-      return -1;
+      return WindowStatus("record-format", PGO_PROFILE_UNSUPPORTED);
     }
-    const uint64_t resolved_frequency = capability_.timestamp_frequency_hz;
-    const bool frequency_valid = resolved_frequency != 0U;
+    const char *mode = std::getenv("AF_PGO_STARS_DIAGNOSTICS");
+    capture_ffts_ = mode != nullptr && stars_format == PgoStarsFormat::kLegacy64 && std::strcmp(mode, "acsq_ffts") == 0;
+    diagnose_stars_ = capture_ffts_ || (mode != nullptr && std::strcmp(mode, "acsq") == 0);
+    const uint64_t ticks_per_ms = capability_.timestamp_ticks_per_ms;
+    const bool frequency_valid = ticks_per_ms != 0U;
     if (frequency_valid) {
       // GetDevStartSysCnt() in MSPTI returns zero on failure and does not
       // reject profiling.  Preserve that behavior for the injected HAL ABI.
@@ -91,7 +110,7 @@ class CollectorImpl final : public PgoCollector {
     }
     const uint64_t host_after = HostRealTimeNs();
     if (frequency_valid) {
-      time_info_.frequency = resolved_frequency;
+      time_info_.ticks_per_ms = ticks_per_ms;
       time_info_.start_sys_count = static_cast<uint64_t>(start_count);
       time_info_.start_real_time_ns = static_cast<uint64_t>((static_cast<__uint128_t>(host_before) + host_after) / 2U);
     }
@@ -108,7 +127,10 @@ class CollectorImpl final : public PgoCollector {
     // Keep the profiler/channel and all raw activity active across candidates;
     // EndCandidate only commits the candidate boundary.
     if (!profiling_started_) {
-      if (adapter_.Start(device_id_, ResolvePgoStarsSamplePeriod(capability_.platform)) != PGO_SUCCESS) return -1;
+      const int status = adapter_.Start(device_id_, ResolvePgoStarsSamplePeriod(capability_.platform), capture_ffts_);
+      if (status != PGO_SUCCESS) {
+        return WindowStatus("start", status, 1U);
+      }
       profiling_started_ = true;
     }
     SetRuntimeTrackCaptureEnabled(true);
@@ -134,7 +156,9 @@ class CollectorImpl final : public PgoCollector {
 
   int EndCandidate() override {
     if (!initialized_ || !candidate_active_) return -1;
-    if (launch_sequences_.size() != kPgoMeasureSamples) return PGO_DATA_UNAVAILABLE;
+    if (launch_sequences_.size() != kPgoMeasureSamples) {
+      return WindowStatus("launch-count", PGO_DATA_UNAVAILABLE, pending_candidates_.size() + 1U);
+    }
     pending_candidates_.push_back(PgoBatchCandidate{candidate_key_, launch_sequences_});
     candidate_active_ = false;
     launch_sequences_.clear();
@@ -157,6 +181,9 @@ class CollectorImpl final : public PgoCollector {
     pending_bytes_.clear();
     runtime_tracks_.clear();
     ClearRuntimeTracks();
+    bytes_read_ = 0U;
+    acsq_records_ = 0U;
+    ffts_records_ = 0U;
     return stop_ret;
   }
 
@@ -170,25 +197,30 @@ class CollectorImpl final : public PgoCollector {
     DrainRuntimeTracks(&runtime_tracks_);
     const int stop_ret = profiling_started_ ? adapter_.Stop(device_id_) : PGO_SUCCESS;
     profiling_started_ = false;
-    if (!drain_ok || RuntimeTrackOverflowed() || stop_ret != PGO_SUCCESS) return PGO_DATA_UNAVAILABLE;
-    if (!ParsePendingRecords(IsStreamExpandEnabled())) return PGO_DATA_UNAVAILABLE;
+    if (stop_ret != PGO_SUCCESS) return WindowStatus("stop", stop_ret);
+    if (flush_ret != PGO_SUCCESS) return WindowStatus("flush", flush_ret);
+    if (!drain_ok) return WindowStatus("read", PGO_DATA_UNAVAILABLE);
+    if (RuntimeTrackOverflowed()) return WindowStatus("track-overflow", PGO_DATA_UNAVAILABLE);
+    if (!ParsePendingRecords(IsStreamExpandEnabled())) return WindowStatus("decode", PGO_DATA_UNAVAILABLE);
     if (!runtime_tracks_.empty()) {
-      if (!FilterEventsByRuntimeTracks()) return PGO_DATA_UNAVAILABLE;
+      if (!FilterEventsByRuntimeTracks()) return WindowStatus("track-filter", PGO_DATA_UNAVAILABLE);
     } else if (!CanUseSerialPgoEvents(events_)) {
-      return PGO_DATA_UNAVAILABLE;
+      return WindowStatus("serial-filter", PGO_DATA_UNAVAILABLE);
     }
     if (PairPgoTaskEventsBatch(events_, pending_candidates_, time_info_, &candidate_records_) != 0) {
-      return PGO_DATA_UNAVAILABLE;
+      return WindowStatus("pair", PGO_DATA_UNAVAILABLE);
     }
     candidate_durations_ns_.clear();
     candidate_durations_ns_.reserve(candidate_records_.size());
     for (const auto &records : candidate_records_) {
       uint64_t duration_ns = 0U;
-      if (CalculatePgoDurationNs(records, &duration_ns) != 0) return PGO_DATA_UNAVAILABLE;
+      if (CalculatePgoDurationNs(records, &duration_ns) != 0 || duration_ns == 0U) {
+        return WindowStatus("timestamp", PGO_DATA_UNAVAILABLE);
+      }
       candidate_durations_ns_.push_back(duration_ns);
     }
     batch_finalized_ = true;
-    return 0;
+    return diagnose_stars_ ? WindowStatus("complete", PGO_SUCCESS) : PGO_SUCCESS;
   }
 
   int GetDurationNs(uint64_t *duration_ns) override {
@@ -202,18 +234,52 @@ class CollectorImpl final : public PgoCollector {
   }
 
   void Finalize() override {
-    SetRuntimeTrackCaptureEnabled(false);
+    if (reporter_registered_) {
+      SetRuntimeTrackCaptureEnabled(false);
+    }
     if (initialized_ && profiling_started_) (void)adapter_.Stop(device_id_);
-    WaitRuntimeTrackCallbacks();
+    adapter_.Finalize();
+    if (reporter_registered_) {
+      WaitRuntimeTrackCallbacks();
+      (void)UnregisterRuntimeTrackReporter();
+      reporter_registered_ = false;
+    }
     candidate_active_ = false;
     initialized_ = false;
     profiling_started_ = false;
     runtime_tracks_.clear();
-    (void)UnregisterRuntimeTrackReporter();
-    adapter_.Finalize();
   }
 
  private:
+  int WindowStatus(const char *stage, int status, size_t candidates = 0U) const {
+    if (candidates == 0U) {
+      candidates = pending_candidates_.size();
+    }
+    const size_t expected = candidates * kPgoMeasureSamples;
+    const size_t valid = candidate_durations_ns_.size() * kPgoMeasureSamples;
+    const char *mode = capture_ffts_ ? "acsq_ffts" : "acsq";
+    const char *graph =
+        pending_candidates_.empty() ? candidate_key_.c_str() : pending_candidates_.front().candidate_key.c_str();
+    if (status == PGO_SUCCESS) {
+      GELOGI(PGO_WINDOW_LOG_FORMAT, graph, device_id_, stage, status, mode, candidates, expected, valid, bytes_read_,
+             acsq_records_, ffts_records_, events_.size(), runtime_tracks_.size());
+    } else {
+      GELOGW(PGO_WINDOW_LOG_FORMAT, graph, device_id_, stage, status, mode, candidates, expected, valid, bytes_read_,
+             acsq_records_, ffts_records_, events_.size(), runtime_tracks_.size());
+    }
+    return status;
+  }
+
+  void LogLegacyIdentity(const char *source, uint16_t raw_stream, uint16_t raw_task, bool stream_expand,
+                         uint16_t task_type) const {
+    uint32_t stream = 0U;
+    uint32_t task = 0U;
+    const bool resolved = ResolveStarsTaskIdentity(raw_stream, raw_task, stream_expand, false, &stream, &task);
+    GELOGI("[PGO] %s device=%u task_type=%u raw_stream=%u raw_task=%u resolved=%d stream=%u task=%u", source,
+           device_id_, static_cast<unsigned>(task_type), static_cast<unsigned>(raw_stream),
+           static_cast<unsigned>(raw_task), static_cast<int>(resolved), stream, task);
+  }
+
   struct IdentityHash {
     size_t operator()(const std::tuple<uint32_t, uint32_t, uint32_t> &value) const {
       const auto [device, stream, task] = value;
@@ -225,6 +291,11 @@ class CollectorImpl final : public PgoCollector {
     if (runtime_tracks_.empty()) return false;
     using Identity = std::tuple<uint32_t, uint32_t, uint32_t>;
     std::unordered_set<Identity, IdentityHash> identities;
+    if (diagnose_stars_ && record_size_ == 64U) {
+      const auto &track = runtime_tracks_.front();
+      LogLegacyIdentity("runtime track", static_cast<uint16_t>(track.stream_id), static_cast<uint16_t>(track.task_info),
+                        IsStreamExpandEnabled(), static_cast<uint16_t>(track.task_type));
+    }
     for (const auto &track : runtime_tracks_) {
       if (!IsKernelTaskType(track.task_type)) continue;
       uint32_t stream_id = 0;
@@ -276,6 +347,7 @@ class CollectorImpl final : public PgoCollector {
       }
       idle_polls = 0U;
       drained_bytes += static_cast<size_t>(size);
+      bytes_read_ = drained_bytes;
       pending_bytes_.insert(pending_bytes_.end(), buffer.begin(), buffer.begin() + size);
     }
     // Reaching the polling bound is not equivalent to draining the channel.
@@ -300,8 +372,23 @@ class CollectorImpl final : public PgoCollector {
   bool ParsePendingRecords(bool stream_expand) {
     events_.clear();
     for (size_t offset = 0U; offset < pending_bytes_.size(); offset += record_size_) {
+      const auto *record = pending_bytes_.data() + offset;
+      const uint8_t func_type = record[0] & 0x3fU;
+      if (func_type <= 1U) {
+        ++acsq_records_;
+      } else if (record_size_ == 64U && (func_type == kFftsBegin || func_type == kFftsEnd)) {
+        ++ffts_records_;
+      }
+      if (diagnose_stars_ && record_size_ == 64U) {
+        const bool ffts = func_type == kFftsBegin || func_type == kFftsEnd;
+        if ((ffts && ffts_records_ == 1U) || (func_type <= 1U && acsq_records_ == 1U)) {
+          LogLegacyIdentity(ffts ? "FFTS+ record" : "ACSQ record", ReadLegacyIdentityField(record + 4U),
+                            ReadLegacyIdentityField(record + 6U), stream_expand,
+                            ReadLegacyIdentityField(record) >> 10U);
+        }
+      }
       PgoStarsEvent event{};
-      if (ParseStarsRecord(pending_bytes_.data() + offset, record_size_, device_id_, &event, stream_expand)) {
+      if (ParseStarsRecord(record, record_size_, device_id_, &event, stream_expand)) {
         events_.push_back(event);
       }
     }
@@ -311,10 +398,16 @@ class CollectorImpl final : public PgoCollector {
 
   uint32_t device_id_ = 0;
   bool initialized_ = false;
+  bool reporter_registered_ = false;
+  bool capture_ffts_ = false;
+  bool diagnose_stars_ = false;
   bool profiling_started_ = false;
   bool candidate_active_ = false;
   bool batch_finalized_ = false;
   size_t record_size_ = 64;
+  size_t bytes_read_ = 0U;
+  size_t acsq_records_ = 0U;
+  size_t ffts_records_ = 0U;
   std::string candidate_key_;
   std::vector<PgoBatchCandidate> pending_candidates_;
   std::vector<std::vector<PgoTaskRecord>> candidate_records_;
@@ -327,6 +420,7 @@ class CollectorImpl final : public PgoCollector {
   std::vector<uint64_t> launch_sequences_;
   std::vector<PgoRuntimeTrack> runtime_tracks_;
 };
+#undef PGO_WINDOW_LOG_FORMAT
 }  // namespace
 
 extern "C" int AutofusePgoCollectorCreate(uint32_t device_id, void *stream, void **collector) {

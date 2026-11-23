@@ -397,7 +397,8 @@ def test_ascbc_host_compile_uses_32_jobs_for_tiling_func_split_compile(
         stdout = ""
         stderr = ""
 
-    def fake_run(cmd, capture_output, text):
+    def fake_run(cmd, *, cwd, capture_output, text):
+        assert cwd == str(host_build_dir)
         commands.append(cmd)
         return FakeCompletedProcess()
 
@@ -409,4 +410,6 @@ def test_ascbc_host_compile_uses_32_jobs_for_tiling_func_split_compile(
         )
     )
 
+    assert len(commands) == 2
+    assert commands[0][0] == "cmake"
     assert commands[1] == ["make", "-C", "./", "-j", "32"]

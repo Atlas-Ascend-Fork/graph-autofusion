@@ -88,12 +88,18 @@ TEST(PgoRuntimeTrack, DecodesStreamExpandControlRecord) {
   ASSERT_EQ(RegisterRuntimeTrackReporter(PgoReporterOwnership::kExclusive, &QueueRuntimeTrack), PGO_SUCCESS);
   RawCompactInfo raw;
   raw.type = 804;
+  raw.data_len = 4;
   auto *payload = reinterpret_cast<unsigned char *>(&raw) + 24U;
   payload[0] = 1U;
   ASSERT_EQ(DispatchRuntimeTrack(0, &raw, sizeof(raw)), PGO_SUCCESS);
   EXPECT_TRUE(IsStreamExpandEnabled());
   payload[0] = 0U;
+  raw.data_len = 40;
   ASSERT_EQ(DispatchRuntimeTrack(0, &raw, sizeof(raw)), PGO_SUCCESS);
+  EXPECT_FALSE(IsStreamExpandEnabled());
+  raw.data_len = 3;
+  payload[0] = 1U;
+  EXPECT_EQ(DispatchRuntimeTrack(0, &raw, sizeof(raw)), PGO_DATA_UNAVAILABLE);
   EXPECT_FALSE(IsStreamExpandEnabled());
   EXPECT_EQ(UnregisterRuntimeTrackReporter(), PGO_SUCCESS);
 }

@@ -4457,7 +4457,8 @@ TEST_F(TestCodegenTiling, SplitHeaderGenerateForPgoShouldIncludeDirectEntryDepen
     if (source.find("Loaded PGO block_dim %u is outside core budget [1, %u]") != std::string::npos) {
       found_pgo_core_budget_check = true;
     }
-    if (source.find("tiling_i32.size() != expect_num") != std::string::npos &&
+    if (source.find("for (size_t index = 0; index < expect_num; ++index)") != std::string::npos &&
+        source.find("Invalid PGO tiling data length.") != std::string::npos &&
         source.find("memcpy_s(&tiling_data, sizeof(tiling_data), tiling_i32.data(), sizeof(tiling_data)) != EOK") !=
             std::string::npos) {
       found_pgo_config_validation = true;
@@ -5784,6 +5785,36 @@ TEST_F(TestCodegenTiling, TfAndInductorPgoShouldSortAclDurationsConsistently) {
   EXPECT_EQ(inductor_source.find("mspti"), std::string::npos);
 }
 
+TEST_F(TestCodegenTiling, PgoProfilingSourceShouldKeepLifecycleOrder) {
+  std::stringstream ss;
+  this->GenPgoAclProfiling(ss, false);
+  const auto source = ss.str();
+  const auto begin = source.find("int PgoBeginCandidate(void *collector)");
+  const auto init = source.find("int InitAclPgoEvents()");
+  const auto destroy = source.find("void DestroyAclPgoEvents()");
+  const auto measure = source.find("int MeasureAclPgoLaunch(");
+  const auto loop = source.find("for (uint64_t launch_count = 0U;");
+  ASSERT_NE(begin, std::string::npos);
+  ASSERT_NE(init, std::string::npos);
+  ASSERT_NE(destroy, std::string::npos);
+  ASSERT_NE(measure, std::string::npos);
+  ASSERT_NE(loop, std::string::npos);
+  EXPECT_LT(begin, init);
+  EXPECT_LT(init, destroy);
+  EXPECT_LT(destroy, measure);
+  EXPECT_LT(measure, loop);
+}
+
+TEST_F(TestCodegenTiling, PgoAutofuseTilingSplitShouldPreserveGeneratedShape) {
+  enable_autofuse_pgo_ = true;
+  auto fused_schedule_result = this->GenBasicFusedScheduleResult({af::Symbol(64), af::Symbol(128)});
+  codegen::PgoShapeStringStream pgo_shape_dim;
+  const auto source = this->GenPgoAutofuseTiling(fused_schedule_result, pgo_shape_dim, "AutofuseTilingData", false);
+  EXPECT_NE(source.find("extern \"C\" int64_t AutofuseTilingWithConfig"), std::string::npos);
+  EXPECT_NE(source.find("  auto pgo_tiling = *tiling;"), std::string::npos);
+  EXPECT_NE(source.find("  return 0;"), std::string::npos);
+}
+
 TEST_F(TestCodegenTiling, TfPgoGeneratedSourceContractShouldRemainStable) {
   auto fused_schedule_result = this->GenBasicFusedScheduleResult({af::Symbol(64), af::Symbol(128)});
   fused_schedule_result.node_idx_to_scheduled_results[0].resize(1);
@@ -5798,10 +5829,11 @@ TEST_F(TestCodegenTiling, TfPgoGeneratedSourceContractShouldRemainStable) {
   EXPECT_NE(source.find("AutofusePgoCollectorBegin(collector, PGO_GRAPH_NAME)"), std::string::npos);
   EXPECT_NE(source.find("int PgoBeginCandidate(void *collector)"), std::string::npos);
   EXPECT_NE(source.find("const int begin_status = PgoBeginCandidate(g_pgo_collector);"), std::string::npos);
+  EXPECT_NE(source.find("#define DLOGE(fmt, ...) DLOGW(fmt, ##__VA_ARGS__)"), std::string::npos);
   EXPECT_EQ(source.find("int PgoBeginCandidate(void *collector, AutofuseTilingData *tiling_data, "
                         "uint32_t workspace_size)"),
             std::string::npos);
-  EXPECT_NE(source.find("DLOGE(\"InitAclPgoEvents failed, status: %d\", status)"), std::string::npos);
+  EXPECT_NE(source.find("DLOGI(\"InitAclPgoEvents failed, status: %d\", status)"), std::string::npos);
   EXPECT_EQ(source.find("get_tiling_data_repr_fn(tiling_data)"), std::string::npos);
   EXPECT_EQ(source.find("kInductorPgoRunnerAbi"), std::string::npos);
   EXPECT_EQ(source.find("kPgoTopnMagic"), std::string::npos);
@@ -7349,8 +7381,8 @@ void AssertDlopenRunnerProfiling(const std::string &runner) {
   ASSERT_NE(unsupported_branch, std::string::npos);
   EXPECT_LT(unsupported_branch, unsupported_warning);
   EXPECT_NE(runner.find("result = kPgoProfileUnsupported;"), std::string::npos);
-  EXPECT_NE(runner.find("DLOGE(\"InitAclPgoEvents failed, status: %d\", status)"), std::string::npos);
-  EXPECT_NE(runner.find("DLOGE(\"PgoBeginCandidate failed, status: %d\", begin_status)"), std::string::npos);
+  EXPECT_NE(runner.find("DLOGI(\"InitAclPgoEvents failed, status: %d\", status)"), std::string::npos);
+  EXPECT_NE(runner.find("DLOGI(\"PgoBeginCandidate failed, status: %d\", begin_status)"), std::string::npos);
   EXPECT_NE(runner.find("DLOGE(\"AutofusePgoCollectorRecordLaunch failed, status: %d\", record_status)"),
             std::string::npos);
   EXPECT_NE(runner.find("DLOGE(\"WrapperOnlyLaunch failed, ERROR: %d\", launch_status)"), std::string::npos);

@@ -283,6 +283,23 @@ class TilingLib {
   std::string GenPgoTilingFunc(const ::ascir::FusedScheduledResult &fused_schedule_result, const std::string &tiling,
                                codegen::PgoShapeStringStream &pgo_shape_dim, bool is_inductor_scene,
                                const std::string &core_num = "0") const;
+  void GenPgoAutofuseTilingConfig(std::stringstream &ss, bool track_config) const;
+  void GenPgoAutofuseTilingSignature(std::stringstream &ss, codegen::PgoShapeStringStream &pgo_shape_dim,
+                                     const std::string &tiling) const;
+  void GenPgoAutofuseTilingLimits(std::stringstream &ss, codegen::PgoShapeStringStream &pgo_shape_dim,
+                                  bool is_inductor_scene, bool track_config) const;
+  void GenPgoAutofuseTilingPgoWorkspace(std::stringstream &ss, bool track_config) const;
+  void GenPgoAutofuseTilingPgoSelect(const ::ascir::FusedScheduledResult &fused_schedule_result, std::stringstream &ss,
+                                     bool track_config) const;
+  void GenPgoAutofuseTilingPgoResult(const ::ascir::FusedScheduledResult &fused_schedule_result,
+                                     std::stringstream &ss) const;
+  void GenPgoAutofuseTilingPgoFallback(std::stringstream &ss) const;
+  void GenPgoAutofuseTilingNoPgo(std::stringstream &ss) const;
+  void GenPgoAutofuseTilingSelection(const ::ascir::FusedScheduledResult &fused_schedule_result, std::stringstream &ss,
+                                     bool track_config) const;
+  void GenPgoAutofuseTilingPgoSelection(const ::ascir::FusedScheduledResult &fused_schedule_result,
+                                        std::stringstream &ss, bool track_config) const;
+  void GenPgoAutofuseTilingWorkspace(std::stringstream &ss, bool track_config, bool is_inductor_scene) const;
   std::string GenPgoAutofuseTiling(const ::ascir::FusedScheduledResult &fused_schedule_result,
                                    codegen::PgoShapeStringStream &pgo_shape_dim, const std::string &tiling,
                                    bool is_inductor_scene) const;
@@ -338,9 +355,19 @@ class TilingLib {
   void GenPgoWrapperKernelLaunch(std::stringstream &ss) const;
   void GenPgoWrapper(const ::ascir::FusedScheduledResult &fused_schedule_result, std::stringstream &ss,
                      bool direct_link = false) const;
+  void GenPgoAclProfilingBeginCandidate(std::stringstream &ss, bool direct_link) const;
+  void GenPgoAclProfilingConstants(std::stringstream &ss) const;
+  void GenPgoAclProfilingInit(std::stringstream &ss, bool direct_link) const;
+  void GenPgoAclProfilingDestroy(std::stringstream &ss) const;
+  void GenPgoAclProfilingMeasure(std::stringstream &ss, bool direct_link) const;
+  void GenPgoAclProfilingBeginStatus(std::stringstream &ss, bool direct_link) const;
+  void GenPgoAclProfilingAttempt(std::stringstream &ss, bool direct_link) const;
   void GenPgoAclProfiling(std::stringstream &ss, bool direct_link = false) const;
   void GenPgoBatchProcess(std::stringstream &ss) const;
   void GenPgoProfilingBatchSetup(std::stringstream &ss) const;
+  void GenPgoProfilingBatchRetry(std::stringstream &ss) const;
+  void GenPgoProfilingBatchFailure(std::stringstream &ss) const;
+  void GenPgoProfilingBatchCleanup(std::stringstream &ss) const;
   void GenPgoGetProfilingBatch(const ::ascir::FusedScheduledResult &fused_schedule_result, std::stringstream &ss,
                                bool direct_link = false) const;
   void GenPgoDirectProfilingCallback(std::stringstream &ss) const;

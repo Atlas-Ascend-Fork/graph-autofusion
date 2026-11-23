@@ -46,4 +46,5 @@ target_link_libraries(test_codegen PRIVATE
     aihac_symbolizer_af
     json
     ascendc_api_extend
-    GTest::gtest)
+    GTest::gtest
+    ${CMAKE_DL_LIBS})

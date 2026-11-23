@@ -11,6 +11,7 @@
 # ----------------------------------------------------------------------------
 import hashlib
 import os
+import math
 import tempfile
 import argparse
 import time
@@ -1029,32 +1030,62 @@ def get_inductor_pgo_cann_root_candidates():
 
 def extract_time(line):
     try:
-        time_str = line.split("#")[-1].strip()
-        if time_str == "1.79769e+308":  # 采样失败的返回值
-            return float("inf")
-        return float(time_str)
-    except (ValueError, IndexError):
-        return float("inf")
+        _, separator, value = line.partition("#")
+        if separator:
+            duration = float(value)
+            # The runner historically printed DBL_MAX with six significant digits.
+            if math.isfinite(duration) and 0 < duration < 1.79769e308:
+                return duration
+    except ValueError:
+        pass
+    return math.inf
 
 
-def pgo_get_top_result(search_path, top_n=5):
+def pgo_tiling_identity(line):
+    tiling, separator, _ = line.partition("#")
+    if not separator:
+        return ()
     try:
-        with open(search_path, "r") as file:
-            lines = [line.strip() for line in file if line.strip()]
-    except OSError:
-        return None, None, None
+        fields = tuple(int(field) for field in tiling.split())
+    except ValueError:
+        return ()
+    return fields if all(-(1 << 31) <= field < (1 << 31) for field in fields) else ()
 
+
+def pgo_read_search(search_path):
+    try:
+        with open(search_path, encoding="utf-8") as file:
+            return [line.strip() for line in file if line.strip()]
+    except (OSError, UnicodeError):
+        return []
+
+
+def pgo_rank_measured(lines):
+    return sorted(
+        (
+            line
+            for line in lines
+            if extract_time(line) < math.inf and pgo_tiling_identity(line)
+        ),
+        key=extract_time,
+    )
+
+
+def pgo_get_top_result(search_path, top_n=5, *, first_round=None):
+    lines = pgo_read_search(search_path) if first_round is None else first_round
     if not lines:
         return None, None, None
 
     origin_line = lines[-1]
-    solution_set_line = lines[:-1]
+    seen = {pgo_tiling_identity(origin_line), ()}
+    solution_set_line = []
+    for line in sorted(lines[:-1], key=extract_time):
+        identity = pgo_tiling_identity(line)
+        if identity not in seen:
+            seen.add(identity)
+            solution_set_line.append(line)
 
-    sorted_lines = sorted(solution_set_line, key=extract_time)
-    if top_n == 0 or top_n > len(sorted_lines):
-        top_lines = sorted_lines
-    else:
-        top_lines = sorted_lines[:top_n]
+    top_lines = solution_set_line if top_n == 0 else solution_set_line[:top_n]
 
     return top_lines, origin_line, top_n
 
@@ -1071,13 +1102,25 @@ def pgo_write_config(config_path, tiling_data, is_last_result=False):
         file.flush()
 
 
-def pgo_generate_config(search_path, config_path, topn=5):
-    with open(search_path, "r") as file:
-        lines = [line.strip() for line in file if line.strip()]
+def pgo_read_config(config_path):
+    lines = pgo_read_search(config_path)
+    if len(lines) == 2 and lines[0] == "1" and pgo_rank_measured(lines[1:]):
+        return lines[1]
+    return None
 
-    target_lines = lines[-(topn + 1) :]
 
-    result = min(target_lines, key=extract_time)
-    if extract_time(result) == float("inf"):
-        result = lines[-1]
-    pgo_write_config(config_path, result, is_last_result=True)
+def pgo_generate_config(config_path, result):
+    if not pgo_rank_measured([result]):
+        return False
+    directory = os.path.dirname(os.path.abspath(config_path))
+    with tempfile.NamedTemporaryFile(
+        dir=directory, prefix=".pgo-config-", delete=False
+    ) as file:
+        temp_path = file.name
+    try:
+        pgo_write_config(temp_path, result, is_last_result=True)
+        os.replace(temp_path, config_path)
+    finally:
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
+    return True

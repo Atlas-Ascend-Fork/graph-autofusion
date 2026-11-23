@@ -1,3 +1,12 @@
+# Copyright (c) 2025 Huawei Technologies Co., Ltd.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, EITHER EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE. See
+# LICENSE in the root of the software repository for the full text of the License.
+# ======================================================================================================================
+
 cmake_minimum_required(VERSION 3.16.1)
 project(autofuse)
 
@@ -384,6 +393,12 @@ file(GLOB_RECURSE CODEGEN_SOURCES "${CODEGEN_DIR}/*.cpp")
 add_library(codegen SHARED
         ${CODEGEN_SOURCES}
 )
+add_library(pgo_profiler_stub SHARED depends/profiling/pgo_profiler_stub.cpp)
+target_sources(codegen PRIVATE depends/profiling/pgo_dlopen_stub.cpp)
+target_link_options(codegen PRIVATE "LINKER:--wrap=dlopen")
+target_link_libraries(codegen PRIVATE ${CMAKE_DL_LIBS})
+target_compile_definitions(test_codegen PRIVATE PGO_PROFILER_STUB_PATH="$<TARGET_FILE:pgo_profiler_stub>")
+add_dependencies(test_codegen pgo_profiler_stub)
 
 set(CMAKE_LIBRARY_PATH "${CMAKE_LIBRARY_PATH};${CODE_ROOT_DIR}/att/build")
 

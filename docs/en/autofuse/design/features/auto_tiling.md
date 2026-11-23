@@ -37,7 +37,7 @@ Generated code is delivered with CANN/Autofuse and loaded by GE Runtime or Torch
 - Online inference or training: GE Runtime invokes the generated `TilingFunc`/`TilingFuncVec`, while TorchAir/Inductor invokes `AutofuseTiling`. The generated function selects TilingData from platform information and Shape, and the corresponding runtime then launches the fused Kernel.
 - Static Shape compilation: Inductor or GE invokes static-key and constant-TilingData interfaces at compile time and specializes the result into the Kernel. Re-running Tiling with the same input must not produce a different key or TilingData.
 - Dynamic Shape: One Kernel may contain multiple candidate keys. For each concrete input, symbolic Shape caching and Tiling logic must select one deterministic result.
-- PGO/Top-N tuning: Only static Shape is currently supported. GE/TBE collects hardware timings through a separate PGO flow. TorchAir/Inductor uses Split-Compile to generate candidates and selects one at runtime based on `modeled_perf`, optionally with a measurement callback. If tuning fails, the system falls back to ordinary ATT and reports a warning.
+- PGO/Top-N tuning currently supports only static Shape. GE/TBE uses a dedicated runner for initial screening and static retesting. TorchAir/Inductor uses Split-Compile to generate candidates and selects by `modeled_perf`, with an optional measurement callback. Section 5.5 describes GE profiling outcomes and fallback to default tiling.
 - CV/UBFuse and multi-Group integration: Codegen combines the basic Cube tiling block from the Cube Tiling module with the Vector result produced by Auto Tiling, and generates combined TilingData, Cube keys, and Vector keys. Auto Tiling does not choose the basic Cube block, but its Group-level results and the final combined key must remain stable.
 
 ## 3. Special Constraints and Current Implementation Status
@@ -63,12 +63,12 @@ This section is the single authoritative source for capability boundaries and im
 | S6 | Common source for static compilation | Inductor uses one `tiling_repr` both to generate launch parameters and to specialize the Kernel. GE currently obtains input parameters and hardware information separately when generating TilingData and specializing the Kernel. | Both paths must use the same immutable Tiling result. Until GE uses a common source, it must at least validate the key, BlockDim, and complete TilingData, with particular attention to BlockDim when core count is constrained. | Implementation gap in GE |
 | S7 | Default Tiling cache setting | GE Runtime does not depend on the Autofuse backend cache and disables it by default. Inductor depends on the backend cache and enables it by default. | Select the scenario default using `is_inductor_scene` or equivalent information. Explicit configuration takes precedence. | Intentional design |
 | S8 | Tiling cache identity | The symbolic Shape cache key currently excludes dtype, fused graph structure, chip model, and configuration. | A cache hit must reuse the same layout and key. Extend the key before introducing reuse across additional conditions; do not interpret the current key as a complete compilation identity. | Current limitation |
-| S9 | PGO scope | Only static Shape is supported. Candidate collection, cache keys, and result specialization for dynamic Shape and CV have not been defined. | Do not reuse PGO results for dynamic Shape or CV until reliable identity and specialization rules are defined. On tuning failure, fall back to ordinary ATT and report a warning. | Current limitation |
-| S10 | PGO result identity | GE/TBE currently reuses a result when `<pgo_dir>/<graph_name>_config.txt` exists. It does not validate the sampled device, AIV count, UB, or Kernel name on a hit. The Inductor protocol includes candidate hashes/reprs, but that does not prove that the complete runtime environment is bound. | At minimum, bind PGO results to the chip model, hardware inputs that affect execution, and operator hash. If identity is incomplete, do not promise safe reuse across processes, machines, or chips. | Implementation gap |
+| S9 | PGO scope | Only static Shape is supported. Candidate collection, cache keys, and specialization rules for dynamic Shape and CV remain undefined. | Reuse on dynamic Shape or CV requires reliable identity and specialization rules. See S14 for GE tuning failures. | Current limitation |
+| S10 | PGO result identity | Static GE/TBE validates the commit flag, tiling fields, and measurement in `<pgo_dir>/<graph_name>_config.txt` before reuse. Final tiling also checks whether it can apply the configuration. The file name and contents omit the sampling device, AIV count, UB, and operator hash. The Inductor protocol includes candidate hashes and reprs. | PGO result identity should include the chip model, execution-affecting hardware inputs, and operator hash. The caller is responsible for limiting reuse to matching environments. | Implementation gap |
 | S11 | TilingData and ABI | Field order, alignment, and type width are not an independent cross-version ABI. Type names, generated function names, and namespaces are generated automatically; user customization and user-injected Tiling shared libraries are not supported. | TilingData, TilingFunc, and Kernel must be released as a version-matched set. The formal ABI is defined by symbols actually loaded by GE/TorchAir. | Intentional design |
 | S12 | Configuration | `AutoFuseConfig` is a process-wide singleton and cannot be changed during compilation. Precedence is call options, environment/configuration object, then defaults. `force_*` and HighPerf are debugging/experimental capabilities; Golden is not exposed. | Production code must not depend on the stability of experimental settings. ATT options are planned for removal. | Current limitation |
 | S13 | Offline OOTD | No mechanism for injecting chip information has been designed or implemented. | Do not promise offline OOTD compatibility until the platform-information source, model selection, and delivery protocol are designed. | Planned capability |
-| S14 | Failure semantics | Invalid input or no feasible solution returns `false`/`af::FAILED`; no invalid Tiling stub is generated. Host/Device compilation errors are propagated to the TBE or Inductor frontend. | PGO failure is recoverable and must report a warning. Once the S4 gap is closed, oversized TilingData must fail early. | Intentional design, except S4 |
+| S14 | Failure semantics | Invalid input or no feasible solution returns `false`/`af::FAILED` and skips invalid Tiling stub generation. Final Host/Device compilation errors propagate to the TBE or Inductor frontend. Static GE records skipped tuning, profiling failures, and publication failures by stage. It uses default tiling when a valid configuration is unavailable. | If static GE attempted profiling and neither round produced a valid candidate, the compilation entry point emits one aggregate profiling `ERROR`. See Section 5.5 for other recoverable outcomes and S4 for oversized TilingData. | Intentional design, except S4 |
 
 ### 3.3 Assumptions and Dependencies
 
@@ -379,16 +379,75 @@ PGO result identity should at least include the chip model, hardware inputs that
 
 #### GE/TBE Path
 
-```text
-GE compilation subprocess
-  -> ATT generates candidates and a PGO runner
-  -> `asc_pgo_exec`/Runtime wrapper executes candidates
-  -> hardware sampling writes search.txt
-  -> second optimization searches sampled results
-  -> write config.txt and generate the final Kernel
+##### Search, Static Retest, and Replay with Outer Profiling
+
+Set `AUTOFUSE_FLAGS=autofuse_enable_pgo=true` to enable static GE PGO. The test framework disables outer profiling before search and starts it after the search session exits and releases its profiling resources.
+
+```mermaid
+sequenceDiagram
+    participant T as TF/GE test framework
+    participant G as GE compilation entry point
+    participant R as PGO runner and collector
+    participant F as Configuration files
+    T->>G: Disable outer profiling and start search
+    G->>F: Validate the published configuration
+    alt Valid cache hit
+        F-->>G: Return the published configuration
+    else Search required
+        G->>R: exec_type 0, screen candidates with dynamic tiling
+        R-->>G: Return first-round candidates and measurement status
+        opt Candidates available and status allows retest
+            loop Top-N candidates and original solution
+                G->>R: Compile static candidate and retest with exec_type 1
+                R-->>G: Drain and stop profiling and return measurement status
+                G->>G: Match the result by tiling identity
+            end
+        end
+        opt Candidate available for publication
+            G->>F: Recheck the cache under lock and publish atomically
+        end
+    end
+    G-->>T: Search session ends
+    T->>G: Set replay marker and start replay with outer profiling
+    G->>F: Read the published configuration or compile with default tiling
+    G-->>T: Return execution result
 ```
 
-This path selects from actual hardware timings. `core_select` is the default algorithm, and `pruning` prunes candidates. If the process fails or candidate count exceeds 10000, it falls back to ordinary ATT and reports a warning. A `config.txt` file is named by graph name, and its existence skips tuning without validating chip, AIV count, UB, or operator hash. Therefore, the caller may reuse the file only after ensuring that the environment matches.
+1. `asc_pgo_exec` validates the published configuration and creates a private `.pgo-tune-*` directory on a cache miss. The first round measures candidates and the original solution using a kernel with dynamic tiling. Core-count search is the default. Set `autofuse_pgo_algo=pruning` to enable pruning. A recoverable first-round measurement failure preserves enumerated candidates for static retesting.
+2. Python freezes the first-round snapshot, orders it by duration, and deduplicates it by the full tiling fields. Trial compilation reads the candidate configuration with `flag=0`, generates constant TilingData, verifies that the configuration applied, and compiles the static kernel. The runner loads each trial artifact and writes its result to `*_search.txt.retest`. Python accepts exactly one record with the same tiling identity as the trial.
+3. Selection prefers the fastest valid static retest. If no static retest is valid, it uses the fastest valid first-round candidate that passes trial compilation. Durations must be positive and finite. Selection excludes the `DBL_MAX` failure sentinel. While holding the configuration lock, Python rechecks the cache and atomically publishes the `flag=1` configuration using a temporary file in the same directory. The `*_search.txt` archive holds the first round and valid static retest records. The private directory is cleaned up after tuning and can be preserved in debug mode.
+4. The replay framework can set `AF_BATCH_PGO_REPLAY_ONLY=1` and create `.replay-only` in the PGO directory. The compilation entry point skips the runner if either marker is present. The directory marker is also visible to compilation workers started during search. Final static compilation generates constant TilingData from the published configuration or uses default tiling if the configuration is missing, invalid, or cannot be applied.
+
+##### Device Profiling and Timing
+
+The collector uses an exclusive profiling channel and matches STARS ACSQ parent-task events to Runtime task tracking by normalized device, stream, and task IDs. Stream extension control messages support the 4-byte payload and the legacy 40-byte envelope. When Runtime task tracking is unavailable, only ACSQ records with an unambiguous order on a single stream can be paired. The collector assigns pairs to candidates in serial launch order and requires all 20 start/end samples for each candidate. Read failures, incomplete records, and ambiguous ownership return the corresponding stage and status. [MSPTI control message definition](https://gitcode.com/Ascend/mspti/blob/beec2813e7ea28b6afd9bb0b206fe86fb994078c/csrc/common/inject/profapi_inject.h#L157)
+
+The HAL reports device clock frequency in ticks per millisecond. Convert a counter delta to nanoseconds using `Δtick × 1_000_000 / ticks_per_ms`. For each candidate, sort durations in descending order, discard the slowest sample, and average the next five. This score measures one task in the standalone runner. Use replay with outer profiling to assess whole-network performance.
+
+VNECT with FFTS+ uses the matching ACSQ parent task for timing. On legacy64 devices, use `AF_PGO_STARS_DIAGNOSTICS=acsq` and `acsq_ffts` to compare records. FFTS+ child records contribute to diagnostic counts. Recovery uses batch screening and Top-N static retests. Child-task timing and failed-batch splitting are future extensions.
+
+##### Profiling Outcomes and Fallback
+
+```mermaid
+flowchart TD
+    A[Summarize first-round and static retest results] --> B{Any valid measurement?}
+    B -->|Yes| C{Valid configuration available or published?}
+    C -->|Yes| D[Use the published configuration]
+    C -->|No| E[Log publication WARN and fall back]
+    B -->|No| F{Profiling attempted?}
+    F -->|Yes| G[Log one aggregate profiling ERROR and fall back]
+    F -->|No| H[Log skip WARN and fall back]
+```
+
+| Condition | Action and logging |
+|-----------|--------------------|
+| Recoverable measurement failure or missing or mismatched candidate record | Record the stage and counts with `WARN`. Static retesting can continue. |
+| Runner launch failure, timeout, or signal termination, or unsupported profiling, a busy channel, or failure to stop profiling | End further measurement and select from the valid results already collected. |
+| Profiling attempted with zero valid candidates in both rounds | Emit one aggregate profiling `ERROR` per fused operator from the compilation entry point and use default tiling. |
+| Profiling skipped before measurement or valid data collected but configuration publication failed | Log the reason with `WARN` and use default tiling if a valid configuration is unavailable. |
+| Valid cache hit or configuration published | Use the published result. For a new publication, log `INFO` with both rounds' valid candidate counts. |
+
+To locate a failure, check channel start and stop, reads, parsing, task-track filtering, pairing, and timing. Compare expected launches, valid samples, and raw record counts. Final Host/Device compilation errors follow the regular compilation error paths.
 
 #### TorchAir/Inductor Path
 
@@ -405,7 +464,7 @@ The Inductor path uses separate DSO loading and a protocol file. Top-N records c
 
 #### Boundary Classification
 
-S9 defines the static-only and dynamic/CV boundaries. Falling back to ordinary ATT with a warning on candidate or measurement failure is an intentional availability strategy. PGO identity completeness is the implementation gap in S10; developers must not interpret current cache-hit behavior as satisfying that design constraint.
+See S9 for support scope, S10 for configuration reuse, and S14 for static GE failure and fallback behavior.
 
 ### 5.6 Diagnostics and Maintainability
 
@@ -420,7 +479,7 @@ ATT diagnostics target problem triage within one hour and root-cause localizatio
 3. Code generation: Check Group/Case fields, actual TilingData size, Workspace, BlockDim, static key, and Kernel type. Confirm that TilingData/TilingFunc/Kernel come from one version. See S4 for the missing limit check.
 4. Runtime: Use `DfxInputSymbolInfo` to print symbolic inputs and `GetSymbolTilingCacheKey` to inspect cache keys and hits. Confirm that the Runtime TilingData size agrees with `GetTilingDataSize`.
 5. Forced reproduction: Use `force_tiling_case`, `force_schedule_result`, and `force_template_op_name` to fix a template and compare the unfused Kernel, different Cases, and PGO results. These options exist in release packages but are not guaranteed stable.
-6. PGO: For GE, inspect `search.txt/config.txt` and hardware sampling. For Inductor, inspect the Top-N protocol, candidate repr, DSO loading, and warnings. If repeated static-Shape Tiling produces different keys or TilingData, escalate it as a functional risk.
+6. For GE PGO diagnostics, check the profiling stage, `first_valid`, `static_valid`, the search archive, and the published configuration as described in Section 5.5. For performance evaluation, compare fusion-fragment duration, BlockDim, and end-to-end step time between AF and replay under outer profiling. For Inductor, inspect the Top-N protocol, candidate repr, DSO loading, and warnings. Escalate inconsistent keys or TilingData across repeated static-Shape calls as a functional risk.
 
 #### Torch/GE Paths and Boundaries
 
@@ -528,7 +587,7 @@ Tiling cache reuses TilingData already solved for a symbolic Shape. A hit must r
 
 Therefore, "Tiling cache is enabled by default" is not a global rule. Documentation, configuration, and tests must carry `is_inductor_scene` or equivalent scenario information. The current cache key excludes dtype, fused graph structure, chip model, and configuration; it must be extended before reuse across those conditions is introduced.
 
-PGO uses heuristics and CostModel to select Top-N from the full Tiling space, measures candidates, and selects the best result. S9, S10, and S14 define support scope, fallback semantics, and result identity. Current code cannot guarantee that results bind all environment information.
+GE ranks candidates for static Top-N retesting by the first-round device measurements. Section 5.5 describes Inductor candidate screening and measurement. See S9, S10, and S14 for support scope, cache identity, and fallback behavior, respectively.
 
 #### 6.7.4 Configuration Management
 
@@ -542,6 +601,7 @@ ATT configuration is held by the process-wide `AutoFuseConfig` singleton. Preced
 | `att_corenum_threshold` | 0-100 | 40 | Core-utilization threshold. |
 | `autofuse_enable_tiling_cache` | `true`, `false` | GE: `false`; Inductor: `true` | GE Runtime does not depend on the backend cache; Inductor does. Explicit configuration overrides the scenario default. |
 | `autofuse_enable_pgo` | `true`, `false` | `false` | Enables PGO candidate search. |
+| `autofuse_pgo_topn` | Nonnegative integer | 5 | Static GE/TBE reads this from `AUTOFUSE_DFX_FLAGS` to limit static retesting. Zero retests all candidates. The original solution is considered separately. |
 | `force_tiling_case` | Case ID | Empty | Forces a selection for debugging only. |
 | `force_schedule_result` | 0-100 | -1 | Forces a schedule result for debugging only. |
 | `force_template_op_name` | Operator name | Empty | Restricts a forced template to one operator for debugging only. |
@@ -655,6 +715,7 @@ The following table is for development navigation, not a complete stable ABI lis
 | `GetTilingKeyCount`, `FindBestTilingKey` | Enumerate and combine keys between PGO runner and candidate DSO. |
 | `GetTilingKeyForStatic`, `GetTilingKeyKernelTypeForStatic` | Let Compiler obtain the key and Kernel type for specialization. |
 | `GenConstTilingData` | Generates the internal constant-TilingData representation for Compiler. |
+| `AutofusePgoConfigApplied` | Confirms that static GE trial compilation applied the candidate configuration. |
 | `AutofuseIsStaticShape` | Lets Compiler determine whether an artifact has static Shape. |
 | `GetCVUBFusionStageSizeName`, `GenCVFusionTilingKey`, `GenTilingDataValueBlockDimAndWss` | Support Compiler CV/UBFuse specialization and combined data. |
 | `GenerateMeasuredTopnSolutions` | Measurement protocol between the Inductor PGO runner and candidate DSO. |
@@ -691,14 +752,15 @@ Axis priority favors parent, reduction, broadcast, and non-innermost axes. Intra
 - `gen_tiling_impl.*`: Validates input graphs or scheduling results, initializes configuration and platform information, and invokes `TilingCodeGenerator`.
 - `gen_model_info/`: `AscendGraphParser` extracts axes, tensors, memory, and scheduling constraints. `GenerateTilingExpr` creates resource and performance expressions. `GetModelInfoMap` aggregates ScheduleGroups and handles reuse.
 - `codegen_tiling.*`: Assembles ATT results into Host/Device source and generates static-key, symbolic-cache, diagnostic, CV/Cube, and Inductor Top-N entries.
-- `autofuse/compiler/python/asc_codegen_compile.py`: Invokes Host/Device compilers, manages PGO files, and packages compiled artifacts.
+- `autofuse/codegen/pgo/` manages collection windows, converts device timestamps, and matches samples to launches.
+- `autofuse/compiler/python/asc_codegen_compile.py` and `compile_adapter.py` manage GE PGO snapshots, static retests, selection, configuration, and final compilation artifacts.
 - `common/autofuse_config/`: `AutoFuseEnvConfigParser` parses `AUTOFUSE_FLAGS`/`AUTOFUSE_DFX_FLAGS`, and process-wide `AutoFuseConfig` stores configuration.
 
 ### 9.4 Flow Design
 
 The main flow is input validation -> singleton configuration initialization -> platform-information acquisition -> ASCIR parsing -> TuningSpace -> ModelInfo/performance expressions -> solving and candidate combination -> Tiling/static/cache/PGO source generation -> Compiler compilation and packaging -> GE/TorchAir loading. Generation-time TilingData limit checking is not part of the current flow; see S4.
 
-Exception flows include immediate failure for an empty graph or invalid options; early failure for no feasible solution; fallback to non-PGO with a warning on PGO failure or candidate overflow; full error propagation to the frontend on Host/Device compilation failure; and blocking KernelLaunch when Runtime symbols are absent or TilingData size does not match. Early failure for oversized TilingData is planned and is not a current guarantee.
+An empty graph or invalid option fails immediately. A graph with no feasible solution fails early. The frontend receives errors from final Host/Device compilation. Missing Runtime symbols or a TilingData size mismatch prevent KernelLaunch. See Section 5.5 for PGO profiling outcomes and fallback, and S4 for the TilingData size check.
 
 ### 9.5 Development Navigation
 
@@ -714,7 +776,7 @@ Before making a change, developers and Agents must check the capability status i
 | Add or change TilingData fields | `autofuse/att/generator/tiling_data_gen/`, `autofuse/codegen/codegen_tiling_data.cpp` | Serialization and constant repr in `codegen_tiling.cpp`, consumers in `codegen_kernel.cpp`, static compilation parameters, S4 size, and S11 artifact consistency | TilingData generation UT, Codegen UT/E2E, and GE/Inductor loading and accuracy verification |
 | Change GE formal ABI | `autofuse/codegen/codegen_tiling.cpp`, `codegen_infershape.cpp` | Loading names, signatures, invocation sequence, and error codes in GE `op_tiling_rt2.cc` and `autofuse_op_kernel.cc` | Codegen symbol-generation UT, GE dynamic-loading ST/E2E, and backward compatibility |
 | Change Inductor formal ABI | `codegen_tiling.cpp`, `codegen_tiling_inductor_topn.cpp`, `codegen_kernel.cpp` | TorchAir `_asc_codegen.py` typedef/dlsym, C++ standard-library ABI, and common-source `tiling_repr` | Inductor Top-N/static-Kernel E2E and cross-package compatibility |
-| Change GE/TBE PGO | `codegen_tiling_pgo_*.cpp`, `autofuse/compiler/python/asc_codegen_compile.py` | `search.txt/config.txt` protocol, S10 cache identity, fallback, and temporary-file cleanup | `autofuse/tests/st/backend_e2e/pgo_*`; verify invalidation when hardware inputs change |
+| Change GE/TBE PGO | `codegen_tiling_pgo_*.cpp`, `autofuse/codegen/pgo/`, `autofuse/compiler/python/asc_codegen_compile.py` | `search.txt/config.txt`, task identity and timing, S10 cache boundary, profiling outcomes, and replay | `test_static_ge_pgo.py`, `pgo_collector_st`, `pgo_timestamp_abi_st`, and GE replay on the same device |
 | Change Inductor PGO | `codegen_tiling_inductor_pgo_proxy.cpp`, `codegen_tiling_inductor_topn.cpp`, `codegen_tiling_inductor_pgo_runner.cpp` | Top-N protocol version, candidate hash/repr, DSO lifecycle, and TorchAir caller | Inductor PGO E2E, protocol errors, timeout, and fallback |
 | Change Tiling cache or configuration | `autofuse/att/generator/cache/`, `autofuse/common/autofuse_config/` | `GenTilingCacheFunc`, cache-key identity, GE/Inductor defaults, and singleton initialization order | Configuration UT, default-setting ST for both frontends, and repeated Tiling comparison for the same input |
 | Change diagnostics | `autofuse/tools/att_analyze/`, `DfxInputSymbolInfo` generation | Logging switches, evidence format, symbolic-information bounds, hot-path overhead, and GE/Inductor logging differences | `att_analyze` unit/integration tests and error-log samples |
@@ -739,7 +801,7 @@ Memory, file, Runtime-query, shared-library-loading, and Host/Device compilation
 
 #### 9.7.2 Interface Errors
 
-Generation failures return `false`/`af::FAILED`. Runtime Tiling returns nonzero on failure, and GE/TorchAir converts it into a frontend error message. PGO fallback remains executable but must report a warning. Invalid forced-debug configuration must identify the configuration name and value.
+Generation failures return `false`/`af::FAILED`. Runtime Tiling returns a nonzero status on failure, which GE/TorchAir converts into a frontend error message. Section 5.5 describes PGO profiling logs and fallback. Invalid forced-debug configuration must identify the configuration name and value.
 
 ## 10. Security Check
 
@@ -754,6 +816,7 @@ Generation failures return `false`/`af::FAILED`. Runtime Tiling returns nonzero 
 
 - GE and graph-autofusion are released as matching versions. TorchAir and CANN/torch_npu follow their version compatibility table. The deployed Runtime must not be older than the model-conversion environment requires.
 - Interfaces actually loaded by external repositories are formal ABIs whose signatures and invocation sequences must remain compatible. Top-N/repr interfaces are additionally constrained by the C++ standard-library ABI. Test-only and internal extension interfaces may change.
+- Static GE PGO retains the two-line configuration and search record formats. Interpret internal durations using the timestamp conversion from the version that collected them. See S10 for configuration reuse.
 - TilingData compatibility follows S11. An old Kernel must not load a new layout.
 - `AutoFuseEnvConfigParser` accepts both `--key=value` and `key=value`, removes the optional `--` prefix, and separates multiple items with semicolons. Internal options are still checked against generation-interface allowlists.
 - Current environment defaults are defined by code and listed in 6.7.4. Scenario-specific Tiling cache behavior follows S7.
@@ -776,11 +839,16 @@ Test entries include `autofuse/tests/ut/att`, `autofuse/tests/ut/common`, `autof
 | Cross-feature | Runtime size validation, symbolic-Shape diagnostics, and configuration precedence | Execute end to end and inspect logs. | ST/E2E |
 | Scenario defaults | Backend cache disabled for GE and enabled for Inductor | Initialize each frontend flow and inspect configuration and cache behavior. | UT/ST |
 | Common-source static compilation | Dual use of Inductor `tiling_repr`; consistency of the two GE parameter-acquisition paths | Compare tiling key, BlockDim, and complete TilingData. | ST/E2E |
+| Static GE PGO | Profiling status, timestamps, Top-N static retests, publication, fallback, and replay markers | Inject collection failures in `pgo_collector_st` and check the ticks-per-millisecond conversion and ABI. Verify candidate matching, publication, and profiling outcomes in `test_static_ge_pgo.py`. | UT/ST |
+| Static GE PGO on device | Standard AIV, VNECT ACSQ parent tasks, and search followed by outer profiling replay | Compare PGO replay with AF with PGO disabled on the same device. Check samples, configuration, accuracy, fusion-fragment duration, and step duration. | ST/RDV |
+
+On 910B3, both ACSQ-only profiling and ACSQ profiling with FFTS+ diagnostics collected 20 of 20 valid samples for the same VNECT candidate after the stream-extension ID matching fix. For on-device regression, run AF and PGO for ResNet101, VNECT, and WPOD_Net with `AUTOFUSE_DFX_FLAGS=--autofuse_pgo_topn=10` on the PGO run. Verify that search exits before outer profiling starts.
 
 ### 12.3 Test Commands
 
 ```bash
 sh build.sh -u --module=autofuse_framework -j 8
+sh build.sh -s --module=autofuse_framework -j 8
 sh build.sh -s --module=autofuse_e2e -j 8
 ```
 
@@ -792,7 +860,7 @@ Expected results: UT/ST compile and run successfully; no-solution and ABI-mismat
 
 - On supported chips, ATT-generated TilingData, TilingFunc, and Kernel load and execute through the formal GE/Inductor interfaces in Chapter 8. Upstream disables fusion on unsupported chips.
 - Auto Tiling solves VV fusion only. CV integration uses the basic block supplied by the Cube Tiling module instead of solving it again in ATT.
-- No feasible solution fails early without an invalid Tiling stub. PGO failure or candidate overflow falls back to non-PGO and reports a warning.
+- A graph with no feasible solution fails early and skips invalid Tiling stub generation. Static GE PGO follows Section 5.5 for stage failures, the aggregate profiling outcome, and fallback. Replay launches the runner zero times.
 - For the same input, key/TilingData selection is stable for single Group, multiple Groups, CV/UBFuse, Inductor constant data, and PGO. Cache hits reuse the same layout.
 - GE Runtime disables the Autofuse backend Tiling cache by default; Inductor enables it. Inductor static Kernels and TilingData parameters share one `tiling_repr`.
 - Complete 910B2/950PR hardware verification and GE/TorchAir cross-repository compatibility testing. Other chips and OOTD are delivered through separate version plans.
