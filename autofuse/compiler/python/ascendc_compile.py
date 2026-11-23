@@ -601,12 +601,17 @@ def build_host_include_options(temp_dir):
         f"{ASCEND_PATH}/opp/built-in/op_impl/ai_core/tbe/impl/ascendc/mat_mul_v3",
         "-I",
         f"{ASCEND_PATH}/opp/built-in/op_impl/ai_core/tbe/impl/ops_nn/ascendc/mat_mul_v3",
+        # conv2d 统一使用 act_conv 自定义算子路径（tilingdata/tilingkey 单一来源）
         "-I",
-        f"{ASCEND_PATH}/opp/built-in/op_impl/ai_core/tbe/impl/ascendc/conv2d_v2",
+        f"{ASCEND_PATH}/opp/built-in/op_impl/ai_core/tbe/impl/ops_nn/ascendc/act_conv",
         "-I",
-        f"{ASCEND_PATH}/opp/built-in/op_impl/ai_core/tbe/impl/ops_nn/ascendc/conv2d_v2",
+        f"{ASCEND_PATH}/opp/built-in/op_impl/ai_core/tbe/impl/ops_nn/ascendc/act_conv/conv2d_v2",
+        "-I",
+        f"{ASCEND_PATH}/opp/built-in/op_impl/ai_core/tbe/impl/ops_nn/ascendc/act_conv/common",
         "-I",
         f"{ASCEND_PATH}/opp/built-in/op_impl/ai_core/tbe/impl/ops_nn/ascendc/common",
+        "-I",
+        f"{ASCEND_PATH}/opp/built-in/op_impl/ai_core/tbe/impl/ops_nn/ascendc/common/act",
     ]
     if temp_dir is not None:
         options[0:0] = ["-I", f"{temp_dir}/host"]
@@ -966,6 +971,8 @@ def build_device_compile_command(args: argparse.Namespace, temp_dir, base_device
         f"{ASCEND_PATH}/opp/built-in/op_impl/ai_core/tbe/impl/ops_nn/ascendc/common",
         "-I",
         f"{ASCEND_PATH}/opp/built-in/op_impl/ai_core/tbe/impl/ops_nn/ascendc/common/cmct",
+        "-I",
+        f"{ASCEND_PATH}/opp/built-in/op_impl/ai_core/tbe/impl/ops_nn/ascendc/common/act",
         "-fPIC",
         "-D",
         "HAVE_TILING",

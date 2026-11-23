@@ -9,7 +9,8 @@
  */
 #ifndef CONV2D_INCLUDE_HEADERS_H
 #define CONV2D_INCLUDE_HEADERS_H
-// conv2d
-#include "arch35/conv2d_v2_tiling_def.h"
+// conv2d: tiling data 结构单一来源为 act_conv 自定义算子
+// (-I <impl>/ops_nn/ascendc/act_conv)
+#include "conv/utils/conv2d_v2_tiling_def.h"
 
 #endif  // CONV2D_INCLUDE_HEADERS_H

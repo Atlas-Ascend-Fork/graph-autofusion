@@ -121,6 +121,16 @@ ConvArgsConfig = namedtuple(
     defaults=[False, False, False],
 )
 
+ACT_CONV2D_V2_TILING_OP_TYPE = "ActConv2DV2"
+ACT_EXTEND_CONV2D_TILING_OP_TYPE = "ActExtendConv2D"
+
+
+def _get_conv_tiling_op_type(is_extend_conv2d):
+    """Return the isolated ActConv operator type used for host tiling."""
+    if is_extend_conv2d:
+        return ACT_EXTEND_CONV2D_TILING_OP_TYPE
+    return ACT_CONV2D_V2_TILING_OP_TYPE
+
 
 def get_target_machine(params):
     host_env_cpu = params.get("host_env_cpu", "")
@@ -363,9 +373,12 @@ def generate_cmake_lists(host_ctx, cross_info=None, slim_export=None):
     if is_cube:
         source += f"    {ASCEND_PATH}/opp/built-in/op_impl/ai_core/tbe/impl/ascendc/mat_mul_v3\n"
         source += f"    {ASCEND_PATH}/opp/built-in/op_impl/ai_core/tbe/impl/ops_nn/ascendc/mat_mul_v3\n"
-        source += f"    {ASCEND_PATH}/opp/built-in/op_impl/ai_core/tbe/impl/ascendc/conv2d_v2\n"
-        source += f"    {ASCEND_PATH}/opp/built-in/op_impl/ai_core/tbe/impl/ops_nn/ascendc/conv2d_v2\n"
+        # conv2d tiling 编译统一使用 act_conv 自定义算子路径（tilingdata/tilingkey 单一来源）
+        source += f"    {ASCEND_PATH}/opp/built-in/op_impl/ai_core/tbe/impl/ops_nn/ascendc/act_conv\n"
+        source += f"    {ASCEND_PATH}/opp/built-in/op_impl/ai_core/tbe/impl/ops_nn/ascendc/act_conv/conv2d_v2\n"
+        source += f"    {ASCEND_PATH}/opp/built-in/op_impl/ai_core/tbe/impl/ops_nn/ascendc/act_conv/common\n"
         source += f"    {ASCEND_PATH}/opp/built-in/op_impl/ai_core/tbe/impl/ops_nn/ascendc/common\n"
+        source += f"    {ASCEND_PATH}/opp/built-in/op_impl/ai_core/tbe/impl/ops_nn/ascendc/common/act\n"
     source += "    )\n\n"
 
     with open(host_build_dir + "/CMakeLists.txt", "w") as cmake_file:
@@ -2377,7 +2390,7 @@ def create_conv_tiling_data(compile_context, tiling_info, cube_info, cube_attrib
 
     host_tiling_data = f"""
 // conv2d
-#include "arch35/conv2d_v2_tiling_def.h"
+#include "conv/utils/conv2d_v2_tiling_def.h"
 #include <algorithm>
 const int32_t cube_output_type_size = {cube_output_type_size};
 GET_TILING_DATA_PTR_WITH_STRUCT({struct_name}, tmpTilingData, tmpTilingGM);
@@ -2423,7 +2436,7 @@ GET_TILING_DATA_PTR_WITH_STRUCT({struct_name}, tmpTilingData, tmpTilingGM);
         host_tiling_content_old,
     )
 
-    device_tiling_data = f"""\n#include "arch35/conv2d_v2_tiling_def.h"
+    device_tiling_data = f"""\n#include "conv/utils/conv2d_v2_tiling_def.h"
 #define IS_ENABLE_BIAS {str(has_bias).lower()}
 #define IS_ENABLE_OFFSET_W {str(has_offset_w).lower()}
 #define IS_ENABLE_SCALE0 {str(has_scale0).lower()}
@@ -2517,7 +2530,7 @@ def ascbc_conv_kernel_tiling_pro(
     dtype0 = cube_attributes.get("dtype0", -1)
     dtype1 = cube_attributes.get("dtype1", -1)
 
-    op_type = "ExtendConv2D" if is_extend_conv2d else "Conv2DV2"
+    op_type = _get_conv_tiling_op_type(is_extend_conv2d)
 
     # attr 顺序需与对应 op proto 一致：ExtendConv2D 在 pad_mode 前插入 round_mode。
     conv_attr = []
