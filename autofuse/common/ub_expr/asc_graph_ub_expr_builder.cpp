@@ -23,6 +23,10 @@
 namespace ascir {
 namespace {
 constexpr int64_t kMinTmpBufferSize = 8 * 1024;
+// [边界化] 边界化列分块/逐 tile 调用时单块最大 8192 个元素（fp32 为 32KB），无显式 tmp
+// 的节点复用该兜底缓冲，8KB 会越界导致结果错误。仅在含边界化 IL 的图上提升，其他图
+// 维持 8KB，保证非边界化场景的 UB 估算逐字节不变。
+constexpr int64_t kBoundaryFusionMinTmpBufferSize = 32 * 1024;
 constexpr int64_t kBlockAlignBytes = 32;
 // GetTmpBuffer 会为 tmp 公式套上 v1 repeat cap 壳: Min(size, 255 * 256 + 32)。
 // CV UBFuse 的 epilogue 内联公式按原始需求分配 tmp, host UB 约束须与之一致, 否则
@@ -297,10 +301,74 @@ void AddTmpBuffer(const af::TmpBuffer &tmp_buffer, bool use_raw_tmp_size,
 }
 
 void MergeNodeTmpBuffers(const std::map<int64_t, UbExpr> &node_tmp_buffer_bytes,
-                         std::map<int64_t, ContainerState> &buffer_bytes) {
+                         std::map<int64_t, ContainerState> &buffer_bytes, int64_t min_tmp_buffer_size) {
   for (const auto &item : node_tmp_buffer_bytes) {
-    AppendMax(buffer_bytes[item.first].normal_max, af::sym::Max(item.second, af::Symbol(kMinTmpBufferSize)));
+    AppendMax(buffer_bytes[item.first].normal_max, af::sym::Max(item.second, af::Symbol(min_tmp_buffer_size)));
   }
+}
+
+// [列分块] 把节点的全部输入 producer 加入闭包（已收集则跳过）。
+void CollectProducerClosure(af::AscNode *node, std::set<const af::Node *> &collected) {
+  std::vector<const af::AscNode *> pending;
+  for (const auto &input : node->inputs()) {
+    if (input == nullptr || input->anchor.GetOwnerNode() == nullptr) {
+      continue;
+    }
+    auto *producer = dynamic_cast<af::AscNode *>(input->anchor.GetOwnerNode().get());
+    if (producer != nullptr && collected.insert(producer).second) {
+      pending.push_back(producer);
+    }
+  }
+  while (!pending.empty()) {
+    auto *cur = const_cast<af::AscNode *>(pending.back());
+    pending.pop_back();
+    for (const auto &input : cur->inputs()) {
+      if (input == nullptr || input->anchor.GetOwnerNode() == nullptr) {
+        continue;
+      }
+      auto *producer = dynamic_cast<af::AscNode *>(input->anchor.GetOwnerNode().get());
+      if (producer != nullptr && collected.insert(producer).second) {
+        pending.push_back(producer);
+      }
+    }
+  }
+}
+
+// direct-GM 节点仅在作为 SIMT post-Reduce local target 时计入 UB（其余由 GM 直读）。
+bool IsSimtLocalTargetInGraph(const af::AscGraph &graph, const af::AscNodePtr &node) {
+  for (const auto &candidate : graph.GetAllNodes()) {
+    if (!af::ops::IsOps<af::ascir_op::IndirectLoad>(candidate)) {
+      continue;
+    }
+    const auto local_target = ascgen_utils::indirect_load::GetSimtPostReduceLocalProducer(candidate);
+    if (local_target != nullptr && local_target->GetName() == node->GetName()) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// [列分块] 收集列分块 IL 的输入链节点（input 表/索引走 GM 直读，不驻留 UB）。仅当
+// IndirectLoad 带 column_tile_inner 标记（boundary fusion 列分块场景）时生效，其他图
+// 该集合为空，行为零变化。has_boundary_fusion_il 标记图中是否存在边界化 IL，用于决定
+// 无显式 tmp 节点的兜底缓冲尺寸。
+std::set<const af::Node *> CollectColumnTileInputNodes(const af::AscGraph &graph, bool &has_boundary_fusion_il) {
+  std::set<const af::Node *> column_tile_input_nodes;
+  has_boundary_fusion_il = false;
+  for (const auto &node : graph.GetAllNodes()) {
+    if (node == nullptr || !af::ops::IsOps<af::ascir_op::IndirectLoad>(node)) {
+      continue;
+    }
+    if (ascgen_utils::indirect_load::IsSimtBoundaryFusion(node)) {
+      has_boundary_fusion_il = true;
+    }
+    if (ascgen_utils::indirect_load::GetSimtColumnTileInner(node) <= 0L) {
+      continue;
+    }
+    has_boundary_fusion_il = true;
+    CollectProducerClosure(node.get(), column_tile_input_nodes);
+  }
+  return column_tile_input_nodes;
 }
 
 void AddTensor(const af::AscGraph &graph, const af::AscTensorAttr &attr, std::map<int64_t, ContainerState> &queue_bytes,
@@ -328,25 +396,22 @@ af::Status AscGraphUbExprBuilder::Build(const af::AscGraph &graph, UbExprContext
   FillSizeVars(graph, context);
   FillTileVars(graph, context);
 
+  // [列分块] 收集列分块 IL 的输入链节点（input 表/索引走 GM 直读，不驻留 UB）。
+  // 仅当 IndirectLoad 带 column_tile_inner 标记（boundary fusion 列分块场景）时生效，
+  // 其他图/场景该集合为空，行为零变化。输入链回溯到 Data（GM）为止。
+  bool has_boundary_fusion_il = false;
+  const auto column_tile_input_nodes = CollectColumnTileInputNodes(graph, has_boundary_fusion_il);
+
   std::map<int64_t, ContainerState> queue_bytes;
   std::map<int64_t, ContainerState> buffer_bytes;
   for (const auto &node : graph.GetAllNodes()) {
     GE_ASSERT_NOTNULL(node);
-    if (ascgen_utils::indirect_load::GetTemplateBehavior(node).uses_direct_gm_pipeline) {
-      bool is_simt_local_target = false;
-      for (const auto &candidate : graph.GetAllNodes()) {
-        if (!af::ops::IsOps<af::ascir_op::IndirectLoad>(candidate)) {
-          continue;
-        }
-        const auto local_target = ascgen_utils::indirect_load::GetSimtPostReduceLocalProducer(candidate);
-        is_simt_local_target = local_target != nullptr && local_target->GetName() == node->GetName();
-        if (is_simt_local_target) {
-          break;
-        }
-      }
-      if (!is_simt_local_target) {
-        continue;
-      }
+    if (column_tile_input_nodes.count(node.get()) != 0UL) {
+      continue;  // [列分块] IL 输入链走 GM 直读，不驻留 UB
+    }
+    if (ascgen_utils::indirect_load::GetTemplateBehavior(node).uses_direct_gm_pipeline &&
+        !IsSimtLocalTargetInGraph(graph, node)) {
+      continue;
     }
     for (const auto &output : node->outputs()) {
       AddTensor(graph, output->attr, queue_bytes, buffer_bytes);
@@ -355,7 +420,8 @@ af::Status AscGraphUbExprBuilder::Build(const af::AscGraph &graph, UbExprContext
     for (const auto &tmp_buffer : node->attr.tmp_buffers) {
       AddTmpBuffer(tmp_buffer, use_raw_tmp_size, node_tmp_buffer_bytes);
     }
-    MergeNodeTmpBuffers(node_tmp_buffer_bytes, buffer_bytes);
+    MergeNodeTmpBuffers(node_tmp_buffer_bytes, buffer_bytes,
+                        has_boundary_fusion_il ? kBoundaryFusionMinTmpBufferSize : kMinTmpBufferSize);
   }
 
   for (const auto &item : queue_bytes) {

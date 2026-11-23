@@ -1762,6 +1762,28 @@ std::string codegen::Tiler::GenRestoreInnerActualSize(const ascir::AxisId loop_a
   return ss.str();
 }
 
+// [列分块] from（如 outerT）代表 merged 轴（如 outer={a0, a1T}）的 block 级展开值；merged 的
+// 子轴在 tile 展开后没有独立循环变量，而下游 vectorized 子轴（a1t）的 tail 计算引用 a1T。
+// 于是在 from 定义后按子轴行优先顺序派生：sub = (from / 后序子轴 loop_size 乘积) % sub_loop_size
+void codegen::Tiler::AppendMergedSubAxisDerivations(stringstream &ss, const Axis &from) const {
+  if (from.from.empty()) {
+    return;
+  }
+  const auto merged = this->GetAxis(from.from[0]);
+  if (merged.from.size() <= 1UL) {
+    return;
+  }
+  for (size_t i = 0UL; i < merged.from.size(); ++i) {
+    const auto sub = this->GetAxis(merged.from[i]);
+    af::Expression stride = af::sym::kSymbolOne;
+    for (size_t j = i + 1UL; j < merged.from.size(); ++j) {
+      stride = af::sym::Mul(stride, af::Symbol(this->GetAxis(merged.from[j]).loop_size.Str().c_str()));
+    }
+    ss << "const int64_t " << sub.Str() << " = (" << from.Str() << " / " << stride.Str().get() << ") % "
+       << sub.loop_size.Str() << ";" << std::endl;
+  }
+}
+
 std::string codegen::Tiler::CalcFromAxis(const ascir::AxisId id, bool is_define) const {
   stringstream ss;
   auto axis = this->GetAxis(id);
@@ -1777,6 +1799,11 @@ std::string codegen::Tiler::CalcFromAxis(const ascir::AxisId id, bool is_define)
       ss << (is_define ? from.AsArg() : from.Str()) << " = " << "block_dim_offset" << " + " << axis.Str() << ";"
          << std::endl;
     }
+    // [列分块] 这里的 from（如 outerT）代表 merged 轴（如 outer={a0, a1T}）的 block 级展开值。
+    // merged 的子轴在 tile 展开后没有独立循环变量，而下游 vectorized 子轴（a1t）的 tail
+    // 计算引用 a1T。于是在 from 定义后按子轴行优先顺序派生：
+    //   sub = (from / 后序子轴 loop_size 乘积) % sub_loop_size
+    AppendMergedSubAxisDerivations(ss, from);
     ss << this->CalcFromAxis(from.id, is_define);
   } else if (axis.type == Axis::Type::kAxisTypeMerged) {
     for (size_t i = 0; i < axis.from.size(); i++) {

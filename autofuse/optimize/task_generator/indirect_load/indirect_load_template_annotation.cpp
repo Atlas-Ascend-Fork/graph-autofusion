@@ -269,6 +269,13 @@ af::Status AnnotateSimtSideInputClosure(const af::AscNodePtr &branch_node, const
 
 af::Status AnnotateSimtFanoutBranches(const af::AscNodePtr &indirect_load, const RewrittenGraphAnalysis &analysis,
                                       NodeSet &normal_schedule_nodes) {
+  // [边界化] 输出链已退出标量求值器（gather-only SIMT）：主输出链与扇出分支均不再
+  // 标注 SIMT 求值器角色，整链（含 side-input 闭包）交普通 VF 调度消费——此处若照常
+  // 标注 kSimtInlineTransform/kSimtFanoutBranch 会把降级形态重新拉回标量求值器，
+  // 发射期必然断言失败。
+  if (ascgen_utils::indirect_load::IsSimtBoundaryFusion(indirect_load)) {
+    return af::SUCCESS;
+  }
   const af::AscNodePtr selected_root = analysis.post_reduce == nullptr
                                            ? analysis.output_store
                                            : ascgen_utils::indirect_load::GetSimtPostReduceLocalProducer(indirect_load);

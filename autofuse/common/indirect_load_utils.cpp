@@ -38,6 +38,7 @@ constexpr char kTemplateSyntheticOuterAttr[] = "af.internal.indirect_load.synthe
 constexpr char kImplementationAttr[] = "af.internal.indirect_load.implementation";
 constexpr char kSimdInputInnerAxisHintAttr[] = "af.internal.indirect_load.simd_input_inner_axis";
 constexpr char kSimtGroupMemberAttr[] = "af.internal.indirect_load.simt_group_member";
+constexpr char kSimtBoundaryFusionAttr[] = "af.internal.indirect_load.simt_boundary_fusion";
 bool IsValidLogicalTensorView(const LogicalTensorView &view) {
   return !view.axis_ids.empty() && view.axis_ids.size() == view.sizes.size() &&
          view.axis_ids.size() == view.strides.size();
@@ -272,7 +273,11 @@ TemplateRole GetTemplateRole(const af::AscNodePtr &node) {
 TemplateBehavior GetTemplateBehavior(const af::AscNodePtr &node) {
   const TemplateRole role = GetTemplateRole(node);
   TemplateBehavior behavior = GetBehavior(role);
-  if (role == TemplateRole::kSimtOp && GetPostReduceConsumer(node) != nullptr) {
+  // 边界化与 post-Reduce 共用同一复位机制（发现性驱动的逐 tile 非提升）：value 走 UB
+  // 局部目标后本就非 direct-GM，FindIndirectLoadOpCall(require_direct_gm) 不可发现，
+  // 循环体内逐 tile 发射；skips_ub_lifecycle 同步清零使通用 AllocOutputs 接管 value
+  // tensor 的声明（reg 侧显式 TensorAlloc 跳过，防重定义）。
+  if (role == TemplateRole::kSimtOp && (GetPostReduceConsumer(node) != nullptr || IsSimtBoundaryFusion(node))) {
     behavior = {};
     behavior.excludes_tiling_group = true;
   }
@@ -1053,11 +1058,16 @@ bool TryAccumulateStaticOffset(const af::Expression &size_expr, const af::Expres
 }
 
 bool TryGetStaticSpans(const LogicalTensorView &input, const LogicalTensorView &output, size_t axis,
-                       SimtPolicyMetadata &policy) {
+                       int64_t column_tile_inner, SimtPolicyMetadata &policy) {
   uint64_t inner = 1U;
-  for (size_t i = axis + 1U; i < output.sizes.size(); ++i) {
-    if (!TryBuildStaticSpan(output.sizes[i], inner, inner)) {
-      return false;
+  if (column_tile_inner > 0L) {
+    // [列分块] 边界化列分块：单次调用 inner 跨度是 tile 内列块而非整行维乘积。
+    inner = static_cast<uint64_t>(column_tile_inner);
+  } else {
+    for (size_t i = axis + 1U; i < output.sizes.size(); ++i) {
+      if (!TryBuildStaticSpan(output.sizes[i], inner, inner)) {
+        return false;
+      }
     }
   }
   int64_t input_stride = 0L;
@@ -1239,27 +1249,23 @@ void AppendRuntimeParams(std::vector<af::Expression> &target, const std::vector<
   target.insert(target.end(), source.begin(), source.end());
 }
 
-af::Status BuildSimtPolicyMetadata(const TemplateLogicalView &logical_view, const NodePath &index_nodes, size_t axis,
-                                   bool embedding_structured, bool &mixed_index_views, bool store_targets_fit_uint32,
-                                   SimtPolicyMetadata &metadata, LogicalTensorView &policy_index_view) {
-  const size_t rank = logical_view.input.sizes.size();
-  GE_ASSERT_TRUE(rank < 64UL, "IndirectLoad SIMT rank must be smaller than 64.");
-  LogicalTensorView input = logical_view.input;
-  LogicalTensorView index = logical_view.index;
-  const auto &output = logical_view.output;
-  const bool index_broadcast_strided = ApplySimtIndexPhysicalStrides(index_nodes, index, mixed_index_views);
-  policy_index_view = index;
-  const bool strided = logical_view.input.kind != IndirectLoadLayoutKind::kDense ||
-                       logical_view.index.kind != IndirectLoadLayoutKind::kDense || index_broadcast_strided;
+// [列分块] 单次 SIMT 调用的 inner 跨度：列分块场景为 tile 内列块（column_tile_inner），
+// 否则为 gather 轴之后各维尺寸的乘积。
+af::Expression BuildSimtInnerSpan(const LogicalTensorView &output, size_t axis, int64_t column_tile_inner) {
+  if (column_tile_inner > 0L) {
+    return af::Symbol(column_tile_inner);
+  }
   af::Expression inner_span = af::sym::kSymbolOne;
   for (size_t i = axis + 1U; i < output.sizes.size(); ++i) {
     inner_span = af::sym::Mul(inner_span, output.sizes[i]);
   }
-  const af::Expression output_axis_span = af::sym::Mul(output.sizes[axis], inner_span);
-  const af::Expression input_axis_stride = input.strides[axis];
-  const af::Expression input_axis_span = af::sym::Mul(input.sizes[axis], input_axis_stride);
-  const bool structured = IsStructuredSimt(input, index, output, axis);
-  const bool static_spans = TryGetStaticSpans(input, output, axis, metadata);
+  return inner_span;
+}
+
+// [SIMT policy] 选择地址策略与 stride mask（embedding / strided / structured 三档）。
+void SelectSimtAddressPolicy(bool embedding_structured, bool strided, bool structured, bool static_spans, size_t rank,
+                             size_t axis, const LogicalTensorView &input, const LogicalTensorView &index,
+                             SimtPolicyMetadata &metadata) {
   if (embedding_structured) {
     metadata.policy = SimtAddressPolicy::kEmbedding;
     metadata.input_stride_mask = BuildNonZeroStrideMask(input.strides);
@@ -1268,22 +1274,33 @@ af::Status BuildSimtPolicyMetadata(const TemplateLogicalView &logical_view, cons
       metadata.input_stride_mask = 0U;
       metadata.index_stride_mask = 0U;
     }
-  } else if (strided) {
+    return;
+  }
+  if (strided) {
     metadata.policy = SimtAddressPolicy::kStrided;
     metadata.input_stride_mask = BuildNonZeroStrideMask(input.strides);
     metadata.index_stride_mask = BuildNonZeroStrideMask(index.strides);
-  } else if (structured) {
-    const bool static_power_of_two =
-        static_spans && IsPowerOfTwo(metadata.inner_span) && IsPowerOfTwo(metadata.output_axis_span);
-    const bool static_inner = static_spans && IsPowerOfTwo(metadata.inner_span);
-    const bool magic_divisors_supported =
-        !static_spans || (metadata.inner_span <= static_cast<uint64_t>(INT64_MAX) &&
-                          metadata.output_axis_span <= static_cast<uint64_t>(INT64_MAX));
-    metadata.policy = static_power_of_two        ? SimtAddressPolicy::kStaticPowerOfTwo
-                      : static_inner             ? SimtAddressPolicy::kStaticInner
-                      : magic_divisors_supported ? SimtAddressPolicy::kStructuredMagic
-                                                 : SimtAddressPolicy::kRecursive;
+    return;
   }
+  if (!structured) {
+    return;
+  }
+  const bool static_power_of_two =
+      static_spans && IsPowerOfTwo(metadata.inner_span) && IsPowerOfTwo(metadata.output_axis_span);
+  const bool static_inner = static_spans && IsPowerOfTwo(metadata.inner_span);
+  const bool magic_divisors_supported =
+      !static_spans || (metadata.inner_span <= static_cast<uint64_t>(INT64_MAX) &&
+                        metadata.output_axis_span <= static_cast<uint64_t>(INT64_MAX));
+  metadata.policy = static_power_of_two        ? SimtAddressPolicy::kStaticPowerOfTwo
+                    : static_inner             ? SimtAddressPolicy::kStaticInner
+                    : magic_divisors_supported ? SimtAddressPolicy::kStructuredMagic
+                                               : SimtAddressPolicy::kRecursive;
+}
+
+// [SIMT policy] 决定 offset 宽度是否可收紧到 uint32。
+void SelectSimtOffsetWidth(const LogicalTensorView &input, const LogicalTensorView &index,
+                           const LogicalTensorView &output, bool store_targets_fit_uint32, bool static_spans,
+                           SimtPolicyMetadata &metadata) {
   const bool structured_magic_supported = metadata.policy != SimtAddressPolicy::kStructuredMagic ||
                                           (static_spans && metadata.inner_span <= static_cast<uint64_t>(INT32_MAX) &&
                                            metadata.output_axis_span <= static_cast<uint64_t>(INT32_MAX));
@@ -1297,6 +1314,13 @@ af::Status BuildSimtPolicyMetadata(const TemplateLogicalView &logical_view, cons
       static_inner_magic_supported && general_magic_supported) {
     metadata.offset_width = SimtOffsetWidth::kUint32;
   }
+}
+
+// [SIMT policy] 按策略追加运行时参数（尺寸/stride 序列）。
+void AppendSimtRuntimeParams(const LogicalTensorView &input, const LogicalTensorView &index,
+                             const LogicalTensorView &output, const af::Expression &inner_span,
+                             const af::Expression &output_axis_span, const af::Expression &input_axis_stride,
+                             const af::Expression &input_axis_span, SimtPolicyMetadata &metadata) {
   switch (metadata.policy) {
     case SimtAddressPolicy::kStaticPowerOfTwo:
       break;
@@ -1327,6 +1351,31 @@ af::Status BuildSimtPolicyMetadata(const TemplateLogicalView &logical_view, cons
       AppendRuntimeParams(metadata.runtime_params, index.strides);
       break;
   }
+}
+
+af::Status BuildSimtPolicyMetadata(const TemplateLogicalView &logical_view, const NodePath &index_nodes, size_t axis,
+                                   bool embedding_structured, bool &mixed_index_views, bool store_targets_fit_uint32,
+                                   int64_t column_tile_inner, SimtPolicyMetadata &metadata,
+                                   LogicalTensorView &policy_index_view) {
+  const size_t rank = logical_view.input.sizes.size();
+  GE_ASSERT_TRUE(rank < 64UL, "IndirectLoad SIMT rank must be smaller than 64.");
+  LogicalTensorView input = logical_view.input;
+  LogicalTensorView index = logical_view.index;
+  const auto &output = logical_view.output;
+  const bool index_broadcast_strided = ApplySimtIndexPhysicalStrides(index_nodes, index, mixed_index_views);
+  policy_index_view = index;
+  const bool strided = logical_view.input.kind != IndirectLoadLayoutKind::kDense ||
+                       logical_view.index.kind != IndirectLoadLayoutKind::kDense || index_broadcast_strided;
+  af::Expression inner_span = BuildSimtInnerSpan(output, axis, column_tile_inner);
+  const af::Expression output_axis_span = af::sym::Mul(output.sizes[axis], inner_span);
+  const af::Expression input_axis_stride = input.strides[axis];
+  const af::Expression input_axis_span = af::sym::Mul(input.sizes[axis], input_axis_stride);
+  const bool structured = IsStructuredSimt(input, index, output, axis);
+  const bool static_spans = TryGetStaticSpans(input, output, axis, column_tile_inner, metadata);
+  SelectSimtAddressPolicy(embedding_structured, strided, structured, static_spans, rank, axis, input, index, metadata);
+  SelectSimtOffsetWidth(input, index, output, store_targets_fit_uint32, static_spans, metadata);
+  AppendSimtRuntimeParams(input, index, output, inner_span, output_axis_span, input_axis_stride, input_axis_span,
+                          metadata);
   return af::SUCCESS;
 }
 
@@ -1369,56 +1418,12 @@ af::Status ValidateSimtOutputPlan(const SimtLoweringMetadata &metadata) {
   return af::SUCCESS;
 }
 
-af::Status BuildSimtLoweringMetadata(const af::AscNodePtr &indirect_load, IndirectLoadLoweringMetadata &metadata) {
-  NodePath graph_nodes;
-  GE_ASSERT_SUCCESS(GetStableGraphNodes(indirect_load, graph_nodes));
-  auto &simt = metadata.simt;
-  // 多 gather 组员：SIMT 计划仅含本路 index 链与 input 读取；共享归并/输出链不进入计划
-  // （普通向量代码在全部组员 invocation 之后执行），value 直接写 UB 局部目标。
-  const bool is_group_member = IsSimtGroupMember(indirect_load);
-  const af::AscNodePtr post_reduce = is_group_member ? nullptr : GetPostReduceConsumer(indirect_load);
-  simt.has_post_reduce = post_reduce != nullptr;
-  const auto inputs = indirect_load->inputs();
-  GE_ASSERT_TRUE(inputs.size() == 2UL, "Invalid IndirectLoad SIMT input number:%zu.", inputs.size());
-  simt.index_result_tensor_id = inputs[kIndexTensorIndex]->attr.mem.tensor_id;
-  simt.index_dtype = inputs[kIndexTensorIndex]->attr.dtype;
-  simt.value_tensor_id = indirect_load->outputs()[0]->attr.mem.tensor_id;
-
-  const auto index_root = GetInputProducer(indirect_load, kIndexTensorIndex);
-  GE_ASSERT_NOTNULL(index_root, "IndirectLoad SIMT index input has no producer.");
-  NodeSet index_set;
-  GE_ASSERT_SUCCESS(CollectSimtLoweringBackwardNodes(index_root, indirect_load, index_set));
-  NodeSet output_set;
-  af::AscNodePtr output_root;
-  if (simt.has_post_reduce) {
-    output_root = GetSimtPostReduceLocalProducer(indirect_load);
-    GE_ASSERT_NOTNULL(output_root, "IndirectLoad post Reduce input has no producer.");
-    GE_ASSERT_SUCCESS(CollectSimtLoweringBackwardNodes(output_root, indirect_load, output_set));
-  }
-
-  std::vector<SimtOutputChainBuild> chain_builds;
-  if (is_group_member) {
-    // 组员：仅收 index 生产链尾部的外部 store 链（per-IL，无共享）；不收集 IL 前向输出链。
-    GE_ASSERT_SUCCESS(
-        CollectSimtIndexChainStoreBuilds(graph_nodes, index_root, simt.index_result_tensor_id, chain_builds));
-  } else {
-    GE_ASSERT_SUCCESS(CollectSimtOutputChainBuilds(graph_nodes, indirect_load, chain_builds));
-    GE_ASSERT_SUCCESS(
-        CollectSimtIndexChainStoreBuilds(graph_nodes, index_root, simt.index_result_tensor_id, chain_builds));
-  }
-  std::vector<bool> keep_chain(chain_builds.size(), true);
-  for (size_t chain_index = 0UL; chain_index < chain_builds.size(); ++chain_index) {
-    const bool contains_reduce =
-        simt.has_post_reduce && std::any_of(chain_builds[chain_index].nodes.begin(),
-                                            chain_builds[chain_index].nodes.end(), [](const af::AscNode *node) {
-                                              return node != nullptr &&
-                                                     node->attr.api.compute_type == af::ComputeType::kComputeReduce;
-                                            });
-    keep_chain[chain_index] = !contains_reduce;
-  }
-
-  NodePath index_nodes;
-  NodePath output_load_nodes;
+// 分类 SIMT lowering 节点：index 链、输出区域/输出链，收集 GM 直接边界张量，并把保留的
+// 输出链移入 metadata（与调用方后续按 index_nodes/output_load_nodes 播种的顺序一致）。
+af::Status ClassifySimtLoweringNodes(const NodePath &graph_nodes, const NodeSet &index_set, const NodeSet &output_set,
+                                     std::vector<SimtOutputChainBuild> &chain_builds,
+                                     const std::vector<bool> &keep_chain, NodePath &index_nodes,
+                                     NodePath &output_load_nodes, SimtLoweringMetadata &simt) {
   std::unordered_set<ascir::TensorId> seen_gm_tensors;
   for (const af::AscNodePtr &node : graph_nodes) {
     const bool in_index = index_set.count(node.get()) != 0UL;
@@ -1453,6 +1458,59 @@ af::Status BuildSimtLoweringMetadata(const af::AscNodePtr &indirect_load, Indire
       simt.output_chains.emplace_back(std::move(chain_builds[chain_index].metadata));
     }
   }
+  return af::SUCCESS;
+}
+
+namespace {
+// [SIMT lowering] 节点集合与输出链构建的中间状态。
+struct SimtLoweringSets {
+  NodeSet index_set;
+  NodeSet output_set;
+  af::AscNodePtr output_root;
+  std::vector<SimtOutputChainBuild> chain_builds;
+  std::vector<bool> keep_chain;
+  NodePath index_nodes;
+  NodePath output_load_nodes;
+};
+
+// [SIMT lowering] 收集 index/输出链节点集合与待保留的输出链。
+af::Status CollectSimtLoweringSets(const af::AscNodePtr &indirect_load, const NodePath &graph_nodes,
+                                   bool is_local_target_only, SimtLoweringMetadata &simt, SimtLoweringSets &sets) {
+  const auto index_root = GetInputProducer(indirect_load, kIndexTensorIndex);
+  GE_ASSERT_NOTNULL(index_root, "IndirectLoad SIMT index input has no producer.");
+  GE_ASSERT_SUCCESS(CollectSimtLoweringBackwardNodes(index_root, indirect_load, sets.index_set));
+  if (simt.has_post_reduce) {
+    sets.output_root = GetSimtPostReduceLocalProducer(indirect_load);
+    GE_ASSERT_NOTNULL(sets.output_root, "IndirectLoad post Reduce input has no producer.");
+    GE_ASSERT_SUCCESS(CollectSimtLoweringBackwardNodes(sets.output_root, indirect_load, sets.output_set));
+  }
+
+  if (is_local_target_only) {
+    // 组员/边界化：仅收 index 生产链尾部的外部 store 链（per-IL，无共享）；不收集 IL
+    // 前向输出链（组员为共享链不进计划；边界化为输出链交普通 VF 代码）。
+    GE_ASSERT_SUCCESS(
+        CollectSimtIndexChainStoreBuilds(graph_nodes, index_root, simt.index_result_tensor_id, sets.chain_builds));
+  } else {
+    GE_ASSERT_SUCCESS(CollectSimtOutputChainBuilds(graph_nodes, indirect_load, sets.chain_builds));
+    GE_ASSERT_SUCCESS(
+        CollectSimtIndexChainStoreBuilds(graph_nodes, index_root, simt.index_result_tensor_id, sets.chain_builds));
+  }
+  sets.keep_chain.assign(sets.chain_builds.size(), true);
+  for (size_t chain_index = 0UL; chain_index < sets.chain_builds.size(); ++chain_index) {
+    const bool contains_reduce =
+        simt.has_post_reduce && std::any_of(sets.chain_builds[chain_index].nodes.begin(),
+                                            sets.chain_builds[chain_index].nodes.end(), [](const af::AscNode *node) {
+                                              return node != nullptr &&
+                                                     node->attr.api.compute_type == af::ComputeType::kComputeReduce;
+                                            });
+    sets.keep_chain[chain_index] = !contains_reduce;
+  }
+  return af::SUCCESS;
+}
+
+// [SIMT lowering] 依据 post-Reduce / 组员/边界化形态确定输出 tensor 与输出链。
+af::Status BuildSimtOutputChainMetadata(const af::AscNodePtr &indirect_load, const af::AscNodePtr &output_root,
+                                        bool is_local_target_only, SimtLoweringMetadata &simt) {
   if (simt.has_post_reduce) {
     GE_ASSERT_TRUE(!output_root->outputs().empty(), "IndirectLoad post Reduce input producer has no output.");
     simt.output_result_tensor_id = output_root->outputs()[0]->attr.mem.tensor_id;
@@ -1465,9 +1523,12 @@ af::Status BuildSimtLoweringMetadata(const af::AscNodePtr &indirect_load, Indire
                                   {},
                                   {},
                                   af::ops::Zero});
-  } else if (is_group_member) {
-    // 组员输出 = value 直写 UB 局部目标：空变换链，evaluator 的 value 种子直接落 target
-    // （与 post Reduce 合成链同构，见 GenerateSimtOutputsEvaluator 的 values[value_tensor_id]）。
+    return af::SUCCESS;
+  }
+  if (is_local_target_only) {
+    // 组员/边界化输出 = value 直写 UB 局部目标：空变换链，evaluator 的 value 种子直接落
+    // target（与 post Reduce 合成链同构，见 GenerateSimtOutputsEvaluator 的
+    // values[value_tensor_id]）。
     simt.output_result_tensor_id = simt.value_tensor_id;
     simt.output_dtype = indirect_load->outputs()[0]->attr.dtype;
     simt.output_chains.push_back({std::vector<std::string>{},
@@ -1478,22 +1539,26 @@ af::Status BuildSimtLoweringMetadata(const af::AscNodePtr &indirect_load, Indire
                                   {},
                                   {},
                                   af::ops::Zero});
-  } else {
-    GE_ASSERT_TRUE(!simt.output_chains.empty(), "IndirectLoad SIMT output chains are empty.");
-    if (simt.output_chains.size() == 1UL) {
-      simt.output_result_tensor_id = simt.output_chains[0].result_tensor_id;
-      simt.output_node_names = simt.output_chains[0].node_names;
-    }
-    simt.output_dtype = simt.output_chains.front().dtype;
+    return af::SUCCESS;
   }
+  GE_ASSERT_TRUE(!simt.output_chains.empty(), "IndirectLoad SIMT output chains are empty.");
+  if (simt.output_chains.size() == 1UL) {
+    simt.output_result_tensor_id = simt.output_chains[0].result_tensor_id;
+    simt.output_node_names = simt.output_chains[0].node_names;
+  }
+  simt.output_dtype = simt.output_chains.front().dtype;
+  return af::SUCCESS;
+}
 
-  NodePath index_load_nodes;
+// [SIMT lowering] 计算每个输出侧 GM load 的地址来源（zero-offset / index-offset / output-offset）。
+af::Status CollectSimtLoadAddressSources(const NodePath &index_nodes, const NodePath &output_load_nodes,
+                                         NodePath &index_load_nodes,
+                                         std::unordered_map<std::string, SimtLoadAddressSource> &output_sources) {
   for (const auto &node : index_nodes) {
     if (IsSimtDirectGmBoundary(node)) {
       index_load_nodes.emplace_back(node);
     }
   }
-  std::unordered_map<std::string, SimtLoadAddressSource> output_sources;
   for (const auto &node : output_load_nodes) {
     auto source = SimtLoadAddressSource::kOutputOffset;
     if (SimtLoadUsesZeroOffset(node)) {
@@ -1505,13 +1570,16 @@ af::Status BuildSimtLoweringMetadata(const af::AscNodePtr &indirect_load, Indire
     }
     output_sources.emplace(node->GetName(), source);
   }
+  return af::SUCCESS;
+}
 
-  bool mixed_index_views = false;
-  const bool store_targets_fit_uint32 = StoreTargetsFitUint32(simt.output_chains, metadata.logical_view.output);
-  LogicalTensorView policy_index_view;
-  GE_ASSERT_SUCCESS(BuildSimtPolicyMetadata(metadata.logical_view, index_nodes, static_cast<size_t>(metadata.axis),
-                                            metadata.access_info.can_use_simt_structured, mixed_index_views,
-                                            store_targets_fit_uint32, simt.policy, policy_index_view));
+// [SIMT lowering] index/output 侧 GM load 的地址元数据（物理视图 + 逻辑偏移策略）。
+void AppendSimtLoadMetadata(SimtLoweringMetadata &simt, const NodePath &index_load_nodes,
+                            const NodePath &output_load_nodes,
+                            const std::unordered_map<std::string, SimtLoadAddressSource> &output_sources,
+                            const LogicalTensorView &policy_index_view, const LogicalTensorView &logical_output,
+                            bool mixed_index_views) {
+  const bool policy_index_dense = IsDense(policy_index_view);
   for (const auto &node : index_load_nodes) {
     const LogicalTensorView current_view = GetNodeOutputView(node);
     SimtLoadMetadata load_meta;
@@ -1521,18 +1589,11 @@ af::Status BuildSimtLoweringMetadata(const af::AscNodePtr &indirect_load, Indire
     // 唯一 index Load 通常可直接使用按其物理 view 计算的 index_offset。对于 dense policy
     // 下的非 dense 物理 view，或多个 index Load，仍必须按各自 view 做 logical offset
     // 坐标折叠，避免丢失行 stride 或将主 Load 的偏移用于 side-input。
-    const bool policy_index_dense = IsDense(policy_index_view);
-    load_meta.use_logical_offset =
-        index_load_nodes.size() != 1UL || mixed_index_views ||
-        (policy_index_dense && !IsDenseEquivalentView(current_view, metadata.logical_view.output));
+    load_meta.use_logical_offset = index_load_nodes.size() != 1UL || mixed_index_views ||
+                                   (policy_index_dense && !IsDenseEquivalentView(current_view, logical_output));
     load_meta.physical_view = current_view;
-    // [行级广播 side-input] 尾轴零贡献（stride==0 且 size==1）的广播形态：记原始
-    // 视图（此时已过 NormalizeTemplateAxes 的轴改写，若视图已符号化则再取一次不可
-    // 恢复——改写前的语义在 CompletePreservedVectorizedViews 之前才完整，但该函数
-    // 在 metadata 构建前运行；此处能取到的是改写后视图，行级广播判定按其结构特征
-    // （尾轴零贡献 + 其余轴稠密）识别，坐标重建不依赖具体尺寸值——见 codegen 兜底）。
-    // 改写后视图无法可靠判定（split 破坏结构特征）——读 generator 在视图改写前
-    // 写入的节点 attr 标记。
+    // [行级广播 side-input] 读 generator 在视图改写前写入的节点 attr 标记（改写后视图
+    // 的 split 会破坏结构特征，无法可靠判定）。
     load_meta.is_row_broadcast = ascir::IsRowBroadcastLoad(*node);
     load_meta.original_view = load_meta.physical_view;
     simt.index_loads.push_back(std::move(load_meta));
@@ -1547,11 +1608,54 @@ af::Status BuildSimtLoweringMetadata(const af::AscNodePtr &indirect_load, Indire
     output_load_meta.use_logical_offset = true;
     output_load_meta.physical_view = GetNodeOutputView(node);
     output_load_meta.original_view = output_load_meta.physical_view;
-    // [行级广播] 输出侧 GM load 同样读 attr 标记（SIMT body 内联融合算子的
-    // side-input 归属 output evaluator，报错栈走 simt_output_loads_）。
+    // [行级广播] 输出侧 GM load 同样读 attr 标记（SIMT body 内联融合算子的 side-input
+    // 归属 output evaluator，报错栈走 simt_output_loads_）。
     output_load_meta.is_row_broadcast = ascir::IsRowBroadcastLoad(*node);
     simt.output_loads.push_back(std::move(output_load_meta));
   }
+}
+}  // namespace
+
+af::Status BuildSimtLoweringMetadata(const af::AscNodePtr &indirect_load, IndirectLoadLoweringMetadata &metadata) {
+  NodePath graph_nodes;
+  GE_ASSERT_SUCCESS(GetStableGraphNodes(indirect_load, graph_nodes));
+  auto &simt = metadata.simt;
+  // 多 gather 组员：SIMT 计划仅含本路 index 链与 input 读取；共享归并/输出链不进入计划
+  // （普通向量代码在全部组员 invocation 之后执行），value 直接写 UB 局部目标。
+  // 单 gather 边界化（输出链含不可标量发射算子）与组员同构：输出链不进入计划（普通
+  // 向量代码在同一循环迭代内消费），value 直接写 UB 局部目标。两类形态的 post Reduce
+  // 消费者均不参与 SIMT 计划，post_reduce 置空。
+  const bool is_group_member = IsSimtGroupMember(indirect_load);
+  const bool is_local_target_only = is_group_member || IsSimtBoundaryFusion(indirect_load);
+  const af::AscNodePtr post_reduce = is_local_target_only ? nullptr : GetPostReduceConsumer(indirect_load);
+  simt.has_post_reduce = post_reduce != nullptr;
+  const auto inputs = indirect_load->inputs();
+  GE_ASSERT_TRUE(inputs.size() == 2UL, "Invalid IndirectLoad SIMT input number:%zu.", inputs.size());
+  simt.index_result_tensor_id = inputs[kIndexTensorIndex]->attr.mem.tensor_id;
+  simt.index_dtype = inputs[kIndexTensorIndex]->attr.dtype;
+  simt.value_tensor_id = indirect_load->outputs()[0]->attr.mem.tensor_id;
+
+  SimtLoweringSets sets;
+  GE_ASSERT_SUCCESS(CollectSimtLoweringSets(indirect_load, graph_nodes, is_local_target_only, simt, sets));
+  GE_ASSERT_SUCCESS(ClassifySimtLoweringNodes(graph_nodes, sets.index_set, sets.output_set, sets.chain_builds,
+                                              sets.keep_chain, sets.index_nodes, sets.output_load_nodes, simt));
+  GE_ASSERT_SUCCESS(BuildSimtOutputChainMetadata(indirect_load, sets.output_root, is_local_target_only, simt));
+
+  NodePath index_load_nodes;
+  std::unordered_map<std::string, SimtLoadAddressSource> output_sources;
+  GE_ASSERT_SUCCESS(
+      CollectSimtLoadAddressSources(sets.index_nodes, sets.output_load_nodes, index_load_nodes, output_sources));
+
+  bool mixed_index_views = false;
+  const bool store_targets_fit_uint32 = StoreTargetsFitUint32(simt.output_chains, metadata.logical_view.output);
+  LogicalTensorView policy_index_view;
+  const int64_t column_tile_inner = GetSimtColumnTileInner(indirect_load);
+  GE_ASSERT_SUCCESS(BuildSimtPolicyMetadata(metadata.logical_view, sets.index_nodes, static_cast<size_t>(metadata.axis),
+                                            metadata.access_info.can_use_simt_structured, mixed_index_views,
+                                            store_targets_fit_uint32, column_tile_inner, simt.policy,
+                                            policy_index_view));
+  AppendSimtLoadMetadata(simt, index_load_nodes, sets.output_load_nodes, output_sources, policy_index_view,
+                         metadata.logical_view.output, mixed_index_views);
   return af::SUCCESS;
 }
 }  // namespace
@@ -1930,6 +2034,34 @@ bool IsSimtGroupMember(const af::AscNodePtr &node) {
     return false;
   }
   return node->GetOpDesc()->TryGetExtAttr(kSimtGroupMemberAttr, false);
+}
+
+af::Status SetSimtBoundaryFusion(const af::AscNodePtr &node, bool enabled) {
+  GE_ASSERT_NOTNULL(node);
+  const auto op_desc = node->GetOpDesc();
+  GE_ASSERT_NOTNULL(op_desc);
+  GE_ASSERT_TRUE(op_desc->SetExtAttr(kSimtBoundaryFusionAttr, enabled),
+                 "Set IndirectLoad SIMT boundary fusion flag failed, node = %s", node->GetNamePtr());
+  return af::SUCCESS;
+}
+
+bool IsSimtBoundaryFusion(const af::AscNodePtr &node) {
+  if (node == nullptr || node->GetOpDesc() == nullptr) {
+    return false;
+  }
+  return node->GetOpDesc()->TryGetExtAttr(kSimtBoundaryFusionAttr, false);
+}
+
+// [列分块] 读取边界化列分块的单次调用 inner 跨度（未标记或非法时返回 0）。
+int64_t GetSimtColumnTileInner(const af::AscNodePtr &node) {
+  if (node == nullptr || node->GetOpDesc() == nullptr) {
+    return 0L;
+  }
+  int64_t column_tile_inner = 0L;
+  if (!af::AttrUtils::GetInt(node->GetOpDesc(), "af.internal.indirect_load.column_tile_inner", column_tile_inner)) {
+    return 0L;
+  }
+  return column_tile_inner > 0L ? column_tile_inner : 0L;
 }
 
 constexpr char kSimtFusedPrimaryAttr[] = "af.internal.indirect_load.simt_fused_primary";

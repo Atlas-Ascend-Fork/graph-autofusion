@@ -269,9 +269,15 @@ af::Status ApplySkGraphPass(af::AscGraph &graph, const af::AscNodePtr &indirect_
   const size_t axis_index = GetIndirectLoadAxisIndex(indirect_load);
   GE_ASSERT_TRUE(axis_index != kIndirectLoadInvalidAxisIndex, "IndirectLoad axis index of node[%s] is invalid.",
                  indirect_load->GetNamePtr());
+  // axis=0 时轴前缀为空，boundary=0 会让 BuildAxisViewByBoundary 生成合成单轴
+  // indirect_load_single_outer(size=1)，IL 的输入/输出整体落入 inner 全量视图，
+  // 静态全量驻留估算超平台 UB，SK 被 StaticUbTemplateFilter 淘汰。
+  // 与 SK 分段 SIMT 一致（RestoreSkTemplateAxes 注释），退化时改用输出 rank：
+  // outer=完整输出视图，调度期按 UB 求解 tile。
+  const size_t sk_boundary = axis_index == 0UL ? indirect_load->outputs()[0]->attr.axis.size() : axis_index;
   ascir::AxisId input_inner_axis = af::kIdNone;
   GE_ASSERT_SUCCESS(BuildSkInputInnerAxis(graph, indirect_load, axis_index, input_inner_axis));
-  GE_ASSERT_SUCCESS(NormalizeAxesForTemplate(graph, indirect_load, axis_index, ascir::TemplateId::kIndirectLoadSK,
+  GE_ASSERT_SUCCESS(NormalizeAxesForTemplate(graph, indirect_load, sk_boundary, ascir::TemplateId::kIndirectLoadSK,
                                              input_inner_axis, af::kIdNone));
   const auto input_boundary = ascgen_utils::indirect_load::GetInputProducer(indirect_load, 0UL);
   GE_ASSERT_TRUE(input_boundary != nullptr && af::ops::IsOps<af::ascir_op::Load>(input_boundary),

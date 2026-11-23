@@ -185,6 +185,34 @@ TEST_F(CommonUtilsTest, TemplateSemanticSimtPolicyMappingIsShared) {
   }
 }
 
+// [边界化语义] 同一 policy/offset 下，全链折叠形态与边界化（gather-only）形态必须是不同身份，
+// 否则 ATT/TopN/cache 会把两种实现的成本与复用混在一起。
+TEST_F(CommonUtilsTest, SimtSemanticFeatureDistinguishesBoundaryFusion) {
+  using Policy = indirect_load::SimtAddressPolicy;
+  const std::string folded = BuildSimtSemanticFeature(Policy::kStructuredMagic, true, false);
+  const std::string boundary = BuildSimtSemanticFeature(Policy::kStructuredMagic, true, true);
+  EXPECT_EQ(folded, "SIMT/StructuredMagic/Offset32");
+  EXPECT_EQ(boundary, "SIMT/StructuredMagic/Offset32/GatherOnly");
+  EXPECT_NE(folded, boundary);
+  EXPECT_EQ(BuildSimtSemanticFeature(Policy::kStrided, false, true), "SIMT/Strided/Offset64/GatherOnly");
+  EXPECT_EQ(BuildSimtSemanticFeature(static_cast<Policy>(-1), true, false), "SIMT/Adaptive/Offset32");
+}
+
+// [边界化语义·兜底采集点] 无 CodegenApiParam 时按节点 metadata 生成名称，flag 置位/清除
+// 必须让名称可区分且回落干净（不残留 GatherOnly）。
+TEST_F(CommonUtilsTest, TemplateSemanticNameMarksBoundaryFusionAndClears) {
+  af::AscGraph graph("indirect_load_boundary_semantic_graph");
+  af::ascir_op::IndirectLoad indirect_load("indirect_load");
+  const auto node = graph.AddNode(indirect_load);
+  ASSERT_NE(node, nullptr);
+  ASSERT_EQ(ascir::SetTemplateId(node, ascir::TemplateId::kIndirectLoadSimt), af::SUCCESS);
+  EXPECT_EQ(GetTemplateSemanticName(graph), "IndirectLoad/SIMT/Adaptive");
+  ASSERT_EQ(indirect_load::SetSimtBoundaryFusion(node, true), af::SUCCESS);
+  EXPECT_EQ(GetTemplateSemanticName(graph), "IndirectLoad/SIMT/Adaptive/GatherOnly");
+  ASSERT_EQ(indirect_load::SetSimtBoundaryFusion(node, false), af::SUCCESS);
+  EXPECT_EQ(GetTemplateSemanticName(graph), "IndirectLoad/SIMT/Adaptive");
+}
+
 TEST_F(CommonUtilsTest, TemplateSemanticNameNormalizesAtMetadataBoundary) {
   const std::vector<std::pair<std::string, std::string>> cases = {
       {"Reduce/Common/Norm/AR/NoReuseSrc+NDDMA.Cast", "Reduce/Common@Norm#AR|NoReuseSrc+NDDMA.Cast"},

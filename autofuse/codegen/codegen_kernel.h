@@ -329,6 +329,8 @@ class Tiler : public Code {
   // 见GenAxisSizeNew的IsInner分支头部定义与GenInnerLoopSizeAndActualSize循环内赋值）
   std::string GenRestoreInnerActualSize(const ascir::AxisId loop_axis) const;
   std::string CalcFromAxis(const ascir::AxisId id, bool is_define = true) const;
+  // [列分块] 为 merged 轴的 block 级展开值派生各子轴的块内索引。
+  void AppendMergedSubAxisDerivations(std::stringstream &ss, const Axis &from) const;
 
  private:
   uint32_t tiling_case_id;
