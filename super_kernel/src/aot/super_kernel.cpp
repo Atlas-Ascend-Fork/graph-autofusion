@@ -95,12 +95,12 @@ aclError aclskOptimize(aclmdlRI model, aclskOptions *options) {
     return ret;
   }
 
-  SK_LOGI("Start dump tasks by use rts api to JSON...");
+  SK_LOGI("Start dumping tasks to JSON via the RTS API...");
   ret = DumpMdlJson(model, metaDir, "sk_mdl_origin");
   if (ret != ACL_SUCCESS) {
     return ret;
   }
-  SK_LOGI("End dump tasks by use rts api to JSON...");
+  SK_LOGI("Finished dumping tasks to JSON via the RTS API...");
   CurrentModelGuard modelGuard(model);
   ret = SkResourceManager::CallbackRegister(model, modelId);
   if (ret != ACL_SUCCESS) {

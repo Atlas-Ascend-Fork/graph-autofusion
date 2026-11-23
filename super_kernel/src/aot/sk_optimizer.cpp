@@ -380,7 +380,7 @@ bool SuperKernelOptimizer::Process(SuperKernelGraph &graph) {
 
   for (size_t i = 0; i < processedScopeInfos_.size(); ++i) {
     auto &scopeInfo = processedScopeInfos_[i];
-    SK_LOGI("process scope begin: scopeId=%u", scopeInfo.GetScopeId());
+    SK_LOGD("process scope begin: scopeId=%u", scopeInfo.GetScopeId());
     if (!postProcessor.PostProcess(scopeInfo)) {
       const ScopeProcessStatus processStatus = scopeInfo.GetExtInfo().processStatus;
       if (processStatus == ScopeProcessStatus::UNRECOVERABLE_FAIL) {
@@ -421,7 +421,7 @@ bool SuperKernelOptimizer::Process(SuperKernelGraph &graph) {
   if (!taskQueueJsons_.empty()) {
     SK_LOGI("Dumping all task queues to JSON, scopeCount=%zu", taskQueueJsons_.size());
     if (!DumpAllTaskQueuesToJson(graph, taskQueueJsons_)) {
-      SK_LOGE("Failed to dump all task queues to JSON, continuing...");
+      SK_LOGW("Failed to dump all task queues to JSON, continuing...");
     }
   }
 

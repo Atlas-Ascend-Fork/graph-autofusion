@@ -121,10 +121,9 @@ void DumpDeviceArgsDetail(const std::string &skFuncName, const SkDeviceEntryArgs
   SK_LOGD("Dumping device args for function: %s", skFuncName.c_str());
   const uint8_t *base = (const uint8_t *)args;
   const SkHeaderInfo &hdr = args->skHeader;
-  SK_LOGD(
-      "SkHeaderInfo: aicOff=%u, aivOff=%u, counterOff=%u, dfxOff=%u, eventConfigOff=%u, nodeCnt=%u, totalSize=%lu\n",
-      hdr.aicQueOffset, hdr.aivQueOffset, hdr.counterOffset, hdr.dfxOffset, hdr.eventConfigOffset, hdr.nodeCnt,
-      hdr.totalSize);
+  SK_LOGD("SkHeaderInfo: aicOff=%u, aivOff=%u, counterOff=%u, dfxOff=%u, eventConfigOff=%u, nodeCnt=%u, totalSize=%lu",
+          hdr.aicQueOffset, hdr.aivQueOffset, hdr.counterOffset, hdr.dfxOffset, hdr.eventConfigOffset, hdr.nodeCnt,
+          hdr.totalSize);
 
   DumpTaskQueDetail((const TaskQue *)(base + args->skHeader.aicQueOffset), "AIC", tasks);
   DumpTaskQueDetail((const TaskQue *)(base + args->skHeader.aivQueOffset), "AIV", tasks);
@@ -461,7 +460,8 @@ bool SkTaskBuilder::InitTaskSyncInfos(const std::vector<SkTaskDesc> &tasks, SkTa
         ++resetCount;
         break;
       default:
-        SK_LOGE("unsupported node type for sync info initialization");
+        SK_LOGE("unsupported task kind %u for sync info initialization, taskIndex=%zu, nodeId=%lu",
+                static_cast<unsigned int>(task.kind), i, task.nodeId);
         return false;
     }
     if (task.nodeId == INVALID_TASK_ID) {
@@ -653,7 +653,7 @@ void SkTaskBuilder::RemoveCrossedLineSync(SkTaskContext &context) const {
       }
     }
     for (size_t recvIdx : toRemove) {
-      SK_LOGI("  Remove crossed cub:vec sync: task[%zu] -> task[%zu]", i, recvIdx);
+      SK_LOGD("  Remove crossed cub:vec sync: task[%zu] -> task[%zu]", i, recvIdx);
       RemoveSyncInfo(context, i, recvIdx, false, SyncDirection::CUB_TO_VEC);
       RemoveSyncInfo(context, recvIdx, i, true, SyncDirection::CUB_TO_VEC);
     }
@@ -670,7 +670,7 @@ void SkTaskBuilder::RemoveCrossedLineSync(SkTaskContext &context) const {
       }
     }
     for (size_t recvIdx : toRemove) {
-      SK_LOGI("  Remove crossed vec:cub sync: task[%zu] -> task[%zu]", i, recvIdx);
+      SK_LOGD("  Remove crossed vec:cub sync: task[%zu] -> task[%zu]", i, recvIdx);
       RemoveSyncInfo(context, i, recvIdx, false, SyncDirection::VEC_TO_CUB);
       RemoveSyncInfo(context, recvIdx, i, true, SyncDirection::VEC_TO_CUB);
     }
@@ -694,7 +694,7 @@ void SkTaskBuilder::RemoveMultiSendSync(SkTaskContext &context) const {
         std::sort(vecSendList.begin(), vecSendList.end());
         for (size_t j = 1; j < vecSendList.size(); j++) {
           size_t recvIdx = vecSendList[j];
-          SK_LOGI("  Remove multi vec:cub send sync: task[%zu] -> task[%zu]", i, recvIdx);
+          SK_LOGD("  Remove multi vec:cub send sync: task[%zu] -> task[%zu]", i, recvIdx);
           RemoveSyncInfo(context, i, recvIdx, false, SyncDirection::VEC_TO_CUB);
           RemoveSyncInfo(context, recvIdx, i, true, SyncDirection::VEC_TO_CUB);
         }
@@ -716,7 +716,7 @@ void SkTaskBuilder::RemoveMultiSendSync(SkTaskContext &context) const {
         std::sort(cubSendList.begin(), cubSendList.end());
         for (size_t j = 1; j < cubSendList.size(); j++) {
           size_t recvIdx = cubSendList[j];
-          SK_LOGI("  Remove multi cub:vec send sync: task[%zu] -> task[%zu]", i, recvIdx);
+          SK_LOGD("  Remove multi cub:vec send sync: task[%zu] -> task[%zu]", i, recvIdx);
           RemoveSyncInfo(context, i, recvIdx, false, SyncDirection::CUB_TO_VEC);
           RemoveSyncInfo(context, recvIdx, i, true, SyncDirection::CUB_TO_VEC);
         }
@@ -743,7 +743,7 @@ void SkTaskBuilder::RemoveMultiRecvSync(SkTaskContext &context) const {
         std::sort(vecRecvList.begin(), vecRecvList.end(), std::greater<>());
         for (size_t j = 1; j < vecRecvList.size(); j++) {
           size_t sendIdx = vecRecvList[j];
-          SK_LOGI("  Remove multi cub:vec recv sync: task[%zu] <- task[%zu]", i, sendIdx);
+          SK_LOGD("  Remove multi cub:vec recv sync: task[%zu] <- task[%zu]", i, sendIdx);
           RemoveSyncInfo(context, i, sendIdx, true, SyncDirection::CUB_TO_VEC);
           RemoveSyncInfo(context, sendIdx, i, false, SyncDirection::CUB_TO_VEC);
         }
@@ -765,7 +765,7 @@ void SkTaskBuilder::RemoveMultiRecvSync(SkTaskContext &context) const {
         std::sort(cubRecvList.begin(), cubRecvList.end(), std::greater<>());
         for (size_t j = 1; j < cubRecvList.size(); j++) {
           size_t sendIdx = cubRecvList[j];
-          SK_LOGI("  Remove multi vec:cub recv sync: task[%zu] <- task[%zu]", i, sendIdx);
+          SK_LOGD("  Remove multi vec:cub recv sync: task[%zu] <- task[%zu]", i, sendIdx);
           RemoveSyncInfo(context, i, sendIdx, true, SyncDirection::VEC_TO_CUB);
           RemoveSyncInfo(context, sendIdx, i, false, SyncDirection::VEC_TO_CUB);
         }
@@ -1753,8 +1753,8 @@ bool SkTaskBuilder::ValidateInput(const SkTaskIR &input) const {
   for (size_t i = 0; i < input.tasks.size(); ++i) {
     const auto &task = input.tasks[i];
     if (!IsValidTaskKind(task.kind)) {
-      SK_LOGE("process task %zu: unsupported node type %s, skipping (supported types: KERNEL, NOTIFY, WAIT, RESET)", i,
-              to_string(task.kind));
+      SK_LOGE("process task %zu: unsupported task kind %u (supported types: KERNEL, NOTIFY, WAIT, RESET)", i,
+              static_cast<unsigned int>(task.kind));
       return false;
     }
     if (task.nodeId == INVALID_TASK_ID) {
@@ -1815,7 +1815,13 @@ SkBuildResult SkTaskBuilder::Build(const SkTaskIR &input) const {
     SK_LOGE("Build failed: invalid lowered task input, scopeId=%u", input.scopeId);
     return {};
   }
-  const size_t capacity = input.tasks.size() * static_cast<uint8_t>(SkTaskType::TYPE_MAX);
+  constexpr size_t taskTypeCount = static_cast<size_t>(SkTaskType::TYPE_MAX);
+  if (input.tasks.size() > std::numeric_limits<size_t>::max() / taskTypeCount) {
+    SK_LOGE("invalid task queue capacity: taskCount=%zu, maxTaskCount=%zu", input.tasks.size(),
+            std::numeric_limits<size_t>::max() / taskTypeCount);
+    return {};
+  }
+  const size_t capacity = input.tasks.size() * taskTypeCount;
   SkTask aicTask;
   SkTask aivTask;
   if (!aicTask.Init(capacity)) {
@@ -1827,7 +1833,8 @@ SkBuildResult SkTaskBuilder::Build(const SkTaskIR &input) const {
     return {};
   }
   if (input.tasks.size() > std::numeric_limits<size_t>::max() / sizeof(SkDfxInfo)) {
-    SK_LOGE("invalid dfxInfos alloc size, taskCount=%zu", input.tasks.size());
+    SK_LOGE("invalid dfxInfos alloc size: taskCount=%zu, maxTaskCount=%zu", input.tasks.size(),
+            std::numeric_limits<size_t>::max() / sizeof(SkDfxInfo));
     return {};
   }
   std::vector<SkDfxInfo> dfxInfos(input.tasks.size());
@@ -1885,16 +1892,16 @@ SkBuildResult SkTaskBuilder::Build(const SkTaskIR &input) const {
   for (size_t i = 0; i < input.tasks.size(); ++i) {
     const auto &task = input.tasks[i];
     const auto &sync = context.syncInfos[i];
-    SK_LOGI("index=%zu, nodeType=%s, nodeInfo=%s", i, to_string(task.kind), task.debugLabel.c_str());
+    SK_LOGD("index=%zu, nodeType=%s, nodeInfo=%s", i, to_string(task.kind), task.debugLabel.c_str());
     if (earlyStartEnabled && !DispatchSyncTasks(aicTask, aivTask, input, sync.earlyStartInfo, i, false)) {
       return {};
     }
-    SK_LOGI("add task sync for vec recv, vec recv size %zu", sync.vecRecvInfo.size());
+    SK_LOGD("add task sync for vec recv, vec recv size %zu", sync.vecRecvInfo.size());
     if (!DispatchSyncTasks(aicTask, aivTask, input, context, i, sync.vecRecvInfo, false)) {
       SK_LOGE("Build failed: dispatch vec recv sync failed at task index %zu", i);
       return {};
     }
-    SK_LOGI("add task sync for cub recv, cub recv size %zu", sync.cubRecvInfo.size());
+    SK_LOGD("add task sync for cub recv, cub recv size %zu", sync.cubRecvInfo.size());
     if (!DispatchSyncTasks(aicTask, aivTask, input, context, i, sync.cubRecvInfo, false)) {
       SK_LOGE("Build failed: dispatch cub recv sync failed at task index %zu", i);
       return {};
@@ -1946,17 +1953,17 @@ SkBuildResult SkTaskBuilder::Build(const SkTaskIR &input) const {
     if (earlyStartEnabled && !DispatchSyncTasks(aicTask, aivTask, input, sync.earlyStartInfo, i, true)) {
       return {};
     }
-    SK_LOGI("add sync task for cross sync info, cross sync info size %zu", sync.crossSyncInfo.size());
+    SK_LOGD("add sync task for cross sync info, cross sync info size %zu", sync.crossSyncInfo.size());
     if (!DispatchSyncTasks(aicTask, aivTask, input, context, i, sync.crossSyncInfo, true)) {
       SK_LOGE("Build failed: dispatch cross sync failed at task index %zu", i);
       return {};
     }
-    SK_LOGI("add sync task for vec send, vec send size %zu", sync.vecSendInfo.size());
+    SK_LOGD("add sync task for vec send, vec send size %zu", sync.vecSendInfo.size());
     if (!DispatchSyncTasks(aicTask, aivTask, input, context, i, sync.vecSendInfo, true)) {
       SK_LOGE("Build failed: dispatch vec send sync failed at task index %zu", i);
       return {};
     }
-    SK_LOGI("add sync task for cub send, cub send size %zu", sync.cubSendInfo.size());
+    SK_LOGD("add sync task for cub send, cub send size %zu", sync.cubSendInfo.size());
     if (!DispatchSyncTasks(aicTask, aivTask, input, context, i, sync.cubSendInfo, true)) {
       SK_LOGE("Build failed: dispatch cub send sync failed at task index %zu", i);
       return {};
