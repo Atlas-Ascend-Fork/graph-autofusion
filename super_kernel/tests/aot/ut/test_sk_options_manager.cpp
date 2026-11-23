@@ -509,6 +509,22 @@ TEST_F(SuperKernelOptionsManagerTest, SetOptOptionValue_OptExtendOption_TrimmedV
   EXPECT_EQ(valueMap["key2"][1], "value3");
 }
 
+TEST_F(SuperKernelOptionsManagerTest, SetOptOptionValue_OptExtendOption_AllowsValidTokenCharacters) {
+  aclskOption option{};
+  option.optionType = aclskOptionType::OPT_EXTEND_OPTION;
+  std::string rawValue = "key-name.with.dot=value/path";
+  option.optExtend.value = const_cast<char *>(rawValue.c_str());
+
+  opts_test->SetOptOptionValue(&option);
+
+  auto result = opts_test->GetOption(aclskOptionType::OPT_EXTEND_OPTION);
+  ASSERT_NE(result, nullptr);
+  const auto valueMap = static_cast<MapOptOption *>(result)->GetMapValue();
+  ASSERT_EQ(valueMap.size(), 1U);
+  ASSERT_EQ(valueMap.at("key-name.with.dot").size(), 1U);
+  EXPECT_EQ(valueMap.at("key-name.with.dot")[0], "value/path");
+}
+
 TEST_F(SuperKernelOptionsManagerTest, SetOptOptionValue_OptExtendOption_InvalidDangerousChar) {
   aclskOption option{};
   option.optionType = aclskOptionType::OPT_EXTEND_OPTION;

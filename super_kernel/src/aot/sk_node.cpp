@@ -1243,7 +1243,7 @@ bool SuperKernelKernelNode::Update(const UpdateContext &ctx) {
     // update kernel with custom params for stream sync
     aclError aclRet = aclmdlRITaskSetParams(*originTask, &updateParams);
     if (aclRet != ACL_SUCCESS) {
-      SK_LOGE("Failed to set kernel with custom params for %s", Format().c_str());
+      SK_LOGE("Failed to set kernel with custom params for %s, aclRet=%d", Format().c_str(), aclRet);
       return false;
     }
     hasUpdateParams = true;
@@ -1267,7 +1267,7 @@ bool SuperKernelKernelNode::Update(const UpdateContext &ctx) {
     aclError aclRet = aclmdlRITaskSetParams(*originTask, &updateParams);
 
     if (aclRet != ACL_SUCCESS) {
-      SK_LOGE("Failed to update kernel node %s", Format().c_str());
+      SK_LOGE("Failed to update kernel node %s, aclRet=%d", Format().c_str(), aclRet);
       return false;
     }
     hasUpdateParams = true;
@@ -1404,7 +1404,7 @@ bool SuperKernelMemoryNode::Update(const UpdateContext &ctx) {
     // update memory node with custom params for stream sync
     aclError aclRet = aclmdlRITaskSetParams(*originTask, &updateParams);
     if (aclRet != ACL_SUCCESS) {
-      SK_LOGE("Failed to set custom params on memory node %s", Format().c_str());
+      SK_LOGE("Failed to set custom params on memory node %s, aclRet=%d", Format().c_str(), aclRet);
       return false;
     }
     // Sync taskParams for JSON dump
@@ -1666,7 +1666,7 @@ bool DumpSingleKernelBinary(const KernelInfos &kernelInfo, const std::string &ke
   outFile.write(static_cast<char *>(binHostAddr), binHostSize);
   outFile.close();
 
-  SK_LOGI("Dumped kernel binary: %s, size=%u, codeSegAddr=%lu", oFilePath.c_str(), binHostSize, codeSegmentAddr);
+  SK_LOGI("Dumped kernel binary: %s, size=%u bytes, codeSegAddr=%lu", oFilePath.c_str(), binHostSize, codeSegmentAddr);
   return true;
 }
 
@@ -1744,6 +1744,7 @@ uint32_t DumpSkEntryBinary(const std::string &kernelBinsDir) {
   skOutFile.write(static_cast<char *>(entryBinAddr), entryBinSize);
   skOutFile.close();
 
-  SK_LOGI("Dumped SK entry binary: %s, size=%u, codeSegAddr=%lu", skOFilePath.c_str(), entryBinSize, codeSegmentAddr);
+  SK_LOGI("Dumped SK entry binary: %s, size=%u bytes, codeSegAddr=%lu", skOFilePath.c_str(), entryBinSize,
+          codeSegmentAddr);
   return 1;
 }

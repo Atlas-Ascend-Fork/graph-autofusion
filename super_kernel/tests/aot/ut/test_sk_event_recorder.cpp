@@ -521,6 +521,14 @@ TEST_F(SkEventRecorderTest, GetGmAddrForDeviceReturnsNullForInvalidDeviceId) {
   EXPECT_EQ(addressExceedingMaxDevice, nullptr);
 }
 
+TEST_F(SkEventRecorderTest, InitDeviceOutputFileReturnsFalseWhenOpenFails) {
+  SkEventDeviceCtx ctx;
+  ctx.outputDir = "/dev/null";
+
+  EXPECT_FALSE(SkEventRecorder::Instance().InitDeviceOutputFile(&ctx, 0));
+  EXPECT_FALSE(ctx.outputFp.IsValid());
+}
+
 // Test 21: GetGmAddrForDevice 已激活的设备返回缓存地址
 TEST_F(SkEventRecorderTest, GetGmAddrForDeviceReturnsCachedAddr) {
   // 手动初始化一个设备上下文
