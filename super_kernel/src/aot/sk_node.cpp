@@ -101,6 +101,31 @@ const char *FusionFailReasonDetail(FusionFailReason reason) {
   }
 }
 
+bool AppendKernelArgsLogFields(std::ostream &log, const aclmdlRIKernelTaskParams &kernelParams,
+                               bool includePlaceholders) {
+  const auto argsType = static_cast<uint32_t>(kernelParams.argsType);
+  log << ", argsType=" << argsType;
+  switch (argsType) {
+    case ACL_RT_KERNEL_ARGS_HOST_BUFFER:
+      log << ", hostArgs=" << kernelParams.hostBuffer.hostArgs
+          << ", hostArgsSize=" << kernelParams.hostBuffer.hostArgsSize;
+      if (includePlaceholders) {
+        log << ", placeHolderArray=" << kernelParams.hostBuffer.placeHolderArray
+            << ", placeHolderNum=" << kernelParams.hostBuffer.placeHolderNum;
+      }
+      return true;
+    case ACL_RT_KERNEL_ARGS_DEVICE_BUFFER:
+      log << ", deviceArgs=" << kernelParams.deviceBuffer.deviceArgs
+          << ", deviceArgsSize=" << kernelParams.deviceBuffer.deviceArgsSize;
+      return true;
+    case ACL_RT_KERNEL_ARGS_ARRAY:
+      log << ", argsArray=" << kernelParams.argsArray;
+      return true;
+    default:
+      return false;
+  }
+}
+
 }  // namespace
 
 KernelCapBits ParseKernelCapBits(uint64_t cap) {
@@ -841,26 +866,11 @@ void SuperKernelBaseNode::LogNodeUpdateResult(const aclmdlRITaskParams *paramsTo
       const auto &kernelParams = paramsToLog->kernelTaskParams;
       oss << ", opInfoPtr=" << paramsToLog->opInfoPtr << ", opInfoSize=" << paramsToLog->opInfoSize
           << ", funcHandle=" << kernelParams.funcHandle
-          << ", numBlocks=" << static_cast<uint32_t>(kernelParams.numBlocks)
-          << ", argsType=" << static_cast<uint32_t>(kernelParams.argsType);
-      switch (static_cast<uint32_t>(kernelParams.argsType)) {
-        case ACL_RT_KERNEL_ARGS_HOST_BUFFER:
-          oss << ", hostArgs=" << kernelParams.hostBuffer.hostArgs
-              << ", hostArgsSize=" << kernelParams.hostBuffer.hostArgsSize
-              << ", placeHolderArray=" << kernelParams.hostBuffer.placeHolderArray
-              << ", placeHolderNum=" << kernelParams.hostBuffer.placeHolderNum;
-          break;
-        case ACL_RT_KERNEL_ARGS_DEVICE_BUFFER:
-          oss << ", deviceArgs=" << kernelParams.deviceBuffer.deviceArgs
-              << ", deviceArgsSize=" << kernelParams.deviceBuffer.deviceArgsSize;
-          break;
-        case ACL_RT_KERNEL_ARGS_ARRAY:
-          oss << ", argsArray=" << kernelParams.argsArray;
-          break;
-        default:
-          SK_LOGE("Unsupported kernel argsType in node update result: nodeId=%lu, argsType=%u", nodeId,
-                  static_cast<uint32_t>(kernelParams.argsType));
-          return;
+          << ", numBlocks=" << static_cast<uint32_t>(kernelParams.numBlocks);
+      if (!AppendKernelArgsLogFields(oss, kernelParams, true)) {
+        SK_LOGE("Unsupported kernel argsType in node update result: nodeId=%lu, argsType=%u", nodeId,
+                static_cast<uint32_t>(kernelParams.argsType));
+        return;
       }
       break;
     }
@@ -956,6 +966,13 @@ bool SuperKernelKernelNode::InitNode(const SuperKernelOptionsManager *opts) {
   if (rtRet != 0) {
     SK_LOGE("Failed to get copied device task args, ret=%d", rtRet);
     return false;
+  }
+  if (std::ostringstream argsLog; AppendKernelArgsLogFields(argsLog, kernelParams, false)) {
+    SK_LOGI("Kernel args and device copy: nodeId=%lu%s, copiedDevArgs=%p, copiedDevArgsSize=%zu", nodeId,
+            argsLog.str().c_str(), copiedDevArgs, copiedDevArgsSize);
+  } else {
+    SK_LOGE("Unsupported kernel argsType when logging kernel args: nodeId=%lu, argsType=%u", nodeId,
+            static_cast<uint32_t>(kernelParams.argsType));
   }
 
   if (!GetScopeKernelInfo(kernelParams, copiedDevArgs, &scopeKernelInfo)) {
