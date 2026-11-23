@@ -76,6 +76,39 @@ bool IsAxisStreamingOnAnyOutput(const ascir::NodeView &node, const int64_t axis_
   return false;
 }
 
+// 全退化tensor（标量/常量参数的表示形态）：所有轴repeats=1/strides=0。repeats为空视为
+// 无轴信息，按标量语义处理（全退化）——Scalar族节点构造时可能仅设axis、repeats/strides走
+// 默认空表（见test_autoschedule的Scalar构造先例），逐轴判定无从进行；空表对归约轴扫描
+// 本就是0次迭代的no-op，放宽无副作用。注意：全轴规约的reduce输出同为全退化形态，
+// 仅凭attr无法区分，需结合生产者判断（IsConstantScalarInput）
+template <typename TensorViewPtr>
+bool IsDegenerateTensorView(const TensorViewPtr &input) {
+  if (input->attr.repeats.empty()) {
+    return true;
+  }
+  for (size_t i = 0UL; i < input->attr.repeats.size(); i++) {
+    if ((af::SymbolicUtils::StaticCheckEq(input->attr.repeats[i], af::sym::kSymbolOne) != af::TriBool::kTrue) ||
+        (af::SymbolicUtils::StaticCheckEq(input->attr.strides[i], af::sym::kSymbolZero) != af::TriBool::kTrue)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// 常量标量输入：全退化且生产者为标量常量节点（Scalar/ScalarData/IndexExpr，无循环内的
+// 运行时生产者）。全轴规约的reduce输出虽然同为全退化，但其生产者在循环内、值依赖循环
+// 迭代，不可按常量处理（如整体外提会先于生产者发射）
+template <typename TensorViewPtr>
+bool IsConstantScalarInput(const TensorViewPtr &input) {
+  // 注：全退化(repeats/strides)校验是结合下方scalar生产者判断的备份校验，规整图中Scalar族
+  // 输出必然全退化、两条件同时成立；仅为防御异常构造的attr形态，必要时可删（删后仅按生产者判断）
+  if (!IsDegenerateTensorView(input)) {
+    return false;
+  }
+  const auto producer = std::dynamic_pointer_cast<af::AscNode>(input->anchor.GetOwnerNode());
+  return producer != nullptr && optimize::ScheduleUtils::IsScalarLikeNode(producer);
+}
+
 void FindNotLoopAxis(const ascir::NodeView &node, ascir::ImplGraph &impl_graph,
                      std::unordered_set<int64_t> &not_loop_axis_set, bool has_reduce, bool is_reduce_first_stage) {
   for (auto output : node->outputs()) {
@@ -93,6 +126,15 @@ void FindNotLoopAxis(const ascir::NodeView &node, ascir::ImplGraph &impl_graph,
   }
   // find reduce axis of input
   for (auto input : node->inputs()) {
+    // 手工注释：解决scalar->brc->element<-reduce结构里brc的loop_axis不对的问题。
+    // 常量标量输入不作为归约轴来源：其所有轴repeats=1/strides=0是标量语义，
+    // 而非"相对输入塌缩的归约轴"；若按归约轴过滤会误杀消费节点的全部循环轴候选
+    // （如含reduce图中scalar->brc的loop_axis被整体过滤，仅剩Block轴等豁免路径幸存者）。
+    // 全轴规约的reduce输出同为全退化但不属于常量（IsConstantScalarInput按生产者区分），
+    // 仍走原有归约塌缩过滤；部分退化输入（真·reduce下游消费）同样不受影响。
+    if (IsConstantScalarInput(input)) {
+      continue;
+    }
     for (size_t i = 0; i < input->attr.repeats.size(); i++) {
       if ((af::SymbolicUtils::StaticCheckEq(input->attr.repeats[i], af::sym::kSymbolOne) != af::TriBool::kTrue) ||
           (af::SymbolicUtils::StaticCheckEq(input->attr.strides[i], af::sym::kSymbolZero) != af::TriBool::kTrue)) {
@@ -263,6 +305,44 @@ bool TryGenIndirectLoadTilingCase(ascir::ImplGraph &graph,
 }  // namespace
 
 namespace optimize::autoschedule {
+// 全退化输入（常量标量/全轴规约输出，attr上同形态）的Broadcast判定, 刷新时的目标定位与消费者排除共用
+static bool IsDegenerateInputBroadcast(const af::AscNodePtr &node) {
+  if (!ScheduleUtils::IsBroadcast(node)) {
+    return false;
+  }
+  for (auto input : node->inputs()) {
+    if (!IsDegenerateTensorView(input)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// 手工注释：解决scalar->brc->element<-reduce结构里brc的loop_axis不对的问题。
+// 全退化输入（常量标量/全轴规约输出，attr上同形态）的Broadcast没有有效的输入方向轴，
+// 正常选轴会落在错误轴上；此时全图选轴已完成，直接取其输出消费者的循环轴覆盖——
+// 输出流动方向即brc的消费语境所在层级。多消费者取首个有效者（同族图一致）；
+// 消费者若同为全退化输入brc（待刷新，值不可信）则跳过。
+static void RefreshDegenerateBroadcastLoopAxis(ascir::ImplGraph &impl_graph) {
+  for (auto node : impl_graph.GetAllNodes()) {
+    if (node == nullptr || node->attr.api.type != af::ApiType::kAPITypeCompute ||
+        ascgen_utils::indirect_load::GetTemplateBehavior(node).skips_main_schedule_tiling ||
+        !IsDegenerateInputBroadcast(node)) {
+      continue;
+    }
+    for (auto &out_node : node->GetOutDataNodes()) {
+      const auto consumer = std::dynamic_pointer_cast<af::AscNode>(out_node);
+      if (consumer == nullptr || IsDegenerateInputBroadcast(consumer)) {
+        continue;
+      }
+      if (consumer->attr.sched.loop_axis != af::kIdNone) {
+        node->attr.sched.loop_axis = consumer->attr.sched.loop_axis;
+        break;
+      }
+    }
+  }
+}
+
 Status AutoSchedule::SelectLoopAxis(ascir::ImplGraph &impl_graph, bool is_reduce_fullload) const {
   bool has_reduce = false;
   for (auto node : impl_graph.GetAllNodes()) {
@@ -306,6 +386,7 @@ Status AutoSchedule::SelectLoopAxis(ascir::ImplGraph &impl_graph, bool is_reduce
     GE_ASSERT_TRUE((node->attr.sched.loop_axis != af::kIdNone), "Cannot find loop axis for node: [%s].",
                    node->GetNamePtr());
   }
+  RefreshDegenerateBroadcastLoopAxis(impl_graph);
   return af::SUCCESS;
 }
 

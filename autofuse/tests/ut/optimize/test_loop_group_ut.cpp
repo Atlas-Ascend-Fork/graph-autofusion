@@ -323,6 +323,51 @@ af::AscGraph CreateSameRoundSameAxisSeeds(const char *name) {
   return graph;
 }
 
+// 组级依赖环：abs0(A)与首个reduce add1(A)同组，exp0(B)独立成组，两组间存在双向数据边
+// （abs0->exp0 与 exp0->add1），RenumberLoopGroupsByDependency应检测成环并保持原分组：
+// data -> load -> abs0(A) -> exp0(B) -> add1(A,reduce,双输入abs0/exp0) -> store0 -> output0
+af::AscGraph CreateCrossGroupCycle(const char *name) {
+  af::AscGraph graph(name);
+  af::ascir_op::Data data("data", graph);
+  data.attr.api.compute_type = af::ComputeType::kComputeInvalid;
+  data.attr.api.type = af::ApiType::kAPITypeBuffer;
+
+  af::ascir_op::Load load("load");
+  load.x = data.y;
+  load.attr.api.compute_type = af::ComputeType::kComputeLoad;
+  load.attr.api.type = af::ApiType::kAPITypeCompute;
+
+  af::ascir_op::Abs abs0("abs0");
+  abs0.x = load.y;
+  abs0.attr.api.compute_type = af::ComputeType::kComputeElewise;
+  abs0.attr.api.type = af::ApiType::kAPITypeCompute;
+
+  af::ascir_op::Exp exp0("exp0");
+  exp0.x = abs0.y;
+  exp0.attr.api.compute_type = af::ComputeType::kComputeElewise;
+  exp0.attr.api.type = af::ApiType::kAPITypeCompute;
+
+  af::ascir_op::Add add1("add1");
+  add1.x1 = abs0.y;
+  add1.x2 = exp0.y;
+  add1.attr.api.compute_type = af::ComputeType::kComputeReduce;
+  add1.attr.api.type = af::ApiType::kAPITypeCompute;
+  add1.y.dtype = ge::DT_FLOAT;
+
+  af::ascir_op::Store store0("store0");
+  store0.x = add1.y;
+  store0.attr.api.compute_type = af::ComputeType::kComputeStore;
+  store0.attr.api.type = af::ApiType::kAPITypeCompute;
+  store0.y.dtype = ge::DT_FLOAT;
+
+  af::ascir_op::Output output0("output0");
+  output0.x = store0.y;
+  output0.attr.api.compute_type = af::ComputeType::kComputeInvalid;
+  output0.attr.api.type = af::ApiType::kAPITypeBuffer;
+  output0.y.dtype = ge::DT_FLOAT;
+  return graph;
+}
+
 struct LoopAxisIds {
   int64_t axis_a;
   int64_t axis_b;
@@ -357,6 +402,18 @@ void SetHorizontalFusionLoopAxis(af::AscGraph &graph, const LoopAxisIds &axes) {
   SetNodeLoopAxis(graph, "abs1", axes.axis_b);
   SetNodeLoopAxis(graph, "max1", axes.axis_b);
   SetNodeLoopAxis(graph, "max2", axes.axis_b);
+  SetNodeLoopAxis(graph, "relu0", axes.axis_a);
+  SetNodeLoopAxis(graph, "relu1", axes.axis_a);
+}
+
+// 为水平融合图赋loop_axis（依赖反向版）：reduce链为axis_a、其前置生产链（load/abs）为axis_b，
+// 发现序组0=A(reduce链)先于组1=B(生产链)，与组间依赖方向(B->A)相反，用于构造需要交换组号的场景
+void SetReversedDependencyLoopAxis(af::AscGraph &graph, const LoopAxisIds &axes) {
+  SetNodeLoopAxis(graph, "load", axes.axis_b);
+  SetNodeLoopAxis(graph, "abs0", axes.axis_b);
+  SetNodeLoopAxis(graph, "abs1", axes.axis_b);
+  SetNodeLoopAxis(graph, "max1", axes.axis_a);
+  SetNodeLoopAxis(graph, "max2", axes.axis_a);
   SetNodeLoopAxis(graph, "relu0", axes.axis_a);
   SetNodeLoopAxis(graph, "relu1", axes.axis_a);
 }
@@ -510,6 +567,84 @@ TEST(LoopGroupTest, BuildLoopGroupsSameRoundSameAxisSeedsMerged) {
   EXPECT_EQ(node_to_group[GetNodePtr(graph, "max1")], 0UL);
 }
 
+TEST(LoopGroupTest, RenumberLoopGroupsDependencyAlignedKeepOrder) {
+  auto graph = CreateHorizontalFusionTwoReduce("renumber_aligned");
+  const auto axes = CreateLoopAxisIds(graph);
+  SetHorizontalFusionLoopAxis(graph, axes);
+
+  std::vector<LoopGroup> loop_groups;
+  std::unordered_map<af::Node *, size_t> node_to_group;
+  ASSERT_EQ(ScheduleUtils::BuildLoopGroups(graph, loop_groups, node_to_group), af::SUCCESS);
+  ASSERT_EQ(loop_groups.size(), 2UL);
+
+  // 发现序与依赖方向一致（组0=B生产链 -> 组1=A后继），重编号为恒等映射
+  EXPECT_TRUE(ScheduleUtils::RenumberLoopGroupsByDependency(graph, loop_groups, node_to_group));
+  EXPECT_EQ(loop_groups[0].loop_axis, axes.axis_b);
+  EXPECT_EQ(loop_groups[1].loop_axis, axes.axis_a);
+  EXPECT_EQ(node_to_group[GetNodePtr(graph, "max1")], 0UL);
+  EXPECT_EQ(node_to_group[GetNodePtr(graph, "relu0")], 1UL);
+}
+
+TEST(LoopGroupTest, RenumberLoopGroupsProducerGroupFirst) {
+  auto graph = CreateHorizontalFusionTwoReduce("renumber_reversed_dep");
+  const auto axes = CreateLoopAxisIds(graph);
+  SetReversedDependencyLoopAxis(graph, axes);
+
+  std::vector<LoopGroup> loop_groups;
+  std::unordered_map<af::Node *, size_t> node_to_group;
+  ASSERT_EQ(ScheduleUtils::BuildLoopGroups(graph, loop_groups, node_to_group), af::SUCCESS);
+
+  // 发现序：组0=A(reduce链max1)，组1=B(生产链abs0/load/data/abs1)，组2=A(max2分支，异轮同轴拆分)
+  ASSERT_EQ(loop_groups.size(), 3UL);
+  ASSERT_EQ(node_to_group[GetNodePtr(graph, "max1")], 0UL);
+  ASSERT_EQ(node_to_group[GetNodePtr(graph, "abs0")], 1UL);
+  ASSERT_EQ(node_to_group[GetNodePtr(graph, "max2")], 2UL);
+
+  // 组间依赖为1->0与1->2（生产组B发现序靠后），重编号后B组为0、A组按原相对序为1/2
+  EXPECT_TRUE(ScheduleUtils::RenumberLoopGroupsByDependency(graph, loop_groups, node_to_group));
+  EXPECT_EQ(loop_groups[0].loop_axis, axes.axis_b);
+  EXPECT_EQ(loop_groups[1].loop_axis, axes.axis_a);
+  EXPECT_EQ(loop_groups[2].loop_axis, axes.axis_a);
+  EXPECT_EQ(node_to_group[GetNodePtr(graph, "abs0")], 0UL);
+  EXPECT_EQ(node_to_group[GetNodePtr(graph, "load")], 0UL);
+  EXPECT_EQ(node_to_group[GetNodePtr(graph, "max1")], 1UL);
+  EXPECT_EQ(node_to_group[GetNodePtr(graph, "relu0")], 1UL);
+  EXPECT_EQ(node_to_group[GetNodePtr(graph, "max2")], 2UL);
+  EXPECT_EQ(node_to_group[GetNodePtr(graph, "relu1")], 2UL);
+  // 组内成员仅随组重排，不丢失
+  EXPECT_EQ(loop_groups[0].nodes.size(), 4UL);
+  EXPECT_EQ(loop_groups[1].nodes.size(), 4UL);
+  EXPECT_EQ(loop_groups[2].nodes.size(), 4UL);
+}
+
+TEST(LoopGroupTest, RenumberLoopGroupsCycleKeepOriginalOrder) {
+  auto graph = CreateCrossGroupCycle("renumber_cycle");
+  const auto axes = CreateLoopAxisIds(graph);
+  SetNodeLoopAxis(graph, "abs0", axes.axis_a);
+  SetNodeLoopAxis(graph, "add1", axes.axis_a);
+  SetNodeLoopAxis(graph, "exp0", axes.axis_b);
+
+  std::vector<LoopGroup> loop_groups;
+  std::unordered_map<af::Node *, size_t> node_to_group;
+  ASSERT_EQ(ScheduleUtils::BuildLoopGroups(graph, loop_groups, node_to_group), af::SUCCESS);
+
+  // 发现序：组0=A(abs0/add1及其-1前驱后继)，组1=B(exp0)
+  ASSERT_EQ(loop_groups.size(), 2UL);
+  ASSERT_EQ(node_to_group[GetNodePtr(graph, "add1")], 0UL);
+  ASSERT_EQ(node_to_group[GetNodePtr(graph, "exp0")], 1UL);
+  EXPECT_EQ(loop_groups[0].nodes.size(), 6UL);
+  EXPECT_EQ(loop_groups[1].nodes.size(), 1UL);
+
+  // 组间双向数据边（abs0->exp0与exp0->add1）构成组级环：返回false且分组保持不变
+  EXPECT_FALSE(ScheduleUtils::RenumberLoopGroupsByDependency(graph, loop_groups, node_to_group));
+  EXPECT_EQ(loop_groups[0].loop_axis, axes.axis_a);
+  EXPECT_EQ(loop_groups[1].loop_axis, axes.axis_b);
+  EXPECT_EQ(node_to_group[GetNodePtr(graph, "add1")], 0UL);
+  EXPECT_EQ(node_to_group[GetNodePtr(graph, "exp0")], 1UL);
+  EXPECT_EQ(loop_groups[0].nodes.size(), 6UL);
+  EXPECT_EQ(loop_groups[1].nodes.size(), 1UL);
+}
+
 TEST(LoopGroupTest, TopologicalSortingLoopGroupRuleApplied) {
   auto graph = CreateHorizontalFusionTwoReduce("loop_group_sort");
   const auto axes = CreateLoopAxisIds(graph);
@@ -529,8 +664,33 @@ TEST(LoopGroupTest, TopologicalSortingLoopGroupRuleApplied) {
   EXPECT_TRUE(GetNodeId(graph, "max2") < GetNodeId(graph, "relu1"));
 }
 
-TEST(LoopGroupTest, TopologicalSortingLoopGroupRuleSkippedWithoutMulConsumer) {
-  auto graph = CreateIndependentTwoReduceChains("loop_group_sort_skipped");
+TEST(LoopGroupTest, TopologicalSortingRenumberedProducerGroupFirst) {
+  auto graph = CreateHorizontalFusionTwoReduce("loop_group_sort_renumber");
+  const auto axes = CreateLoopAxisIds(graph);
+  SetReversedDependencyLoopAxis(graph, axes);
+  // 前置条件：load多引用触发IsNeedFixTopo，双reduce多轴触发IsNeedLoopGrouping
+  ASSERT_TRUE(ScheduleUtils::IsNeedLoopGrouping(graph));
+
+  ASSERT_EQ(ScheduleUtils::TopologicalSorting(graph, true), af::SUCCESS);
+
+  // 生产组(B轴data/load/abs)重编号为组0整体在前：修复前comparator按发现序强排reduce链组在前，
+  // abs->max组间反向边产生拓扑违例（生产者排在消费者之后）
+  EXPECT_TRUE(GetNodeId(graph, "data") < GetNodeId(graph, "load"));
+  EXPECT_TRUE(GetNodeId(graph, "load") < GetNodeId(graph, "abs0"));
+  EXPECT_TRUE(GetNodeId(graph, "abs0") < GetNodeId(graph, "max1"));
+  EXPECT_TRUE(GetNodeId(graph, "abs1") < GetNodeId(graph, "max2"));
+  // 组间不穿插：B组节点整体先于A组reduce链与后继链
+  EXPECT_TRUE(GetNodeId(graph, "abs0") < GetNodeId(graph, "relu0"));
+  EXPECT_TRUE(GetNodeId(graph, "abs1") < GetNodeId(graph, "relu1"));
+  EXPECT_TRUE(GetNodeId(graph, "max1") < GetNodeId(graph, "relu0"));
+  EXPECT_TRUE(GetNodeId(graph, "max2") < GetNodeId(graph, "relu1"));
+  // 同轴两个A组保持原相对序（max1链组先于max2链组）
+  EXPECT_TRUE(GetNodeId(graph, "max1") < GetNodeId(graph, "max2"));
+  EXPECT_TRUE(GetNodeId(graph, "store0") < GetNodeId(graph, "store1"));
+}
+
+TEST(LoopGroupTest, TopologicalSortingLoopGroupRuleAppliedWithoutMulConsumer) {
+  auto graph = CreateIndependentTwoReduceChains("loop_group_sort_applied");
   const auto axes = CreateLoopAxisIds(graph);
   SetNodeLoopAxis(graph, "load0", axes.axis_b);
   SetNodeLoopAxis(graph, "abs0", axes.axis_b);
@@ -542,7 +702,8 @@ TEST(LoopGroupTest, TopologicalSortingLoopGroupRuleSkippedWithoutMulConsumer) {
   SetNodeLoopAxis(graph, "relu1", axes.axis_a);
   ASSERT_TRUE(ScheduleUtils::IsNeedLoopGrouping(graph));
 
-  // 两路独立无多引用：IsNeedFixTopo不触发，分组排序分支不生效，保持依赖拓扑序
+  // 门控修复后 loop grouping 判定先于 IsNeedFixTopo 早退: 无多引用结构也走组排序;
+  // 未与首reduce连通的独立链不入组(按topo序参与), 排序结果仍为合法拓扑序
   ASSERT_EQ(ScheduleUtils::TopologicalSorting(graph, true), af::SUCCESS);
   EXPECT_TRUE(GetNodeId(graph, "load0") < GetNodeId(graph, "abs0"));
   EXPECT_TRUE(GetNodeId(graph, "abs0") < GetNodeId(graph, "max1"));

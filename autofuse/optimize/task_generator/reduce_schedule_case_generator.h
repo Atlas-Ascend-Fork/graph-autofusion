@@ -47,6 +47,7 @@ class ReducePartitionCaseGenerator : public FusionCaseGenerator {
   Status GeneratorGeneralTask(ascir::HintGraph &optimize_graph, std::vector<ScheduleTask> &tasks);
   Status GeneratorAllLoadTask(ascir::HintGraph &optimize_graph, std::vector<ScheduleTask> &tasks);
   Status GeneratorRCoreTask(ascir::HintGraph &optimize_graph, std::vector<ScheduleTask> &tasks) const;
+  Status GeneratorNormRecomputeTask(ascir::HintGraph &optimize_graph, std::vector<ScheduleTask> &tasks);
   Status ReducePartitionPostFusion(ascir::ImplGraph &impl_graph);
   Status GenerateBroadcastWorkspaceCase(ascir::HintGraph &graph, std::vector<ascir::ImplGraph> &graphs);
   bool IsInputNodePartitioned(const std::shared_ptr<af::Node> &start, const std::shared_ptr<af::Node> &node);
@@ -57,8 +58,21 @@ class ReducePartitionCaseGenerator : public FusionCaseGenerator {
   // 基础上补充非单输出方向的类 Norm 结构(起点, 归宿点)对
   Status AddNormLikeLoops(ascir::ImplGraph &graph,
                           std::vector<std::pair<af::AscNodePtr, af::AscNodePtr>> &loop_start_end);
+  bool ShouldNormRecompute(ascir::HintGraph &graph);
   Status PartitionNorm(ascir::ImplGraph &impl_graph,
                        std::vector<std::pair<af::AscNodePtr, af::AscNodePtr>> &loop_start_end);
+  // norm 环重计算切分: 遍历 reduce 节点, 沿其输入方向找多输出节点, 将该节点连同其全部上游
+  // 输入链(重计算部分)复制到每条非发现侧输出边上, 原节点保留发现侧边接 reduce, 代替切 workspace
+  Status PartitionNormByRecompute(ascir::ImplGraph &impl_graph);
+  static void FindInputMultiOutputNode(const af::AscNodePtr &node, af::AscNodePtr &multi_output_node,
+                                       af::AscNodePtr &from_node);
+  Status CopyRecomputeChain(const af::AscNodePtr &node, af::AscGraph &graph,
+                            std::map<af::Node *, af::AscNodePtr> &origin_to_copy, af::AscNodePtr &new_node);
+  // NormRecompute 结果级打分函数生成: 所有 reduce 同时满足 R 轴(规约轴)大小大于阈值、
+  // 输入张量规模(所有轴乘积 * sizeof(dtype))不小于阈值、R 轴大小 * sizeof(dtype) 小于
+  // 上限三个条件时返回 1 分强制选择本模板, 否则 0 分交由其余模板竞争; 动态轴经
+  // kGroupTilingDataPlaceholder 引用本组 tiling data 的运行期值, 常量轴发射期折叠为字面量
+  Status GenerateNormRecomputeScoreFunc(ascir::ImplGraph &impl_graph, std::string &score_func);
   void FindAllPath(const af::AscNodePtr &start, const af::AscNodePtr &end, std::vector<af::AscNodePtr> &path,
                    std::vector<std::vector<af::AscNodePtr>> &all_paths);
   static bool HasReduce(const ascir::ImplGraph &impl_graph);
@@ -85,6 +99,7 @@ class ReducePartitionCaseGenerator : public FusionCaseGenerator {
 
   bool partition_{false};
   std::vector<af::AscNodePtr> node_order_{};
+  size_t norm_recompute_copy_count_{0UL};
 };
 
 class RMulticorePhase2Graph {

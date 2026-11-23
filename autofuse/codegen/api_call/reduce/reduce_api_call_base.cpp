@@ -489,7 +489,7 @@ void ReduceMeanCodeGen(std::string &dtype_name, const TPipe &tpipe, const Tensor
       collect_original_axes(axis_id);  // 从当前轴开始递归收集
     }
   }
-  std::string dimr_recip_line = "const float dimr_recip = 1.0f / (";
+  std::string dimr_recip_line = "dimr_recip = 1.0f / (";
   uint32_t count = 0;
   for (auto axis_id : r_from_axis) {
     if (count++ == 0) {

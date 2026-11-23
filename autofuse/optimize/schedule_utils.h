@@ -71,6 +71,24 @@ class ScheduleUtils {
   // 输出：loop_groups存储各分组及其轴，node_to_group记录节点到分组编号的映射，未入组节点不在其中。
   static Status BuildLoopGroups(const af::AscGraph &graph, std::vector<LoopGroup> &loop_groups,
                                 std::unordered_map<af::Node *, size_t> &node_to_group);
+  // 手动注释：触发场景是reduce -> element <- broadcast这种结构，在norm_recompute模板里由于broadcast的
+  // loop_group Id大于element所在的loopgroup Id，导致broadcast节点的topo排序大于element节点。
+  // 按组间数据依赖边构建组级DAG并做Kahn拓扑重编号，供TopologicalSorting在BuildLoopGroups后使用：
+  // 组号即comparator的组间执行序，重编号保证任意组间数据边的生产组编号小于消费组，
+  // 消除BFS发现序与依赖方向相反导致的组间反向边违例。典型场景（reduce链与前置生产链异轴）：
+  //   data -> load(B轴) -> abs(B轴) -> max(A轴,reduce) -> relu(A轴) -> store
+  //   发现序：BFS从首个reduce(max)扩散，A轴reduce链(max/relu)先成组0，越轴边界的B轴生产链
+  //   (abs/load/data)后成组1；依赖方向为组1 -> 组0，与发现序相反。此时comparator按组号
+  //   强排组0(A)在前，abs->max组间边的生产者被排到消费者之后，产生拓扑违例；
+  //   重编号后组0=B生产链、组1=A消费链，组号顺序与依赖方向一致，违例消除。
+  // 规则约束：如下
+  // 1. 仅统计直接组间数据边（生产者与消费者分属不同组）；未入组节点与组内节点间无数据边，不参与；
+  // 2. Kahn同层就绪组按原组号升序消费，保证重编号结果确定；
+  // 3. 组级存在环（不同组节点交叉依赖，如组X->组Y与组Y->组X的边并存）时无合法组间执行序，
+  //    返回false且不修改任何输出，调用方应放弃loop group排序，保持既有拓扑序。
+  // 成功时loop_groups与node_to_group同步重编号（组内成员与组轴不变，仅组编号按依赖序重排）。
+  static bool RenumberLoopGroupsByDependency(const af::AscGraph &graph, std::vector<LoopGroup> &loop_groups,
+                                             std::unordered_map<af::Node *, size_t> &node_to_group);
 
   static bool IsElewise(const af::AscNodePtr &node) {
     return node->attr.api.compute_type == af::ComputeType::kComputeElewise;

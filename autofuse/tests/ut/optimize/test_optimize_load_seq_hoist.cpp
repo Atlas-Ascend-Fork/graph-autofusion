@@ -232,4 +232,61 @@ TEST(LoadSeqHoistTest, LoadOpSeqAdjustWithoutHoistedLoadKeepsRewiringBenefit) {
   }
 }
 
+// 多循环轴图：两条链的 load 分属不同 loop_axis 且汇合于同一计算节点（满足原前移搜索条件）。
+// id 前移 + ReorderByNodeId 的重分配隐含单轴节点连续排列假设，多轴交错下会破坏拓扑序，
+// LoadOpSeqAdjust 应整体跳过：不执行任何 id 改写/重排，节点序保持建图原序。
+af::AscGraph MakeMultiLoopAxesGraph(const std::string &name) {
+  af::AscGraph graph(name.c_str());
+  const auto s0 = graph.CreateSizeVar(8);
+  const auto s1 = graph.CreateSizeVar(1024);
+  const auto s2 = graph.CreateSizeVar(512);
+  const auto z0 = graph.CreateAxis("z0", s0);
+  const auto z1 = graph.CreateAxis("z1", s1);
+  const auto z2 = graph.CreateAxis("z2", s2);
+  const auto z0_block = graph.BlockSplit(z0.id).first;
+  const auto z1_tile = graph.TileSplit(z1.id).second;
+  const auto z2_tile = graph.TileSplit(z2.id).second;
+  const SplitAxes axes_a{{z0_block->id, z1_tile->id}, {z1_tile->id}, z1_tile->id};
+  const SplitAxes axes_b{{z0_block->id, z2_tile->id}, {z2_tile->id}, z2_tile->id};
+
+  af::ascir_op::Load load_a("load_a");
+  AddLoadChain(graph, axes_a, "load_a", 0, s1, load_a);
+  af::ascir_op::Load load_b("load_b");
+  AddLoadChain(graph, axes_b, "load_b", 1, s2, load_b);
+
+  af::ascir_op::Add add("add");
+  add.x1 = load_a.y;
+  add.x2 = load_b.y;
+  SetComputeAttr(add, axes_a, s1, af::ComputeType::kComputeElewise, af::ComputeUnit::kUnitVector);
+
+  af::ascir_op::Store store("store");
+  store.x = add.y;
+  SetComputeAttr(store, axes_a, s1, af::ComputeType::kComputeStore, af::ComputeUnit::kUnitMTE3);
+
+  af::ascir_op::Output output("output");
+  output.x = store.y;
+  output.y.dtype = af::DT_FLOAT16;
+  output.attr.api.compute_type = af::ComputeType::kComputeInvalid;
+  output.attr.api.type = af::ApiType::kAPITypeBuffer;
+  output.ir_attr.SetIndex(0);
+
+  // 内存分配后的形态：两 load 的 que.id 不同（否则被共复用判定拦截，无法体现前移路径）
+  graph.FindNode("load_a")->outputs[0].attr.que.id = 1;
+  graph.FindNode("load_b")->outputs[0].attr.que.id = 2;
+  return graph;
+}
+
+TEST(LoadSeqHoistTest, LoadOpSeqAdjustSkipsMultiLoopAxesGraph) {
+  auto graph = MakeMultiLoopAxesGraph("load_seq_multi_axes");
+  ASSERT_GT(ScheduleUtils::GetUniqueLoopAxisCnt(graph), 1U);
+  const auto names_before = GetNodeNames(graph);
+
+  auto fused_scheduled_result = MakeFusedScheduledResult(graph);
+  Optimizer::ExecSeqAdvancedOfLoad(fused_scheduled_result);
+
+  auto &impl_graph = fused_scheduled_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs[0];
+  // 多循环轴整体跳过：节点序与建图原序完全一致
+  EXPECT_EQ(GetNodeNames(impl_graph), names_before);
+}
+
 }  // namespace optimize

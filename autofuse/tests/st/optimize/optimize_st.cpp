@@ -900,7 +900,8 @@ TEST_F(OptimizerSt, TestSoftmaxGraph_OptimizeSuccess) {
   ::ascir::FusedScheduledResult fused_scheduled_result;
   Status res = optimizer.Optimize(graph, fused_scheduled_result);
   EXPECT_EQ(res, af::SUCCESS);
-  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 3UL);
+  // 通用模板 1 + R 轴分核模板 1 + norm 环重计算模板 1 + 全载模板 1
+  ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 4UL);
 }
 
 TEST_F(OptimizerSt, TestPackGraph_OptimizeSuccess) {

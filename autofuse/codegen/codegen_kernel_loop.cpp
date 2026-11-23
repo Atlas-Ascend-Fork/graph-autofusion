@@ -11,6 +11,7 @@
 #include "codegen_kernel_loop.h"
 #include <functional>
 #include "codegen_kernel.h"
+#include "codegen_kernel_utils.h"
 #include "codegen_api_param/codegen_api_param.h"
 #include "codegen/expression_convert_struct.h"
 #include "ascir_ops.h"
@@ -21,7 +22,6 @@
 #include "graph/ascendc_ir/utils/asc_tensor_utils.h"
 #include "indirect_load_utils.h"
 #include "common/platform_context.h"
-#include "common/ub_expr/asc_graph_ub_expr_builder.h"
 #include "ascir_node_param/ascir_param_builder.h"
 
 using namespace std;
@@ -707,18 +707,8 @@ static std::string GetCacheGuardCondition(const ApiCall &call, bool is_enable_ca
   return "";
 }
 
-namespace {
-bool IsUnconditionalCall(const ApiCall &call) {
-  return call.node != nullptr && !call.enable_cache && !call.skip_api_emit &&
-         call.api_call_context.stage == ComputeStage::kDefault && call.node->GetInControlNodesSize() == 0U &&
-         call.node->GetOutControlNodesSize() == 0U;
-}
-
-bool IsSingleQueueTensor(const TQue &queue, const Tensor &tensor) {
-  const auto group = queue.share_group.find(tensor.reuse_id);
-  return group != queue.share_group.end() && group->second.size() == 1U && group->second.front() == tensor.id;
-}
-
+// CommonQueueSplit锚点判定: 圈复杂度超标项, 原样保留不拆分; 唯一调用方
+// GetCommonQueueSplitCandidates 在 codegen_kernel_utils.cpp, 故为外部链接(声明见codegen_kernel_utils.h)
 const ApiCall *GetCommonQueueSplitAnchor(const ApiCall &load, const TPipe &tpipe) {
   if (load.type != Load::Type || load.unit != af::ComputeUnit::kUnitMTE2 || load.inputs.size() != 1U ||
       load.outputs.size() != 1U || load.inputs[0]->id != tpipe.cube_output_tensor_id || !IsUnconditionalCall(load)) {
@@ -751,132 +741,6 @@ const ApiCall *GetCommonQueueSplitAnchor(const ApiCall &load, const TPipe &tpipe
   }
   return anchor;
 }
-
-bool HasIndependentQueueLifetime(const Loop &loop, size_t begin, size_t end, const ApiCall &load, const TPipe &tpipe) {
-  const auto *tensor = tpipe.GetTensor(load.outputs[0].id);
-  for (size_t i = begin; i < end; ++i) {
-    const auto &body = loop.bodys[i];
-    if (body.type != LoopType::CALL || !IsUnconditionalCall(*body.call) ||
-        body.call->unit == af::ComputeUnit::kUnitMTE3) {
-      return false;
-    }
-    for (const auto &output : body.call->outputs) {
-      const auto *other = tpipe.GetTensor(output.id);
-      if (other == nullptr ||
-          (other->alloc_type == af::AllocType::kAllocTypeQueue && other->que_id == tensor->que_id)) {
-        return false;
-      }
-    }
-  }
-  return true;
-}
-
-std::map<const ApiCall *, const ApiCall *> GetCommonQueueSplitCandidates(const Loop &loop, const TPipe &tpipe) {
-  std::map<const ApiCall *, const ApiCall *> plan;
-  if (tpipe.cv_fusion_type != ascir::CubeTemplateType::kCommon || tpipe.is_conv2d ||
-      tpipe.cube_output_tensor_id == af::kIdNone || loop.is_graph_has_reduce_node) {
-    return plan;
-  }
-  std::set<ascir::QueId> used_queues;
-  for (size_t i = 0; i < loop.bodys.size(); ++i) {
-    const auto &body = loop.bodys[i];
-    if (body.type != LoopType::CALL || loop.used_calls.count(body.call) != 0U) {
-      continue;
-    }
-    const auto *anchor = GetCommonQueueSplitAnchor(*body.call, tpipe);
-    if (anchor == nullptr) {
-      continue;
-    }
-    if (std::any_of(body.call->outputs[0].reads.begin(), body.call->outputs[0].reads.end(),
-                    [&loop](const ApiCall *reader) {
-                      return std::none_of(loop.bodys.begin(), loop.bodys.end(), [reader](const LoopBody &entry) {
-                        return entry.type == LoopType::CALL && entry.call == reader;
-                      });
-                    })) {
-      continue;
-    }
-    const auto *tensor = tpipe.GetTensor(body.call->outputs[0].id);
-    if (used_queues.count(tensor->que_id) != 0U) {
-      continue;
-    }
-    const auto *source = body.call->outputs[0].reuse_from->write;
-    bool source_seen = false;
-    for (size_t j = 0; j < i; ++j) {
-      source_seen = source_seen || (loop.bodys[j].type == LoopType::CALL && loop.bodys[j].call == source);
-      if (source_seen && loop.bodys[j].type == LoopType::CALL && loop.bodys[j].call == anchor &&
-          HasIndependentQueueLifetime(loop, j, i, *body.call, tpipe)) {
-        plan.emplace(anchor, body.call);
-        used_queues.insert(tensor->que_id);
-        break;
-      }
-    }
-  }
-  return plan;
-}
-
-void CollectCommonQueueSplitCandidates(const Loop &loop, const TPipe &tpipe, std::vector<const ApiCall *> &loads) {
-  const auto candidates = GetCommonQueueSplitCandidates(loop, tpipe);
-  for (const auto &candidate : candidates) {
-    loads.push_back(candidate.second);
-  }
-  for (const auto &body : loop.bodys) {
-    if (body.type == LoopType::LOOP) {
-      CollectCommonQueueSplitCandidates(*body.loop, tpipe, loads);
-    }
-  }
-}
-
-bool BuildCommonQueueUbGuard(const TPipe &tpipe, const af::AscGraph &graph, CommonQueueSplitPlan &plan) {
-  ascir::UbExprContext context;
-  if (ascir::AscGraphUbExprBuilder().Build(graph, context) != af::SUCCESS || !context.ub_expr.IsValid()) {
-    return false;
-  }
-  std::set<std::string> known_containers;
-  for (const auto &entry : tpipe.ques) {
-    known_containers.insert("q" + std::to_string(entry.first) + "_size");
-  }
-  for (const auto &entry : tpipe.bufs) {
-    known_containers.insert("b" + std::to_string(entry.first) + "_size");
-  }
-  std::set<std::string> actual_containers;
-  for (const auto &entry : context.container_names) {
-    if (known_containers.count(entry.second) == 0U) {
-      return false;
-    }
-    actual_containers.insert(entry.second);
-  }
-  if (actual_containers != known_containers) {
-    return false;
-  }
-  std::vector<std::pair<af::Expression, af::Expression>> replacements;
-  for (const auto &symbol : context.ub_expr.FreeSymbols()) {
-    const auto name = context.container_names.find(symbol);
-    if (name == context.container_names.end()) {
-      return false;
-    }
-    replacements.emplace_back(symbol, af::Symbol((plan.QueueAliasName() + "_" + name->second).c_str()));
-  }
-  plan.ub_containers.assign(actual_containers.begin(), actual_containers.end());
-  plan.original_ub_expr = context.ub_expr.Subs(replacements).Simplify().Str().get();
-  return true;
-}
-
-std::unique_ptr<TPipe> MakeCommonMmQueuePipe(const TPipe &tpipe) {
-  if (tpipe.common_queue_split_plan == nullptr) {
-    return nullptr;
-  }
-  const auto &plan = *tpipe.common_queue_split_plan;
-  const auto *queue = tpipe.GetQue(plan.queue_id);
-  if (queue == nullptr) {
-    return nullptr;
-  }
-  auto view = std::make_unique<TPipe>(tpipe);
-  TQue alias(*queue, plan.QueueAliasName(), plan.BufferAliasName());
-  view->ques.erase(queue->id);
-  view->ques.emplace(queue->id, alias);
-  return view;
-}
-}  // namespace
 
 void TPipe::PrepareCommonQueueSplitPlan(const Loop &loop, const af::AscGraph &graph) {
   common_queue_split_plan.reset();
@@ -1223,10 +1087,6 @@ Status Loop::GenerateLoop(const Tiler &tiler, const TPipe &tpipe, std::vector<as
     if (axis.type == Axis::Type::kAxisTypeTileInner && FindIndirectLoadOpCall(this, false) != nullptr) {
       ss << tiler.GenInnerLoopSizeAndActualSize(axis.id, axis.split_pair_other_id);
     }
-    std::string reduce_dim_a = "reduce_dim_a";
-    if (IsHaveReduceType("Mean")) {
-      ss << "uint32_t " << reduce_dim_a << ";" << std::endl;
-    }
     if (axis.type != Axis::Type::kAxisTypeBlockInner && this->is_graph_has_reduce_node) {
       cache_context.bindings[ReduceCondition::kControl].loop_extent = axis.size;
       ss << "control_dis_enable_cache_a = true;" << std::endl;
@@ -1313,6 +1173,7 @@ Status Loop::GenerateLoop(const Tiler &tiler, const TPipe &tpipe, std::vector<as
          (tpipe.is_dynamic && !tpipe.is_conv2d && !tpipe.is_inductor))) {
       ss << axis.loop_size.AsArg() << " = 1;" << std::endl;
     }
+    std::string reduce_dim_a = "reduce_dim_a";
     ss << "for (" << axis.AsArg() << " = 0; " << axis << " < " << axis.loop_size.Str() << "; " << axis << "++) "
        << "{" << std::endl;
     if (tpipe.cv_fusion_type != ascir::CubeTemplateType::kUBFuse) {
@@ -1353,6 +1214,13 @@ Status Loop::GenerateLoop(const Tiler &tiler, const TPipe &tpipe, std::vector<as
     GE_CHK_STATUS_RET(this->GenerateBody(tiler, tpipe, current_axis, ss, cache_context),
                       "Codegen generate body failed for normal loop");
     ss << "}" << std::endl;
+    // 循环收尾恢复：本循环体内被赋值为当前tile尾部裁剪值的IsInner轴actual_size（见:1326的
+    // GenInnerLoopSizeAndActualSize）恢复整块，保证循环外读者读到全量语义而非末次迭代残值。
+    // 仅非CV：CV内核不走共享轴定义段（GenAxisSizeNew），无头部定义可恢复、轴级变量仍为
+    // 其分支内的就地声明
+    if (tpipe.cv_fusion_type != ascir::CubeTemplateType::kUBFuse) {
+      ss << tiler.GenRestoreInnerActualSize(this->axis_id);
+    }
     if (IsReduceDoubleTile(tiler, tpipe, this->is_graph_has_reduce_node) && GetReduceType() == "Mean") {
       auto reduce_src_tensor = GetReduceInputTensor(tpipe);
       auto reduce_dst_tensor = GetReduceOutputTensor(tpipe);
@@ -1379,7 +1247,7 @@ Status Loop::GenerateLoop(const Tiler &tiler, const TPipe &tpipe, std::vector<as
           collect_original_axes(axis_id);  // 从当前轴开始递归收集
         }
       }
-      ss << "const float dimr_recip = 1.0f / (";
+      ss << "dimr_recip = 1.0f / (";
       uint32_t count = 0;
       for (auto axis_id : r_from_axis) {
         if (count == 0) {
@@ -1491,6 +1359,21 @@ void Loop::GenerateEnCacheCondition(const Tiler &tiler, const TPipe &tpipe, cons
   }
 }
 
+// 递归遍历Loop树判断是否存在Mean类型reduce调用：存在时kernel头部一次性定义
+// reduce_dim_a/dimr_recip供全部Mean循环复用，避免多个Mean循环并列时逐循环定义导致重复声明
+static bool HasMeanReduceCall(const Loop &loop) {
+  for (const auto &body : loop.bodys) {
+    if (body.type == LoopType::CALL) {
+      if (body.call->type == Mean::Type) {
+        return true;
+      }
+    } else if (HasMeanReduceCall(*body.loop)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 Status Loop::Generate(const Tiler &tiler, const TPipe &tpipe, std::string &result, ComputeStage stage) {
   std::vector<ascir::AxisId> current_axis;
   this->compute_stage = stage;
@@ -1523,6 +1406,13 @@ Status Loop::Generate(const Tiler &tiler, const TPipe &tpipe, std::string &resul
   }
   if (this->is_graph_has_reduce_node) {
     ss << "bool control_dis_enable_cache_a = true;" << std::endl;
+  }
+  // Mean辅助变量reduce_dim_a/dimr_recip在kernel头部只定义一次，各Mean循环内赋值、循环后Muls复用：
+  // loop group排序可能产生多个Mean循环在同一父作用域并列（如reduce+brc+reduce的兄弟二级for），
+  // 逐循环定义会重复声明
+  if (HasMeanReduceCall(*this)) {
+    ss << "uint32_t reduce_dim_a;" << std::endl;
+    ss << "float dimr_recip;" << std::endl;
   }
   GE_CHK_STATUS_RET(this->GenerateLoop(tiler, tpipe, current_axis, ss, cache_context), "Generate loop failed");
   result = ss.str();
@@ -1779,19 +1669,6 @@ static bool IsLastShare(const ApiTensor &tensor) {
   return (tensor.share_next == nullptr);
 }
 
-static bool IsReuseWithDefine(const ApiTensor &tensor) {
-  if (tensor.reuse_from == nullptr) {
-    return true;
-  }
-  if (tensor.reuse_from->write == nullptr) {
-    return false;
-  }
-  ascir::AxisId cur_axis = tensor.write->axis;
-  ascir::AxisId reuse_axis = tensor.reuse_from->write->axis;
-  bool with_define = cur_axis == reuse_axis ? false : true;
-  return with_define;
-}
-
 /*
  * que共用只存在于 多个load的输出连接同一vec运算算子的输入场景
  *  load0 load1 load2
@@ -1806,7 +1683,7 @@ BoolType ApiCall::WaitShareInputs(const TPipe &tpipe, const ApiTensor *in, const
     if (in->share_prev == nullptr && IsFirstRead(*this, *in)) {
       auto t_que = tpipe.GetQue(t.que_id);
       GE_CHK_BOOL_RET_SPECIAL_STATUS(t_que == nullptr, BoolType::FAILED, "Codegen que[%ld] not found", t.que_id);
-      ss << t_que->DequeBuf(false);
+      ss << t_que->DequeBuf();
     }
     return BoolType::TRUE;
   }
@@ -1856,10 +1733,9 @@ BoolType ApiCall::AllocShareOutputs(const TPipe &tpipe, const ApiTensor &out, co
   if (IsInShareQue(out)) {
     if (this->unit == af::ComputeUnit::kUnitMTE2 && t.position == af::Position::kPositionVecIn) {
       if (out.reuse_from != nullptr && out.share_prev == nullptr) {
-        bool with_define = IsReuseWithDefine(out);
         auto t_que = tpipe.GetQue(t.que_id);
         GE_CHK_BOOL_RET_SPECIAL_STATUS(t_que == nullptr, BoolType::FAILED, "Codegen que[%ld] not found", t.que_id);
-        ss << t_que->AllocBuf(with_define);
+        ss << t_que->AllocBuf();
       } else if (out.reuse_from == nullptr && out.share_prev == nullptr) {
         auto t_que = tpipe.GetQue(t.que_id);
         GE_CHK_BOOL_RET_SPECIAL_STATUS(t_que == nullptr, BoolType::FAILED, "Codegen que[%ld] not found", t.que_id);
@@ -1915,7 +1791,7 @@ bool ApiCall::WaitInputVector(const TPipe &tpipe, const ApiTensor *in, const Ten
     auto t_que = tpipe.GetQue(t.que_id);
     GE_CHK_BOOL_RET_SPECIAL_STATUS(t_que == nullptr, false, "Codegen que[%ld] not found", t.que_id);
     if (t.que_id != tpipe.cube_output_que_id) {
-      ss << t_que->DequeBuf(false);
+      ss << t_que->DequeBuf();
     }
   } else if (t.position == af::Position::kPositionVecCalc && IsFirstRead(*this, *in)) {
     ss << "AscendC::PipeBarrier<PIPE_V>();" << std::endl;
@@ -1955,12 +1831,12 @@ bool ApiCall::WaitInputMte(const TPipe &tpipe, const ApiTensor *in, const Tensor
     // 1. vec->store 2. vec->vec store store 3. vec->store vec store
     auto t_que = tpipe.GetQue(t.que_id);
     GE_CHK_BOOL_RET_SPECIAL_STATUS(t_que == nullptr, false, "Codegen que[%ld] not found", t.que_id);
-    ss << t_que->DequeBuf(false);
+    ss << t_que->DequeBuf();
   } else if ((t.position == af::Position::kPositionVecIn) && IsFirstRead(*this, *in)) {
     // 1. load->store
     auto t_que = tpipe.GetQue(t.que_id);
     GE_CHK_BOOL_RET_SPECIAL_STATUS(t_que == nullptr, false, "Codegen que[%ld] not found", t.que_id);
-    ss << t_que->DequeBuf(false);
+    ss << t_que->DequeBuf();
   } else if (t.position == af::Position::kPositionGM && IsUnitFirstRead(*this, *in) && in->write->type == Store::Type) {
     // store->workspace->load
     ss << tpipe.SyncMte3ToMte2(t) << std::endl;
@@ -2020,8 +1896,8 @@ static bool IsQueProtectedReuse(const TPipe &tpipe, const ApiTensor &out, const 
   return reused != nullptr && reused->position == af::Position::kPositionVecOut;
 }
 
-Status ApiCall::HandleVecOutAlloc(const TPipe &tpipe, const ApiTensor &out, const Tensor &t, std::stringstream &ss,
-                                  bool with_define) const {
+Status ApiCall::HandleVecOutAlloc(const TPipe &tpipe, const ApiTensor &out, const Tensor &t,
+                                  std::stringstream &ss) const {
   if (IsInplaceOutput(*this, out)) {
     return af::SUCCESS;
   }
@@ -2037,7 +1913,7 @@ Status ApiCall::HandleVecOutAlloc(const TPipe &tpipe, const ApiTensor &out, cons
     if (tensor_ptr->position == af::Position::kPositionVecOut) {
       auto t_que = tpipe.GetQue(t.que_id);
       GE_CHK_BOOL_RET_STATUS(t_que != nullptr, af::FAILED, "Codegen que[%ld] not found", t.que_id);
-      ss << t_que->AllocBuf(with_define);
+      ss << t_que->AllocBuf();
     } else {
       ss << "AscendC::PipeBarrier<PIPE_V>();" << std::endl;
     }
@@ -2046,7 +1922,30 @@ Status ApiCall::HandleVecOutAlloc(const TPipe &tpipe, const ApiTensor &out, cons
   if (out.reuse_from->write->unit == af::ComputeUnit::kUnitMTE2) {
     auto t_que = tpipe.GetQue(t.que_id);
     GE_CHK_BOOL_RET_STATUS(t_que != nullptr, af::FAILED, "Codegen que[%ld] not found", t.que_id);
-    ss << t_que->AllocBuf(with_define);
+    ss << t_que->AllocBuf();
+  }
+  return af::SUCCESS;
+}
+
+// AllocOutputs子路径: Queue类输出按算子单元与输出位置分派——共享输出由AllocShareOutputs处理
+// (返回TRUE即已处理); MTE2的VecIn输出AllocBuf; Vector的VecOut/VecCalc各有专门处理
+Status ApiCall::AllocQueueOutput(const TPipe &tpipe, const ApiTensor &out, const Tensor &t,
+                                 std::stringstream &ss) const {
+  BoolType ret = this->AllocShareOutputs(tpipe, out, t, ss);
+  GE_CHK_BOOL_RET_STATUS(ret != BoolType::FAILED, af::FAILED, "AllocShareOutputs return BoolType::FAILED");
+  if (ret == BoolType::TRUE) {
+    GELOGI("tensor id %ld alloc with share", out.id);
+  } else if (this->unit == af::ComputeUnit::kUnitMTE2 && t.position == af::Position::kPositionVecIn) {
+    auto t_que = tpipe.GetQue(t.que_id);
+    GE_CHK_BOOL_RET_STATUS(t_que != nullptr, af::FAILED, "Codegen que[%ld] not found", t.que_id);
+    ss << t_que->AllocBuf();
+  } else if (this->unit == af::ComputeUnit::kUnitVector && t.position == af::Position::kPositionVecOut) {
+    GE_CHK_BOOL_RET_STATUS(this->HandleVecOutAlloc(tpipe, out, t, ss) == af::SUCCESS, af::FAILED,
+                           "HandleVecOutAlloc failed");
+  } else if (this->unit == af::ComputeUnit::kUnitVector && t.position == af::Position::kPositionVecCalc) {
+    GE_CHK_STATUS_RET(AllocVecCalcOutput(tpipe, out, t, ss), "AllocVecCalcOutput failed");
+  } else {
+    std::runtime_error("Unsupported case.");
   }
   return af::SUCCESS;
 }
@@ -2065,62 +1964,13 @@ Status ApiCall::AllocOutputs(const TPipe &tpipe, std::stringstream &ss) const {
     }
 
     if (t.alloc_type == af::AllocType::kAllocTypeBuffer) {
-      if (out.reuse_from != nullptr) {
-        ss << "AscendC::PipeBarrier<PIPE_V>();" << std::endl;
-      }
-      ss << tpipe.TensorActualSizeCalc(t.id);
-      std::string tmp;
-      if (!t.no_need_realloc) {
-        GE_CHK_STATUS_RET(tpipe.TensorAlloc(t, tmp), "Codegen alloc tensor failed");
-      }
-      ss << tmp;
+      GE_CHK_STATUS_RET(AllocBufferOutput(tpipe, out, t, ss), "Codegen alloc buffer output failed");
       continue;
     }
     if (t.alloc_type != af::AllocType::kAllocTypeQueue) {
       continue;
     }
-    bool with_define = IsReuseWithDefine(out);
-    BoolType ret = this->AllocShareOutputs(tpipe, out, t, ss);
-    GE_CHK_BOOL_RET_STATUS(ret != BoolType::FAILED, af::FAILED, "AllocShareOutputs return BoolType::FAILED");
-    if (ret == BoolType::TRUE) {
-      GELOGI("tensor id %ld alloc with share", out.id);
-    } else if (this->unit == af::ComputeUnit::kUnitMTE2 && t.position == af::Position::kPositionVecIn) {
-      if (out.reuse_from != nullptr) {
-        auto t_que = tpipe.GetQue(t.que_id);
-        GE_CHK_BOOL_RET_STATUS(t_que != nullptr, af::FAILED, "Codegen que[%ld] not found", t.que_id);
-        ss << t_que->AllocBuf(with_define);
-      } else {
-        auto t_que = tpipe.GetQue(t.que_id);
-        GE_CHK_BOOL_RET_STATUS(t_que != nullptr, af::FAILED, "Codegen que[%ld] not found", t.que_id);
-        ss << t_que->AllocBuf();
-      }
-    } else if (this->unit == af::ComputeUnit::kUnitVector && t.position == af::Position::kPositionVecOut) {
-      GE_CHK_BOOL_RET_STATUS(HandleVecOutAlloc(tpipe, out, t, ss, with_define) == af::SUCCESS, af::FAILED,
-                             "HandleVecOutAlloc failed");
-    } else if (this->unit == af::ComputeUnit::kUnitVector && t.position == af::Position::kPositionVecCalc) {
-      if (out.reuse_from == nullptr) {
-        // vec ..> store
-        // vec ..> vec ..> store
-        auto t_que = tpipe.GetQue(t.que_id);
-        GE_CHK_BOOL_RET_STATUS(t_que != nullptr, af::FAILED, "Codegen que[%ld] not found", t.que_id);
-        ss << t_que->AllocBuf();
-      } else {
-        auto tensor_ptr = tpipe.GetTensor(out.reuse_from->id);
-        GE_CHK_BOOL_RET_STATUS(tensor_ptr != nullptr, af::FAILED, "Check[Param] tensor_ptr is nullptr");
-        if (tensor_ptr->position == af::Position::kPositionVecOut) {
-          // vec -> store -> free ..> alloc -> vec
-          auto t_que = tpipe.GetQue(t.que_id);
-          GE_CHK_BOOL_RET_STATUS(t_que != nullptr, af::FAILED, "Codegen que[%ld] not found", t.que_id);
-          ss << t_que->AllocBuf(with_define);
-        } else {
-          // load ..> vec
-          // vec ..> vec
-          ss << "AscendC::PipeBarrier<PIPE_V>();" << std::endl;
-        }
-      }
-    } else {
-      std::runtime_error("Unsupported case.");
-    }
+    GE_CHK_STATUS_RET(this->AllocQueueOutput(tpipe, out, t, ss), "Codegen alloc queue output failed");
     ss << tpipe.TensorActualSizeCalc(t.id);
     std::string tmp;
     if (!(t.alloc_type == af::AllocType::kAllocTypeBuffer && t.no_need_realloc)) {

@@ -18,6 +18,7 @@
 #include "ascir_ops.h"
 #include "autoschedule/axis_group.h"
 #include "ascir_utils.h"
+#include "ascgraph_info_complete.h"
 #include "common_utils.h"
 #include "arg_reduce_utils.h"
 #include "node_utils.h"
@@ -39,6 +40,17 @@ size_t NODE_COUNT_AFTER_REDUCE = 4UL;
 constexpr int64_t kBroadcastTailRepeatWorkspaceThreshold = 22500L;
 // reduce 场景首轴 B 扩展的 workspace 收益门槛(首轴须为常量并大于该阈值)
 constexpr int64_t kBroadcastFirstAxisWorkspaceThreshold = 128L;
+// norm 环重计算模板允许新增的节点数上限(多输出节点及其上游链副本的总数), 超限则丢弃该模板
+constexpr size_t kNormRecomputeMaxAddedNodes = 15UL;
+// norm 环重计算模板的强制选择阈值(需同时满足): ① 所有 reduce 的 R 轴(规约轴)大小均大于
+// 该值; ② 输入张量规模(所有轴大小乘积 * sizeof(输入dtype))不小于该字节数;
+// ③ R 轴大小 * sizeof(输入dtype) 小于该字节数。三者同时成立打分函数才返回 1 分强制选择
+// (其余 reduce 系任务默认打 0 分, 严格大于比较下必胜), 否则正常竞争
+constexpr int64_t kNormRecomputeForceSelectRSizeThreshold = 6655L;
+constexpr int64_t kNormRecomputeForceSelectTensorBytesThreshold = 96LL * 1024LL * 1024LL;
+constexpr int64_t kNormRecomputeForceSelectRBytesLimit = 192LL * 1024LL * 1024LL;
+// 打分条件中动态 sizevar 的运行期取值前缀(组 tiling data 字段引用, 替换规则见BuildScoreSizeVarSubs)
+const std::string kScoreDynamicVarPrefix = "static_cast<int64_t>(t.";
 
 // 打印 loop_start_end 的 [begin_idx, end_idx) 区段, tag 标识来源(FindNormLoops/AddNormLikeLoops)
 void LogNormLoops(const char *tag, const std::vector<std::pair<af::AscNodePtr, af::AscNodePtr>> &loop_start_end,
@@ -402,6 +414,280 @@ Status ReducePartitionCaseGenerator::GeneratorRCoreTask(ascir::HintGraph &optimi
   return ge::GRAPH_SUCCESS;
 }
 
+// 手工注释：小于2的条件是为了降低新增模板的影响性，有需要可以随时放开；大于1的条件是为了和loop_group排序里的启用条件一致。
+// norm 环重计算模板启用条件: 仅对恰好包含 2 个 reduce 节点的图生效(双 norm 结构, 如 softmax
+// 的 max+sum 级联); 单/零 reduce 的图收益场景不足, 3 个以上 reduce 的级联切分链路超出简单
+// norm 设计域, 均不启用
+bool ReducePartitionCaseGenerator::ShouldNormRecompute(ascir::HintGraph &graph) {
+  size_t reduce_cnt = 0UL;
+  for (const auto &node : graph.GetAllNodes()) {
+    if (ScheduleUtils::IsReduce(node)) {
+      ++reduce_cnt;
+      if (reduce_cnt > 2UL) {
+        GELOGD("Graph[%s] has more than 2 reduce nodes, skip NormRecompute.", graph.GetName().c_str());
+        return false;
+      }
+    }
+  }
+  if (reduce_cnt != 2UL) {
+    GELOGD("Graph[%s] has %zu reduce nodes (need exactly 2), skip NormRecompute.", graph.GetName().c_str(), reduce_cnt);
+    return false;
+  }
+  return true;
+}
+
+Status ReducePartitionCaseGenerator::GeneratorNormRecomputeTask(ascir::HintGraph &optimize_graph,
+                                                                std::vector<ScheduleTask> &tasks) {
+  if (!HasReduce(optimize_graph)) {
+    return ge::GRAPH_SUCCESS;
+  }
+  ascir::ImplGraph recompute_graph((optimize_graph.GetName() + "_norm_recompute").c_str());
+  recompute_graph.CopyFrom(optimize_graph);
+
+  node_order_.clear();
+  auto loop_start_end = FindNormLoops(recompute_graph);
+  if (loop_start_end.empty()) {
+    GELOGD("Graph %s has no norm loop, skip NormRecompute task generation.", optimize_graph.GetName().c_str());
+    return ge::GRAPH_SUCCESS;
+  }
+
+  // 对 norm 环执行重计算切分: 复制多输出节点及其全部上游(重计算部分)代替切 workspace
+  norm_recompute_copy_count_ = 0UL;
+  GE_CHK_STATUS_RET(PartitionNormByRecompute(recompute_graph), "PartitionNormByRecompute failed");
+  ascir::utils::DumpGraph(recompute_graph, "after_partition_norm_recompute");
+
+  // 重计算新增节点数超上限时丢弃该模板(重算开销过大, 该图交由其余模板竞争)
+  if (norm_recompute_copy_count_ > kNormRecomputeMaxAddedNodes) {
+    GELOGI("Graph[%s] NormRecompute adds %zu nodes, exceeds the limit %zu, skip NormRecompute task.",
+           recompute_graph.GetName().c_str(), norm_recompute_copy_count_, kNormRecomputeMaxAddedNodes);
+    return ge::GRAPH_SUCCESS;
+  }
+
+  ScheduleTask task{recompute_graph, {}, {}, {}, ReduceTemplateType::kCommon};
+  task.semantic_name = semantic::kReduceNormRecompute;
+  // 结果级打分: R 轴大小均大于阈值时返回 1 分强制选择(ATT GenGetScoreFuncsCalling ->
+  // GenGetMaxScoreIndex, 严格大于比较), 否则 0 分与其余 reduce 系任务(默认打 0 分)竞争
+  GE_CHK_STATUS_RET(GenerateNormRecomputeScoreFunc(recompute_graph, task.score_func),
+                    "GenerateNormRecomputeScoreFunc failed");
+  std::sort(node_order_.begin(), node_order_.end(), [](const af::AscNodePtr &lhs, af::AscNodePtr &rhs) {
+    return lhs->GetOpDescBarePtr()->GetId() < rhs->GetOpDescBarePtr()->GetId();
+  });
+  GE_CHK_STATUS_RET(
+      ScheduleGroupGraphPartitioner::PartitionByConnectivity(recompute_graph, task.grouped_graphs, node_order_),
+      "Failed to partition graph");
+  if (task.grouped_graphs.empty()) {
+    GELOGW("Graph[%s] has no subgraphs after partition, skip NormRecompute task", recompute_graph.GetName().c_str());
+    return ge::GRAPH_SUCCESS;
+  }
+  tasks.emplace_back(std::move(task));
+  return ge::GRAPH_SUCCESS;
+}
+
+// 本图原始 sizevar 的叶级替换表: 动态 → t.<name>(运行期组 tiling data 字段), 常量 → 字面量
+static void BuildScoreSizeVarSubs(const af::AscGraph &graph,
+                                  std::vector<std::pair<af::Expression, af::Expression>> &subs) {
+  SizeVarSet original_var_set;
+  AscGraphInfoComplete::AppendOriginalSizeVar(graph, original_var_set);
+  for (const auto &size_var : original_var_set) {
+    int64_t const_value = 0L;
+    if (size_var.GetConstValue(const_value)) {
+      subs.emplace_back(size_var, af::Symbol(std::to_string(const_value).c_str()));
+    } else {
+      subs.emplace_back(size_var, af::Symbol((kScoreDynamicVarPrefix + size_var.Str().get() + ")").c_str()));
+    }
+  }
+}
+
+// 单个 reduce 的强制选择条件文本(带括号的三个子条件 AND): R轴大小>阈值、输入张量规模(所有轴
+// 大小乘积 * sizeof(输入dtype))不小于下限、R轴大小 * sizeof(输入dtype) 小于上限;
+// R 轴经 CalcReduceAxes 推导后查图轴表取乘积, 常量轴经 subs 折叠为字面量, 动态轴替换为 t.<name>;
+// 维度不齐或无 R 轴的 reduce 不产生条件(返回空串)
+static Status GetReduceForceSelectCondition(const af::AscNodePtr &node, ascir::ImplGraph &impl_graph,
+                                            const std::vector<std::pair<af::Expression, af::Expression>> &subs,
+                                            std::string &condition) {
+  condition.clear();
+  const std::vector<af::Expression> input_strides = node->inputs[0].attr.strides;
+  const std::vector<af::Expression> output_strides = node->outputs[0].attr.strides;
+  const std::vector<ascir::AxisId> output_axes = node->outputs[0].attr.axis;
+  if (input_strides.size() != output_strides.size() || output_strides.size() != output_axes.size()) {
+    return ge::GRAPH_SUCCESS;  // 维度不齐, 不产生条件
+  }
+  const auto reduce_axes = ScheduleUtils::CalcReduceAxes(input_strides, output_strides, output_axes);
+  if (reduce_axes.empty()) {
+    return ge::GRAPH_SUCCESS;  // 无 R 轴, 不产生条件
+  }
+  af::Expression r_size = af::ops::One;
+  for (const auto axis_id : reduce_axes) {
+    const auto *axis = impl_graph.FindAxis(axis_id);
+    GE_ASSERT_NOTNULL(axis);
+    r_size = r_size * axis->size;
+  }
+  af::Expression tensor_size = af::ops::One;
+  for (const auto axis_id : node->inputs[0].attr.axis) {
+    const auto *axis = impl_graph.FindAxis(axis_id);
+    GE_ASSERT_NOTNULL(axis);
+    tensor_size = tensor_size * axis->size;
+  }
+  const auto dtype_size = ge::GetSizeByDataType(node->inputs[0].attr.dtype);
+  const std::string r_size_text(r_size.Subs(subs).Str().get());
+  const std::string tensor_size_text(tensor_size.Subs(subs).Str().get());
+  condition = "(" + r_size_text + " > " + std::to_string(kNormRecomputeForceSelectRSizeThreshold) + "LL) && (" +
+              tensor_size_text + " * " + std::to_string(dtype_size) +
+              " >= " + std::to_string(kNormRecomputeForceSelectTensorBytesThreshold) + "LL) && (" + r_size_text +
+              " * " + std::to_string(dtype_size) + " < " + std::to_string(kNormRecomputeForceSelectRBytesLimit) + "LL)";
+  return ge::GRAPH_SUCCESS;
+}
+
+// NormRecompute 结果级打分函数生成: 仅当所有 reduce 的强制选择条件(见GetReduceForceSelectCondition,
+// 各 reduce 间 AND)全满足时返回 1 分强制选择本模板, 否则 0 分正常竞争;
+// 动态轴经 kGroupTilingDataPlaceholder 引用本组 tiling data 的运行期值(与 indirect_load/concat
+// 打分同机制), 常量轴发射期折叠为字面量, 全常量时不引用 tiling data;
+// 多 group 场景占位符无法绑定组子结构, ATT 侧(GenGetScoreFuncs)退化为常量 0, 即不强制选择。
+Status ReducePartitionCaseGenerator::GenerateNormRecomputeScoreFunc(ascir::ImplGraph &impl_graph,
+                                                                    std::string &score_func) {
+  std::vector<std::pair<af::Expression, af::Expression>> subs;
+  BuildScoreSizeVarSubs(impl_graph, subs);
+
+  // 所有带 R 轴的 reduce 的条件, 逐个与(AND)连接
+  std::string condition;
+  for (const auto &node : impl_graph.GetAllNodes()) {
+    if (!ScheduleUtils::IsReduce(node)) {
+      continue;
+    }
+    std::string reduce_condition;
+    GE_CHK_STATUS_RET(GetReduceForceSelectCondition(node, impl_graph, subs, reduce_condition),
+                      "Get reduce force select condition failed, node: %s.", node->GetNamePtr());
+    if (!reduce_condition.empty()) {
+      condition += condition.empty() ? reduce_condition : " && " + reduce_condition;
+    }
+  }
+  if (condition.empty()) {
+    // 无带 R 轴的 reduce, 无判据, 不强制选择
+    score_func =
+        "int32_t CalcScore(const AutofuseTilingData &tiling_data) {\n"
+        "  (void)tiling_data;\n"
+        "  return 0;\n"
+        "}\n";
+    return ge::GRAPH_SUCCESS;
+  }
+  score_func = "int32_t CalcScore(const AutofuseTilingData &tiling_data) {\n";
+  if (condition.find(kScoreDynamicVarPrefix) != std::string::npos) {
+    // 仅条件含动态轴时绑定组 tiling data, 避免未使用引用
+    score_func += "  const auto &t = tiling_data." + std::string(ascgen_utils::kGroupTilingDataPlaceholder) + ";\n";
+  }
+  score_func += "  return (" + condition + ") ? 1 : 0;\n}\n";
+  return ge::GRAPH_SUCCESS;
+}
+
+// 沿 node 输入方向逐层向上(BFS)查找多输出节点:
+// multi_output_node 为找到的多输出节点, from_node 为发现它的节点;
+// from_node 到 reduce 方向的输出边保留在原节点上, 其余输出边改接重计算副本
+void ReducePartitionCaseGenerator::FindInputMultiOutputNode(const af::AscNodePtr &node,
+                                                            af::AscNodePtr &multi_output_node,
+                                                            af::AscNodePtr &from_node) {
+  multi_output_node = nullptr;
+  from_node = nullptr;
+  std::set<af::Node *> visited{node.get()};
+  std::list<af::AscNodePtr> pending{node};
+  while (multi_output_node == nullptr && !pending.empty()) {
+    const auto cur_node = pending.front();
+    pending.pop_front();
+    for (const auto &in_node : cur_node->GetInDataNodes()) {
+      const auto in_asc_node = std::dynamic_pointer_cast<af::AscNode>(in_node);
+      if (in_asc_node == nullptr || !visited.insert(in_asc_node.get()).second) {
+        continue;
+      }
+      if (in_asc_node->GetOutDataNodes().size() > 1UL) {
+        multi_output_node = in_asc_node;
+        from_node = cur_node;
+        break;
+      }
+      pending.emplace_back(in_asc_node);
+    }
+  }
+}
+
+// 递归复制 node 及其全部上游输入链(即重计算部分), new_node 返回 node 的副本;
+// 同一棵复制树内共享的上游节点只复制一次, 保持上游子图结构一致
+Status ReducePartitionCaseGenerator::CopyRecomputeChain(const af::AscNodePtr &node, af::AscGraph &graph,
+                                                        std::map<af::Node *, af::AscNodePtr> &origin_to_copy,
+                                                        af::AscNodePtr &new_node) {
+  const auto copy_iter = origin_to_copy.find(node.get());
+  if (copy_iter != origin_to_copy.cend()) {
+    new_node = copy_iter->second;
+    return ge::GRAPH_SUCCESS;
+  }
+  const auto op_desc = af::GraphUtils::CopyOpDesc(node->GetOpDesc(), nullptr);
+  GE_ASSERT_NOTNULL(op_desc);
+  op_desc->SetName(node->GetName() + "_recompute_" + std::to_string(norm_recompute_copy_count_));
+  ++norm_recompute_copy_count_;
+  af::Operator op = af::OpDescUtils::CreateOperatorFromOpDesc(op_desc);
+  auto copied_node = graph.AddNode(op);
+  GE_ASSERT_NOTNULL(copied_node);
+  origin_to_copy.emplace(node.get(), copied_node);
+  GE_ASSERT_TRUE(af::AscGraph::CopyAscNodeTensorAttr(node, copied_node), "CopyAscNodeTensorAttr failed, node = %s[%s]",
+                 node->GetNamePtr(), node->GetTypePtr());
+  for (const auto &in_anchor : node->GetAllInDataAnchors()) {
+    GE_ASSERT_NOTNULL(in_anchor);
+    const auto peer_out = in_anchor->GetPeerOutAnchor();
+    if (peer_out == nullptr) {
+      continue;
+    }
+    const auto owner_node = peer_out->GetOwnerNodeBarePtr();
+    GE_ASSERT_NOTNULL(owner_node);
+    const auto in_asc_node = std::dynamic_pointer_cast<af::AscNode>(owner_node->shared_from_this());
+    GE_ASSERT_NOTNULL(in_asc_node);
+    af::AscNodePtr in_copy;
+    GE_CHK_STATUS_RET(CopyRecomputeChain(in_asc_node, graph, origin_to_copy, in_copy));
+    GE_CHK_STATUS_RET(af::GraphUtils::AddEdge(in_copy->GetOutAnchor(peer_out->GetIdx()),
+                                              copied_node->GetInAnchor(in_anchor->GetIdx())));
+  }
+  new_node = copied_node;
+  return ge::GRAPH_SUCCESS;
+}
+
+Status ReducePartitionCaseGenerator::PartitionNormByRecompute(ascir::ImplGraph &impl_graph) {
+  // 遍历所有节点, 过滤出 reduce 节点
+  std::vector<af::AscNodePtr> reduce_nodes;
+  for (const auto &node : impl_graph.GetAllNodes()) {
+    if (ScheduleUtils::IsReduce(node)) {
+      reduce_nodes.emplace_back(node);
+    }
+  }
+  std::set<af::Node *> processed_multi_output_nodes;
+  for (const auto &reduce_node : reduce_nodes) {
+    af::AscNodePtr multi_output_node;
+    af::AscNodePtr from_node;
+    FindInputMultiOutputNode(reduce_node, multi_output_node, from_node);
+    // 同一多输出节点只处理一次: 首次处理时发现侧边已保留原节点, 其余输出边均已改接重计算副本
+    if (multi_output_node == nullptr || !processed_multi_output_nodes.insert(multi_output_node.get()).second) {
+      continue;
+    }
+    GELOGI("PartitionNormByRecompute: reduce=%s, multi output node=%s (found from=%s), recompute other output edges.",
+           reduce_node->GetName().c_str(), multi_output_node->GetName().c_str(), from_node->GetName().c_str());
+    for (const auto &out_anchor : multi_output_node->GetAllOutDataAnchors()) {
+      GE_CHECK_NOTNULL(out_anchor, "Out data anchor is null, node:%s.", multi_output_node->GetNamePtr());
+      for (const auto &peer_in_anchor : out_anchor->GetPeerInDataAnchors()) {
+        GE_CHECK_NOTNULL(peer_in_anchor);
+        GE_CHECK_NOTNULL(peer_in_anchor->GetOwnerNodeBarePtr(), "Peer in node:%s is null",
+                         multi_output_node->GetNamePtr());
+        if (peer_in_anchor->GetOwnerNodeBarePtr() == from_node.get()) {
+          continue;  // 发现侧边保留在原节点上(归约路径原始计算)
+        }
+        std::map<af::Node *, af::AscNodePtr> origin_to_copy;
+        af::AscNodePtr recompute_root;
+        GE_CHK_STATUS_RET(CopyRecomputeChain(multi_output_node, impl_graph, origin_to_copy, recompute_root));
+        GE_CHK_STATUS_RET(
+            af::GraphUtils::RemoveEdge(multi_output_node->GetOutAnchor(out_anchor->GetIdx()), peer_in_anchor),
+            "Remove edge failed for node [%s].", multi_output_node->GetNamePtr());
+        GE_CHK_STATUS_RET(af::GraphUtils::AddEdge(recompute_root->GetOutAnchor(out_anchor->GetIdx()), peer_in_anchor),
+                          "Add edge failed for recompute node [%s].", recompute_root->GetNamePtr());
+      }
+    }
+  }
+  return ge::GRAPH_SUCCESS;
+}
+
 Status ReducePartitionCaseGenerator::GeneratorTask(ascir::HintGraph &optimize_graph, std::vector<ScheduleTask> &tasks,
                                                    const OptimizerOptions &options) {
   (void)options;
@@ -412,8 +698,9 @@ Status ReducePartitionCaseGenerator::GeneratorTask(ascir::HintGraph &optimize_gr
     return ge::GRAPH_SUCCESS;
   }
   const bool force_all_load = ShouldForceAllLoad(optimize_graph);
-  GELOGI("Graph %s force AllLoad = %d, begin to generate reduce tasks.", optimize_graph.GetName().c_str(),
-         static_cast<int32_t>(force_all_load));
+  const bool norm_recompute = ShouldNormRecompute(optimize_graph);
+  GELOGI("Graph %s force AllLoad = %d, norm recompute = %d, begin to generate reduce tasks.",
+         optimize_graph.GetName().c_str(), static_cast<int32_t>(force_all_load), static_cast<int32_t>(norm_recompute));
   GE_CHK_STATUS_RET(GeneratorGeneralTask(optimize_graph, tasks));
   GELOGI("After GeneralTask, graph %s has %zu task(s).", optimize_graph.GetName().c_str(), tasks.size());
   if (force_all_load || HasArgReduceMultiRAxisReduce(optimize_graph)) {
@@ -422,6 +709,11 @@ Status ReducePartitionCaseGenerator::GeneratorTask(ascir::HintGraph &optimize_gr
   } else {
     GE_CHK_STATUS_RET(GeneratorRCoreTask(optimize_graph, tasks));
     GELOGI("After RCoreTask, graph %s has %zu task(s).", optimize_graph.GetName().c_str(), tasks.size());
+  }
+  if (norm_recompute) {
+    // NormRecompute 任务虽为 kCommon 类型, 但置于 RCore 之后生成, 避免被 GeneratorRCoreTask 消费
+    GE_CHK_STATUS_RET(GeneratorNormRecomputeTask(optimize_graph, tasks));
+    GELOGI("After NormRecomputeTask, graph %s has %zu task(s).", optimize_graph.GetName().c_str(), tasks.size());
   }
   GE_CHK_STATUS_RET(GeneratorAllLoadTask(optimize_graph, tasks));
   GELOGI("After AllLoadTask, graph %s has %zu task(s).", optimize_graph.GetName().c_str(), tasks.size());

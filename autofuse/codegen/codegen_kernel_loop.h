@@ -154,8 +154,9 @@ class ApiCall {
   bool WaitInputMte(const TPipe &tpipe, const ApiTensor *in, const Tensor &t, std::stringstream &ss) const;
   BoolType WaitShareInputs(const TPipe &tpipe, const ApiTensor *in, const Tensor t, std::stringstream &ss) const;
   BoolType AllocShareOutputs(const TPipe &tpipe, const ApiTensor &out, const Tensor t, std::stringstream &ss) const;
-  Status HandleVecOutAlloc(const TPipe &tpipe, const ApiTensor &out, const Tensor &t, std::stringstream &ss,
-                           bool with_define) const;
+  Status HandleVecOutAlloc(const TPipe &tpipe, const ApiTensor &out, const Tensor &t, std::stringstream &ss) const;
+  // AllocOutputs的Queue输出分派子路径(TBuf/VecCalc子路径已拆至codegen_kernel_utils)
+  Status AllocQueueOutput(const TPipe &tpipe, const ApiTensor &out, const Tensor &t, std::stringstream &ss) const;
 };
 
 struct Loop {

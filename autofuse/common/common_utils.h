@@ -89,6 +89,7 @@ inline constexpr char kReduceAllLoad[] = "Reduce/AllLoad";
 inline constexpr char kReduceRCore[] = "Reduce/RCore";
 inline constexpr char kReducePhase1[] = "Reduce/RCore/Phase1";
 inline constexpr char kReducePhase2[] = "Reduce/RCore/Phase2";
+inline constexpr char kReduceNormRecompute[] = "Reduce/NormRecompute";
 inline constexpr char kConcatOffsetStore[] = "Concat/GM/OffsetStore";
 inline constexpr char kSplitOffsetLoad[] = "Split/GM/OffsetLoad";
 inline constexpr char kTransposeFold[] = "Transpose/Load/Fold";
