@@ -669,18 +669,6 @@ bool SuperKernelScopePostProcessor::ProcessSubStreamSyncEvents(
 
 bool SuperKernelScopePostProcessor::FinalizePostProcess(SuperKernelScopeInfo &scopeInfo, ScopeExtInfo &tempExtInfo,
                                                         std::vector<SuperKernelBaseNode *> &needUpdateNodes) {
-  // Publish dependency edges once all event creation and resource checks have succeeded.
-  for (const auto &event : tempExtInfo.eventNodes) {
-    auto *owner = graph.GetNodeById(event->GetPreNodeId());
-    if (owner == nullptr) {
-      SK_LOGE("synthetic event owner disappeared: scopeId=%u, eventId=%lu, ownerNodeId=%lu", scopeInfo.GetScopeId(),
-              event->GetNodeId(), event->GetPreNodeId());
-      scopeInfo.MutableExtInfo().processStatus = ScopeProcessStatus::UNRECOVERABLE_FAIL;
-      return false;
-    }
-    owner->sendToNodeId.insert(event->GetNodeId());
-    event->receiveNodeId.insert(owner->GetNodeId());
-  }
   graph.ExpandUpdateNodes(needUpdateNodes);
   SK_LOGI("expand update node done, needUpdateNodesSize=%zu", needUpdateNodes.size());
 

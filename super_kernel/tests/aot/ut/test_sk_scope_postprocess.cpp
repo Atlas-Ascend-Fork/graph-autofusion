@@ -373,8 +373,8 @@ TEST_F(SuperKernelScopePostprocessTest, PostProcess_FrontWait_Success) {
   const auto &reset = scopeInfo.extInfo_.eventNodes.front();
   EXPECT_EQ(reset->GetNodeType(), SkNodeType::NODE_RESET);
   EXPECT_EQ(reset->GetPreNodeId(), 20U);
-  EXPECT_EQ(reset->receiveNodeId.count(20), 1U);
-  EXPECT_EQ(graph->GetNodeById(20)->sendToNodeId.count(reset->GetNodeId()), 1U);
+  EXPECT_EQ(reset->receiveNodeId.count(20), 0U);
+  EXPECT_EQ(graph->GetNodeById(20)->sendToNodeId.count(reset->GetNodeId()), 0U);
   EXPECT_EQ(graph->GetNodeById(11)->sendToNodeId.count(reset->GetNodeId()), 0U);
 }
 
@@ -451,8 +451,8 @@ TEST_F(SuperKernelScopePostprocessTest, PostProcess_BackBlockBindsLastTaskAfterF
   EXPECT_EQ(notify->GetPreNodeId(), 50U);
   EXPECT_EQ(scopeInfo.scopeStreamInfos_[1].tailNodeIdx, 52U);
   EXPECT_EQ(scopeInfo.extInfo_.filteredNodes.size(), 2U);
-  EXPECT_EQ(notify->receiveNodeId.count(50), 1U);
-  EXPECT_EQ(graph->GetNodeById(50)->sendToNodeId.count(notify->GetNodeId()), 1U);
+  EXPECT_EQ(notify->receiveNodeId.count(50), 0U);
+  EXPECT_EQ(graph->GetNodeById(50)->sendToNodeId.count(notify->GetNodeId()), 0U);
   EXPECT_EQ(graph->GetNodeById(40)->sendToNodeId.count(notify->GetNodeId()), 0U);
 }
 

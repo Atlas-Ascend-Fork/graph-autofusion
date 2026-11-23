@@ -96,11 +96,13 @@ bool GroupCustomEventsByOwner(
 
 }  // namespace
 
-bool SuperKernelOptimizer::ExtractIntraStreamDependencies(const std::vector<SuperKernelBaseNode *> &taskNodes) const {
+bool SuperKernelOptimizer::BuildScopeDependencies(const std::vector<SuperKernelBaseNode *> &taskNodes,
+                                                  const std::vector<std::unique_ptr<SuperKernelBaseNode>> &eventNodes,
+                                                  SuperKernelGraph &graph) const {
   std::unordered_map<uint32_t, SuperKernelBaseNode *> lastNodeByStream;
   for (auto *node : taskNodes) {
     if (node == nullptr) {
-      SK_LOGE("null node while extracting intra-stream dependencies");
+      SK_LOGE("null node while building scope dependencies");
       return false;
     }
     auto it = lastNodeByStream.find(node->GetStreamIdxInGraph());
@@ -110,6 +112,16 @@ bool SuperKernelOptimizer::ExtractIntraStreamDependencies(const std::vector<Supe
       node->receiveNodeId.insert(previous->GetNodeId());
     }
     lastNodeByStream[node->GetStreamIdxInGraph()] = node;
+  }
+  for (const auto &event : eventNodes) {
+    auto *owner = graph.GetNodeById(event->GetPreNodeId());
+    if (owner == nullptr) {
+      SK_LOGE("synthetic event owner disappeared: eventId=%lu, ownerNodeId=%lu", event->GetNodeId(),
+              event->GetPreNodeId());
+      return false;
+    }
+    owner->sendToNodeId.insert(event->GetNodeId());
+    event->receiveNodeId.insert(owner->GetNodeId());
   }
   return true;
 }
@@ -362,11 +374,6 @@ bool SuperKernelOptimizer::Schedule(SuperKernelScopeInfo &scopeInfo, SuperKernel
     return false;
   }
 
-  if (!ExtractIntraStreamDependencies(reorderedTaskNodes)) {
-    SK_LOGE("failed to extract intra-stream graph dependencies");
-    return false;
-  }
-
   std::string skFuncName = GetSkFuncName(reorderedTaskNodes, scopeInfo.GetScopeId(), scopeInfo.GetExtInfo().scopeName);
   PrintTaskNodesDetail(reorderedTaskNodes, "reordered task nodes");
 
@@ -374,6 +381,12 @@ bool SuperKernelOptimizer::Schedule(SuperKernelScopeInfo &scopeInfo, SuperKernel
   std::vector<SuperKernelBaseNode *> tasks;
   if (!BuildTaskListWithCustomEvents(reorderedTaskNodes, eventNodes, tasks)) {
     SK_LOGE("failed to prepare synthetic custom events: scopeId=%u", scopeInfo.GetScopeId());
+    return false;
+  }
+
+  // Events must be validated first; only original tasks participate in same-stream chaining.
+  if (!BuildScopeDependencies(reorderedTaskNodes, eventNodes, graph)) {
+    SK_LOGE("failed to build scope dependencies: scopeId=%u", scopeInfo.GetScopeId());
     return false;
   }
 
