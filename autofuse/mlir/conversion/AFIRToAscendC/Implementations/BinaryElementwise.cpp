@@ -1093,10 +1093,12 @@ LogicalResult registerScalarBinaryInPlace(ImplementationRegistry &registry, llvm
       });
 }
 
-// 两个平台注册都使用共享的 AxpyExtend 包装，扩展 dtype 仅在 reg 侧可选。
+// `afir.axpy` 专属的标量-属性注册：两个平台共用同一个扩展包装 `AxpyExtend`（`axpy.h`
+// 中立名），tmp 契约相同。家族与元素类型由实参指定，供 axpy 拆成共用行与 RegBased 行；
+// 头文件校验按 `Shared` 走——中立头对 RegBased 家族不匹配（`headersMatchFamily`）。
 template <typename SourceOp, typename TargetOp>
-LogicalResult registerBinaryScalarAttr(ImplementationRegistry &registry, llvm::StringRef id, ApiFamily family,
-                                       uint32_t elementTypes) {
+LogicalResult registerBinaryScalarAttrWithFamily(ImplementationRegistry &registry, llvm::StringRef id, ApiFamily family,
+                                                 uint32_t elementTypes) {
   if (failed(elementwise::checkFamilyMatchesHeader<TargetOp>(ApiFamily::Shared))) {
     return failure();
   }
@@ -1566,9 +1568,9 @@ LogicalResult registerLogicalScalarImplementations(ImplementationRegistry &regis
 // 一个由 ODS 属性来的实参 + 一块 tmp buffer，所以走自己的 pattern
 // （`BinaryScalarAttrConversionPattern`），不走 `registerBinary` 那条。
 LogicalResult registerAxpyImplementations(ImplementationRegistry &registry) {
-  if (failed(registerBinaryScalarAttr<AxpyOp, ascendc::AxpyExtendContiguousOp>(registry, "axpy.tensor_tensor",
-                                                                               ApiFamily::Shared, kF16 | kF32)) ||
-      failed(registerBinaryScalarAttr<AxpyOp, ascendc::AxpyExtendContiguousOp>(
+  if (failed(registerBinaryScalarAttrWithFamily<AxpyOp, ascendc::AxpyExtendContiguousOp>(
+          registry, "axpy.tensor_tensor", ApiFamily::Shared, kF16 | kF32)) ||
+      failed(registerBinaryScalarAttrWithFamily<AxpyOp, ascendc::AxpyExtendContiguousOp>(
           registry, "axpy.tensor_tensor.reg_base", ApiFamily::RegBased, kBF16 | kI64 | kUI64))) {
     return failure();
   }
