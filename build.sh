@@ -63,7 +63,7 @@ else
   PYTHON_CMD="python3"
 fi
 
-SUPPORTED_MODULES=("multistream" "superkernel" "autofuse_framework" "autofuse_ascendc_api" "autofuse_e2e" "autofuse_v35_1" "autofuse_v35_2" "autofuse_v35_3" "autofuse_mlir")
+SUPPORTED_MODULES=("multistream" "superkernel" "autofuse_framework" "autofuse_ascendc_api" "autofuse_e2e" "autofuse_v35_1" "autofuse_v35_2" "autofuse_v35_3")
 declare -A MODULE_ACTION_HANDLERS=(
   ["multistream:py_ut"]="multistream_py_ut"
   ["multistream:py_st"]="multistream_py_st"
@@ -82,6 +82,8 @@ declare -A MODULE_ACTION_HANDLERS=(
   # MLIR 套件经 -m mlir 一次跑完 check-ut/lit/st/e2e, 单入口即可
   ["autofuse_mlir:all_st"]="autofuse_module_test_suite"
 )
+# MLIR 模块单独一行追加注册, 避免与 master 侧对同一行的修改在 develop/master 同步时产生冲突
+SUPPORTED_MODULES+=("autofuse_mlir")
 
 # print usage message
 function log()

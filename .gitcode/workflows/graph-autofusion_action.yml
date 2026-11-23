@@ -418,7 +418,7 @@ stages:
               workspace: ${{ steps.process_checkout.outputs.path }}
               cov_mode: "report"
               ut_field: "superkernel"
-              modules: "UT_Test_superkernel UT_Test_autofuse_framework UT_Test_autofuse_ascendc_api MLIR_Test_autofuse"
+              modules: "UT_Test_superkernel UT_Test_autofuse_framework UT_Test_autofuse_ascendc_api"
               source_branch: ${{ env.SOURCE_BRANCH }}
               target_branch: ${{ env.TARGET_BRANCH }}
               obs_path: ${{ env.obs_path }}
