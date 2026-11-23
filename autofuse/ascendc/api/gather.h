@@ -46,7 +46,16 @@ template <typename T1>
 inline __aicore__ void GatherRows(const LocalTensor<T1> &dst, const LocalTensor<T1> &src0_ub,
                                   const LocalTensor<uint32_t> &src1_offsets, uint32_t vectorized_axis_size,
                                   uint32_t inner_size, uint32_t row_stride, uint32_t rows, uint32_t span) {
-  if (inner_size == 0 || row_stride == 0 || inner_size >= vectorized_axis_size) {
+  const bool single_shot = (inner_size == 0 || row_stride == 0 || inner_size >= vectorized_axis_size);
+  const bool has_scalar_tail = single_shot ? ((vectorized_axis_size % 8U) != 0U) : ((inner_size % 8U) != 0U);
+  if (has_scalar_tail) {
+    // src1_offsets is produced by the vector Muls in GatherUbCompute; the scalar tail in GatherWithTail reads it,
+    // so a vector-to-scalar sync is required (same pattern as broadcast.h / argmax.h).
+    int32_t event_id_v_to_s = static_cast<int32_t>(GetTPipePtr()->FetchEventID(AscendC::HardEvent::V_S));
+    AscendC::SetFlag<AscendC::HardEvent::V_S>(event_id_v_to_s);
+    AscendC::WaitFlag<AscendC::HardEvent::V_S>(event_id_v_to_s);
+  }
+  if (single_shot) {
     GatherWithTail(dst, src0_ub, src1_offsets, 0U, 0U, vectorized_axis_size);
     return;
   }
