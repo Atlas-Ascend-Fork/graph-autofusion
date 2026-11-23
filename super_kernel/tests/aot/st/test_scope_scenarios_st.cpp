@@ -10,6 +10,35 @@
 #include "st_fixture.h"
 #include <set>
 
+namespace {
+void ExpectScopeBoundarySynchronization(const sk::test::Model &model, const std::vector<aclrtStream> &streams) {
+  size_t entries = 0;
+  std::set<uintptr_t> writes;
+  std::vector<uintptr_t> waits;
+  for (auto stream : streams) {
+    for (const auto &task : model.Tasks(stream)) {
+      if (task.disabled) {
+        continue;
+      }
+      if (task.type == ACL_MODEL_RI_TASK_KERNEL && task.function.find("sk_entry_") == 0) {
+        ++entries;
+        EXPECT_FALSE(task.args.empty());
+      } else if (task.type == ACL_MODEL_RI_TASK_VALUE_WRITE) {
+        writes.insert(task.syncAddress);
+      } else if (task.type == ACL_MODEL_RI_TASK_VALUE_WAIT) {
+        waits.push_back(task.syncAddress);
+      }
+    }
+  }
+  EXPECT_EQ(entries, 1U);
+  EXPECT_FALSE(waits.empty());
+  for (auto address : waits) {
+    EXPECT_NE(address, 0U);
+    EXPECT_EQ(writes.count(address), 1U);
+  }
+}
+}  // namespace
+
 TEST_F(AotSystemTest, SharedScopePreservesSurroundingTasksAndAddsBoundarySynchronization) {
   for (uint32_t streamCount : {2U, 3U}) {
     for (uint32_t parallel : {0U, 1U}) {
@@ -38,30 +67,7 @@ TEST_F(AotSystemTest, SharedScopePreservesSurroundingTasksAndAddsBoundarySynchro
         EXPECT_FALSE(model.Snapshot(task).disabled);
         EXPECT_EQ(model.Snapshot(task).setParamsCount, 0U);
       }
-      size_t entries = 0;
-      std::set<uintptr_t> writes;
-      std::vector<uintptr_t> waits;
-      for (auto stream : streams) {
-        for (const auto &task : model.Tasks(stream)) {
-          if (task.disabled) {
-            continue;
-          }
-          if (task.type == ACL_MODEL_RI_TASK_KERNEL && task.function.find("sk_entry_") == 0) {
-            ++entries;
-            EXPECT_FALSE(task.args.empty());
-          } else if (task.type == ACL_MODEL_RI_TASK_VALUE_WRITE) {
-            writes.insert(task.syncAddress);
-          } else if (task.type == ACL_MODEL_RI_TASK_VALUE_WAIT) {
-            waits.push_back(task.syncAddress);
-          }
-        }
-      }
-      EXPECT_EQ(entries, 1U);
-      EXPECT_FALSE(waits.empty());
-      for (auto address : waits) {
-        EXPECT_NE(address, 0U);
-        EXPECT_EQ(writes.count(address), 1U);
-      }
+      ExpectScopeBoundarySynchronization(model, streams);
       EXPECT_GT(sk::test::OutstandingAllocations(), 0U);
       model.Destroy();
       EXPECT_EQ(sk::test::OutstandingAllocations(), 0U);
@@ -204,28 +210,7 @@ TEST_F(AotSystemTest, FilteredEmptySubstreamKeepsScopeFusionAndBoundarySynchroni
     aclskOptions options{&option, 1};
     ASSERT_EQ(aclskOptimize(model.Handle(), &options), ACL_SUCCESS);
 
-    size_t entries = 0;
-    std::set<uintptr_t> writes;
-    std::vector<uintptr_t> waits;
-    for (auto stream : {producer, consumer}) {
-      for (const auto &task : model.Tasks(stream)) {
-        if (task.disabled) {
-          continue;
-        }
-        entries += task.function.find("sk_entry_") == 0;
-        if (task.type == ACL_MODEL_RI_TASK_VALUE_WRITE) {
-          writes.insert(task.syncAddress);
-        } else if (task.type == ACL_MODEL_RI_TASK_VALUE_WAIT) {
-          waits.push_back(task.syncAddress);
-        }
-      }
-    }
-    EXPECT_EQ(entries, 1U);
-    EXPECT_FALSE(waits.empty());
-    for (auto address : waits) {
-      EXPECT_NE(address, 0U);
-      EXPECT_EQ(writes.count(address), 1U);
-    }
+    ExpectScopeBoundarySynchronization(model, {producer, consumer});
     for (auto task : outside) {
       EXPECT_FALSE(model.Snapshot(task).disabled);
       EXPECT_EQ(model.Snapshot(task).setParamsCount, 0U);

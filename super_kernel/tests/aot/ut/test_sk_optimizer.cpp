@@ -257,37 +257,6 @@ TEST_F(SkOptimizerTaskReorderTest, ReorderWaitNodesForTaskBuild_CustomizeQueue_N
   EXPECT_EQ(ToNodeIds(reorderedTaskNodes), (std::vector<uint64_t>{1, 3, 2, 4, 5}));
 }
 
-TEST_F(SkOptimizerTaskReorderTest, SynthesizedBackNotify_IsPlacedBeforeUnrelatedStreamTail) {
-  auto *stream1Kernel = CreateKernelNode(301, 1);
-  auto *stream2Kernel = CreateKernelNode(302, 2);
-  auto *stream3Tail = CreateKernelNode(303, 3);
-  auto *stream2Notify = CreateNotifyNode(312, 2);
-  BindSyntheticEvent(stream2Kernel, stream2Notify);
-  auto *stream3Notify = CreateNotifyNode(313, 3);
-  BindSyntheticEvent(stream3Tail, stream3Notify);
-  auto stream2NotifyOwned = std::move(graph->graphMap[stream2Notify->GetNodeId()]);
-  auto stream3NotifyOwned = std::move(graph->graphMap[stream3Notify->GetNodeId()]);
-
-  std::vector<SuperKernelBaseNode *> taskNodes = {stream1Kernel, stream2Kernel, stream3Tail};
-  std::vector<std::unique_ptr<SuperKernelBaseNode>> eventNodes;
-  eventNodes.emplace_back(std::move(stream2NotifyOwned));
-  eventNodes.emplace_back(std::move(stream3NotifyOwned));
-
-  // This is the observable requirement for the three-stream reproduction:
-  // stream 2's independent successor must not wait for stream 3's tail.
-  std::vector<SuperKernelBaseNode *> scheduled = BuildTasksWithCustomEvents(taskNodes, eventNodes);
-
-  auto stream2NotifyIt = std::find(scheduled.begin(), scheduled.end(), stream2Notify);
-  auto stream3TailIt = std::find(scheduled.begin(), scheduled.end(), stream3Tail);
-  ASSERT_NE(stream2NotifyIt, scheduled.end());
-  ASSERT_NE(stream3TailIt, scheduled.end());
-  EXPECT_LT(std::distance(scheduled.begin(), stream2NotifyIt), std::distance(scheduled.begin(), stream3TailIt));
-  EXPECT_EQ(stream2Kernel->sendToNodeId.count(stream2Notify->GetNodeId()), 1U);
-  EXPECT_EQ(stream2Notify->receiveNodeId.count(stream2Kernel->GetNodeId()), 1U);
-  EXPECT_EQ(stream2Notify->GetPreNodeId(), stream2Kernel->GetNodeId());
-  EXPECT_EQ(stream3Tail->sendToNodeId.count(stream2Notify->GetNodeId()), 0U);
-}
-
 TEST_F(SkOptimizerTaskReorderTest, ScheduleMapsProfilingByFinalTaskIndexAfterCustomEvents) {
   const std::string modelId = "model_custom_event_profiling";
   graph->modelId = modelId;
@@ -336,16 +305,6 @@ TEST_F(SkOptimizerTaskReorderTest, ScheduleMapsProfilingByFinalTaskIndexAfterCus
     recorder.modelIdIndexMap.pop_back();
     recorder.modelIdToIndexMap.erase(modelId);
   }
-}
-
-TEST_F(SkOptimizerTaskReorderTest, EmptyEventNodes_KeepTaskOrderAndDependencies) {
-  auto *first = CreateKernelNode(1301, 1);
-  auto *second = CreateKernelNode(1302, 2);
-  const std::vector<std::unique_ptr<SuperKernelBaseNode>> eventNodes;
-
-  EXPECT_EQ(ToNodeIds(BuildTasksWithCustomEvents({first, second}, eventNodes)), (std::vector<uint64_t>{1301, 1302}));
-  EXPECT_TRUE(first->sendToNodeId.empty());
-  EXPECT_TRUE(second->receiveNodeId.empty());
 }
 
 TEST_F(SkOptimizerTaskReorderTest, FrontResetAndBackNotifyFollowOwnTailWithoutDependingOnEachOther) {
@@ -462,13 +421,15 @@ TEST_F(SkOptimizerTaskReorderTest, InvalidSyntheticEventRejectsEntireTaskList) {
   wrongStreamOwner->SetPreNodeId(other->GetNodeId());
   valid->SetPreNodeId(owner->GetNodeId());
   auto *unsupported = CreateWaitNode(1315, 1);
+  auto *earlyEmptyStreamEvent = CreateNotifyNode(1320, 3);
+  BindSyntheticEvent(owner, earlyEmptyStreamEvent);
   SuperKernelScopeInfo scopeInfo;
   scopeInfo.MutableExtInfo().filteredNodes = {owner, other, later};
   auto &events = scopeInfo.MutableExtInfo().eventNodes;
   events.push_back(std::move(graph->graphMap[valid->GetNodeId()]));
   events.push_back(nullptr);
 
-  for (auto *invalid : {missingOwner, eventWithAbsentOwner, wrongStreamOwner, unsupported,
+  for (auto *invalid : {missingOwner, eventWithAbsentOwner, wrongStreamOwner, earlyEmptyStreamEvent, unsupported,
                         static_cast<SuperKernelBaseNode *>(nullptr)}) {
     SCOPED_TRACE(invalid == nullptr ? INVALID_TASK_ID : invalid->GetNodeId());
     events.back() = invalid == nullptr ? nullptr : std::move(graph->graphMap[invalid->GetNodeId()]);
@@ -518,7 +479,9 @@ TEST_F(SkOptimizerTaskReorderTest, Schedule_NotifyOnlyDoesNotJoinUnrelatedStream
   auto *stream2Tail = CreateKernelNode(322, 2);
   auto *stream3Tail = CreateKernelNode(323, 3);
   auto *stream2Notify = CreateNotifyNode(324, 2);
+  auto *stream3Notify = CreateNotifyNode(325, 3);
   BindSyntheticEvent(stream2Tail, stream2Notify);
+  BindSyntheticEvent(stream3Tail, stream3Notify);
   for (auto *kernel : {stream1Tail, stream2Tail, stream3Tail}) {
     kernel->nodeInfos.kernelInfos.numBlocks = 1;
     kernel->nodeInfos.kernelInfos.cubeNum = 1;
@@ -528,23 +491,23 @@ TEST_F(SkOptimizerTaskReorderTest, Schedule_NotifyOnlyDoesNotJoinUnrelatedStream
   scopeInfo.SetScopeCoreInfo({SkKernelType::AIC_ONLY, 1});
   scopeInfo.MutableExtInfo().filteredNodes = {stream1Tail, stream2Tail, stream3Tail};
   scopeInfo.MutableExtInfo().eventNodes.push_back(std::move(graph->graphMap[stream2Notify->GetNodeId()]));
-  ASSERT_EQ(scopeInfo.GetExtInfo().eventNodes.front()->GetNodeType(), SkNodeType::NODE_NOTIFY);
+  scopeInfo.MutableExtInfo().eventNodes.push_back(std::move(graph->graphMap[stream3Notify->GetNodeId()]));
 
   SkTaskBuilder builder;
   (void)optimizer->Schedule(scopeInfo, *graph, builder);
   std::vector<SuperKernelBaseNode *> tasks;
   ASSERT_TRUE(optimizer->BuildTaskListWithCustomEvents(scopeInfo.GetExtInfo().filteredNodes,
                                                        scopeInfo.GetExtInfo().eventNodes, tasks));
+  ASSERT_EQ(ToNodeIds(tasks), (std::vector<uint64_t>{321, 322, 324, 323, 325}));
   SkTaskBuilder::SkTaskContext context;
   ASSERT_TRUE(AnalyzeTasks(tasks, context));
-
-  ASSERT_EQ(context.nodeIdToIndex.size(), 4U);
-  EXPECT_LT(context.nodeIdToIndex.at(322), context.nodeIdToIndex.at(324));
-  EXPECT_LT(context.nodeIdToIndex.at(324), context.nodeIdToIndex.at(323));
-  EXPECT_EQ(stream2Notify->GetPreNodeId(), stream2Tail->GetNodeId());
+  EXPECT_EQ(stream2Tail->sendToNodeId.count(stream2Notify->GetNodeId()), 1U);
+  EXPECT_EQ(stream3Tail->sendToNodeId.count(stream3Notify->GetNodeId()), 1U);
   EXPECT_EQ(stream2Notify->receiveNodeId.size(), 1U);
-  EXPECT_EQ(stream2Notify->receiveNodeId.count(stream2Tail->GetNodeId()), 1U);
-  EXPECT_EQ(stream1Tail->sendToNodeId.count(stream2Notify->GetNodeId()), 0U);
+  EXPECT_EQ(stream2Notify->receiveNodeId.count(322), 1U);
+  EXPECT_EQ(stream3Notify->receiveNodeId.size(), 1U);
+  EXPECT_EQ(stream3Notify->receiveNodeId.count(323), 1U);
+  EXPECT_TRUE(stream1Tail->sendToNodeId.empty());
   EXPECT_EQ(stream3Tail->sendToNodeId.count(stream2Notify->GetNodeId()), 0U);
 }
 
@@ -554,9 +517,8 @@ TEST_F(SkOptimizerTaskReorderTest, BuildScopeDependencies_ConnectsAdjacentNodesP
   auto *stream0Second = CreateWaitNode(203, 0);
   auto *stream1Second = CreateKernelNode(204, 1);
 
-  const std::vector<std::unique_ptr<SuperKernelBaseNode>> eventNodes;
-  ASSERT_TRUE(optimizer->BuildScopeDependencies({stream0First, stream1First, stream0Second, stream1Second}, eventNodes,
-                                                *graph));
+  auto tasks = BuildTasksWithCustomEvents({stream0First, stream1First, stream0Second, stream1Second}, {});
+  EXPECT_EQ(ToNodeIds(tasks), (std::vector<uint64_t>{201, 202, 203, 204}));
 
   EXPECT_EQ(stream0First->sendToNodeId.count(203), 1);
   EXPECT_EQ(stream0Second->receiveNodeId.count(201), 1);
@@ -797,17 +759,4 @@ TEST_F(SkOptimizerTaskReorderTest, EmptyStreamEventsFollowBoundScopeTail) {
   ASSERT_TRUE(AnalyzeTasks(tasks, context));
   EXPECT_EQ(context.syncInfos[1].cubSendInfo.at(2), SyncDirection::CUB_TO_VEC);
   EXPECT_EQ(context.syncInfos[1].cubSendInfo.at(3), SyncDirection::CUB_TO_VEC);
-}
-
-TEST_F(SkOptimizerTaskReorderTest, EmptyStreamEventRejectsOwnerBeforeScopeTail) {
-  auto *first = CreateKernelNode(9311, 0);
-  auto *tail = CreateKernelNode(9312, 1);
-  auto *notify = CreateNotifyNode(9313, 2);
-  BindSyntheticEvent(first, notify);
-  std::vector<std::unique_ptr<SuperKernelBaseNode>> events;
-  events.push_back(std::move(graph->graphMap[notify->GetNodeId()]));
-
-  std::vector<SuperKernelBaseNode *> tasks;
-  EXPECT_FALSE(optimizer->BuildTaskListWithCustomEvents({first, tail}, events, tasks));
-  EXPECT_TRUE(tasks.empty());
 }

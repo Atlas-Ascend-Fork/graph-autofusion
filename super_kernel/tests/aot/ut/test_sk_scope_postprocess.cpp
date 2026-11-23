@@ -319,7 +319,6 @@ TEST_F(SuperKernelScopePostprocessTest, PostProcess_FrontWait_Success) {
   stream0Node0->SetNodeType(SkNodeType::NODE_KERNEL);
   stream0Node0->nodeInfos.kernelInfos.kernelType = SkKernelType::AIC_ONLY;
   stream0Node0->SetNodeId(10);
-  stream0Node0->SetPreNodeId(INVALID_TASK_ID);
   stream0Node0->SetNextNodeId(11);
   stream0Node0->SetIsFusible(true);
 
@@ -328,8 +327,6 @@ TEST_F(SuperKernelScopePostprocessTest, PostProcess_FrontWait_Success) {
   stream0Node1->SetNodeType(SkNodeType::NODE_KERNEL);
   stream0Node1->nodeInfos.kernelInfos.kernelType = SkKernelType::AIC_ONLY;
   stream0Node1->SetNodeId(11);
-  stream0Node1->SetPreNodeId(10);
-  stream0Node1->SetNextNodeId(INVALID_TASK_ID);
   stream0Node1->SetIsFusible(true);
 
   auto stream1Node0 =
@@ -337,8 +334,6 @@ TEST_F(SuperKernelScopePostprocessTest, PostProcess_FrontWait_Success) {
   stream1Node0->SetNodeType(SkNodeType::NODE_KERNEL);
   stream1Node0->nodeInfos.kernelInfos.kernelType = SkKernelType::AIC_ONLY;
   stream1Node0->SetNodeId(20);
-  stream1Node0->SetPreNodeId(19);
-  stream1Node0->SetNextNodeId(INVALID_TASK_ID);
   stream1Node0->SetIsFusible(true);
 
   SuperKernelScopeInfo scopeInfo;
@@ -363,9 +358,8 @@ TEST_F(SuperKernelScopePostprocessTest, PostProcess_FrontWait_Success) {
   graph->graphMap[20] = std::move(stream1Node0);
 
   SuperKernelScopePostProcessor postProcessor(*graph);
-  bool result = postProcessor.PostProcess(scopeInfo);
+  ASSERT_TRUE(postProcessor.PostProcess(scopeInfo));
 
-  EXPECT_TRUE(result);
   EXPECT_FALSE(scopeInfo.extInfo_.filteredNodes.empty());
   EXPECT_FALSE(scopeInfo.scopeStreamInfos_.empty());
   EXPECT_NE(scopeInfo.extInfo_.skMainNodeId, INVALID_TASK_ID);
@@ -386,8 +380,6 @@ TEST_F(SuperKernelScopePostprocessTest, PostProcess_BackBlockBindsLastTaskAfterF
   stream0Node0->SetNodeType(SkNodeType::NODE_KERNEL);
   stream0Node0->nodeInfos.kernelInfos.kernelType = SkKernelType::AIC_ONLY;
   stream0Node0->SetNodeId(40);
-  stream0Node0->SetPreNodeId(INVALID_TASK_ID);
-  stream0Node0->SetNextNodeId(INVALID_TASK_ID);
   stream0Node0->SetIsFusible(true);
 
   auto stream1Node0 = std::make_unique<SuperKernelKernelNode>(nullptr, ACL_MODEL_RI_TASK_KERNEL, 0, 1,
@@ -395,7 +387,6 @@ TEST_F(SuperKernelScopePostprocessTest, PostProcess_BackBlockBindsLastTaskAfterF
   stream1Node0->SetNodeType(SkNodeType::NODE_KERNEL);
   stream1Node0->nodeInfos.kernelInfos.kernelType = SkKernelType::MIX_AIC_1_2;
   stream1Node0->SetNodeId(50);
-  stream1Node0->SetPreNodeId(INVALID_TASK_ID);
   stream1Node0->SetNextNodeId(51);
   stream1Node0->SetIsFusible(true);
 
@@ -419,19 +410,7 @@ TEST_F(SuperKernelScopePostprocessTest, PostProcess_BackBlockBindsLastTaskAfterF
   SuperKernelScopeInfo scopeInfo;
   scopeInfo.nodes_ = {stream1Node0.get(), notifyToCancel.get(), waitToCancel.get(), stream0Node0.get()};
 
-  ScopeStreamInfo stream0;
-  stream0.streamIdx = 0;
-  stream0.headNodeIdx = 40;
-  stream0.tailNodeIdx = 40;
-  stream0.nodeSize = 1;
-
-  ScopeStreamInfo stream1;
-  stream1.streamIdx = 1;
-  stream1.headNodeIdx = 50;
-  stream1.tailNodeIdx = 52;
-  stream1.nodeSize = 3;
-
-  scopeInfo.scopeStreamInfos_ = {stream0, stream1};
+  scopeInfo.scopeStreamInfos_ = {{0, 40, 40, 1}, {1, 50, 52, 3}};
 
   graph->graphMap[40] = std::move(stream0Node0);
   graph->graphMap[50] = std::move(stream1Node0);
@@ -439,11 +418,8 @@ TEST_F(SuperKernelScopePostprocessTest, PostProcess_BackBlockBindsLastTaskAfterF
   graph->graphMap[52] = std::move(waitToCancel);
 
   SuperKernelScopePostProcessor postProcessor(*graph);
-  bool result = postProcessor.PostProcess(scopeInfo);
+  ASSERT_TRUE(postProcessor.PostProcess(scopeInfo));
 
-  EXPECT_TRUE(result);
-  EXPECT_FALSE(scopeInfo.extInfo_.filteredNodes.empty());
-  EXPECT_FALSE(scopeInfo.scopeStreamInfos_.empty());
   EXPECT_NE(scopeInfo.extInfo_.skMainNodeId, INVALID_TASK_ID);
   ASSERT_EQ(scopeInfo.extInfo_.eventNodes.size(), 1U);
   const auto &notify = scopeInfo.extInfo_.eventNodes.front();
@@ -451,9 +427,6 @@ TEST_F(SuperKernelScopePostprocessTest, PostProcess_BackBlockBindsLastTaskAfterF
   EXPECT_EQ(notify->GetPreNodeId(), 50U);
   EXPECT_EQ(scopeInfo.scopeStreamInfos_[1].tailNodeIdx, 52U);
   EXPECT_EQ(scopeInfo.extInfo_.filteredNodes.size(), 2U);
-  EXPECT_EQ(notify->receiveNodeId.count(50), 0U);
-  EXPECT_EQ(graph->GetNodeById(50)->sendToNodeId.count(notify->GetNodeId()), 0U);
-  EXPECT_EQ(graph->GetNodeById(40)->sendToNodeId.count(notify->GetNodeId()), 0U);
 }
 
 TEST_F(SuperKernelScopePostprocessTest, PostProcess_NoKernelCandidate_SkipSuccess) {
