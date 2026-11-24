@@ -113,8 +113,10 @@ bool CollectSimtGroupIndexRegion(const af::AscGraph &graph, const af::AscNodePtr
 //   （归约段后无 Retained 轴，含尾轴整体归约的 Sum）与形状保持 Norm 开多行求解（k 行
 //   tile，一次调用覆盖 k 行）；非 AR 形态（归约段后有 Retained 后缀）固定单行——多行窗口
 //   会把多组 RA 段并进同一 Reduce 窗口，归约语义错误，k=1 是正确性约束。
+// boundary_override：无共享 Reduce 的组可由调用方指定 template boundary（0 = 沿用输出 rank）。
 af::Status NormalizeSimtAxesForGroupTemplate(af::AscGraph &graph, const std::vector<af::AscNodePtr> &members,
-                                             const af::AscNodePtr &group_post_reduce, bool &is_candidate_legal);
+                                             const af::AscNodePtr &group_post_reduce, bool &is_candidate_legal,
+                                             size_t boundary_override = 0UL);
 
 af::Status NormalizeTemplateAxes(af::AscGraph &graph, const af::AscNodePtr &indirect_load,
                                  ascir::TemplateId template_id, const RewrittenGraphAnalysis &analysis,

@@ -596,9 +596,16 @@ bool CollectSimtGroupIndexRegion(const af::AscGraph &graph, const af::AscNodePtr
 //   形态（归约段后有 Retained 后缀）固定单行——多行窗口 会把多组 RA 段并进同一
 //   Reduce 窗口，归约语义错误，k=1 是正确性约束。
 af::Status NormalizeSimtAxesForGroupTemplate(af::AscGraph &graph, const std::vector<af::AscNodePtr> &members,
-                                             const af::AscNodePtr &group_post_reduce, bool &is_candidate_legal) {
+                                             const af::AscNodePtr &group_post_reduce, bool &is_candidate_legal,
+                                             size_t boundary_override) {
   GE_ASSERT_TRUE(!members.empty(), "IndirectLoad gather group members must be non-empty.");
   size_t boundary = members.front()->outputs()[0]->attr.axis.size();
+  // 无共享 Reduce 的组：结构判定已确定该组只能走 UB 归并时，调用方以 boundary_override
+  // 指定 template boundary（rank-1：outer=行/批、inner=最内连续轴），使 gather 与输出链
+  // 落在同一 tile 循环内；缺省 0 保持原语义（boundary=输出 rank）。
+  if (group_post_reduce == nullptr && boundary_override != 0UL && boundary_override < boundary) {
+    boundary = boundary_override;
+  }
   bool solve_tile_size = false;
   if (group_post_reduce != nullptr) {
     // 形状保持的专用 Norm

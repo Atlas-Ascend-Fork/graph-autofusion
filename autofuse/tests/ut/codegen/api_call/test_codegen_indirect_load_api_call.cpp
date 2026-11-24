@@ -3990,10 +3990,12 @@ TEST_F(IndirectLoadSimtFusedUbMergeTest, KeepsUbMergeStoreRowWidthConstInlineFor
   EXPECT_EQ(generated.find("static_cast<uint64_t>(t->"), std::string::npos);
 }
 
-TEST_F(IndirectLoadConstructFromNodesTest, DeclaresSimtFusedUbMergeGroupAtHoistBeforeFusedTargets) {
-  // L3（UB 归并）提升形态回归：fused 调用的 ftgt 逐成员引用 UB 局部目标（含 primary
-  // 自身——kSimtOp 无 post-Reduce 时 hoist 守卫不声明，历史依赖外层提升点的既有 cross-loop 声明）。
-  // 全组 tensor 声明必须先于 ftgt 初始化，成员循环体不再独立发射（提前返回 + skip）。
+TEST_F(IndirectLoadConstructFromNodesTest, DeclaresSimtFusedUbMergeGroupPerTileInLoopBeforeFusedTargets) {
+  // L3（UB 归并）逐 tile 形态回归：无 post-Reduce 的 fused 调用不做提升——成员 value 只驻留
+  // 单 tile 的 UB 局部目标，整核 local_index 空间与 tile 目标错位（静默精度错误）；调用按
+  // 逐 tile 在 BlockInner 循环体内发射。fused 调用的 ftgt 逐成员引用 UB 局部目标（含 primary
+  // 自身——kSimtOp 无 post-Reduce 时 hoist 守卫不声明，由组路径补齐），全组 tensor 声明必须
+  // 先于 ftgt 初始化，成员循环体不独立发射（skip）。
   ILTestGraph g("simt_fused_ub_merge_hoist");
   BuildSimtFusedGroupGraph(g);
   AnnotateSimtFusedUbMergeGroupTemplate(g);
@@ -4020,9 +4022,9 @@ TEST_F(IndirectLoadConstructFromNodesTest, DeclaresSimtFusedUbMergeGroupAtHoistB
   std::string generated;
   ASSERT_EQ(ParseGraphAndGenerateLoop(g, {"x0", "x1", "idx0", "idx1"}, kernel, generated), af::SUCCESS);
 
-  // 提升形态：fused 调用出现，BlockInner 循环体被替换（提前返回）。
+  // 逐 tile 形态：fused 调用出现且 BlockInner 循环体保留（不提升，调用在循环体内发射）。
   EXPECT_NE(generated.find("// IndirectLoad SIMT Fused"), std::string::npos);
-  EXPECT_EQ(generated.find("for (int z2z3Tb"), std::string::npos);
+  EXPECT_NE(generated.find("for (int z2z3Tb"), std::string::npos);
   // L3 ftgt 逐成员引用 UB 局部目标（primary local_1 + 成员 local_8）。
   const auto ftgt_pos = generated.find("FusedBody::OutputTargets ftgt = {");
   ASSERT_NE(ftgt_pos, std::string::npos);

@@ -4246,9 +4246,10 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, DualGatherSharedPostReduceUsesReduce
   ASSERT_NE(sum, nullptr);
   EXPECT_EQ(sum->inputs[0].attr.vectorized_axis, axes.vectorized_axes);
 
-  // 无共享 Reduce 的组（默认形态）：boundary=rank（inner 为空）、成员 value 视图保持空
-  // （整核调用形态不依赖向量化视图）。
-  const auto bare_graphs = GenerateDualGatherCases();
+  // 无共享 Reduce 的组（默认形态）：逐 tile 布局——boundary=rank-1（inner 为最内输出轴
+  // 的模板合并轴），成员 value 视图按模板 vectorized 轴播种（逐 tile actual_size 的来源）。
+  // FindAxis 为非 const 成员：与前半段一致取非 const（见函数头注释）。
+  auto bare_graphs = GenerateDualGatherCases();
   ASSERT_EQ(bare_graphs.size(), 4UL);
   const auto bare_simt = std::find_if(bare_graphs.begin(), bare_graphs.end(), [](const af::AscGraph &candidate) {
     const auto il0 = candidate.FindNode("dual_indirect_load0");
@@ -4259,8 +4260,12 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, DualGatherSharedPostReduceUsesReduce
   ASSERT_NE(bare_il0, nullptr);
   ascgen_utils::indirect_load::TemplateAxes bare_axes;
   ASSERT_EQ(ascgen_utils::indirect_load::GetTemplateAxes(bare_il0, bare_axes), af::SUCCESS);
-  EXPECT_EQ(bare_axes.inner_axis, af::kIdNone);
-  EXPECT_TRUE(bare_il0->outputs()[0]->attr.vectorized_axis.empty());
+  EXPECT_NE(bare_axes.inner_axis, af::kIdNone);
+  ASSERT_NE(bare_simt->FindAxis(bare_axes.inner_axis), nullptr);
+  ASSERT_FALSE(bare_axes.vectorized_axes.empty());
+  const auto &bare_value = bare_il0->outputs()[0]->attr;
+  EXPECT_EQ(bare_value.vectorized_axis, bare_axes.vectorized_axes);
+  ASSERT_EQ(bare_value.vectorized_axis.size(), bare_value.vectorized_strides.size());
 }
 
 TEST(IndirectLoadScheduleCaseGeneratorTest, DualGatherNormalizesAliasAxesForGroupFusion) {
