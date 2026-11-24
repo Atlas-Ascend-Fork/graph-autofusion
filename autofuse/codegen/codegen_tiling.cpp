@@ -149,7 +149,7 @@ void GenInductorCvSafetyFallback(std::stringstream &ss, uint64_t count, const st
      << " || !optiling::GetTiling(tiling->tiling_data, choice_case_id)) {" << std::endl;
   ss << indent << "  return -1;" << std::endl;
   ss << indent << "}" << std::endl;
-  ss << indent << "tiling->stage_size_name = tiling->tiling_data.STAGE_SIZE_NAME;" << std::endl;
+  ss << indent << "tiling->stage_size_name = GET_CV_STAGE_SIZE(tiling->tiling_data);" << std::endl;
   ss << indent << "tiling->tiling_data.set_tiling_key(tiling->tiling_data.get_tiling_key() - " << common_begin << ");"
      << std::endl;
   ss << indent << "// Rebase the selected Common key after the " << common_begin << " UB cases." << std::endl;
@@ -183,7 +183,7 @@ void GenInductorCvSafetyFallback(std::stringstream &ss, uint64_t count, const st
 // 仅在求解器成功选出STAGE_SIZE_NAME(a0a1t)后调用: 此时行数按预算覆盖为
 // STAGE_SIZE_NAME / basen_align, kernel侧队列申请与vector计算长度均以此为准
 void GenCvTilingDataReset(std::stringstream &ss, const std::string &indent, const std::string &ub_mode,
-                          const std::string &stage_size = "tiling->tiling_data.STAGE_SIZE_NAME") {
+                          const std::string &stage_size = "GET_CV_STAGE_SIZE(tiling->tiling_data)") {
   ss << indent << "tiling->stage_size_name = " << stage_size << ";" << std::endl;
   ss << indent
      << "tiling->cube_m_stage_size = (uint32_t)std::max(1, static_cast<int32_t>(tiling->stage_size_name / "

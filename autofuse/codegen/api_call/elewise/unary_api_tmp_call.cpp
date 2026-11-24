@@ -36,6 +36,32 @@ Status UnaryApiTmpCall::Generate(const TPipe &tpipe, const std::vector<ascir::Ax
                                tpipe.tmp_buf.name + "_" + std::to_string(id));
 
   stringstream ss;
+  if (IsCVFusionStage(this->api_call_context) || tpipe.cv_fusion_type == ascir::CubeTemplateType::kUBFuse) {
+    // CV callbacks receive stage dimensions, not the generic kernel's tiling pointer.
+    // Match UnaryApiCall's physical row layout while retaining the scratch buffer argument.
+    const std::string output_stride = GenBlockAlignNExpr(y, "curAivN");
+    const bool input_is_cube_output =
+        tpipe.cv_fusion_type == ascir::CubeTemplateType::kUBFuse && x.id == tpipe.cube_output_tensor_id;
+    const std::string input_stride = input_is_cube_output ? "curAlignN" : GenBlockAlignNExpr(x, "curAivN");
+    ss << y.actual_size << " = curAivM * " << output_stride << ";" << std::endl;
+    const auto flat_condition = GenCvUbFuseFlatApiCondition(tpipe, inputs, y);
+    if (!flat_condition.empty()) {
+      ss << "if (" << flat_condition << ") {" << std::endl;
+      ss << "  " << this->api_name_ << "(" << y << "[0], " << x << "[0], " << tpipe.tmp_buf << "_" << id
+         << ", ConvertToUint32(curAivM * curAivN));" << std::endl;
+      ss << "} else {" << std::endl;
+    }
+    ss << "for (uint32_t cv_row = 0; cv_row < ConvertToUint32(curAivM); cv_row++) {" << std::endl;
+    ss << "  " << this->api_name_ << "(" << y << "[cv_row * ConvertToUint32(" << output_stride << ")], " << x
+       << "[cv_row * ConvertToUint32(" << input_stride << ")], " << tpipe.tmp_buf << "_" << id
+       << ", ConvertToUint32(curAivN));" << std::endl;
+    ss << "}" << std::endl;
+    if (!flat_condition.empty()) {
+      ss << "}" << std::endl;
+    }
+    result = ss.str();
+    return af::SUCCESS;
+  }
   ss << this->api_name_ << "(" << y << "[" << tpipe.tiler.TensorVectorizedOffset(current_axis, y) << "], " << x << "["
      << tpipe.tiler.TensorVectorizedOffset(current_axis, x) << "], " << tpipe.tmp_buf << "_" << std::to_string(id)
      << ", " << GetCVAlignedSize(this->api_call_context, y, x.actual_size.Str()) << ");" << std::endl;

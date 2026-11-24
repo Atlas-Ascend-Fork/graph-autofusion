@@ -147,6 +147,18 @@ af::Status GenerateTilingExpr::MakeVarArg(const SubAxis *sub_axis,
   auto size = af::MakeShared<SymVarInfo>(expr);
   GE_ASSERT_NOTNULL(size, "Create sym var info failed.");
   size->align = sub_axis->align;
+  if (sub_axis->axis_type == AxisPosition::INNER && sub_axis->enable_pad && sub_axis->enable_tail &&
+      !sub_axis->orig_axis.empty()) {
+    // Match the solver's padded tile domain without changing the logical extent.
+    // Otherwise a short CV axis can have min=align=32 but max=8 or 16.
+    Expr extent = af::sym::kSymbolOne;
+    for (const auto *origin : sub_axis->orig_axis) {
+      GE_ASSERT_NOTNULL(origin);
+      GE_ASSERT_TRUE(IsValid(origin->repeat), "Original axis extent is invalid.");
+      extent = af::sym::Mul(extent, origin->repeat);
+    }
+    size->max_value = af::sym::Mul(af::sym::Ceiling(af::sym::Div(extent, size->align)), size->align);
+  }
   size->value_range = sub_axis->value_range;
   size->data_type_size = sub_axis->data_type_size;
   GE_ASSERT_TRUE(sub_axis->data_type_size != 0, "sub_axis->data_type_size is 0");
