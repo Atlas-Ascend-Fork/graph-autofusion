@@ -1194,4 +1194,60 @@ TEST_F(TestApiWhereUT, ST8_PredicateWordBitMap) {
   AscendC::GmFree(bit2word);
 }
 
+// ST-10：WherePartitionBufferInt64 在 used_size > 0 时的容量校验复现。
+// 现场问题（PR#3105）：load_mask_select_i64_store（1x171x306，MLIR e2e）在
+// Where 前序算子占用 tmp（used_size=64B）后，分区函数把字节数当元素数传给
+// LocalTensor<half>::SetSize，容量按 2 倍需求校验 → ICPU SetSize 越界 SIGABRT。
+// 本用例以同样的 used_size 调用分区函数直接复现；修复（字节/sizeof(T) 换算）后通过。
+TEST_F(TestApiWhereUT, ST10_WherePartitionInt64UsedSizeOverflow) {
+  const uint32_t n = 306;                                                   // 与 e2e 用例的末轴一致
+  const uint32_t mask_stride = AlignUp(n, ONE_BLK_SIZE / sizeof(uint8_t));  // 320
+  auto *x1 = (uint8_t *)AscendC::GmAlloc(mask_stride);
+  auto *x2 = (int64_t *)AscendC::GmAlloc(sizeof(int64_t) * n);
+  auto *x3 = (int64_t *)AscendC::GmAlloc(sizeof(int64_t) * n);
+  auto *y = (int64_t *)AscendC::GmAlloc(sizeof(int64_t) * n);
+  for (uint32_t i = 0; i < n; i++) {
+    x1[i % 32] = (i % 2U == 0U) ? 1U : 0U;
+    x2[i] = (int64_t)(0x1A2B3C4D5E6F7080LL - i);
+    x3[i] = -(int64_t)(i + 1);
+  }
+  auto kernel = [x1, x2, x3, y, n] {
+    TPipe tpipe;
+    TBuf<TPosition::VECCALC> x1b, x2b, x3b, yb, tmp;
+    tpipe.InitBuffer(x1b, 320);  // 覆盖 mask_stride（元素 n=306 对齐到 320）
+    tpipe.InitBuffer(x2b, sizeof(int64_t) * n);
+    tpipe.InitBuffer(x3b, sizeof(int64_t) * n);
+    tpipe.InitBuffer(yb, sizeof(int64_t) * n);
+    tpipe.InitBuffer(tmp, 4608);  // 与 e2e 相近的小 tmp，放大 used_size 的影响
+    auto lx1 = x1b.Get<uint8_t>();
+    auto lx2 = x2b.Get<int64_t>();
+    auto lx3 = x3b.Get<int64_t>();
+    auto ly = yb.Get<int64_t>();
+    auto ltmp = tmp.Get<uint8_t>();
+    for (uint32_t i = 0; i < n; i++) {
+      lx1.SetValue(i, (i % 2U == 0U) ? 1U : 0U);
+    }
+    for (uint32_t i = 0; i < n; i++) {
+      lx2.SetValue(i, (int64_t)(0x1A2B3C4D5E6F7080LL - i));
+      lx3.SetValue(i, -(int64_t)(i + 1));
+    }
+    // used_size = 64：与 e2e 崩溃场景同构（前序算子占用 tmp 后再分区）
+    const uint32_t data_stride = AlignUp(n, ONE_BLK_SIZE / sizeof(int64_t));  // 308
+    Where<false, false>(ly, lx1, lx2, lx3, 1, n, data_stride, mask_stride, data_stride, data_stride, ltmp, 64);
+    for (uint32_t i = 0; i < n; i++) {
+      y[i] = ly.GetValue(i);
+    }
+  };
+  AscendC::SetKernelMode(KernelMode::AIV_MODE);
+  ICPU_RUN_KF(kernel, 1);
+  for (uint32_t i = 0; i < n; i++) {
+    const int64_t expected = (i % 2U == 0U) ? (int64_t)(0x1A2B3C4D5E6F7080LL - i) : -(int64_t)(i + 1);
+    EXPECT_EQ(y[i], expected) << "index=" << i;
+  }
+  AscendC::GmFree(x1);
+  AscendC::GmFree(x2);
+  AscendC::GmFree(x3);
+  AscendC::GmFree(y);
+}
+
 }  // namespace af
