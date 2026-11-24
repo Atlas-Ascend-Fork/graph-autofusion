@@ -14,12 +14,19 @@ template <typename T>
 inline __aicore__ void DataCopyPadExtend(const AscendC::LocalTensor<T> &dst, const AscendC::GlobalTensor<T> &src,
                                          uint32_t block_count, uint32_t block_len, uint32_t src_stride,
                                          uint32_t dst_stride) {
-  uint32_t align_num = ONE_BLK_SIZE / sizeof(T);
   AscendC::DataCopyExtParams param;
-  param.blockCount = block_count;
-  param.blockLen = block_len * sizeof(T);
-  param.srcStride = src_stride * sizeof(T);
-  param.dstStride = dst_stride / align_num;
+  if (unlikely(src_stride == 0 && dst_stride == 0)) {
+    param.blockCount = 1;
+    param.blockLen = block_count * block_len * sizeof(T);
+    param.srcStride = 0;
+    param.dstStride = 0;
+  } else {
+    uint32_t align_num = ONE_BLK_SIZE / sizeof(T);
+    param.blockCount = block_count;
+    param.blockLen = block_len * sizeof(T);
+    param.srcStride = src_stride * sizeof(T);
+    param.dstStride = dst_stride / align_num;
+  }
 
   AscendC::DataCopyPadExtParams<T> pad_params = {true, 0, 0, 0};
   AscendC::DataCopyPad(dst, src, param, pad_params);
