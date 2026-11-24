@@ -104,6 +104,9 @@ class VectorizedAlignmentUT : public testing::Test {
                                       af::OutDataAnchorPtr &reduce_output) const {
       return FindCompactReduceInput(node, reduce_input, reduce_output);
     }
+    af::Status AccessEleWiseAlignment(const af::AscNodePtr &node) {
+      return EleWiseAlignmentInferFunc(node);
+    }
     void SetAlignmentType(const af::AscNodePtr &node, AlignmentType align_type) {
       tensor_to_align_type_[&node->outputs[0].attr].align_type = align_type;
     }
@@ -898,6 +901,75 @@ TEST_F(VectorizedAlignmentUT, sibling_reduce_keeps_compact_output_alignment) {
 
   ASSERT_EQ(AlignmentHandler::AlignVectorizedStrides(graph), af::SUCCESS);
   ExpectCompactReduceBranch(graph, "relu");
+}
+
+TEST_F(VectorizedAlignmentUT, shared_scalar_does_not_connect_reduce_input_and_output_alignment) {
+  af::AscGraph graph("shared_scalar_reduce_alignment");
+  auto rows = af::Symbol(9);
+  auto cols = af::Symbol(2);
+  auto row = graph.CreateAxis("row", rows);
+  auto col = graph.CreateAxis("col", cols);
+  std::vector<af::AxisId> axes = {row.id, col.id};
+  af::ascir_op::Data data("data", graph);
+  data.y.dtype = ge::DT_FLOAT;
+  data.attr.api.type = af::ApiType::kAPITypeBuffer;
+  af::ascir_op::Load load("load");
+  load.x = data.y;
+  SetTwoDimNodeAttr(load, ge::DT_FLOAT, af::ComputeType::kComputeLoad, axes, {rows, cols}, {af::Symbol(32), One});
+  af::ascir_op::Load scalar("scalar_load");
+  scalar.x = data.y;
+  SetTwoDimNodeAttr(scalar, ge::DT_FLOAT, af::ComputeType::kComputeLoad, axes, {One, One}, {Zero, Zero});
+  af::ascir_op::Mul before("before");
+  before.x1 = load.y;
+  before.x2 = scalar.y;
+  SetTwoDimNodeAttr(before, ge::DT_FLOAT, af::ComputeType::kComputeElewise, axes, {rows, cols}, {af::Symbol(32), One});
+  af::ascir_op::Sum sum("sum");
+  sum.x = before.y;
+  SetTwoDimNodeAttr(sum, ge::DT_FLOAT, af::ComputeType::kComputeReduce, axes, {rows, One}, {One, Zero});
+  af::ascir_op::Mul after("after");
+  after.x1 = scalar.y;
+  after.x2 = sum.y;
+  SetTwoDimNodeAttr(after, ge::DT_FLOAT, af::ComputeType::kComputeElewise, axes, {rows, One}, {One, Zero});
+  af::ascir_op::Store store("store");
+  store.x = after.y;
+  SetTwoDimNodeAttr(store, ge::DT_FLOAT, af::ComputeType::kComputeStore, axes, {rows, One}, {One, Zero});
+
+  ASSERT_EQ(AlignmentHandler::AlignVectorizedStrides(graph), af::SUCCESS);
+  const std::vector<af::Expression> padded = {af::Symbol(8), One};
+  const std::vector<af::Expression> compact = {One, Zero};
+  EXPECT_EQ(graph.FindNode("before")->outputs[0].attr.vectorized_strides, padded);
+  EXPECT_EQ(graph.FindNode("sum")->outputs[0].attr.vectorized_strides, compact);
+  EXPECT_EQ(graph.FindNode("after")->outputs[0].attr.vectorized_strides, compact);
+  EXPECT_EQ(graph.FindNode("store")->outputs[0].attr.vectorized_strides, compact);
+}
+
+TEST_F(VectorizedAlignmentUT, aligned_scalar_does_not_impose_elementwise_output_alignment) {
+  af::AscGraph graph("aligned_scalar_input");
+  auto rows = af::Symbol(9);
+  auto row = graph.CreateAxis("row", rows);
+  auto col = graph.CreateAxis("col", One);
+  std::vector<af::AxisId> axes = {row.id, col.id};
+  af::ascir_op::Data data("data", graph);
+  data.y.dtype = ge::DT_FLOAT;
+  data.attr.api.type = af::ApiType::kAPITypeBuffer;
+  af::ascir_op::Load scalar("scalar_load");
+  scalar.x = data.y;
+  SetTwoDimNodeAttr(scalar, ge::DT_FLOAT, af::ComputeType::kComputeLoad, axes, {One, One}, {Zero, Zero});
+  af::ascir_op::Load tensor("tensor_load");
+  tensor.x = data.y;
+  SetTwoDimNodeAttr(tensor, ge::DT_FLOAT, af::ComputeType::kComputeLoad, axes, {rows, One}, {One, Zero});
+  af::ascir_op::Mul mul("mul");
+  mul.x1 = scalar.y;
+  mul.x2 = tensor.y;
+  SetTwoDimNodeAttr(mul, ge::DT_FLOAT, af::ComputeType::kComputeElewise, axes, {rows, One}, {One, Zero});
+  AlignmentStrategyShadow strategy;
+  ASSERT_EQ(strategy.AccessSetAlignWidth(graph), af::SUCCESS);
+  strategy.SetAlignmentType(graph.FindNode("scalar_load"), AlignmentType::kAligned);
+  strategy.SetAlignmentType(graph.FindNode("tensor_load"), AlignmentType::kNotAligned);
+  ASSERT_EQ(strategy.AccessEleWiseAlignment(graph.FindNode("mul")), af::SUCCESS);
+  ASSERT_EQ(strategy.AccessSetVectorizedStrides(graph), af::SUCCESS);
+  const std::vector<af::Expression> compact = {One, Zero};
+  EXPECT_EQ(graph.FindNode("mul")->outputs[0].attr.vectorized_strides, compact);
 }
 
 TEST_F(VectorizedAlignmentUT, compact_reduce_pad_for_aligned_broadcast_add) {

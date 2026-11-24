@@ -552,6 +552,11 @@ void BaseAlignmentStrategy::SetAlignInfoForNodeInputs(AlignmentType aligned_type
                                                       std::set<af::Node *> &visited_nodes,
                                                       std::queue<af::Node *> &node_queue) {
   for (const auto &input : node->inputs()) {
+    // Shared scalars must not connect the row-layout constraints of their consumers.
+    if (ascgen_utils::IsScalarInput(input->attr.repeats)) {
+      GELOGD("Stop alignment propagation through scalar input of node[%s].", node->GetNamePtr());
+      continue;
+    }
     auto asc_node = std::dynamic_pointer_cast<af::AscNode>(input->anchor.GetOwnerNode());
     if ((asc_node == nullptr) || ShouldSkipRegularAlignment(asc_node)) {
       GELOGD("SetAlignInfoForNodeInputs: skip input node[%s] (null or should skip).",
