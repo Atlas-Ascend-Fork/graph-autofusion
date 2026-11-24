@@ -11,6 +11,7 @@
 #ifndef TENSOR_ASSIGN_H
 #define TENSOR_ASSIGN_H
 
+#include <cinttypes>
 #include <vector>
 #include "graph/ge_tensor.h"
 #include "graph/def_types.h"
@@ -83,7 +84,8 @@ class TensorAssign {
                        const int64_t count, GeTensorPtr &weight, const bool is_complex = false) {
     // val_size must be even, and complex value should be an integer multiple of 2
     if (is_complex && ((val_size % kComplexWidth) != 0)) {
-      GELOGE(FAILED, "complex value %lld should be an integer multiple of 2.", static_cast<long long>(val_size));
+      GELOGE(FAILED, "complex value size:%" PRId64 " should be an integer multiple of %" PRId64 ".", val_size,
+             kComplexWidth);
       return FAILED;
     }
     const std::unique_ptr<T[]> addr(new (std::nothrow) T[static_cast<size_t>(count)]());  // Zero init default value

@@ -43,8 +43,8 @@ Status NnSet(const int32_t n, const Dtype alpha, Dtype *const output) {
     if ((sizeof(Dtype) * static_cast<size_t>(n)) < SECUREC_MEM_MAX_LEN) {
       const errno_t err =
           memset_s(output, sizeof(Dtype) * static_cast<size_t>(n), 0, sizeof(Dtype) * static_cast<size_t>(n));
-      GE_CHK_BOOL_RET_STATUS(err == EOK, ge::PARAM_INVALID, "memset_s err, dst ptr %p, size %zu, err %d", output,
-                             sizeof(Dtype) * static_cast<size_t>(n), static_cast<int32_t>(err));
+      GE_CHK_BOOL_RET_STATUS(err == EOK, ge::PARAM_INVALID, "memset_s err, dst:%p, size:%zu, err:%d", output,
+                             sizeof(Dtype) * static_cast<size_t>(n), err);
     } else {
       const uint64_t size = static_cast<uint64_t>(sizeof(Dtype) * static_cast<size_t>(n));
       const uint64_t step = SECUREC_MEM_MAX_LEN - (SECUREC_MEM_MAX_LEN % sizeof(Dtype));
@@ -53,17 +53,15 @@ Status NnSet(const int32_t n, const Dtype alpha, Dtype *const output) {
       uint64_t i = 0U;
       while (i < times) {
         const errno_t err = memset_s(ValueToPtr(PtrToValue(output) + (i * (step / sizeof(Dtype)))), step, 0, step);
-        GE_CHK_BOOL_RET_STATUS(err == EOK, ge::PARAM_INVALID, "memset_s err, dst ptr %p, size %zu, err %d",
-                               ValueToPtr(PtrToValue(output) + (i * (step / sizeof(Dtype)))), static_cast<size_t>(step),
-                               static_cast<int32_t>(err));
+        GE_CHK_BOOL_RET_STATUS(err == EOK, ge::PARAM_INVALID, "memset_s err, dst:%p, step:%" PRIu64 ", err:%d",
+                               ValueToPtr(PtrToValue(output) + (i * (step / sizeof(Dtype)))), step, err);
         i++;
       }
       if (remainder != 0U) {
         const errno_t err =
             memset_s(ValueToPtr(PtrToValue(output) + (i * (step / sizeof(Dtype)))), remainder, 0, remainder);
-        GE_CHK_BOOL_RET_STATUS(err == EOK, ge::PARAM_INVALID, "memset_s err, dst ptr %p, size %zu, err %d",
-                               ValueToPtr(PtrToValue(output) + (i * (step / sizeof(Dtype)))),
-                               static_cast<size_t>(remainder), static_cast<int32_t>(err));
+        GE_CHK_BOOL_RET_STATUS(err == EOK, ge::PARAM_INVALID, "memset_s err, dst:%p, remainder:%" PRIu64 ", err:%d",
+                               ValueToPtr(PtrToValue(output) + (i * (step / sizeof(Dtype)))), remainder, err);
       }
     }
   }
