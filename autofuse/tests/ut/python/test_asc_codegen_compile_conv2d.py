@@ -83,12 +83,14 @@ class FakeCFunc(object):
 @pytest.fixture(scope="module")
 def asc_codegen_compile_module():
     """Fixture to load asc_codegen_compile module with mocked dependencies"""
-    stub_module("tbe")
-    stub_module("tbe.common")
-    stub_module("tbe.common.buildcfg", get_current_build_config=lambda: {})
-    stub_module("tbe.common.utils")
+    stub_module("asc_op_compile_base")
+    stub_module("asc_op_compile_base.common")
     stub_module(
-        "tbe.common.utils.log",
+        "asc_op_compile_base.common.buildcfg", get_current_build_config=lambda: {}
+    )
+    stub_module("asc_op_compile_base.common.utils")
+    stub_module(
+        "asc_op_compile_base.common.utils.log",
         info=DummyLogger.info,
         error=DummyLogger.error,
         warning=DummyLogger.warning,
@@ -96,7 +98,7 @@ def asc_codegen_compile_module():
 
     # Mock do_op_tiling to return Conv2D tiling result
     stub_module(
-        "tbe.common.utils.op_tiling",
+        "asc_op_compile_base.asc_op_compiler.op_tiling",
         do_op_tiling=lambda *args, **kwargs: {
             "tiling_data": {},
             "tiling_key": 12345,
@@ -105,13 +107,13 @@ def asc_codegen_compile_module():
     )
 
     stub_module(
-        "tbe.common.context",
+        "asc_op_compile_base.common.context",
         get_context=lambda: SimpleNamespace(get_compile_info=lambda: {}),
     )
 
-    stub_module("tbe.tikcpp")
+    stub_module("asc_op_compile_base.asc_op_compiler")
     stub_module(
-        "tbe.tikcpp.compile_op",
+        "asc_op_compile_base.asc_op_compiler.compile_op",
         CommonUtility=SimpleNamespace(print_compile_log=lambda *args, **kwargs: None),
         AscendCLogLevel=SimpleNamespace(
             LOG_ERROR="error", LOG_DEBUG="debug", LOG_WARNING="warning", LOG_INFO="info"
@@ -126,15 +128,13 @@ def asc_codegen_compile_module():
             self.file_content = None
 
     stub_module(
-        "tbe.tikcpp.get_op_tiling",
+        "asc_op_compile_base.asc_op_compiler.get_op_tiling",
         TilingInfo=MockTilingInfo,
         _change_param_name_to_name=lambda *args, **kwargs: None,
         gen_static_shape_v2=lambda *args, **kwargs: "mock_tiling_content",
     )
-    sys.modules["tbe.tikcpp"].OpInfo = object
+    sys.modules["asc_op_compile_base.asc_op_compiler"].OpInfo = object
 
-    stub_module("asc_op_compile_base")
-    stub_module("asc_op_compile_base.common")
     stub_module("asc_op_compile_base.common.platform")
     stub_module(
         "asc_op_compile_base.common.platform.platform_info",
@@ -686,9 +686,12 @@ class TestStaticShapeCompileHasattrCheck:
                     "device_id": "0",
                 }.get(key)
 
-        context_module = sys.modules["tbe.common.context"]
+        context_module = sys.modules["asc_op_compile_base.common.context"]
         monkeypatch.setattr(context_module, "__path__", [], raising=False)
-        stub_module("tbe.common.context.op_context", get_context=lambda: MockContext())
+        stub_module(
+            "asc_op_compile_base.common.context.op_context",
+            get_context=lambda: MockContext(),
+        )
         stub_module("autofuse.compile_adapter", get_debug_flag=lambda: False)
         monkeypatch.setattr(
             asc_codegen_compile_module,
