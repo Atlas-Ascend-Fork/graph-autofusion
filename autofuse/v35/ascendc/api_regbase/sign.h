@@ -24,9 +24,8 @@ inline __aicore__ void SignExtend(const AscendC::LocalTensor<T> &dst, const Asce
   uint32_t offset = tmp_buf.GetSize() / 3U / 32U * 32U;
 
   ASCENDC_ASSERT(offset > AscendC::ONE_REPEAT_BYTE_SIZE, {
-    KERNEL_LOG(KERNEL_ERROR,
-               "sign api tmpbuf is too small, tmpbuf is %u bytes, offset is %u bytes, required > %u bytes!",
-               tmp_buf.GetSize(), offset, AscendC::ONE_REPEAT_BYTE_SIZE);
+    KERNEL_LOG(KERNEL_ERROR, "sign api tmpbuf is too small, tmpbuf is %u bytes, required more than %u bytes!",
+               tmp_buf.GetSize(), AscendC::ONE_REPEAT_BYTE_SIZE);
   });
 
   // Prepare float type tensor for src

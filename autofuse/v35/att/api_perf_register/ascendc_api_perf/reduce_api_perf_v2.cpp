@@ -199,7 +199,7 @@ Expr GetRepeatEle(const std::string &dtype) {
 af::Status GetPositiveConstValue(const Expr &value, const std::string &name, int64_t &const_value) {
   GE_ASSERT_TRUE(value.IsConstExpr(), "%s must be const.", name.c_str());
   value.GetConstValue(const_value);
-  GE_ASSERT_TRUE(const_value > 0, "%s[%ld] is invalid, must be positive.", name.c_str(), const_value);
+  GE_ASSERT_TRUE(const_value > 0, "%s must be positive, actual value:%ld.", name.c_str(), const_value);
   return af::SUCCESS;
 }
 

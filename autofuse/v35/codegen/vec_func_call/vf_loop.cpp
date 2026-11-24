@@ -288,7 +288,7 @@ Status VFLoop::ConstructFromNodes(ascir::NodeViewVisitorConst nodes, const ascir
   std::map<ascir::TensorId, MicroApiCall *> tensor_calls;
   for (auto node : nodes) {
     // Loop enter or create
-    GELOGD("node:%s, ComputeUnit:%u", node->GetNamePtr(), static_cast<uint32_t>(node->attr.api.unit));
+    GELOGD("node:%s, ComputeUnit:%u\r\n", node->GetNamePtr(), static_cast<uint32_t>(node->attr.api.unit));
     if (node->attr.api.unit != af::ComputeUnit::kUnitNone) {
       auto node_axis = node->attr.sched.axis;
       auto node_loop_axis = node->attr.sched.loop_axis;

@@ -27,12 +27,13 @@ Status MicroRsqrtApiCall::Generate(const TensorManager &tensor_mng, [[maybe_unus
   std::string dtype_name;
   GE_CHK_STATUS_RET(Tensor::DtypeName(input_tensor->dtype_, dtype_name), "Get data type:%d failed",
                     static_cast<int32_t>(input_tensor->dtype_));
-  GE_ASSERT_TRUE(input_tensor->dtype_ == output_tensor->dtype_,
-                 "Rsqrt input and output dtypes must match, input dtype:%d, output dtype:%d",
-                 static_cast<int32_t>(input_tensor->dtype_), static_cast<int32_t>(output_tensor->dtype_));
-
   const auto &input_name = input_tensor->name;
   const auto &output_name = output_tensor->name;
+  GE_ASSERT_TRUE(input_tensor->dtype_ == output_tensor->dtype_,
+                 "Rsqrt input tensor[%s] dtype:%d and output tensor[%s] dtype:%d must match", input_name.c_str(),
+                 static_cast<int32_t>(input_tensor->dtype_), output_name.c_str(),
+                 static_cast<int32_t>(output_tensor->dtype_));
+
   const std::string one_name = output_name + "_rsqrt_one";
 
   std::stringstream ss;
