@@ -17,10 +17,10 @@
 #include "ascir.h"
 #include "ascir_ops.h"
 #include "ascir_utils.h"
+#include "default_reg_func_v2.h"
 
 namespace af {
 namespace ascir {
-extern std::vector<std::unique_ptr<af::TmpBufDesc>> CalcVoidTmpSizeV2(const af::AscNode &node);
 
 using namespace testing;
 using namespace af::ascir_op;
@@ -85,9 +85,9 @@ TEST_F(CalcTanhTmpSizeV2Test, CalcTanhTmpSizeV2_ShouldReturnCorrectSize_WhenInpu
 
   std::shared_ptr<af::AscNode> node = graph.FindNode("tanh");
   node->inputs[0].attr.vectorized_strides = {s1, Symbol(1)};
-  std::vector<std::unique_ptr<af::TmpBufDesc>> result = CalcVoidTmpSizeV2(*node);
+  std::vector<std::unique_ptr<af::TmpBufDesc>> result = CalcTanhTmpSizeV2(*node);
   ASSERT_EQ(result.size(), 1);
-  ASSERT_EQ(result[0]->size, Symbol(0));
+  ASSERT_EQ(result[0]->size, Symbol(256));
   ASSERT_EQ(result[0]->life_time_axis_id, -1);
 }
 
@@ -145,9 +145,9 @@ TEST_F(CalcTanhTmpSizeV2Test, CalcTanhTmpSizeV2_ShouldReturnCorrectSize_WhenInpu
 
   std::shared_ptr<af::AscNode> node = graph.FindNode("tanh");
   node->inputs[0].attr.vectorized_strides = {s1, Symbol(1)};
-  std::vector<std::unique_ptr<af::TmpBufDesc>> result = CalcVoidTmpSizeV2(*node);
+  std::vector<std::unique_ptr<af::TmpBufDesc>> result = CalcTanhTmpSizeV2(*node);
   ASSERT_EQ(result.size(), 1);
-  ASSERT_EQ(result[0]->size, Symbol(0));
+  ASSERT_EQ(result[0]->size, Symbol(1024));
   ASSERT_EQ(result[0]->life_time_axis_id, -1);
 }
 }  // namespace ascir
