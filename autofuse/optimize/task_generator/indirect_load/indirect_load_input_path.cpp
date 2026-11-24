@@ -508,6 +508,43 @@ af::Status RewriteBroadcastPaths(const af::AscNodePtr &indirect_load, ascir::Tem
   return RewriteSimdInputLayouts(preparation);
 }
 
+namespace {
+// ir_attr.max 是 index 值域上界，通常为数据表 gather 轴尺寸，也可为宽松上界。
+// 模板归一化重写输入视图后 axis 不随之重映射（rank-1 图 [vocab] 被改写为 [1, vocab]
+// 后 vocab 落在 Dim1 而 axis 仍为 0，SIMT 以 strides[0]=vocab 做 gather 步长越界，
+// 触发 aivec 334）。max 大于 axis 维尺寸且与唯一其它维相等时把 axis 重映射到该维；
+// 无匹配（宽松上界）、多匹配或不可静态证明时保持既有行为。
+af::Status RemapMisalignedGatherAxisIfSingular(const af::AscNodePtr &indirect_load,
+                                               const ascgen_utils::indirect_load::TemplateLogicalView &logical_view) {
+  size_t remapped_axis = 0UL;
+  bool gather_extent_mismatch = false;
+  const size_t axis_index = GetIndirectLoadAxisIndex(indirect_load);
+  auto *il_ir_attr =
+      indirect_load->attr.ir_attr == nullptr
+          ? nullptr
+          : indirect_load->attr.ir_attr->DownCastTo<af::ascir_op::IndirectLoad::AscIndirectLoadIrAttrDef>();
+  af::Expression gather_extent;
+  if (axis_index != kIndirectLoadInvalidAxisIndex && axis_index < logical_view.input.sizes.size() &&
+      il_ir_attr != nullptr && il_ir_attr->GetMax(gather_extent) == af::SUCCESS && gather_extent.IsValid() &&
+      af::SymbolicUtils::StaticCheckGt(gather_extent, logical_view.input.sizes[axis_index]) == af::TriBool::kTrue) {
+    size_t match_count = 0UL;
+    for (size_t dim = 0UL; dim < logical_view.input.sizes.size(); ++dim) {
+      if (af::SymbolicUtils::StaticCheckEq(logical_view.input.sizes[dim], gather_extent) == af::TriBool::kTrue) {
+        ++match_count;
+        remapped_axis = dim;
+      }
+    }
+    gather_extent_mismatch = (match_count == 1UL);
+  }
+  if (gather_extent_mismatch) {
+    GELOGI("[IndirectLoad] Remap node[%s] axis %zu -> %zu: candidate view moved the gather dim.",
+           indirect_load->GetNamePtr(), axis_index, remapped_axis);
+    GE_ASSERT_SUCCESS(il_ir_attr->SetAxis(static_cast<int64_t>(remapped_axis)));
+  }
+  return af::SUCCESS;
+}
+}  // namespace
+
 af::Status PreparePhysicalViews(const af::AscNodePtr &indirect_load, ascir::TemplateId template_id,
                                 PhysicalViewPreparation &preparation, bool &is_candidate_legal) {
   // 输入/输出个数已在 Generate 入口统一校验，axis 由 AnalyzeRewrittenGraph 统一获取，此处不再重复获取。
@@ -532,6 +569,7 @@ af::Status PreparePhysicalViews(const af::AscNodePtr &indirect_load, ascir::Temp
   const auto &output_attr = outputs.front()->attr;
   preparation.logical_view.output = {output_attr.axis, output_attr.repeats, output_attr.strides};
   GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::ValidateIndirectLoadOutputLayout(preparation.logical_view.output));
+  GE_ASSERT_SUCCESS(RemapMisalignedGatherAxisIfSingular(indirect_load, preparation.logical_view));
   ascgen_utils::indirect_load::IndirectLoadAccessInfo access_info;
   GE_ASSERT_SUCCESS(
       ascgen_utils::indirect_load::AnalyzeIndirectLoadAccess(indirect_load, preparation.logical_view, access_info));
