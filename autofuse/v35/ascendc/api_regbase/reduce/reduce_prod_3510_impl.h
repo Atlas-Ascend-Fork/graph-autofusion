@@ -333,16 +333,17 @@ template <typename T, const Reg::RegTrait &Trait>
 __aicore__ inline void ReduceProd(Reg::RegTensor<T, Trait> &dst, Reg::RegTensor<T, Trait> src, Reg::MaskReg mask) {
   Reg::RegTensor<T, Trait> tempOne;
   // mask invalid data in src to one
+  Reg::MaskReg fullMask = Reg::CreateMask<T, Reg::MaskPattern::ALL, Trait>();
   Reg::Duplicate(tempOne, 1);
   Reg::Select(src, src, tempOne, mask);
 
   constexpr uint16_t vecElemNum = GetVecLen() / sizeof(T) * Trait.REG_NUM;
   for (uint16_t elemNum = vecElemNum / 2U; elemNum > 1U; elemNum /= 2U) {
     Reg::DeInterleave(dst, src, src, tempOne);
-    Reg::Mul(src, dst, src, mask);
+    Reg::Mul(src, dst, src, fullMask);
   }
   Reg::DeInterleave(dst, src, src, tempOne);
-  Reg::Mul(dst, dst, src, mask);
+  Reg::Mul(dst, dst, src, fullMask);
 }
 
 template <class T, const Reg::RegTrait &Trait, const uint16_t vlSize>
