@@ -391,14 +391,16 @@ void CheckRemovePadFeedsBroadcast(const std::string &body) {
 
 // 全载非 nddma 变体中，尾轴扩维广播的源应是新插入 RemovePad 的紧凑输出；
 // nddma 全载变体（行数段含符号 tile 轴 z0t）同样必须在尾轴扩维广播前插入 RemovePad。
+// 注: 函数名中的 sN 为全局 schedule group 编号, NormRecompute 计划(插入于 RCore 之后)的组
+// 占用 s2, 本计划全载/nddma 变体随之由 s2 后移至 s3
 void CheckKernelRemovePadFeeds(const std::string &kernel_text) {
   std::string full_load_body;
-  SliceKernelBody(kernel_text, "autofuse_2__softmax_v2__expand_dims__add_0_b0_y2_s2_g0_c0(",
-                  "autofuse_2__softmax_v2__expand_dims__add_0_b0_y0_load_to_nddma_s2_g0_c1(", full_load_body);
+  SliceKernelBody(kernel_text, "autofuse_2__softmax_v2__expand_dims__add_0_b0_y2_s3_g0_c0(",
+                  "autofuse_2__softmax_v2__expand_dims__add_0_b0_y0_load_to_nddma_s3_g0_c1(", full_load_body);
   CheckRemovePadFeedsBroadcast(full_load_body);
 
   std::string nddma_load_body;
-  SliceKernelBody(kernel_text, "autofuse_2__softmax_v2__expand_dims__add_0_b0_y0_load_to_nddma_s2_g0_c1(",
+  SliceKernelBody(kernel_text, "autofuse_2__softmax_v2__expand_dims__add_0_b0_y0_load_to_nddma_s3_g0_c1(",
                   "extern \"C\" __global__ __aicore__ void autofuse_2__softmax_v2__expand_dims__add(GM_ADDR",
                   nddma_load_body);
   CheckRemovePadFeedsBroadcast(nddma_load_body);

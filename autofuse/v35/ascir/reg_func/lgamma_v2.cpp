@@ -26,7 +26,7 @@ std::vector<std::unique_ptr<TmpBufDesc>> CalcLgammaTmpSizeV2(const AscNode &node
   const auto data_type_size = GetSizeByDataType(data_type);
 
   Expression TmpSize = Symbol(data_type_size) * input_size * Symbol(LGAMMA_FLOAT_SIZE);
-  GELOGD("Node %s[%s] temp buffer size: %s", node.GetTypePtr(), node.GetNamePtr(), TmpSize.Str().get());
+  GELOGD("Node %s[%s] temp buffer size: %s bytes", node.GetTypePtr(), node.GetNamePtr(), TmpSize.Str().get());
   TmpBufDesc desc = {TmpSize, -1};
   std::vector<std::unique_ptr<TmpBufDesc>> tmpBufDescs;
   tmpBufDescs.emplace_back(std::make_unique<TmpBufDesc>(desc));

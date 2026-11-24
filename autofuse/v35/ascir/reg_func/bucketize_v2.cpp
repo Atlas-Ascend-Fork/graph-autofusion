@@ -49,7 +49,7 @@ std::vector<std::unique_ptr<af::TmpBufDesc>> CalcBucketizeTmpSizeV2(const af::As
     bucketize_tmp_buf_descs.emplace_back(std::make_unique<af::TmpBufDesc>(desc));
     return bucketize_tmp_buf_descs;
   }
-  GELOGD("Node %s[%s] temp buffer size: %u", node.GetTypePtr(), node.GetNamePtr(), calc_tmp_buf);
+  GELOGD("Node %s[%s] temp buffer size: %u bytes", node.GetTypePtr(), node.GetNamePtr(), calc_tmp_buf);
   Expression tmp_size = af::Symbol(calc_tmp_buf);
   af::TmpBufDesc desc = {tmp_size, -1};
   std::vector<std::unique_ptr<af::TmpBufDesc>> bucketize_tmp_buf_descs;

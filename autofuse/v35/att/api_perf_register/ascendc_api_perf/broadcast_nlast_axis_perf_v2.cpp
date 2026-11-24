@@ -306,7 +306,7 @@ struct GatherLoopCounts {
 };
 
 af::Status GetGatherLoopCounts(const std::vector<Expr> &shape, size_t rank, const Expr &vl, GatherLoopCounts &counts) {
-  GE_ASSERT_TRUE(rank == 3U || rank == 4U, "GatherWrapper rank must be 3 or 4.");
+  GE_ASSERT_TRUE(rank == 3U || rank == 4U, "GatherWrapper rank must be 3 or 4, current rank: %zu.", rank);
   const size_t last = rank - 1U;
   Expr inner_product = shape[last] * shape[last - 1U];
   if (rank == 4U) {

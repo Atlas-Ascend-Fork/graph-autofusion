@@ -21,8 +21,8 @@ namespace {
 constexpr size_t kAnchorTypeMaxLen = 1024U;
 bool CanAddPeer(const af::AnchorPtr &anchor) {
   if (anchor->IsTypeIdOf<af::InDataAnchor>() && (anchor->GetPeerAnchorsSize() != 0U)) {
-    REPORT_INNER_ERR_MSG("E18888", "anchor is type of InDataAnchor, it's peer is not empty.");
-    GELOGE(ge::GRAPH_FAILED, "[Check][Param] anchor is type of InDataAnchor, it's peer is not empty.");
+    REPORT_INNER_ERR_MSG("E18888", "anchor is type of InDataAnchor, its peer is not empty.");
+    GELOGE(ge::GRAPH_FAILED, "[Check][Param] anchor is type of InDataAnchor, its peer is not empty.");
     return false;
   }
   return true;

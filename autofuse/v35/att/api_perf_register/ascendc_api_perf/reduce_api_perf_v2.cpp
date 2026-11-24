@@ -199,7 +199,7 @@ Expr GetRepeatEle(const std::string &dtype) {
 af::Status GetPositiveConstValue(const Expr &value, const std::string &name, int64_t &const_value) {
   GE_ASSERT_TRUE(value.IsConstExpr(), "%s must be const.", name.c_str());
   value.GetConstValue(const_value);
-  GE_ASSERT_TRUE(const_value > 0, "%s must be positive.", name.c_str());
+  GE_ASSERT_TRUE(const_value > 0, "%s[%ld] is invalid, must be positive.", name.c_str(), const_value);
   return af::SUCCESS;
 }
 
@@ -527,7 +527,7 @@ void SetLegacyFoldFlags(uint32_t tail_folds, TreeReduceParams &params) {
 
 af::Status MakeTreeReduceParams(uint32_t main_r, const Expr &tail_r, uint32_t avg_folds, bool supports_fold_three,
                                 TreeReduceParams &params) {
-  GE_ASSERT_TRUE(avg_folds > 0U, "avg_folds must be positive.");
+  GE_ASSERT_TRUE(avg_folds > 0U, "avg_folds[%u] is invalid, must be positive.", avg_folds);
   const uint32_t folds = CalculateFoldsConst(main_r);
   const uint32_t tail_folds = folds % avg_folds;
   params.mainR = CreateExpr(static_cast<int64_t>(main_r));
@@ -609,11 +609,11 @@ uint32_t GetTailStoreCount(const NormalSymbolicTreeSpec &spec) {
 
 af::Status CalculateTreeReduceParams(const Expr &dim_r, uint32_t avg_folds, bool supports_fold_three,
                                      TreeReduceParams &params) {
-  GE_ASSERT_TRUE(avg_folds > 0U, "avg_folds must be positive.");
+  GE_ASSERT_TRUE(avg_folds > 0U, "avg_folds[%u] is invalid, must be positive.", avg_folds);
   if (dim_r.IsConstExpr()) {
     int64_t dim_r_val = 0;
     dim_r.GetConstValue(dim_r_val);
-    GE_ASSERT_TRUE(dim_r_val > 0, "Reduce RA dimR must be positive.");
+    GE_ASSERT_TRUE(dim_r_val > 0, "Reduce RA dimR[%ld] is invalid, must be positive.", dim_r_val);
     const uint32_t main_r = CalculateMainRConst(static_cast<uint32_t>(dim_r_val));
     const uint32_t folds = CalculateFoldsConst(main_r);
     const uint32_t main_times = folds / avg_folds;
@@ -641,7 +641,7 @@ af::Status CalculateTreeReduceParams(const Expr &dim_r, uint32_t avg_folds, bool
 
 af::Status ApplyAlignedNonReuseAdjustment(bool is_reuse_source, uint32_t avg_folds, bool supports_fold_three,
                                           TreeReduceParams &params) {
-  GE_ASSERT_TRUE(avg_folds > 0U, "avg_folds must be positive.");
+  GE_ASSERT_TRUE(avg_folds > 0U, "avg_folds[%u] is invalid, must be positive.", avg_folds);
   if (is_reuse_source || !params.tailR.IsConstExpr() || !params.mainR.IsConstExpr()) {
     return af::SUCCESS;
   }
@@ -671,7 +671,7 @@ af::Status ApplyAlignedNonReuseAdjustment(bool is_reuse_source, uint32_t avg_fol
 af::Status AddMainFoldCost(const ReduceOpCostModel &model, const std::string &dtype, const Expr &count,
                            const Expr &repeat_ele, const TreeReduceParams &params, uint32_t avg_folds, bool b64,
                            Expr &cost) {
-  GE_ASSERT_TRUE(avg_folds > 0U, "avg_folds must be positive.");
+  GE_ASSERT_TRUE(avg_folds > 0U, "avg_folds[%u] is invalid, must be positive.", avg_folds);
   const uint32_t load_count = 1U << avg_folds;
   const uint32_t binary_count = load_count - 1U;
   Expr per_group = CreateExpr(0);
@@ -823,7 +823,7 @@ af::Status BuildArTailInplaceCost(const ReduceApiPerfContext &context, const Red
 af::Status CalculateArTreeReduceParams(const ReduceApiPerfContext &context, uint32_t avg_folds,
                                        bool supports_fold_three, Expr vl_size, bool apply_non_reuse,
                                        TreeReduceParams &params) {
-  GE_ASSERT_TRUE(avg_folds > 0U, "avg_folds must be positive.");
+  GE_ASSERT_TRUE(avg_folds > 0U, "avg_folds[%u] is invalid, must be positive.", avg_folds);
   const auto &nd = context.node_detail;
   if (!nd.input_dims[1].IsConstExpr() || !vl_size.IsConstExpr()) {
     params.mainR = nd.input_dims[1];
@@ -871,7 +871,7 @@ af::Status BuildArOverVlCost(const ReduceApiPerfContext &context, const ReduceOp
   if (!nd.input_dims[1].IsConstExpr()) {
     int64_t vl_size = 0;
     repeat_ele.GetConstValue(vl_size);
-    GE_ASSERT_TRUE(vl_size > 0, "Reduce AR vlSize must be positive.");
+    GE_ASSERT_TRUE(vl_size > 0, "Reduce AR vlSize[%ld] is invalid, must be positive.", vl_size);
     const Expr count = GetArSegmentFirst(nd) * repeat_ele;
     const std::string var_name =
         b64 ? (unaligned ? "reduce_ar_b64_unaligned_tree_cost" : "reduce_ar_b64_aligned_tree_cost")
@@ -992,7 +992,7 @@ af::Status BuildArNormalCost(const ReduceApiPerfContext &context, const ReduceOp
 
 af::Status AddSymbolicMainFoldCost(const ReduceOpCostModel &model, const NormalSymbolicTreeSpec &spec,
                                    const TreeReduceParams &params, uint32_t avg_folds, bool b64, Expr &cost) {
-  GE_ASSERT_TRUE(avg_folds > 0U, "avg_folds must be positive.");
+  GE_ASSERT_TRUE(avg_folds > 0U, "avg_folds[%u] is invalid, must be positive.", avg_folds);
   Expr per_group = CreateExpr(0);
   const uint32_t store_count = GetMainStoreCount(spec);
   if (b64) {

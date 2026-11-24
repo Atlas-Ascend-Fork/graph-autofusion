@@ -37,7 +37,7 @@ ATT 是 Autofuse Codegen 的组成部分，不直接改写图。图融合范围�
 - 在线推理或训练：GE Runtime 调用生成的 `TilingFunc`/`TilingFuncVec`，TorchAir/Inductor 调用 `AutofuseTiling`；生成函数根据平台信息和 Shape 选择 TilingData，随后由各自运行时启动融合 Kernel。
 - 静态 Shape 编译：Inductor 或 GE 在编译期调用静态 key、常量 TilingData 接口，将固定结果固化到 Kernel。后续同一输入不得得到不同 key 或 TilingData。
 - 动态 Shape：同一 Kernel 可包含多个候选 key；每个具体输入通过符号 Shape 缓存和 Tiling 逻辑确定唯一结果。
-- PGO/Top-N 调优：当前仅支持静态 Shape。GE/TBE 通过独立 PGO 流程采集硬件耗时；TorchAir/Inductor 通过 Split-Compile 生成候选并在运行时按 modeled_perf（可选实测回调）选择；调优失败时回退普通 ATT 并上报 warning。
+- PGO/Top-N 调优：当前仅支持静态 Shape。GE/TBE 通过独立 runner 初筛和静态重测；TorchAir/Inductor 通过 Split-Compile 生成候选并按 modeled_perf（可选实测回调）选择。GE 的采集终态和默认 tiling 回退规则见 5.5。
 - CV/UBFuse 和多 Group 集成：Codegen 组合 Cube Tiling 模块给出的基本块 Tiling 与 Auto Tiling 负责的 Vector 结果，生成组合 TilingData、Cube key 和 Vector key；Auto Tiling 不决定 Cube 基本块，但必须保证其职责范围内的 Group 结果及最终组合 key 稳定。
 
 ## 3. 特殊限制与当前实现状态
@@ -63,12 +63,12 @@ ATT 是 Autofuse Codegen 的组成部分，不直接改写图。图融合范围�
 | S6 | 静态编译同源性 | Inductor 使用同一 `tiling_repr` 生成 Launch 参数并静态化 Kernel；GE 的 TilingData 获取和 Kernel 静态化当前分别获取输入参数及硬件信息。 | 两条链路必须使用同一份不可变 Tiling 结果；GE 在同源改造前至少校验 key、BlockDim 和完整 TilingData，控核场景重点校验 BlockDim。 | GE 为实现缺口 |
 | S7 | Tiling Cache 默认值 | GE Runtime 不依赖 Autofuse 后端 Cache，默认关闭；Inductor 依赖后端 Cache，默认开启。 | 场景默认值必须由 `is_inductor_scene` 或等价信息决定，显式配置优先于场景默认值。 | 有意设计 |
 | S8 | Tiling Cache 身份 | 当前符号 Shape Cache key 未纳入 dtype、融合图结构、芯片型号和配置项。 | 命中后必须复用相同布局和 key；新增跨条件复用场景前需要扩展 key，禁止把当前 key 解释为完整编译身份。 | 当前限制 |
-| S9 | PGO 支持范围 | 当前只支持静态 Shape；动态 Shape 和 CV 的候选采集、缓存键及结果固化方案尚未定义。 | 未定义可靠身份和固化规则前不得在动态 Shape/CV 上复用 PGO 结果；调优失败应回退普通 ATT 并上报 warning。 | 当前限制 |
-| S10 | PGO 结果身份 | GE/TBE 当前以 `<pgo_dir>/<graph_name>_config.txt` 是否存在判断复用；采样使用的设备、AIV 数、UB 和 Kernel 名称未作为缓存身份在命中时校验。Inductor 协议包含候选 hash/repr，但也不能据此宣称已绑定全部运行环境。 | PGO 结果至少应绑定芯片型号、影响执行的硬件输入和算子 hash；身份不完整时不得承诺跨进程、跨机器或跨芯片安全复用。 | 实现缺口 |
+| S9 | PGO 支持范围 | 当前只支持静态 Shape。动态 Shape 和 CV 的候选采集、缓存键及结果固化方案尚未定义。 | 未定义可靠身份和固化规则前不得在动态 Shape/CV 上复用 PGO 结果。GE 调优失败时按 S14 处理。 | 当前限制 |
+| S10 | PGO 结果身份 | 静态 GE/TBE 复用 `<pgo_dir>/<graph_name>_config.txt` 前校验提交标记、tiling 字段格式及耗时。正式 Tiling 再校验配置能否应用。文件名和内容未绑定采样设备、AIV 数、UB 或算子 hash。Inductor 协议提供候选 hash/repr。 | PGO 结果至少应绑定芯片型号、影响执行的硬件输入和算子 hash。身份不完整时，复用范围由调用方保证。 | 实现缺口 |
 | S11 | TilingData 与 ABI | 字段顺序、对齐和类型宽度不作为独立跨版本 ABI；类型名、生成函数名和命名空间自动生成，不支持用户自定义或注入 Tiling 动态库。 | TilingData、TilingFunc 和 Kernel 必须同版本成套发布；正式 ABI 以 GE/TorchAir 实际加载的符号为准。 | 有意设计 |
 | S12 | 配置 | `AutoFuseConfig` 是进程级单例，不支持编译过程中动态修改；优先级为调用 options、环境配置、默认值。`force_*` 和 HighPerf 为调试/实验能力，Golden 未开放。 | 业务代码不得依赖实验配置的稳定性；ATT options 后续计划废弃。 | 当前限制 |
 | S13 | OOTD 离线场景 | 尚未设计和实现芯片信息注入方式。 | 完成平台信息来源、模型选择和交付协议设计前，不承诺 OOTD 离线兼容。 | 规划能力 |
-| S14 | 失败语义 | 输入非法或无可行解时返回 `false`/`af::FAILED`，不生成 invalid Tiling stub；Host/Device 编译错误向 TBE 或 Inductor 前端传播。 | PGO 失败属于可回退错误并上报 warning；TilingData 超限在 S4 缺口补齐后应提前失败。 | 有意设计；S4 除外 |
+| S14 | 失败语义 | 输入非法或无可行解时返回 `false`/`af::FAILED`，不生成 invalid Tiling stub。Host/Device 正式编译错误向 TBE 或 Inductor 前端传播。静态 GE PGO 跳过、采集尝试失败或发布失败按阶段记录，缺少有效配置时回退默认 tiling。 | 静态 GE 已发起测量且首轮与静态重测均无有效候选时，编译入口汇总一次采集 `ERROR`。其他可回退异常按 5.5 记录。TilingData 超限按 S4 跟踪。 | 有意设计；S4 除外 |
 
 ### 3.3 假设和依赖关系
 
@@ -379,16 +379,75 @@ PGO 结果的目标身份至少包括芯片型号、影响执行时间的硬件�
 
 #### GE/TBE 路径
 
-```text
-GE 编译子进程
-  → ATT 生成候选与 PGO runner
-  → `asc_pgo_exec`/运行时包装执行候选
-  → 硬件采样得到 search.txt
-  → second optimization 按采样结果搜索
-  → 输出 config.txt 并生成最终 Kernel
+##### 搜索、静态重测与外层回放
+
+静态 GE 通过 `AUTOFUSE_FLAGS=autofuse_enable_pgo=true` 启用 PGO。测试框架先关闭外层 profiling，在搜索会话退出且内部采集资源释放后再启动外层采样。
+
+```mermaid
+sequenceDiagram
+    participant T as TF/GE 测试框架
+    participant G as GE 编译入口
+    participant R as PGO runner 与 collector
+    participant F as 配置文件
+    T->>G: 关闭外层 profiling，启动搜索会话
+    G->>F: 校验正式配置
+    alt 缓存有效
+        F-->>G: 返回已提交配置
+    else 需要搜索
+        G->>R: exec_type 0，动态 tiling 初筛
+        R-->>G: 首轮候选及测量状态
+        opt 已枚举候选且状态允许继续
+            loop Top-N 候选与原始解
+                G->>R: 编译静态候选，exec_type 1 重测
+                R-->>G: 排空并停止采集，返回测量状态
+                G->>G: 按 tiling 身份核对结果
+            end
+        end
+        opt 有可提交的候选
+            G->>F: 持锁重检缓存，原子提交正式配置
+        end
+    end
+    G-->>T: 搜索会话结束
+    T->>G: 设置回放标记，启动外层 profiling 和回放
+    G->>F: 读取已提交配置或用默认 tiling 编译
+    G-->>T: 返回执行结果
 ```
 
-该路径以实际硬件时间为选择依据，`core_select` 为默认算法，`pruning` 用于剪枝；失败或候选超过 10000 时回退普通 ATT 并上报 warning。当前 `config.txt` 以 graph name 命名，文件存在即跳过调优，没有校验芯片、AIV 数、UB 或算子 hash；因此结果文件只应在调用方确认环境一致后复用。
+1. `asc_pgo_exec` 校验正式缓存，未命中时创建独立的 `.pgo-tune-*` 目录。首轮以动态 tiling 的 kernel 测量候选和原始解。默认按核数搜索，`autofuse_pgo_algo=pruning` 启用剪枝路径。可恢复的首轮测量失败保留已枚举候选，供静态重测使用。
+2. Python 冻结首轮快照，按耗时排序并按完整 tiling 字段去重。试编译先读取 `flag=0` 的候选配置，生成常量 TilingData，确认配置已应用，再编译静态 kernel。Runner 逐个加载本轮静态产物，并将单个结果写入 `*_search.txt.retest`。Python 仅接收与本次试编译 tiling 身份一致的单条记录。
+3. 选优优先取有效静态重测的最小耗时。静态重测无有效结果时，从首轮有效候选中选择经静态试编译确认可用的候选。候选耗时必须为正有限数，失败哨兵 `DBL_MAX` 不参与选优。持同名配置锁重检正式缓存后，以同目录临时文件原子提交 `flag=1` 的配置。`*_search.txt` 归档保留首轮及有效静态重测记录。临时目录在调优结束后清理，调试模式可保留。
+4. 回放框架可设置 `AF_BATCH_PGO_REPLAY_ONLY=1`，并在本次 PGO 目录创建 `.replay-only`。编译入口识别任一标记后跳过 runner。目录标记也能被搜索期已启动的编译 worker 看到。正式静态编译用已提交配置生成常量 TilingData，缺少有效配置或配置无法应用时使用默认 tiling。
+
+##### 设备采集与计时
+
+Collector 独占采集通道，将 STARS 的 ACSQ 父任务事件与 runtime task track 按归一化后的设备、stream 和 task ID 关联。stream 扩展控制消息兼容 4 字节 payload 和历史 40 字节封装。没有 runtime task track 时，只有单 stream 上顺序明确的 ACSQ 记录可以继续配对。配对后的记录按串行 launch 顺序分配给候选，校验每个候选有完整的 20 个起止样本。读取失败、记录不全或归属不确定时，返回对应采集阶段和状态。[MSPTI 控制消息定义](https://gitcode.com/Ascend/mspti/blob/beec2813e7ea28b6afd9bb0b206fe86fb994078c/csrc/common/inject/profapi_inject.h#L157)
+
+设备频率按 HAL 返回的每毫秒 tick 数解释，换算口径为 `Δtick × 1_000_000 / ticks_per_ms`，单位为纳秒。每个候选按耗时降序排列，去掉最慢样本后取接下来 5 个样本的平均值作为选优分数。该分数衡量独立 runner 的单任务耗时，整网收益以外层 profiling 的回放结果为准。
+
+VNECT 的 FFTS+ 场景沿用可关联的 ACSQ 父任务计时。`AF_PGO_STARS_DIAGNOSTICS=acsq` 和 `acsq_ffts` 用于在 legacy64 设备上对照记录。FFTS+ 子任务只做诊断计数。当前恢复路径使用整批初筛和 Top-N 静态重测。子任务计时和失败批次拆分属于后续扩展。
+
+##### 采集终态与回退
+
+```mermaid
+flowchart TD
+    A[汇总首轮和静态重测结果] --> B{有有效测量}
+    B -->|有| C{已有有效配置或成功提交}
+    C -->|是| D[使用正式配置]
+    C -->|否| E[记录发布失败 WARN 并回退]
+    B -->|无| F{已发起采集}
+    F -->|是| G[汇总一次采集 ERROR 并回退]
+    F -->|否| H[记录跳过 WARN 并回退]
+```
+
+| 条件 | 动作和日志 |
+|------|-----------|
+| 普通测量失败或单候选重测记录缺失、身份不匹配 | 保留阶段状态和计数，按过程 `WARN` 诊断，可继续重测。 |
+| Runner 无法启动、超时、被信号终止，或采集能力不支持、通道繁忙、停止失败 | 结束后续测量，保留已获得的有效结果并进入选优。 |
+| 已发起采集且首轮与静态重测均无有效候选 | 编译入口按融合算子汇总一次采集 `ERROR`，回退默认 tiling。 |
+| 测量开始前跳过，或已有有效测量数据但无法提交配置 | 记录 `WARN` 和回退原因，缺少有效配置时使用默认 tiling。 |
+| 已提交配置或有效缓存命中 | 复用正式结果。新一轮发布时记录 `INFO`，并报告两轮有效候选数。 |
+
+诊断失败阶段时可核对通道启停、读出、解析、track 过滤、配对和计时的状态，以及预期 launch 数、有效样本数和原始记录数。正式 Host/Device 编译错误仍按对应编译流程返回。
 
 #### TorchAir/Inductor 路径
 
@@ -405,7 +464,7 @@ Inductor 路径使用独立 DSO 加载和协议文件（Top-N 记录包含 Tilin
 
 #### 边界属性
 
-“仅静态 Shape”及动态/CV 边界见 S9；候选或实测失败回退普通 ATT 并 warning 是有意的可用性策略。PGO 身份完整性是 S10 所列实现缺口，开发者不能把当前命中行为视为已经满足该设计约束。
+支持范围见 S9，配置复用边界见 S10，静态 GE 的失败和回退语义见 S14。
 
 ### 5.6 维测能力
 
@@ -420,7 +479,7 @@ ATT 维测面向“1 小时定界、2 小时定位”：先区分功能、Tiling
 3. 代码生成：核对 Group/Case 字段、TilingData 实际大小、Workspace、BlockDim、静态 key 和 Kernel 类型，确认 TilingData/TilingFunc/Kernel 三件套来自同一版本；上限检查缺口见 S4。
 4. 运行时：通过 `DfxInputSymbolInfo` 输出符号输入，通过 `GetSymbolTilingCacheKey` 检查缓存键和命中；检查 Runtime 返回的 TilingData 大小与 `GetTilingDataSize` 一致。
 5. 强制复现：使用 `force_tiling_case`、`force_schedule_result`、`force_template_op_name` 固定模板，对比未融合 Kernel、不同 Case 和 PGO 结果；这些配置在正式包中存在但不承诺稳定兼容。
-6. PGO：GE 检查 `search.txt/config.txt` 和硬件采样；Inductor 检查 Top-N 协议、候选 repr、DSO 加载和 warning。静态 Shape 重复 Tiling 若 key/TilingData 不一致，应按功能风险升级处理。
+6. PGO：GE 按 5.5 核对采集阶段、`first_valid`、`static_valid`、归档和正式配置。评估性能时对照 AF 与外层回放中的片段耗时、BlockDim 和整步耗时。Inductor 检查 Top-N 协议、候选 repr、DSO 加载和 warning。静态 Shape 重复 Tiling 若 key/TilingData 不一致，应按功能风险升级处理。
 
 #### Torch/GE 路径与边界
 
@@ -528,7 +587,7 @@ Tiling Cache 用于复用符号 Shape 下已经求得的 TilingData；命中时�
 
 因此“默认启用 Tiling Cache”不是跨场景统一默认值，文档、配置和测试必须携带 `is_inductor_scene` 或等价场景信息。当前 Cache key 尚未纳入 dtype、融合图结构、芯片型号和配置项，后续出现跨条件复用需求时需要扩展键定义。
 
-PGO 先使用启发式规则和 CostModel 从 Tiling 全空间筛选 Top-N，再对候选进行实测并选择最优结果。支持范围、回退语义和结果身份分别以 S9、S10、S14 为准；当前代码不能保证结果已经绑定全部环境信息。
+GE 的 Top-N 静态重测以首轮设备实测作为候选排序依据。Inductor 的候选筛选和实测协议见 5.5。支持范围、缓存身份和回退语义分别见 S9、S10、S14。
 
 #### 6.7.4 配置管理
 
@@ -542,6 +601,7 @@ ATT 配置由 `AutoFuseConfig` 进程级单例维护，来源优先级为调用 
 | `att_corenum_threshold` | 0～100 | 40 | 核数利用率阈值。 |
 | `autofuse_enable_tiling_cache` | `true`、`false` | GE：`false`；Inductor：`true` | GE Runtime 不依赖后端缓存；Inductor 依赖后端缓存。显式配置高于场景默认值。 |
 | `autofuse_enable_pgo` | `true`、`false` | `false` | 开启 PGO 候选搜索。 |
+| `autofuse_pgo_topn` | 非负整数 | 5 | 静态 GE/TBE 从 `AUTOFUSE_DFX_FLAGS` 读取，限制重测候选数。0 表示重测全部候选，原始解单独参与比较。 |
 | `force_tiling_case` | Case 标识 | 空 | 强制选择，仅调试用途。 |
 | `force_schedule_result` | 0～100 | -1 | 强制调度结果，仅调试用途。 |
 | `force_template_op_name` | 算子名 | 空 | 限定强制模板的算子，仅调试用途。 |
@@ -655,6 +715,7 @@ TorchAir Inductor 的 Top-N/PGO 路径通过 `GenerateTopnSolutions` 枚举候�
 | `GetTilingKeyCount`、`FindBestTilingKey` | PGO runner 与候选 DSO 间枚举和组合 key。 |
 | `GetTilingKeyForStatic`、`GetTilingKeyKernelTypeForStatic` | Compiler 静态化流程获取 key 和 Kernel 类型。 |
 | `GenConstTilingData` | Compiler 内部生成常量 TilingData 表示。 |
+| `AutofusePgoConfigApplied` | 静态 GE 试编译确认本候选配置已应用。 |
 | `AutofuseIsStaticShape` | Compiler 判断生成产物是否为静态 Shape。 |
 | `GetCVUBFusionStageSizeName`、`GenCVFusionTilingKey`、`GenTilingDataValueBlockDimAndWss` | Compiler 的 CV/UBFuse 静态化和组合数据处理。 |
 | `GenerateMeasuredTopnSolutions` | Inductor PGO runner 与候选 DSO 间的实测协议。 |
@@ -691,14 +752,15 @@ TorchAir Inductor 的 Top-N/PGO 路径通过 `GenerateTopnSolutions` 枚举候�
 - `gen_tiling_impl.*`：校验输入图或调度结果，初始化配置和平台信息，调用 `TilingCodeGenerator`。
 - `gen_model_info/`：`AscendGraphParser` 提取轴、Tensor、内存和调度约束；`GenerateTilingExpr` 生成资源及性能表达式；`GetModelInfoMap` 汇总各 ScheduleGroup 并处理复用。
 - `codegen_tiling.*`：将 ATT 结果拼接为 Host/Device 源码，生成静态 key、符号缓存、维测、CV/Cube 和 Inductor Top-N 入口。
-- `autofuse/compiler/python/asc_codegen_compile.py`：调用 Host/Device 编译器，管理 PGO 文件并打包编译产物。
+- `autofuse/codegen/pgo/`：采集窗口、设备时间戳转换与 launch 样本关联。
+- `autofuse/compiler/python/asc_codegen_compile.py` 与 `compile_adapter.py`：管理 GE PGO 首轮快照、静态重测、选优、配置和正式编译产物。
 - `common/autofuse_config/`：`AutoFuseEnvConfigParser` 解析 `AUTOFUSE_FLAGS`/`AUTOFUSE_DFX_FLAGS`，`AutoFuseConfig` 以进程单例保存配置。
 
 ### 9.4 流程设计
 
 主流程为：输入校验 → 配置单例初始化 → 平台信息获取 → ASCIR 解析 → TuningSpace → ModelInfo/性能表达式 → 求解及候选合并 → 生成 Tiling/静态/缓存/PGO 源码 → Compiler 编译打包 → GE/TorchAir 加载。TilingData 生成阶段上限校验尚未进入该主流程，见 S4。
 
-异常流程包括：空图或非法选项直接失败；无可行解提前失败；PGO 失败或候选超限回退非 PGO 并 warning；Host/Device 编译失败将完整错误传递前端；Runtime 符号缺失或 TilingData 大小不匹配时禁止 KernelLaunch。TilingData 超限提前报错是待补齐流程，不能作为当前实现保证。
+异常流程包括空图或非法选项直接失败、无可行解提前失败、Host/Device 正式编译失败向前端传递错误，以及 Runtime 符号缺失或 TilingData 大小不匹配时禁止 KernelLaunch。PGO 采集终态和回退按 5.5 处理。TilingData 超限检查见 S4。
 
 ### 9.5 开发变更导航
 
@@ -714,7 +776,7 @@ TorchAir Inductor 的 Top-N/PGO 路径通过 `GenerateTopnSolutions` 枚举候�
 | 新增或修改 TilingData 字段 | `autofuse/att/generator/tiling_data_gen/`、`autofuse/codegen/codegen_tiling_data.cpp` | `codegen_tiling.cpp` 序列化和常量 repr、`codegen_kernel.cpp` 消费端、静态编译参数、S4 大小约束、S11 三件套一致性 | TilingData 生成 UT、Codegen UT/E2E、GE/Inductor 加载与精度验证 |
 | 修改 GE 正式 ABI | `autofuse/codegen/codegen_tiling.cpp`、`codegen_infershape.cpp` | GE `op_tiling_rt2.cc`、`autofuse_op_kernel.cc` 的加载名、签名、调用时序和错误码 | Codegen 符号生成 UT、GE 动态加载 ST/E2E、旧版本兼容检查 |
 | 修改 Inductor 正式 ABI | `codegen_tiling.cpp`、`codegen_tiling_inductor_topn.cpp`、`codegen_kernel.cpp` | TorchAir `_asc_codegen.py` 的 typedef/dlsym、C++ 标准库 ABI、`tiling_repr` 同源性 | Inductor Top-N/静态 Kernel E2E 和跨包兼容检查 |
-| 修改 GE/TBE PGO | `codegen_tiling_pgo_*.cpp`、`autofuse/compiler/python/asc_codegen_compile.py` | `search.txt/config.txt` 协议、S10 缓存身份、失败回退、临时文件清理 | `autofuse/tests/st/backend_e2e/pgo_*`；切换硬件输入验证缓存失效 |
+| 修改 GE/TBE PGO | `codegen_tiling_pgo_*.cpp`、`autofuse/codegen/pgo/`、`autofuse/compiler/python/asc_codegen_compile.py` | `search.txt/config.txt`、任务身份和计时、S10 缓存边界、终态与回放 | `test_static_ge_pgo.py`、`pgo_collector_st`、`pgo_timestamp_abi_st` 和同板 GE 回放 |
 | 修改 Inductor PGO | `codegen_tiling_inductor_pgo_proxy.cpp`、`codegen_tiling_inductor_topn.cpp`、`codegen_tiling_inductor_pgo_runner.cpp` | Top-N 协议版本、候选 hash/repr、DSO 生命周期、TorchAir 调用方 | Inductor PGO E2E、协议异常、超时和回退测试 |
 | 修改 Tiling Cache 或配置 | `autofuse/att/generator/cache/`、`autofuse/common/autofuse_config/` | `GenTilingCacheFunc`、Cache key 身份、GE/Inductor 场景默认值、进程单例初始化时序 | 配置 UT、两条前端默认值 ST、同输入重复 Tiling 对比 |
 | 修改维测能力 | `autofuse/tools/att_analyze/`、`DfxInputSymbolInfo` 生成逻辑 | 日志开关、证据格式、符号信息边界、高频路径开销、GE/Inductor 日志差异 | `att_analyze` unit/integration tests 和异常日志样例 |
@@ -739,7 +801,7 @@ TorchAir Inductor 的 Top-N/PGO 路径通过 `GenerateTopnSolutions` 枚举候�
 
 #### 9.7.2 接口错误
 
-生成接口失败返回 `false`/`af::FAILED`；运行时 Tiling 失败返回非零结果，GE/TorchAir 将其转换为前端 error message。PGO 回退属于可执行结果，但必须输出 warning；调试强制配置不满足时应明确提示配置名和值。
+生成接口失败返回 `false`/`af::FAILED`，运行时 Tiling 失败返回非零结果，GE/TorchAir 将其转换为前端 error message。PGO 采集日志及回退规则见 5.5。调试强制配置不满足时应明确提示配置名和值。
 
 ## 10. 安全检查
 
@@ -755,6 +817,7 @@ TorchAir Inductor 的 Top-N/PGO 路径通过 `GenerateTopnSolutions` 枚举候�
 - GE 与 graph-autofusion 按配套版本发布；TorchAir 与 CANN/torch_npu 按其版本配套表发布。部署 Runtime 版本不得低于模型转换环境要求。
 - 外部仓实际加载的接口为正式 ABI，接口签名和调用时序需保持兼容；其中 Top-N/repr 接口还受 C++ 标准库 ABI 约束。其他测试或内部扩展接口可变化。
 - TilingData 兼容规则以 S11 为准；旧 Kernel 不得加载新布局。
+- 静态 GE PGO 保留配置文件的两行格式和搜索记录格式。修正设备频率换算前后的内部耗时应按各自版本口径解读。当前配置复用边界见 S10。
 - 环境变量由 `AutoFuseEnvConfigParser` 解析，`--key=value` 和 `key=value` 均可被解析（解析器会去除可选 `--` 前缀），多项以分号分隔。内部 options 仍按生成接口白名单校验。
 - 当前环境配置默认值以代码为准，具体取值见 6.7.4；Tiling Cache 的场景差异以 S7 为准。
 - 芯片覆盖和 OOTD 边界分别见 S1、S2、S13。
@@ -776,11 +839,16 @@ TorchAir Inductor 的 Top-N/PGO 路径通过 `GenerateTopnSolutions` 枚举候�
 | 特性交叉 | Runtime 大小校验、符号 Shape 维测、配置优先级 | 端到端执行并核对日志 | ST/E2E |
 | 场景默认值 | GE 关闭后端 Cache、Inductor 开启后端 Cache | 分别初始化两条前端流程并检查配置与缓存行为 | UT/ST |
 | 静态编译同源性 | Inductor 的 `tiling_repr` 双路复用；GE 的 TilingData/Kernel 两次取参一致 | 对比 tiling key、BlockDim 和完整 TilingData | ST/E2E |
+| 静态 GE PGO | 采集状态、时间戳、Top-N 静态重测、正式配置、回退及回放标记 | 用 `pgo_collector_st` 注入采集故障，校验毫秒计数频率换算及 ABI。用 `test_static_ge_pgo.py` 验证候选归属、发布和终态 | UT/ST |
+| 静态 GE PGO 上板 | 普通 AIV、VNECT 的 ACSQ 父任务、搜索和外层 profiling 回放 | 同板对比关闭 PGO 的 AF 与 PGO 回放，核对样本、正式配置、精度、片段及整步耗时 | ST/RDV |
+
+910B3 上的 VNECT 同候选对照中，修复 stream 扩展 ID 匹配后，ACSQ 单独采集和同时启用 FFTS+ 诊断均得到 20/20 个有效样本。上板回归可对 ResNet101、VNECT 和 WPOD_Net 分别运行 AF 与 PGO，使用 `AUTOFUSE_DFX_FLAGS=--autofuse_pgo_topn=10`，核对搜索会话退出与外层采样启动的先后顺序。
 
 ### 12.3 测试命令
 
 ```bash
 sh build.sh -u --module=autofuse_framework -j 8
+sh build.sh -s --module=autofuse_framework -j 8
 sh build.sh -s --module=autofuse_e2e -j 8
 ```
 
@@ -792,7 +860,7 @@ sh build.sh -s --module=autofuse_e2e -j 8
 
 - ATT 在支持芯片上生成的 TilingData、TilingFunc 和 Kernel 可通过第 8 章所列 GE/Inductor 正式接口加载并执行；不支持芯片由上游关闭融合。
 - Auto Tiling 自动求解范围仅覆盖 VV；CV 集成使用 Cube Tiling 模块给出的基本块，不由 ATT 重新求解。
-- 无可行解提前失败，不生成 invalid tiling stub；PGO 失败或候选超限时回退非 PGO 并上报 warning。
+- 无可行解提前失败，不生成 invalid tiling stub。静态 GE PGO 按 5.5 处理阶段失败、汇总采集终态并回退。回放期间 runner 启动次数应为 0。
 - 对相同输入，单 Group、多 Group、CV/UBFuse、Inductor 常量和 PGO 的 key/TilingData 选择稳定；缓存命中复用相同布局。
 - GE Runtime 默认关闭 Autofuse 后端 Tiling Cache，Inductor 默认开启；Inductor 静态 Kernel 和 TilingData 参数共用同一 `tiling_repr`。
 - 完成 910B2/950PR 硬件验证以及 GE/TorchAir 跨仓兼容测试；其他芯片适配和 OOTD 支持以独立版本计划交付。

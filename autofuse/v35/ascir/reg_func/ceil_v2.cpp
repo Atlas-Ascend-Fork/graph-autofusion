@@ -27,7 +27,7 @@ std::vector<std::unique_ptr<TmpBufDesc>> CalcCeilTmpSizeV2(const AscNode &node) 
   Expression buf_nums =
       ((node_inputs[0].attr.dtype == ge::DT_FLOAT) ? Symbol(CEIL_FLOAT_CALC_FAC) : Symbol(CEIL_HALF_CALC_FAC));
   Expression total_size = buf_nums * Symbol(CEIL_ONE_REPEAT_BYTE_SIZE);
-  GELOGD("Get temp buffer size: %s", total_size.Str().get());
+  GELOGD("Get temp buffer size: %s bytes", total_size.Str().get());
   TmpBufDesc desc = {total_size, -1};
   std::vector<std::unique_ptr<TmpBufDesc>> tmp_buf_descs;
   tmp_buf_descs.emplace_back(std::make_unique<TmpBufDesc>(desc));

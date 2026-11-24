@@ -9,6 +9,7 @@
  */
 
 #include "codegen_kernel.h"
+#include "codegen_kernel_utils.h"
 
 #include <sstream>
 #include <string>
@@ -1269,14 +1270,11 @@ TQue::TQue(ascir::QueId que_id, ascir::Position src_position, const std::string 
       buf(Type("LocalTensor<uint8_t>"), name + "_buf"),
       is_bind(true) {}
 
-std::string TQue::AllocBuf(const bool with_define) const {
+std::string TQue::AllocBuf() const {
   stringstream ss;
-  if (with_define && !is_cv_ub_fusion) {
-    ss << this->buf.AsArg();
-  } else {
-    ss << this->buf.Str();
-  }
-  ss << " = " << this->name << ".AllocTensor<uint8_t>();" << std::endl;
+  // 两段式：buf句柄（q<id>_buf）在kernel头部声明（LocalTQueAlloc），各站点一律赋值——
+  // 避免"首次调用点声明"被钉在某个for体内、兄弟循环引用时跨作用域（重定义/未定义）
+  ss << this->buf.Str() << " = " << this->name << ".AllocTensor<uint8_t>();" << std::endl;
   return ss.str();
 }
 
@@ -1292,13 +1290,10 @@ std::string TQue::EnqueBuf() const {
   return ss.str();
 }
 
-std::string TQue::DequeBuf(const bool is_unit_first) const {
+std::string TQue::DequeBuf() const {
   stringstream ss;
-  if (is_unit_first) {
-    ss << this->buf.AsArg() << " = " << this->name << ".DeQue<uint8_t>();" << std::endl;
-  } else {
-    ss << this->buf.name << " = " << this->name << ".DeQue<uint8_t>();" << std::endl;
-  }
+  // 两段式：同TQue::AllocBuf，句柄头部声明、站点赋值
+  ss << this->buf.Str() << " = " << this->name << ".DeQue<uint8_t>();" << std::endl;
   return ss.str();
 }
 
@@ -1349,6 +1344,7 @@ std::string TBuf::AllocBuf(std::string buf_name, std::string dtype_name, const b
 std::string TBuf::AllocBuf(const bool with_define, const std::string &merged_buf,
                            const std::string &offset_expr) const {
   stringstream ss;
+  // 两段式：with_define=false 即站点赋值形态（b<id>_buf = ...），句柄已在 LocalTBufAlloc 头部声明
   if (with_define) {
     ss << this->buf.AsArg();
   } else {
@@ -1708,6 +1704,11 @@ std::string codegen::Tiler::GenAxisSizeNew(const ascir::AxisId id) const {
     const auto &from = this->GetAxis(axis.from[0]);
     ss << "const " << axis.axis_size.AsArg() << " = " << this->AxisSize(axis) << ";" << endl;
     ss << "const " << axis.tail_size.AsArg() << " = " << from.loop_size << " % " << axis.axis_size << ";" << endl;
+    // actual_size头部只定义一次（整块初值），与循环体内赋值（GenInnerLoopSizeAndActualSize）、
+    // 循环收尾恢复（GenRestoreInnerActualSize）构成三段式，显式编码其作用域生命周期：
+    // 循环外读者（如reduce+brc+reduce兄弟结构中brc的actual_size初始化器）处处可编译，
+    // 且循环退出后读到整块全量语义而非末次迭代的尾部残值
+    ss << axis.actual_size.AsArg() << " = " << axis.axis_size.Str() << ";" << endl;
   } else if (axis.type == ascir::Axis::Type::kAxisTypeMerged || is_reduce_block) {
     ss << "const " << axis.axis_size.AsArg() << " = ";
     for (const auto &f : axis.from) {
@@ -1732,8 +1733,10 @@ std::string codegen::Tiler::GenInnerLoopSizeAndActualSize(const ascir::AxisId id
 
   if (IsFrom(loop_axis, axis.split_pair_other_id)) {
     auto outter = this->GetAxis(axis.split_pair_other_id);
-    ss << axis.actual_size.AsArg() << " = " << outter.Str() << " < " << outter.axis_size << " ? "
-       << axis.axis_size.Str() << " : " << axis.tail_size.Str() << ";" << endl;
+    // 赋值而非定义：actual_size已在kernel头部定义（GenAxisSizeNew的IsInner分支），
+    // 此处在配对外层循环体内刷新为当前tile的尾部裁剪值
+    ss << axis.actual_size.Str() << " = " << outter.Str() << " < " << outter.axis_size << " ? " << axis.axis_size.Str()
+       << " : " << axis.tail_size.Str() << ";" << endl;
     ss << axis.loop_size.AsArg() << " = " << axis.actual_size.Str() << ";" << endl;
 
     af::Expression actual_size = af::Symbol(axis.actual_size.name.c_str());
@@ -1741,6 +1744,44 @@ std::string codegen::Tiler::GenInnerLoopSizeAndActualSize(const ascir::AxisId id
   }
 
   return ss.str();
+}
+
+// 循环收尾恢复：配对派生自loop_axis的IsInner轴，其actual_size在循环体内被赋值为当前tile
+// 的尾部裁剪值（GenInnerLoopSizeAndActualSize）；循环退出后按同一谓词静态反查恢复整块，
+// 保证循环外读者读到全量语义而非末次迭代残值（否则尾部形状下brc等循环外读者会欠算）。
+// 推导集合⊇实际赋值集合，恢复未赋值轴只是写回头部初值，无操作冗余、无害
+std::string codegen::Tiler::GenRestoreInnerActualSize(const ascir::AxisId loop_axis) const {
+  stringstream ss;
+  for (const auto &entry : this->axis_map) {
+    const auto &axis = entry.second;
+    if (!axis.IsInner() || !IsFrom(loop_axis, axis.split_pair_other_id)) {
+      continue;
+    }
+    ss << axis.actual_size.Str() << " = " << axis.axis_size.Str() << ";" << endl;
+  }
+  return ss.str();
+}
+
+// [列分块] from（如 outerT）代表 merged 轴（如 outer={a0, a1T}）的 block 级展开值；merged 的
+// 子轴在 tile 展开后没有独立循环变量，而下游 vectorized 子轴（a1t）的 tail 计算引用 a1T。
+// 于是在 from 定义后按子轴行优先顺序派生：sub = (from / 后序子轴 loop_size 乘积) % sub_loop_size
+void codegen::Tiler::AppendMergedSubAxisDerivations(stringstream &ss, const Axis &from) const {
+  if (from.from.empty()) {
+    return;
+  }
+  const auto merged = this->GetAxis(from.from[0]);
+  if (merged.from.size() <= 1UL) {
+    return;
+  }
+  for (size_t i = 0UL; i < merged.from.size(); ++i) {
+    const auto sub = this->GetAxis(merged.from[i]);
+    af::Expression stride = af::sym::kSymbolOne;
+    for (size_t j = i + 1UL; j < merged.from.size(); ++j) {
+      stride = af::sym::Mul(stride, af::Symbol(this->GetAxis(merged.from[j]).loop_size.Str().c_str()));
+    }
+    ss << "const int64_t " << sub.Str() << " = (" << from.Str() << " / " << stride.Str().get() << ") % "
+       << sub.loop_size.Str() << ";" << std::endl;
+  }
 }
 
 std::string codegen::Tiler::CalcFromAxis(const ascir::AxisId id, bool is_define) const {
@@ -1758,6 +1799,11 @@ std::string codegen::Tiler::CalcFromAxis(const ascir::AxisId id, bool is_define)
       ss << (is_define ? from.AsArg() : from.Str()) << " = " << "block_dim_offset" << " + " << axis.Str() << ";"
          << std::endl;
     }
+    // [列分块] 这里的 from（如 outerT）代表 merged 轴（如 outer={a0, a1T}）的 block 级展开值。
+    // merged 的子轴在 tile 展开后没有独立循环变量，而下游 vectorized 子轴（a1t）的 tail
+    // 计算引用 a1T。于是在 from 定义后按子轴行优先顺序派生：
+    //   sub = (from / 后序子轴 loop_size 乘积) % sub_loop_size
+    AppendMergedSubAxisDerivations(ss, from);
     ss << this->CalcFromAxis(from.id, is_define);
   } else if (axis.type == Axis::Type::kAxisTypeMerged) {
     for (size_t i = 0; i < axis.from.size(); i++) {
@@ -2400,6 +2446,7 @@ Status TPipe::LocalTQueAlloc(std::string &result) const {
     if (id == this->cube_output_que_id || que.skip_init_for_simt_direct_gm) {
       continue;
     }
+    // 规模表达式 = Max(合并域项, 非合并张量项, 共享组项): 三类项按此顺序独立追加
     stringstream tensor_size_max;
     stringstream tensor_bufnum_max;
 
@@ -2408,80 +2455,23 @@ Status TPipe::LocalTQueAlloc(std::string &result) const {
 
     bool is_first = true;
 
-    for (auto mid : que.merge_scopes) {
-      auto merge_scope = this->merge_scopes.find(mid);
-      GE_ASSERT_TRUE(merge_scope != this->merge_scopes.end(), "Codegen merge scope not found:%ld", mid);
-
-      if (is_first) {
-        is_first = false;
-      } else {
-        tensor_size_max << ", ";
-        tensor_bufnum_max << ", ";
-      }
-
-      tensor_size_max << merge_scope->second.size;
-      tensor_bufnum_max << merge_scope->second.buf_num;
-    }
-
-    uint32_t tensor_buf_num_max_val = 0;
-    for (auto tid : que.not_merge_tensors) {
-      auto tensor = this->tensors.find(tid);
-      GE_ASSERT_TRUE(tensor != this->tensors.end(), "Codegen tensor not found:%ld", tid);
-
-      if (is_first) {
-        is_first = false;
-      } else {
-        tensor_size_max << ", ";
-      }
-
-      std::string dtype_name;
-      GE_CHK_STATUS_RET(Tensor::DtypeName(tensor->second.dtype, dtype_name), "Codegen get data type:%d failed",
-                        static_cast<int32_t>(tensor->second.dtype));
-      tensor_size_max << tensor->second.size << " * sizeof(" << dtype_name << ")";
-      tensor_buf_num_max_val = std::max(tensor_buf_num_max_val, tensor->second.que_buf_num_value);
-    }
-    tensor_bufnum_max << (que.merge_scopes.empty() ? "" : ", ") << tensor_buf_num_max_val;
-    for (auto share_tensors : que.share_group) {
-      if (share_tensors.second.size() <= 1) {  // 仅有1个tensor 不需要合并计算
-        continue;
-      }
-      // 此处肯定不是第一个size
-      tensor_size_max << ", ";
-      // 多个tensor在一个que中且reuse id相同，需要计算reuse id相同这一组所有tensor size的综合
-      bool is_first_share = true;
-      for (auto tid : share_tensors.second) {
-        auto tensor = this->tensors.find(tid);
-        GE_ASSERT_TRUE(tensor != this->tensors.end(), "Codegen share tensor not found:%ld", tid);
-        if (is_first_share) {
-          is_first_share = false;
-        } else {
-          tensor_size_max << " + ";
-        }
-        std::string dtype_name;
-        GE_CHK_STATUS_RET(Tensor::DtypeName(tensor->second.dtype, dtype_name), "Codegen get data type:%d failed",
-                          static_cast<int32_t>(tensor->second.dtype));
-        std::string tensor_byte_size = tensor->second.size.Str() + " * sizeof(" + dtype_name + ")";
-        if (this->cv_fusion_type == ascir::CubeTemplateType::kUBFuse) {
-          tensor_byte_size = "KernelUtils::BlkAlign<uint8_t>(" + tensor_byte_size + ")";
-        }
-        tensor_size_max << tensor_byte_size;
-      }
-    }
+    GE_CHK_STATUS_RET(AppendMergeScopeMaxTerms(*this, que, tensor_size_max, tensor_bufnum_max, is_first),
+                      "Codegen append merge scope max terms failed");
+    GE_CHK_STATUS_RET(AppendNotMergeTensorMaxTerms(*this, que, tensor_size_max, tensor_bufnum_max, is_first),
+                      "Codegen append not merge tensor max terms failed");
+    GE_CHK_STATUS_RET(AppendShareGroupMaxTerms(*this, que, tensor_size_max),
+                      "Codegen append share group max terms failed");
 
     tensor_size_max << ")";
     tensor_bufnum_max << ")";
 
-    if (this->cv_fusion_type == ascir::CubeTemplateType::kUBFuse) {
-      ss << que.size.DefineConst(tensor_size_max.str()) << std::endl;
-      ss << que.buf_num.DefineConst(tensor_bufnum_max.str()) << std::endl;
-    } else if (!using_att_calc_qbt_size_) {
-      ss << que.size.DefineConst(tensor_size_max.str()) << std::endl;
-      ss << que.buf_num.DefineConst(tensor_bufnum_max.str()) << std::endl;
-      ss << que.Define() << std::endl;
-    } else {
-      ss << "// " << que.size.DefineConst(tensor_size_max.str()) << std::endl;
-      ss << que.buf_num.DefineConst(tensor_bufnum_max.str()) << std::endl;
-      ss << que.Define() << std::endl;
+    GenLocalTQueDefine(ss, que, tensor_size_max.str(), tensor_bufnum_max.str(),
+                       this->cv_fusion_type == ascir::CubeTemplateType::kUBFuse, using_att_calc_qbt_size_);
+    // 两段式：que的buf句柄（q<id>_buf）随TQue对象在此头部声明，各Alloc/Deque站点一律
+    // 赋值（TQue::AllocBuf/DequeBuf）——声明不再钉在首次调用点所在的for体内；
+    // UBFuse分支不声明TQue对象，buf句柄由CV路径自行管理
+    if (this->cv_fusion_type != ascir::CubeTemplateType::kUBFuse) {
+      ss << que.buf.AsArg() << ";" << std::endl;
     }
     std::string init;
     if (common_queue_split_plan != nullptr && id == common_queue_split_plan->queue_id) {
@@ -2705,6 +2695,12 @@ Status TPipe::LocalTBufAlloc(const TBuf &buf, std::string &result, const bool wi
       ss << buf.Define() << std::endl;
     }
   }
+  // 两段式：buf句柄（b<id>_buf）在此头部声明（merged/非merged 路径均需句柄），站点一律赋值
+  // （AllocTBufTensor 调用 AllocBuf(false, ...)）。with_define=false 的调用方自行管理声明
+  // （保持其原行为），不在此重复声明；UBFuse 分支不声明句柄，由 CV 路径自行解决
+  if (with_define && this->cv_fusion_type != ascir::CubeTemplateType::kUBFuse) {
+    ss << buf.buf.AsArg() << ";" << std::endl;
+  }
   if (!is_merged) {
     std::string init;
     GE_CHK_STATUS_RET(this->InitTBufBuffer(buf, init), "Codegen init tbuf buffer failed");
@@ -2723,7 +2719,8 @@ Status TPipe::AllocTBufTensor(const TBuf &buf, const bool with_define, const boo
                               const std::string &reuse_dtype_name, const std::vector<const Tensor *> &reuse_buf_tensors,
                               std::stringstream &ss) const {
   if (!is_buf_reuse) {
-    ss << (is_merged ? buf.AllocBuf(with_define, merged_buf, offset_expr) : buf.AllocBuf(with_define)) << std::endl;
+    // 两段式：b<id>_buf 句柄已在 LocalTBufAlloc 头部声明，站点一律赋值（AllocBuf(false, ...)）
+    ss << (is_merged ? buf.AllocBuf(false, merged_buf, offset_expr) : buf.AllocBuf(false)) << std::endl;
     return af::SUCCESS;
   }
   const auto &first_tensor = reuse_buf_tensors[0];

@@ -32,7 +32,7 @@ std::map<int64_t, af::AxisPtr> GetAllAxisInfo(const af::AscGraph &graph) {
 
 bool IsAxisEqual(const af::AxisPtr &axis1, const af::AxisPtr &axis2) {
   if (axis1->type != axis2->type) {
-    GELOGD("Axis: [%d] and Axis: [%d] has different type [%d vs %d]", axis1->id, axis2->id, axis1->type, axis2->type);
+    GELOGD("Axis: [%d] and Axis: [%d] have different type [%d vs %d]", axis1->id, axis2->id, axis1->type, axis2->type);
     return false;
   }
   // 当前仅仅比较轴的切分方式是否一致
@@ -106,7 +106,7 @@ bool EquivalentGraphRecognizer::CompareAxis(const int64_t axis_id, const int64_t
     auto axis1_from = iter1->second->from;
     auto axis2_from = iter2->second->from;
     if (axis1_from.size() != axis2_from.size()) {
-      GELOGD("Axis: [%d] and Axis: [%d] has different parent axis size [%zu vs %zu]", axis_id, axis_id2,
+      GELOGD("Axis: [%d] and Axis: [%d] have different parent axis size [%zu vs %zu]", axis_id, axis_id2,
              axis1_from.size(), axis2_from.size());
       return false;
     }
@@ -116,7 +116,7 @@ bool EquivalentGraphRecognizer::CompareAxis(const int64_t axis_id, const int64_t
     for (size_t i = 0; i < axis1_from.size(); ++i) {
       bool is_equal = CompareAxis(axis1_from[i], axis2_from[i]);
       if (!is_equal) {
-        GELOGD("Axis: [%d] and Axis: [%d] has different parent axis [%d vs %d]", axis_id, axis_id2, axis1_from[i],
+        GELOGD("Axis: [%d] and Axis: [%d] have different parent axis [%d vs %d]", axis_id, axis_id2, axis1_from[i],
                axis2_from[i]);
         return false;
       }
@@ -190,7 +190,7 @@ bool EquivalentGraphRecognizer::CanExprEquivalentAfterReplace(const af::Expressi
       }
       return true;
     }
-    GELOGD("Expression: [%s] and Expression: [%s] has different free symbols", replace_expr3.c_str(),
+    GELOGD("Expression: [%s] and Expression: [%s] have different free symbols", replace_expr3.c_str(),
            reuse_expr3.c_str());
   }
   // 尝试替换所有输入轴后，都不相等，返回false
@@ -199,7 +199,7 @@ bool EquivalentGraphRecognizer::CanExprEquivalentAfterReplace(const af::Expressi
 
 bool EquivalentGraphRecognizer::CompareExpression(const af::Expression &expr1, const af::Expression &expr2) {
   if (expr1.GetExprType() != expr2.GetExprType()) {
-    GELOGD("Expression: [%s] and Expression: [%s] has different type [%d vs %d]",
+    GELOGD("Expression: [%s] and Expression: [%s] have different type [%d vs %d]",
            af::SymbolicUtils::ToString(expr1).c_str(), af::SymbolicUtils::ToString(expr2).c_str(),
            static_cast<int32_t>(expr1.GetExprType()), static_cast<int32_t>(expr2.GetExprType()));
     return false;
@@ -215,7 +215,7 @@ bool EquivalentGraphRecognizer::CompareExpression(const af::Expression &expr1, c
   const auto &free_sym1 = expr1.FreeSymbols();
   const auto &free_sym2 = expr2.FreeSymbols();
   if (free_sym1.size() != free_sym2.size()) {
-    GELOGD("Expression: [%s] and Expression: [%s] has different free symbols size [%zu vs %zu]",
+    GELOGD("Expression: [%s] and Expression: [%s] have different free symbols size [%zu vs %zu]",
            af::SymbolicUtils::ToString(expr1).c_str(), af::SymbolicUtils::ToString(expr2).c_str(), free_sym1.size(),
            free_sym2.size());
     return false;
@@ -317,14 +317,14 @@ bool EquivalentGraphRecognizer::IsAscTensorEquivalent(const af::AscTensorAttr &t
 
 bool EquivalentGraphRecognizer::IsAscNodeEquivalent(af::AscNode &node1, af::AscNode &node2) {
   if (node1.GetType() != node2.GetType()) {
-    GELOGD("Node: [%s] and Node: [%s] has different type [%s vs %s]", node1.GetName().c_str(), node2.GetName().c_str(),
+    GELOGD("Node: [%s] and Node: [%s] have different type [%s vs %s]", node1.GetName().c_str(), node2.GetName().c_str(),
            node1.GetType().c_str(), node2.GetType().c_str());
     return false;
   }
   const auto &node1_outputs = node1.outputs();
   const auto &node2_outputs = node2.outputs();
   if (node1_outputs.size() != node2_outputs.size()) {
-    GELOGD("Node: [%s] and Node: [%s] has different output tensor size [%zu vs %zu]", node1.GetName().c_str(),
+    GELOGD("Node: [%s] and Node: [%s] have different output tensor size [%zu vs %zu]", node1.GetName().c_str(),
            node2.GetName().c_str(), node1_outputs.size(), node2_outputs.size());
     return false;
   }
@@ -334,7 +334,7 @@ bool EquivalentGraphRecognizer::IsAscNodeEquivalent(af::AscNode &node1, af::AscN
     GE_ASSERT_NOTNULL(tensor_att1);
     GE_ASSERT_NOTNULL(tensor_att2);
     if (!IsAscTensorEquivalent(tensor_att1->attr, tensor_att2->attr)) {
-      GELOGD("Node: [%s] and Node: [%s] has different output tensor [%zu]", node1.GetName().c_str(),
+      GELOGD("Node: [%s] and Node: [%s] have different output tensor [%zu]", node1.GetName().c_str(),
              node2.GetName().c_str(), i);
       return false;
     }
@@ -358,7 +358,7 @@ bool EquivalentGraphRecognizer::IsInputNodeSame(const af::AscNodePtr &asc_node1,
     input_nodes2.emplace_back(node);
   }
   if (input_nodes2.size() != input_nodes1.size()) {
-    GELOGD("Node: [%s] and Node: [%s] has different input size [%zu vs %zu]", asc_node1->GetName().c_str(),
+    GELOGD("Node: [%s] and Node: [%s] have different input size [%zu vs %zu]", asc_node1->GetName().c_str(),
            asc_node2->GetName().c_str(), input_nodes1.size(), input_nodes2.size());
     return false;
   }
@@ -366,7 +366,7 @@ bool EquivalentGraphRecognizer::IsInputNodeSame(const af::AscNodePtr &asc_node1,
     af::AscNode node1(input_nodes1[i]->GetOpDesc(), input_nodes1[i]->GetOwnerComputeGraph());
     af::AscNode node2(input_nodes2[i]->GetOpDesc(), input_nodes2[i]->GetOwnerComputeGraph());
     if (!IsAscNodeEquivalent(node1, node2)) {
-      GELOGD("Node: [%s] and Node: [%s] has different input node name [%s vs %s]", asc_node1->GetName().c_str(),
+      GELOGD("Node: [%s] and Node: [%s] have different input node name [%s vs %s]", asc_node1->GetName().c_str(),
              asc_node2->GetName().c_str(), input_nodes1[i]->GetName().c_str(), input_nodes2[i]->GetName().c_str());
       return false;
     }
@@ -427,7 +427,7 @@ bool EquivalentGraphRecognizer::IsInputAxesFromDuplicityMapped() const {
 bool EquivalentGraphRecognizer::IsAscNodeAttrEquivalent(const af::AscNodeAttr &node_attr_to,
                                                         const af::AscNodeAttr &node_attr_from) {
   if (node_attr_to.sched.axis.size() != node_attr_from.sched.axis.size()) {
-    GELOGD("Graph: [%s] and Graph: [%s] has different schedule axis size [%zu vs %zu]", graph_to_.GetName().c_str(),
+    GELOGD("Graph: [%s] and Graph: [%s] have different schedule axis size [%zu vs %zu]", graph_to_.GetName().c_str(),
            graph_from_.GetName().c_str(), node_attr_to.sched.axis.size(), node_attr_from.sched.axis.size());
     return false;
   }
@@ -440,7 +440,7 @@ bool EquivalentGraphRecognizer::IsEquivalent() {
   auto graph1_nodes_size = graph1_nodes.size();
   auto graph2_nodes_size = graph2_nodes.size();
   if (graph1_nodes_size != graph2_nodes_size) {
-    GELOGD("Graph: [%s] and Graph: [%s] has different node size [%zu vs %zu]", graph_to_.GetName().c_str(),
+    GELOGD("Graph: [%s] and Graph: [%s] have different node size [%zu vs %zu]", graph_to_.GetName().c_str(),
            graph_from_.GetName().c_str(), graph1_nodes_size, graph2_nodes_size);
     return false;
   }
@@ -454,7 +454,7 @@ bool EquivalentGraphRecognizer::IsEquivalent() {
   const auto &graph1_axes = GetCompareAxes(graph_to_.GetAllAxis());
   const auto &graph2_axes = GetCompareAxes(graph_from_.GetAllAxis());
   if (graph1_axes.size() != graph2_axes.size()) {
-    GELOGD("Graph: [%s] and Graph: [%s] has different axis size [%zu vs %zu]", graph_to_.GetName().c_str(),
+    GELOGD("Graph: [%s] and Graph: [%s] have different axis size [%zu vs %zu]", graph_to_.GetName().c_str(),
            graph_from_.GetName().c_str(), graph1_axes.size(), graph2_axes.size());
     return false;
   }

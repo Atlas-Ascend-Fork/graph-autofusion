@@ -259,7 +259,7 @@ graphStatus UpdateSubGraphDataNodes(const ConstNodePtr &node) {
             ref_i, node_sub->GetName().c_str(), name.c_str(), node->GetName().c_str(), node->GetAllInDataAnchorsSize());
         return GRAPH_FAILED;
       }
-      GELOGI("Ref index is %d, input_desc dtype is %d, node name is %s", ref_i, input_desc->GetDataType(),
+      GELOGD("Ref index is %d, input_desc dtype is %d, node name is %s", ref_i, input_desc->GetDataType(),
              node->GetName().c_str());
 
       // if need infer again, refresh subgraph input with output
@@ -268,7 +268,7 @@ graphStatus UpdateSubGraphDataNodes(const ConstNodePtr &node) {
       if (is_infer_again) {
         input_desc = op_desc->MutableOutputDesc(static_cast<uint32_t>(ref_i));
         GE_CHECK_NOTNULL(input_desc,
-                         "The ref index(%d) on the data %s on the subgraph %s "
+                         " The ref index(%d) on the data %s on the subgraph %s "
                          "parent node %s are incompatible, outputs num %u.",
                          ref_i, node_sub->GetName().c_str(), name.c_str(), node->GetName().c_str(),
                          node->GetAllOutDataAnchorsSize());

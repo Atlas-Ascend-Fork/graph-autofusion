@@ -245,6 +245,7 @@ struct ShareGraph {
   static af::ComputeGraphPtr AsinBf16FusedGraph(size_t dims_size);
   static af::ComputeGraphPtr AsinhBf16FusedGraph(size_t dims_size);
   static af::ComputeGraphPtr AtanBf16FusedGraph(size_t dims_size);
+  static af::ComputeGraphPtr AtanFp16FusedGraph(size_t dims_size);
   static af::ComputeGraphPtr PowBf16FusedGraph(size_t dims_size);
   static af::ComputeGraphPtr ReciprocalBf16FusedGraph(size_t dims_size);
   static af::ComputeGraphPtr RoundBf16FusedGraph(size_t dims_size);

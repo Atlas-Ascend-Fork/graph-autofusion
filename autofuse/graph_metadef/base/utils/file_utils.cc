@@ -69,7 +69,7 @@ std::string GetSanitizedName(const std::string &input) {
       sanitized += c;
     }
   }
-  GELOGD("Get regulated name[%s] from [%s]success", sanitized.c_str(), input.c_str());
+  GELOGD("Get regulated name[%s] from [%s] success", sanitized.c_str(), input.c_str());
   return sanitized;
 }
 
@@ -84,7 +84,7 @@ static inline int32_t CheckAndMkdir(const char_t *tmp_dir_path, mmMode_t mode) {
                                       std::vector<const char_t *>({"filepath", tmp_dir_path, reason.c_str()}));
       GELOGW(
           "[Util][mkdir] Create directory %s failed, reason:%s. Make sure the "
-          "directory exists and writable.",
+          "directory exists and is writable.",
           tmp_dir_path, strerror(errno));
       return ret;
     }

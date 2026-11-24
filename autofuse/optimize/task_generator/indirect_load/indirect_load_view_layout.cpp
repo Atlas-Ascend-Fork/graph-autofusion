@@ -24,6 +24,7 @@
 #include "v35/ascir/ascir_codegen_v2.h"
 #include "ascgraph_info_complete.h"
 #include "schedule_result.h"
+#include "utils/axis_utils.h"
 
 namespace optimize {
 namespace indirect_load_detail {
@@ -96,8 +97,8 @@ bool IsInputRegionBoundary(const af::AscNodePtr &node) {
 // 检查已选中的 Broadcast 路径是否可以安全折叠；不支持时只淘汰当前 candidate。
 bool IsSupportedBroadcastPath(const NodePath &path, size_t broadcast_index, ascir::TemplateId template_id) {
   if (broadcast_index >= path.size()) {
-    GELOGI("[IndirectLoad] Reject candidate[%d]: Broadcast path index is out of range.",
-           static_cast<int32_t>(template_id));
+    GELOGI("[IndirectLoad] Reject candidate[%d]: Broadcast path index %zu is out of range [0, %zu).",
+           static_cast<int32_t>(template_id), broadcast_index, path.size());
     return false;
   }
   const af::AscNodePtr &broadcast = path[broadcast_index];
@@ -214,7 +215,8 @@ af::Status ApplyPhysicalView(const NodePath &path,
     // sched rank 不匹配的防御场景（完全移除会使 layernorm 等复合场景在
     // BuildReduceContext 阶段失败）。
     if (node->attr.sched.axis.size() != layout.axis_ids.size()) {
-      GELOGD("[IndirectLoad] Preserve node[%s] view: sched rank does not match physical layout.", node->GetNamePtr());
+      GELOGD("[IndirectLoad] Preserve node[%s] view: sched rank (%zu) does not match physical layout (%zu).",
+             node->GetNamePtr(), node->attr.sched.axis.size(), layout.axis_ids.size());
       continue;
     }
     GE_ASSERT_EQ(node->attr.sched.axis.size(), layout.axis_ids.size());
@@ -323,6 +325,240 @@ af::Status CreateFixedTileSplit(af::AscGraph &graph, af::AxisId axis_id, af::Axi
   return af::SUCCESS;
 }
 
+// [边界化列分块] 行全驻留 × 全列使下游 VF 链的 tile 块远超平台 UB（如 [4,47360] 表：
+// 1 行 = 189440B，VECOUT 4 块 = 757760B）。把 IndirectLoad 输出最内层连续轴（列）拆成
+// 固定 TileOut/TileInner，并同步输出链全部节点视图。
+// 列块必须整除列宽：GM 布局按整行连续存储（行宽 47360），merged 轴的元素线性偏移需等于
+// a0×行宽 + a1T×列块；若列块不整除列宽（如 8192），行间距与块步长不匹配会导致偏移错位/越界。
+constexpr int64_t kBoundaryFusionColumnTileElems = 8192L;
+constexpr int64_t kColumnTileAlign = 8L;  // 32B 对齐（fp32）
+
+// 列块必须严格小于列宽且整除：零值/越界校验拆成独立的前置返回，便于静态检查
+// （G.EXP.22-CPP）识别除数非零。
+bool IsExactDivisor(const int64_t value, const int64_t divisor) {
+  if (divisor == 0L) {
+    return false;
+  }
+  if (divisor < 0L) {
+    return false;
+  }
+  if (divisor >= value) {
+    return false;
+  }
+  return value % divisor == 0L;
+}
+
+int64_t PickColumnTile(const int64_t col_size) {
+  // 优先：≤8192 的 8 倍数（32B 对齐）且整除列宽
+  for (int64_t candidate = std::min(kBoundaryFusionColumnTileElems, col_size); candidate >= kColumnTileAlign;
+       candidate -= kColumnTileAlign) {
+    if (IsExactDivisor(col_size, candidate)) {
+      return candidate;
+    }
+  }
+  // fallback：行宽无 8 倍数因子（如 237790）时，选 ≤8192 的最大整除因子。线性偏移
+  // merged×tile 仍精确等于 a0×行宽 + a1T×tile（整除保证），仅失去 32B 对齐，
+  // 由 DataCopy 的非对齐/tail 路径处理。
+  for (int64_t candidate = std::min(kBoundaryFusionColumnTileElems, col_size); candidate >= 8L; --candidate) {
+    if (IsExactDivisor(col_size, candidate)) {
+      return candidate;
+    }
+  }
+  return col_size;
+}
+
+// [列分块] 收集需要同步列轴的节点：输出链 backward 闭包 + index 链。返回 false 表示输出链
+// 无法识别（调用方保持原图）。
+bool CollectColumnTileChain(const af::AscNodePtr &indirect_load, const af::AscNodePtr &output_store,
+                            const std::vector<af::AscNodePtr> &index_region, NodeSet &chain) {
+  if (!CollectSimtBackwardRegion({output_store}, indirect_load, chain)) {
+    return false;
+  }
+  chain.emplace(indirect_load.get());
+  // index 链（data/load/broadcast 等）的输出作为 IL 输入也会被拆列轴，必须把其节点一并纳入，
+  // 否则其 sched.axis 残留原始列轴而 output 已拆成 outer/inner，导致
+  // IdentifyZeroStrideAxisIndices 的 sched ⊆ output 断言失败。
+  for (const auto &region_node : index_region) {
+    if (region_node != nullptr) {
+      chain.emplace(region_node.get());
+    }
+  }
+  return true;
+}
+
+// [列分块] 把单个节点的输入 producer 加入闭包（已存在则跳过）。
+void AddMissingInputOwners(const af::AscNode *node, NodeSet &chain, std::vector<const af::AscNode *> &extra_nodes,
+                           bool &changed) {
+  if (node == nullptr) {
+    return;
+  }
+  auto *mutable_node = const_cast<af::AscNode *>(node);
+  for (const auto &input : mutable_node->inputs()) {
+    if (input == nullptr || input->anchor.GetOwnerNode() == nullptr) {
+      continue;
+    }
+    auto *owner = dynamic_cast<af::AscNode *>(input->anchor.GetOwnerNode().get());
+    if (owner != nullptr && chain.count(owner) == 0UL) {
+      extra_nodes.push_back(owner);
+      changed = true;
+    }
+  }
+}
+
+// [列分块] 输入链闭包：IL 的输入 producer（表 load1、index load/broadcast 及其上游）的输出
+// tensor 作为下游输入会被拆列轴，其自身 sched.axis 必须同步，否则
+// IdentifyZeroStrideAxisIndices 的 sched⊆output 断言失败。
+void ExpandColumnTileInputClosure(NodeSet &chain) {
+  for (bool changed = true; changed;) {
+    changed = false;
+    std::vector<const af::AscNode *> extra_nodes;
+    for (const auto *chain_node : chain) {
+      AddMissingInputOwners(chain_node, chain, extra_nodes, changed);
+    }
+    chain.insert(extra_nodes.begin(), extra_nodes.end());
+  }
+}
+
+// [列分块] 把 tensor 视图里的列轴拆成 outer/inner；不含列轴（如标量）时跳过。
+void SplitTensorColumnAxis(af::AscTensor *tensor, ascir::AxisId col_axis_id, ascir::AxisId col_outer,
+                           ascir::AxisId col_inner, const af::Expression &inner_size) {
+  if (tensor == nullptr) {
+    return;
+  }
+  auto &attr = tensor->attr;
+  if (std::find(attr.axis.begin(), attr.axis.end(), col_axis_id) == attr.axis.end()) {
+    return;
+  }
+  const auto view =
+      af::AxisUtils::SplitView({attr.axis, attr.repeats, attr.strides}, inner_size, col_outer, col_inner, col_axis_id);
+  attr.axis = view.axis_ids;
+  attr.repeats = view.repeats;
+  attr.strides = view.strides;
+}
+
+bool NodeOutputsCarryColumnAxis(af::AscNode &node, ascir::AxisId col_outer, ascir::AxisId col_inner) {
+  for (const auto &out : node.outputs()) {
+    if (out == nullptr) {
+      continue;
+    }
+    const auto &axis = out->attr.axis;
+    if (std::find(axis.begin(), axis.end(), col_outer) == axis.end() ||
+        std::find(axis.begin(), axis.end(), col_inner) == axis.end()) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// [列分块] 调度轴同步拆分：IdentifyZeroStrideAxisIndices 要求 sched.axis ⊆ 每个 output 的
+// attr.axis。仅当所有输出都确实带列轴（已拆成 outer/inner）时同步，任一输出不含列轴
+// （如标量/单元素）时保持 sched.axis 原样，避免该输出上找不到拆分后的轴而断言。
+void SyncNodeScheduleColumnAxis(af::AscNode &node, ascir::AxisId col_axis_id, ascir::AxisId col_outer,
+                                ascir::AxisId col_inner) {
+  if (!NodeOutputsCarryColumnAxis(node, col_outer, col_inner)) {
+    return;
+  }
+  auto &sched_axis = node.attr.sched.axis;
+  const auto sched_it = std::find(sched_axis.begin(), sched_axis.end(), col_axis_id);
+  if (sched_it == sched_axis.end()) {
+    return;
+  }
+  const auto pos = std::distance(sched_axis.begin(), sched_it);
+  sched_axis.erase(sched_it);
+  sched_axis.insert(sched_axis.begin() + pos, col_inner);
+  sched_axis.insert(sched_axis.begin() + pos, col_outer);
+}
+
+// [列分块] tmp 缓冲需容纳一个列块：算子默认 tmp（如 8KB）在图改写期固定，列分块后单块变大
+// （列块元素 × dtype），固定小尺寸会越界导致结果错误。
+void EnlargeNodeTmpBuffers(af::AscNode &node, int64_t min_tmp_bytes) {
+  for (auto &tmp_buffer : node.attr.tmp_buffers) {
+    int64_t tmp_size = 0;
+    if (tmp_buffer.buf_desc.size.IsValid() && tmp_buffer.buf_desc.size.GetConstValue(tmp_size) && tmp_size > 0 &&
+        tmp_size < min_tmp_bytes) {
+      tmp_buffer.buf_desc.size = af::Symbol(min_tmp_bytes);
+    }
+  }
+}
+
+void ApplyColumnTileToNode(af::AscNode &node, ascir::AxisId col_axis_id, ascir::AxisId col_outer,
+                           ascir::AxisId col_inner, const af::Expression &inner_size, int64_t min_tmp_bytes) {
+  for (const auto &out : node.outputs()) {
+    SplitTensorColumnAxis(out, col_axis_id, col_outer, col_inner, inner_size);
+  }
+  for (const auto &in : node.inputs()) {
+    SplitTensorColumnAxis(in, col_axis_id, col_outer, col_inner, inner_size);
+  }
+  SyncNodeScheduleColumnAxis(node, col_axis_id, col_outer, col_inner);
+  EnlargeNodeTmpBuffers(node, min_tmp_bytes);
+}
+
+// [列分块] 确保 IL 输入走 GM 直读（direct-GM），不按全量驻留 UB。0002 由
+// AnnotateSimtTemplateRoles 完成了该标注；部分图（如含复合 index_select 链）未走到该标注时
+// input 会全量计入 UB（如 0030 的 228MB），列分块无法收敛。此处按 0002 的 role 约定补齐
+// （仅当 producer 尚未标注时，避免覆盖既有语义）。
+void MarkColumnTileInputRoles(const af::AscNodePtr &indirect_load) {
+  for (size_t input_idx = 0UL; input_idx < static_cast<size_t>(kIndirectLoadInputCount); ++input_idx) {
+    const auto producer = ascgen_utils::indirect_load::GetInputProducer(indirect_load, input_idx);
+    if (producer == nullptr) {
+      continue;
+    }
+    if (ascgen_utils::indirect_load::GetTemplateRole(producer) != ascgen_utils::indirect_load::TemplateRole::kNone) {
+      continue;
+    }
+    (void)ascgen_utils::indirect_load::SetTemplateRole(
+        producer, input_idx == ascgen_utils::indirect_load::kInputTensorIndex
+                      ? ascgen_utils::indirect_load::TemplateRole::kSimtInputBoundary
+                      : ascgen_utils::indirect_load::TemplateRole::kSimtDirectGmBoundary);
+  }
+}
+
+af::Status SplitBoundaryFusionColumnTile(af::AscGraph &graph, const af::AscNodePtr &indirect_load,
+                                         const af::AscNodePtr &output_store,
+                                         const std::vector<af::AscNodePtr> &index_region) {
+  const auto &out_attr = indirect_load->outputs()[0]->attr;
+  if (out_attr.axis.size() < 2UL) {
+    return af::SUCCESS;
+  }
+  const ascir::AxisId col_axis_id = out_attr.axis.back();
+  const auto *col_axis = graph.FindAxis(col_axis_id);
+  GE_ASSERT_NOTNULL(col_axis);
+  int64_t col_size = 0;
+  if (!col_axis->size.GetConstValue(col_size)) {
+    return af::SUCCESS;
+  }
+  const int64_t col_tile = PickColumnTile(col_size);
+  if (col_tile >= col_size) {
+    return af::SUCCESS;  // 找不到整除列块（或列本身很小），保持整列
+  }
+  ascir::AxisId col_outer = af::kIdNone;
+  ascir::AxisId col_inner = af::kIdNone;
+  GE_ASSERT_SUCCESS(CreateFixedTileSplit(graph, col_axis_id, col_outer, col_inner, col_tile));
+  const auto *inner_axis = graph.FindAxis(col_inner);
+  GE_ASSERT_NOTNULL(inner_axis);
+  NodeSet chain;
+  if (!CollectColumnTileChain(indirect_load, output_store, index_region, chain)) {
+    return af::SUCCESS;
+  }
+  ExpandColumnTileInputClosure(chain);
+  const int64_t min_tmp_bytes = col_tile * 4L;  // 按 4B 元素保守估算
+  for (const auto *chain_node : chain) {
+    if (chain_node != nullptr) {
+      ApplyColumnTileToNode(*const_cast<af::AscNode *>(chain_node), col_axis_id, col_outer, col_inner, inner_axis->size,
+                            min_tmp_bytes);
+    }
+  }
+  MarkColumnTileInputRoles(indirect_load);
+  const auto il_op_desc = indirect_load->GetOpDesc();
+  if (il_op_desc != nullptr) {
+    // 标记单次 SIMT 调用的 tile 内跨度，供 lowering metadata 只在 boundary fusion 列分块场景
+    // 把 inner span 从整列宽改为列块大小。
+    (void)af::AttrUtils::SetInt(il_op_desc, "af.internal.indirect_load.column_tile_inner", col_tile);
+  }
+  GELOGI("[IndirectLoad] boundary fusion column tile %ld applied for node[%s].", col_tile, indirect_load->GetNamePtr());
+  return af::SUCCESS;
+}
+
 af::Status BuildAxisViewByBoundary(af::AscGraph &graph, const std::vector<af::AxisId> &axes, size_t boundary,
                                    af::AxisId &outer_axis, af::AxisId &inner_axis) {
   GE_ASSERT_TRUE(!axes.empty(), "IndirectLoad output axis is empty.");
@@ -346,6 +582,34 @@ bool CanEmitSimtScalar(const af::AscNodePtr &node) {
   const auto impl = ascgen_utils::GetAscIrCodegenImpl(node->GetType());
   const auto *v2_impl = impl == nullptr ? nullptr : dynamic_cast<af::ascir::AscIrCodegenV2 *>(impl.get());
   return v2_impl != nullptr && v2_impl->IsSimtScalarSupported(*node);
+}
+
+// [边界化判定] 扫描 SIMT 标量求值器消费集（输出链 backward 闭包，含汇入链中的
+// side-input）内节点的可发射性。豁免集与发射期 EmitSimtEvaluatorNodes 的专用路径
+// 分流保持一致（单一事实源）：Load（GM 直读）/Scalar/ScalarData/Arange/Store/
+// Transpose 均有专用发射路径；其余节点与 EmitSimtScalarExpr 共用同一 V2 支持查询
+// （CanEmitSimtScalar）。返回首个不可发射节点（nullptr = 全部可发射）。
+af::AscNodePtr FindUnemittableSimtEvaluatorNode(const af::AscGraph &graph, const NodeSet &evaluator_nodes) {
+  for (const af::AscNodePtr &node : graph.GetAllNodes()) {
+    if (evaluator_nodes.count(node.get()) == 0UL) {
+      continue;
+    }
+    // IndirectLoad 自身即模板的 gather 发射点，不进入标量求值器：post-Reduce 形态的求值器
+    // 消费链从 local producer 回溯时会把它一并收进来，必须豁免，否则所有 post-Reduce 候选
+    // 都会被误判为不可发射而整体降级。Reduce 节点由普通向量调度执行（不进入求值器），
+    // 同样豁免——输出链检测必须与 ValidateSimtTemplateRegion 的 index 链口径保持一致。
+    if (af::ops::IsOps<af::ascir_op::IndirectLoad>(node) || af::ops::IsOps<af::ascir_op::Load>(node) ||
+        af::ops::IsOps<af::ascir_op::Scalar>(node) || af::ops::IsOps<af::ascir_op::ScalarData>(node) ||
+        af::ops::IsOps<af::ascir_op::Arange>(node) || af::ops::IsOps<af::ascir_op::Store>(node) ||
+        af::ops::IsOps<af::ascir_op::Transpose>(node) ||
+        node->attr.api.compute_type == af::ComputeType::kComputeReduce) {
+      continue;
+    }
+    if (!CanEmitSimtScalar(node)) {
+      return node;
+    }
+  }
+  return nullptr;
 }
 }  // namespace indirect_load_detail
 }  // namespace optimize

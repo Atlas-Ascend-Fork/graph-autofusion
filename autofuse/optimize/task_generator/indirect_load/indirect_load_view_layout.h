@@ -73,6 +73,15 @@ af::Status BuildAxisViewByBoundary(af::AscGraph &graph, const std::vector<af::Ax
 
 bool CanEmitSimtScalar(const af::AscNodePtr &node);
 
+// [边界化判定] 求值器消费集中首个不可标量发射的节点（nullptr = 全部可发射）。
+af::AscNodePtr FindUnemittableSimtEvaluatorNode(const af::AscGraph &graph, const NodeSet &evaluator_nodes);
+
+// [边界化列分块] 把 IL 输出最内层连续轴拆成固定列块，并同步输出链/index 链/输入链
+// 闭包的视图与 sched.axis；同时标记 column_tile_inner 供 lowering 使用列块内跨度。
+af::Status SplitBoundaryFusionColumnTile(af::AscGraph &graph, const af::AscNodePtr &indirect_load,
+                                         const af::AscNodePtr &output_store,
+                                         const std::vector<af::AscNodePtr> &index_region);
+
 }  // namespace indirect_load_detail
 }  // namespace optimize
 

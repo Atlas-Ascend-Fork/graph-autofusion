@@ -1907,7 +1907,10 @@ TEST_F(TestCodegenTiling, InductorAivOnlyLaunchCoversNativeAndEpilogueBlocks) {
   const auto end = body.find("return 0;", begin);
   ASSERT_NE(end, std::string::npos);
   const auto call_cube_tiling = this->GenCallCubeTilingForInductor(fused, {}, codegen::PgoShapeStringStream{});
-  const auto helpers_begin = call_cube_tiling.find("static inline constexpr bool is_cv_safety_aiv_only_mode");
+  // GenInductorCvSafetyFallback输出的启动块表达式引用kCvTaskRatio，真实生成链路中
+  // GenTilingFuncForInductor将其与CallCubeTiling输出在同一编译单元，此处提取区间
+  // 需从kCvTaskRatio定义起始，保证helpers片段与body拼接后定义完整。
+  const auto helpers_begin = call_cube_tiling.find("constexpr uint32_t kCvTaskRatio");
   const auto helpers_end = call_cube_tiling.find("// Global variable", helpers_begin);
   ASSERT_NE(helpers_begin, std::string::npos);
   ASSERT_NE(helpers_end, std::string::npos);
@@ -4454,7 +4457,8 @@ TEST_F(TestCodegenTiling, SplitHeaderGenerateForPgoShouldIncludeDirectEntryDepen
     if (source.find("Loaded PGO block_dim %u is outside core budget [1, %u]") != std::string::npos) {
       found_pgo_core_budget_check = true;
     }
-    if (source.find("tiling_i32.size() != expect_num") != std::string::npos &&
+    if (source.find("for (size_t index = 0; index < expect_num; ++index)") != std::string::npos &&
+        source.find("Invalid PGO tiling data length.") != std::string::npos &&
         source.find("memcpy_s(&tiling_data, sizeof(tiling_data), tiling_i32.data(), sizeof(tiling_data)) != EOK") !=
             std::string::npos) {
       found_pgo_config_validation = true;
@@ -5781,6 +5785,36 @@ TEST_F(TestCodegenTiling, TfAndInductorPgoShouldSortAclDurationsConsistently) {
   EXPECT_EQ(inductor_source.find("mspti"), std::string::npos);
 }
 
+TEST_F(TestCodegenTiling, PgoProfilingSourceShouldKeepLifecycleOrder) {
+  std::stringstream ss;
+  this->GenPgoAclProfiling(ss, false);
+  const auto source = ss.str();
+  const auto begin = source.find("int PgoBeginCandidate(void *collector)");
+  const auto init = source.find("int InitAclPgoEvents()");
+  const auto destroy = source.find("void DestroyAclPgoEvents()");
+  const auto measure = source.find("int MeasureAclPgoLaunch(");
+  const auto loop = source.find("for (uint64_t launch_count = 0U;");
+  ASSERT_NE(begin, std::string::npos);
+  ASSERT_NE(init, std::string::npos);
+  ASSERT_NE(destroy, std::string::npos);
+  ASSERT_NE(measure, std::string::npos);
+  ASSERT_NE(loop, std::string::npos);
+  EXPECT_LT(begin, init);
+  EXPECT_LT(init, destroy);
+  EXPECT_LT(destroy, measure);
+  EXPECT_LT(measure, loop);
+}
+
+TEST_F(TestCodegenTiling, PgoAutofuseTilingSplitShouldPreserveGeneratedShape) {
+  enable_autofuse_pgo_ = true;
+  auto fused_schedule_result = this->GenBasicFusedScheduleResult({af::Symbol(64), af::Symbol(128)});
+  codegen::PgoShapeStringStream pgo_shape_dim;
+  const auto source = this->GenPgoAutofuseTiling(fused_schedule_result, pgo_shape_dim, "AutofuseTilingData", false);
+  EXPECT_NE(source.find("extern \"C\" int64_t AutofuseTilingWithConfig"), std::string::npos);
+  EXPECT_NE(source.find("  auto pgo_tiling = *tiling;"), std::string::npos);
+  EXPECT_NE(source.find("  return 0;"), std::string::npos);
+}
+
 TEST_F(TestCodegenTiling, TfPgoGeneratedSourceContractShouldRemainStable) {
   auto fused_schedule_result = this->GenBasicFusedScheduleResult({af::Symbol(64), af::Symbol(128)});
   fused_schedule_result.node_idx_to_scheduled_results[0].resize(1);
@@ -5795,10 +5829,11 @@ TEST_F(TestCodegenTiling, TfPgoGeneratedSourceContractShouldRemainStable) {
   EXPECT_NE(source.find("AutofusePgoCollectorBegin(collector, PGO_GRAPH_NAME)"), std::string::npos);
   EXPECT_NE(source.find("int PgoBeginCandidate(void *collector)"), std::string::npos);
   EXPECT_NE(source.find("const int begin_status = PgoBeginCandidate(g_pgo_collector);"), std::string::npos);
+  EXPECT_NE(source.find("#define DLOGE(fmt, ...) DLOGW(fmt, ##__VA_ARGS__)"), std::string::npos);
   EXPECT_EQ(source.find("int PgoBeginCandidate(void *collector, AutofuseTilingData *tiling_data, "
                         "uint32_t workspace_size)"),
             std::string::npos);
-  EXPECT_NE(source.find("DLOGE(\"InitAclPgoEvents failed, status: %d\", status)"), std::string::npos);
+  EXPECT_NE(source.find("DLOGI(\"InitAclPgoEvents failed, status: %d\", status)"), std::string::npos);
   EXPECT_EQ(source.find("get_tiling_data_repr_fn(tiling_data)"), std::string::npos);
   EXPECT_EQ(source.find("kInductorPgoRunnerAbi"), std::string::npos);
   EXPECT_EQ(source.find("kPgoTopnMagic"), std::string::npos);
@@ -7346,8 +7381,8 @@ void AssertDlopenRunnerProfiling(const std::string &runner) {
   ASSERT_NE(unsupported_branch, std::string::npos);
   EXPECT_LT(unsupported_branch, unsupported_warning);
   EXPECT_NE(runner.find("result = kPgoProfileUnsupported;"), std::string::npos);
-  EXPECT_NE(runner.find("DLOGE(\"InitAclPgoEvents failed, status: %d\", status)"), std::string::npos);
-  EXPECT_NE(runner.find("DLOGE(\"PgoBeginCandidate failed, status: %d\", begin_status)"), std::string::npos);
+  EXPECT_NE(runner.find("DLOGI(\"InitAclPgoEvents failed, status: %d\", status)"), std::string::npos);
+  EXPECT_NE(runner.find("DLOGI(\"PgoBeginCandidate failed, status: %d\", begin_status)"), std::string::npos);
   EXPECT_NE(runner.find("DLOGE(\"AutofusePgoCollectorRecordLaunch failed, status: %d\", record_status)"),
             std::string::npos);
   EXPECT_NE(runner.find("DLOGE(\"WrapperOnlyLaunch failed, ERROR: %d\", launch_status)"), std::string::npos);
@@ -9429,4 +9464,59 @@ int main() {
 }
 )LOG";
   ASSERT_TRUE(CompileAndRunCode(source));
+}
+
+TEST_F(TestCodegenTiling, CvCoreLimitRatioMatchesTheGeneratedKernelType) {
+  af::AscGraph graph("conv_core_limit_ratio");
+  CreateConv2DGraphWithGroups(graph);
+  ascir::ScheduleGroup group;
+  group.impl_graphs.push_back(graph);
+  ascir::ScheduledResult result;
+  result.cube_type = ascir::CubeTemplateType::kUBFuse;
+  result.schedule_groups.push_back(group);
+  ascir::FusedScheduledResult fused;
+  fused.node_idx_to_scheduled_results = {{result}};
+
+  for (const auto &target : std::vector<std::pair<std::string, uint32_t>>{{"3510", 2U}, {"5102", 1U}}) {
+    ge::PlatformContext::GetInstance().SetPlatform(target.first);
+    std::stringstream source;
+    codegen::AppendCvCoreLimitHelperDefs(source, fused);
+    EXPECT_NE(source.str().find("constexpr uint32_t kCvTaskRatio = " + std::to_string(target.second) + "U;"),
+              std::string::npos);
+    EXPECT_EQ(codegen::GetKernelTaskType(fused), "KERNEL_TYPE_MIX_AIC_1_" + std::to_string(target.second));
+  }
+  fused.node_idx_to_scheduled_results[0][0].cube_type = ascir::CubeTemplateType::kFixpip;
+  std::stringstream cube_only;
+  codegen::AppendCvCoreLimitHelperDefs(cube_only, fused);
+  EXPECT_EQ(codegen::GetKernelTaskType(fused), "KERNEL_TYPE_AIC_ONLY");
+  EXPECT_EQ(cube_only.str().find("aiv_limit / kCvTaskRatio"), std::string::npos);
+  EXPECT_EQ(cube_only.str().find("extern \"C\" bool GetCvCoreLimits"), std::string::npos);
+}
+
+TEST_F(TestCodegenTiling, InductorCvTilingPassesCoreLimitsBeforeAssigningWorkAndKeysTheCache) {
+  af::AscGraph graph("bmm_core_limit");
+  CreateBatchMatmulElemwiseFusedGraph(graph);
+  optimize::Optimizer optimizer(optimize::OptimizerOptions{});
+  ascir::FusedScheduledResult fused;
+  ASSERT_EQ(optimizer.Optimize(graph, fused), af::SUCCESS);
+  ASSERT_TRUE(ascgen_utils::IsCubeFusedScheduled(fused));
+  codegen::Codegen generator(codegen::CodegenOptions{});
+  codegen::CodegenResult result;
+  ASSERT_EQ(generator.GenerateForInductor(fused, result), af::SUCCESS);
+  const auto &source = result.tiling;
+  EXPECT_LT(source.find("std::lock_guard<std::mutex> lock(cube_tiling_mutex)"),
+            source.find("const uint32_t requested_aic = cv_aic_num"));
+  EXPECT_NE(source.find("limit->aic_num, limit->aiv_num, ws_size"), std::string::npos);
+  EXPECT_NE(source.find("compile_info.aicore_num = cv_aic_num;"), std::string::npos);
+  EXPECT_NE(source.find("compile_info.aiv_num = cv_aiv_num;"), std::string::npos);
+  EXPECT_NE(source.find("cached_requested_aic == requested_aic"), std::string::npos);
+  EXPECT_NE(source.find("cached_requested_aiv == requested_aiv"), std::string::npos);
+  EXPECT_NE(source.find("cv_aic_num = cached_effective_aic"), std::string::npos);
+  EXPECT_NE(source.find("cv_aiv_num = cached_effective_aiv"), std::string::npos);
+  EXPECT_EQ(source.find("cube_block_dim * 2 < vec_block_dim"), std::string::npos);
+  EXPECT_NE(source.find("GenConstTilingDataWithCoreLimits(char* config_file, int aic_num"), std::string::npos);
+  EXPECT_NE(source.find("limit.aic_num = aic_num;"), std::string::npos);
+  EXPECT_NE(source.find("&workspace_size, &block_dim, &limit)"), std::string::npos);
+  EXPECT_NE(source.find("return GenConstTilingDataWithCoreLimits(config_file, 0, aiv_num, ub_size);"),
+            std::string::npos);
 }

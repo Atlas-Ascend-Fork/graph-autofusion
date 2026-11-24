@@ -12,6 +12,7 @@
 import hashlib
 import json
 import os
+import sys
 import time
 import types
 from dataclasses import dataclass
@@ -42,6 +43,7 @@ _LAUNCH_FUNC = (
 
 def fake_get_soc_spec(key):
     return {
+        "cube_core_cnt": 24,
         "vector_core_cnt": 20,
         "ub_size": 262144,
     }.get(key, "")
@@ -2847,3 +2849,86 @@ def test_main_link_stage_skips_recompile_when_baked(ascendc_compile_module, tmpd
 
     assert link_calls == [1]
     assert out_file.check()
+
+
+@pytest.mark.parametrize(
+    "aic,aiv,expected",
+    [(5, 7, (5, 7)), (5, 0, (5, 20)), (0, 7, (24, 7)), (0, 0, (24, 20))],
+)
+def test_const_cv_tiling_receives_compile_resource_snapshot(
+    ascendc_compile_module, tmpdir, monkeypatch, aic, aiv, expected
+):
+    device = tmpdir.mkdir("device")
+    device.join("autofuse_tiling_data.h").write("old tiling")
+    received = []
+
+    # 固定设备属性不可用，聚焦控核传参矩阵，避免用例结果依赖运行环境是否有 NPU 卡
+    ascendc_compile_module.module.get_npu_device_core_limits = lambda: (0, 0)
+
+    def generate(config, cube, vector, ub):
+        received.append((config.value, cube, vector, ub))
+        return b"limited CV tiling"
+
+    module = ascendc_compile_module.module
+    module.static_shape_kernel_proc = lambda *args: None
+    module.init_torch_npu_for_const_tiling = lambda: None
+    args = types.SimpleNamespace(
+        stage="all", graph_name="cv", config_file="config", aic_num=aic, aiv_num=aiv
+    )
+    lib = types.SimpleNamespace(GenConstTilingDataWithCoreLimits=generate)
+    module.rewrite_device_kernel_with_const_tiling(args, str(tmpdir), lib)
+    assert received == [(b"config", *expected, 262144)]
+    assert device.join("autofuse_tiling_data.h").read() == "limited CV tiling"
+    assert device.join("autofuse_tiling_data_bak.h").read() == "old tiling"
+
+
+@pytest.mark.parametrize(
+    "aic,aiv,expected", [(0, 0, (40, 80)), (0, 7, (40, 7)), (5, 0, (5, 80))]
+)
+def test_const_cv_tiling_unlimited_falls_back_to_device_core_limits(
+    ascendc_compile_module, tmpdir, monkeypatch, aic, aiv, expected
+):
+    device = tmpdir.mkdir("device")
+    device.join("autofuse_tiling_data.h").write("old tiling")
+    received = []
+
+    def generate(config, cube, vector, ub):
+        received.append((config.value, cube, vector, ub))
+        return b"limited CV tiling"
+
+    fake_torch = types.SimpleNamespace(
+        npu=types.SimpleNamespace(
+            current_device=lambda: 0,
+            get_device_properties=lambda device_id: types.SimpleNamespace(
+                cube_core_num=40, vector_core_num=80
+            ),
+        )
+    )
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setitem(sys.modules, "torch_npu", types.ModuleType("torch_npu"))
+
+    module = ascendc_compile_module.module
+    module.static_shape_kernel_proc = lambda *args: None
+    module.init_torch_npu_for_const_tiling = lambda: None
+    args = types.SimpleNamespace(
+        stage="all", graph_name="cv", config_file="config", aic_num=aic, aiv_num=aiv
+    )
+    lib = types.SimpleNamespace(GenConstTilingDataWithCoreLimits=generate)
+    module.rewrite_device_kernel_with_const_tiling(args, str(tmpdir), lib)
+    # 不控核维度设备属性优先；用户显式控核值优先，不被设备属性覆盖
+    assert received == [(b"config", *expected, 262144)]
+
+
+def test_const_cv_tiling_does_not_silently_ignore_limits_on_old_abi(
+    ascendc_compile_module, tmpdir
+):
+    module = ascendc_compile_module.module
+    module.static_shape_kernel_proc = lambda *args: None
+    module.init_torch_npu_for_const_tiling = lambda: None
+    args = types.SimpleNamespace(
+        stage="all", graph_name="cv", config_file="config", aic_num=5, aiv_num=7
+    )
+    with pytest.raises(module.CompileError, match="does not support core limits"):
+        module.rewrite_device_kernel_with_const_tiling(
+            args, str(tmpdir), types.SimpleNamespace()
+        )

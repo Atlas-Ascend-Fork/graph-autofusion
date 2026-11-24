@@ -10,15 +10,15 @@
 #ifndef CONV_PINGPONG_BASIC_ATCOS_H
 #define CONV_PINGPONG_BASIC_ATCOS_H
 
-#include "include/conv/block/block_scheduler.h"
-#include "include/conv/prologue/block_prologue.h"
+#include "conv/block/block_scheduler.h"
+#include "conv/prologue/block_prologue.h"
 
 #ifdef CV_UB_FUSION
-#include "include/conv/kernel/kernel_conv_forward_mix.h"
-#include "include/conv/epilogue/block_epilogue_cv.h"
+#include "conv/kernel/kernel_conv_forward_mix.h"
+#include "conv/epilogue/block_epilogue_cv.h"
 #else
-#include "include/conv/kernel/kernel_conv_forward.h"
-#include "include/conv/epilogue/block_epilogue_empty.h"
+#include "conv/kernel/kernel_conv_forward.h"
+#include "conv/epilogue/block_epilogue_empty.h"
 #endif
 
 namespace Conv2DV2Advanced {

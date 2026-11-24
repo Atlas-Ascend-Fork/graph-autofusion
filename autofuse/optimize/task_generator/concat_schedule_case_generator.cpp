@@ -684,7 +684,7 @@ Status ConcatFusionCaseGenerator::InsertAxis(const ascir::ImplGraph &optimized_g
   std::vector<af::AxisPtr> new_axes;
   for (const auto &src_axis : src_axes) {
     std::shared_ptr<af::Axis> new_axis = af::MakeShared<af::Axis>();
-    GE_CHECK_NOTNULL(new_axis, "create axis failed");
+    GE_CHECK_NOTNULL(new_axis, " create axis failed");
     new_axis->id = src_axis->id;
     new_axis->name = src_axis->name;
     new_axis->type = src_axis->type;
@@ -694,7 +694,7 @@ Status ConcatFusionCaseGenerator::InsertAxis(const ascir::ImplGraph &optimized_g
 
   auto new_axis_id = static_cast<int64_t>(new_axes.size());
   std::shared_ptr<af::Axis> const_axis = af::MakeShared<af::Axis>();
-  GE_CHECK_NOTNULL(const_axis, "create axis failed");
+  GE_CHECK_NOTNULL(const_axis, " create axis failed");
   const_axis->id = static_cast<int64_t>(new_axes.size());
   const_axis->name = "axis_1d";
   const_axis->type = af::Axis::kAxisTypeOriginal;

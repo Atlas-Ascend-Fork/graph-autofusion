@@ -7718,8 +7718,8 @@ TEST_F(TestOptimizer, ReducePartitionLoad) {
   ::ascir::FusedScheduledResult fused_scheduled_result;
   EXPECT_EQ(optimizer.Optimize(graph, fused_scheduled_result), 0);
   EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results.size(), 1);
-  // 通用模板 1 + R 轴分核模板 1 + 全载模板 1
-  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 3);
+  // 通用模板 1 + R 轴分核模板 1 + norm 环重计算模板 1 + 全载模板 1
+  EXPECT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0].size(), 4);
 }
 
 TEST_F(TestOptimizer, ReducePartition3) {

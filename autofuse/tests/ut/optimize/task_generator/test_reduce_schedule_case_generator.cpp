@@ -100,6 +100,97 @@ size_t CountCommonTaskNodesByName(const std::vector<ScheduleTask> &tasks, const 
   return count;
 }
 
+struct ArgminFusionLayout {
+  std::vector<af::AxisId> input_axes;
+  std::vector<af::Expression> input_repeats;
+  std::vector<af::Expression> input_strides;
+  std::vector<af::AxisId> output_axes;
+  std::vector<af::Expression> output_repeats;
+  std::vector<af::Expression> output_strides;
+};
+
+ArgminFusionLayout CreateArgminFusionLayout(af::AscGraph &graph) {
+  auto s0 = graph.CreateSizeVar(128);
+  auto s1 = graph.CreateSizeVar(64);
+  auto z0 = graph.CreateAxis("z0", s0);
+  auto z1 = graph.CreateAxis("z1", s1);
+  ArgminFusionLayout layout;
+  layout.input_axes = {z0.id, z1.id};
+  layout.input_repeats = {s0, s1};
+  layout.input_strides = {s1, af::ops::One};
+  layout.output_axes = {z0.id, z1.id};
+  layout.output_repeats = {s0, af::ops::One};
+  layout.output_strides = {af::ops::One, af::ops::Zero};
+  return layout;
+}
+
+void SetFusionTensorAttr(af::AscOpOutput &tensor, const std::vector<af::AxisId> &axes,
+                         const std::vector<af::Expression> &repeats, const std::vector<af::Expression> &strides,
+                         ge::DataType dtype) {
+  tensor.dtype = dtype;
+  *tensor.axis = axes;
+  *tensor.repeats = repeats;
+  *tensor.strides = strides;
+}
+
+void AddFusionStoreOutput(const ArgminFusionLayout &layout, const af::AscOpOutput &src, const std::string &store_name,
+                          const std::string &output_name, int64_t output_index) {
+  Store store(store_name.c_str());
+  store.attr.sched.axis = layout.input_axes;
+  store.x = src;
+  SetFusionTensorAttr(store.y, layout.output_axes, layout.output_repeats, layout.output_strides, ge::DT_INT64);
+  Output output(output_name.c_str());
+  output.x = store.y;
+  output.y.dtype = ge::DT_INT64;
+  output.ir_attr.SetIndex(output_index);
+}
+
+af::AscGraph BuildArgminWithValuePostFusionGraph() {
+  af::AscGraph graph("argmin_with_value_post_fusion");
+  const auto layout = CreateArgminFusionLayout(graph);
+
+  Data data("data", graph);
+  data.y.dtype = ge::DT_INT64;
+  data.ir_attr.SetIndex(0);
+  Load load("load");
+  load.attr.sched.axis = layout.input_axes;
+  load.x = data.y;
+  SetFusionTensorAttr(load.y, layout.input_axes, layout.input_repeats, layout.input_strides, ge::DT_INT64);
+
+  ArgminWithValue reduce("argminwithvalue");
+  reduce.attr.sched.axis = layout.input_axes;
+  reduce.attr.api.compute_type = af::ComputeType::kComputeReduce;
+  reduce.x = load.y;
+  SetFusionTensorAttr(reduce.value, layout.output_axes, layout.output_repeats, layout.output_strides, ge::DT_INT64);
+  SetFusionTensorAttr(reduce.index, layout.output_axes, layout.output_repeats, layout.output_strides, ge::DT_INT64);
+
+  Data fallback_data("fallback_data", graph);
+  fallback_data.y.dtype = ge::DT_INT64;
+  fallback_data.ir_attr.SetIndex(1);
+  Load fallback_load("fallback_load");
+  fallback_load.attr.sched.axis = layout.input_axes;
+  fallback_load.x = fallback_data.y;
+  SetFusionTensorAttr(fallback_load.y, layout.output_axes, layout.output_repeats, layout.output_strides, ge::DT_INT64);
+
+  Le le("le");
+  le.attr.sched.axis = layout.input_axes;
+  le.x1 = reduce.index;
+  le.x2 = fallback_load.y;
+  SetFusionTensorAttr(le.y, layout.output_axes, layout.output_repeats, layout.output_strides, ge::DT_BOOL);
+
+  Where where("where1");
+  where.attr.sched.axis = layout.input_axes;
+  where.x1 = le.y;
+  where.x2 = reduce.value;
+  where.x3 = fallback_load.y;
+  SetFusionTensorAttr(where.y, layout.output_axes, layout.output_repeats, layout.output_strides, ge::DT_INT64);
+
+  AddFusionStoreOutput(layout, reduce.value, "value_store", "value_output", 0);
+  AddFusionStoreOutput(layout, reduce.index, "index_store", "index_output", 1);
+  AddFusionStoreOutput(layout, where.y, "where_store", "where_output", 2);
+  return graph;
+}
+
 void ConstructFourAxisReduce(af::AscGraph &graph, bool tail_reduce) {
   auto s0 = graph.CreateSizeVar(128);
   auto s1 = graph.CreateSizeVar(64);
@@ -1016,5 +1107,50 @@ TEST_F(ReduceScheduleCaseGeneratorTest, TestReduce_Multi_Cita_Workspace_Source_M
   }
   // 同一子图内同名 workspace 只应剩一份
   EXPECT_EQ(max_ws_per_sub_graph, 1UL);
+}
+
+TEST_F(ReduceScheduleCaseGeneratorTest, TestArgminWithValuePostFusionPartitionsOutputWorkspacesTogether) {
+  auto graph = BuildArgminWithValuePostFusionGraph();
+  std::vector<ScheduleTask> tasks;
+  ReducePartitionCaseGenerator generator;
+  OptimizerOptions options;
+
+  ASSERT_EQ(generator.GeneratorTask(graph, tasks, options), af::SUCCESS);
+
+  const ScheduleTask *common_task = nullptr;
+  for (const auto &task : tasks) {
+    if (task.reduce_type == ReduceTemplateType::kCommon) {
+      common_task = &task;
+      break;
+    }
+  }
+  ASSERT_NE(common_task, nullptr);
+
+  size_t value_pre_group = common_task->grouped_graphs.size();
+  size_t index_pre_group = common_task->grouped_graphs.size();
+  size_t value_post_group = common_task->grouped_graphs.size();
+  size_t index_post_group = common_task->grouped_graphs.size();
+  for (size_t group_idx = 0UL; group_idx < common_task->grouped_graphs.size(); ++group_idx) {
+    const auto &grouped_graph = common_task->grouped_graphs[group_idx];
+    for (const auto &node : grouped_graph.GetAllNodes()) {
+      if (!af::ops::IsOps<af::ascir_op::Workspace>(node)) {
+        continue;
+      }
+      const bool is_pre_workspace = node->GetInDataNodesSize() != 0UL;
+      if (node->GetName() == "argminwithvalue_Workspace_0") {
+        (is_pre_workspace ? value_pre_group : value_post_group) = group_idx;
+      } else if (node->GetName() == "argminwithvalue_Workspace_1") {
+        (is_pre_workspace ? index_pre_group : index_post_group) = group_idx;
+      }
+    }
+  }
+
+  EXPECT_LT(value_pre_group, common_task->grouped_graphs.size());
+  EXPECT_LT(index_pre_group, common_task->grouped_graphs.size());
+  EXPECT_LT(value_post_group, common_task->grouped_graphs.size());
+  EXPECT_LT(index_post_group, common_task->grouped_graphs.size());
+  EXPECT_EQ(value_pre_group, index_pre_group);
+  EXPECT_EQ(value_post_group, index_post_group);
+  EXPECT_NE(value_pre_group, value_post_group);
 }
 }  // namespace schedule

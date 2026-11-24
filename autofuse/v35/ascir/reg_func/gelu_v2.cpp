@@ -15,7 +15,7 @@ std::vector<std::unique_ptr<TmpBufDesc>> CalcGeluTmpSizeV2(const AscNode &node) 
   constexpr uint32_t GELU_CALC_PROC = 3;
   constexpr uint32_t GELU_ONE_REPEAT_BYTE_SIZE = 256;
   uint32_t calcTmpBuf = GELU_CALC_PROC * GELU_ONE_REPEAT_BYTE_SIZE;
-  GELOGD("Node %s[%s] temp buffer size: %u", node.GetTypePtr(), node.GetNamePtr(), calcTmpBuf);
+  GELOGD("Node %s[%s] temp buffer size: %u bytes", node.GetTypePtr(), node.GetNamePtr(), calcTmpBuf);
   Expression TmpSize = Symbol(calcTmpBuf);
   TmpBufDesc desc = {TmpSize, -1};
   std::vector<std::unique_ptr<TmpBufDesc>> tmpBufDescs;

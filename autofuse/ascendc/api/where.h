@@ -325,15 +325,18 @@ inline __aicore__ void WherePartition3Buffer(AscendC::LocalTensor<uint8_t> &tmp_
 inline __aicore__ void WherePartitionBufferInt64(AscendC::LocalTensor<uint8_t> &tmp_buf, DoSelectParams &params,
                                                  uint32_t used_size) {
   // int64 select 用 select_pool 自己做切分：mask_cast_buf / mask_shift_buf 保持为两段互不重叠的临时空间，
-  // 供不走 stride（WhereBase）的 int64 分支继续使用。
+  // 供不走 stride（WhereBase）的 int64 分支继续使用。select_pool 复用同一区间供乘法选择链使用。
+  // 注意 SetSize 的入参单位是该视图类型的元素数，不是字节数：mask 两段按 2 字节宽度换算，
+  // 否则容量被按 2 倍需求校验，used_size > 0 的场景（如 MLIR e2e select 前序算子已占用 tmp）
+  // 会触发 ICPU SetSize 越界（load_mask_select_i64_store 1x171x306 崩溃）。
   const uint32_t rest_buf_byte_size = (tmp_buf.GetSize() - used_size) / ONE_REPEAT_BYTE_SIZE * ONE_REPEAT_BYTE_SIZE;
   const uint32_t each_part_buf_byte_size = rest_buf_byte_size / 2;
 
   params.mask_cast_buf = tmp_buf[used_size].template ReinterpretCast<half>();
-  params.mask_cast_buf.SetSize(each_part_buf_byte_size);
+  params.mask_cast_buf.SetSize(each_part_buf_byte_size / sizeof(half));
 
   params.mask_shift_buf = tmp_buf[used_size + each_part_buf_byte_size].template ReinterpretCast<int16_t>();
-  params.mask_shift_buf.SetSize(each_part_buf_byte_size);
+  params.mask_shift_buf.SetSize(each_part_buf_byte_size / sizeof(int16_t));
 
   params.select_pool = tmp_buf[used_size];
   params.select_pool.SetSize(each_part_buf_byte_size * 2);

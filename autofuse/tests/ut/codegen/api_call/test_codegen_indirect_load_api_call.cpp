@@ -16,6 +16,7 @@
 #include "codegen/ascendc_api_registry.h"
 #include "codegen_kernel.h"
 #include "common_utils.h"
+#include "codegen_api_param/codegen_api_param.h"
 #include "graph/ascendc_ir/utils/asc_tensor_utils.h"
 #include "graph/ascendc_ir/utils/asc_graph_utils.h"
 #include "graph/utils/graph_utils.h"
@@ -4721,4 +4722,97 @@ TEST(IndirectLoadApiCallTest, GenerateFuncDefinitionSameNodeDistinctRoutesCoexis
             std::string::npos);
   EXPECT_NE(gm_output_def.find("#ifndef AUTOFUSE_INDIRECT_LOAD_SIMT_BODY_DEFINED_indirect_load_gm_output"),
             std::string::npos);
+}
+
+// [边界化·语义名采集点] 边界化形态的最终 API feature 必须带 GatherOnly 维度，与全链折叠
+// 形态（SIMT/<role>/Offset32）区分实现身份（ATT/TopN/cache 用该名称）。
+void ExpectBoundaryFusionSemanticFeature(const af::AscNodePtr &il_node) {
+  const auto api_param = codegen::CodegenApiParam::TryGetNodeApiParam(il_node);
+  ASSERT_NE(api_param, nullptr);
+  EXPECT_NE(api_param->semantic_feature.find("GatherOnly"), std::string::npos)
+      << "semantic feature must mark boundary fusion, got: " << api_param->semantic_feature;
+  EXPECT_EQ(api_param->semantic_feature.rfind("SIMT/", 0UL), 0UL) << api_param->semantic_feature;
+}
+
+// 便捷入口 Generate(tpipe, axis, result) 不经过 BuildApiParam，需先注册 CodegenApiParam，
+// 否则 SetSemanticFeature 无写入目标（生产路径由框架统一注册）。
+void SeedCodegenApiParam(const af::AscNodePtr &node) {
+  auto param = std::make_shared<codegen::CodegenApiParam>();
+  param->api_name = "IndirectLoadRegApiCall";
+  ASSERT_EQ(codegen::CodegenApiParam::Register(node, param), af::SUCCESS);
+}
+
+ascir::AxisId FindAxisIdByName(const af::AscGraph &graph, const char *name) {
+  for (const auto &axis : graph.GetAllAxis()) {
+    if (axis != nullptr && axis->name == name) {
+      return axis->id;
+    }
+  }
+  return af::kIdNone;
+}
+
+// [边界化·调用点] flag 置位驱动的边界化形态（与组员空链同构）：metadata 空链 local target
+// （target == value tensor）、Init 通过（local target 不伴随 post-Reduce 的断言）、
+// invocation 逐 tile（actual_size = value 向量化元素数、offset = (block_dim_offset + Tb) ×
+// tile 元素数；整核 <Tb>_loop_size 实参不出现）、显式 TensorAlloc 跳过（通用 AllocOutputs
+// 已声明 value tensor，此处再发即设备侧重定义）。
+TEST(IndirectLoadApiCallTest, GenerateSimtBoundaryFusionLocalTargetUsesPerTileFormWithoutExplicitAlloc) {
+  ILTestGraph g("simt_boundary_fusion");
+  SimtCodegenContext context;
+  BuildSimtEmbeddingGraph(g);
+  AnnotateSimtEmbeddingTemplate(g.graph);
+
+  auto il_node = g.graph.FindNode("indirect_load");
+  ASSERT_NE(il_node, nullptr);
+  // 边界化 value tensor 形态：非租户 TBuf（通用 AllocOutputs 声明，非 Queue 生命周期）。
+  il_node->outputs[0].attr.mem.alloc_type = af::AllocType::kAllocTypeBuffer;
+  il_node->outputs[0].attr.que.id = af::kIdNone;
+  ASSERT_EQ(ascgen_utils::indirect_load::SetSimtBoundaryFusion(il_node, true), af::SUCCESS);
+  bool metadata_supported = false;
+  ASSERT_EQ(ascgen_utils::indirect_load::FinalizeLoweringMetadata(il_node, metadata_supported), af::SUCCESS);
+  ASSERT_TRUE(metadata_supported);
+  ascgen_utils::indirect_load::IndirectLoadLoweringMetadata metadata;
+  ASSERT_EQ(ascgen_utils::indirect_load::GetLoweringMetadata(il_node, metadata), af::SUCCESS);
+  EXPECT_FALSE(metadata.simt.has_post_reduce);
+  ASSERT_EQ(metadata.simt.output_chains.size(), 1UL);
+  EXPECT_TRUE(metadata.simt.output_chains[0].local_target);
+  EXPECT_EQ(metadata.simt.output_chains[0].target_tensor_id, metadata.simt.value_tensor_id);
+  EXPECT_EQ(metadata.simt.output_result_tensor_id, metadata.simt.value_tensor_id);
+
+  IndirectLoadRegApiCall call("IndirectLoadRegApiCall");
+  EXPECT_EQ(call.Init(il_node), af::SUCCESS);
+
+  Tiler tiler;
+  SetupTiler(g.graph, tiler);
+  TPipe tpipe("tpipe", tiler);
+  tpipe.CollectQues(g.graph);
+  ApiTensor x1, x2;
+  x1.id = il_node->inputs[0].attr.mem.tensor_id;
+  x2.id = il_node->inputs[1].attr.mem.tensor_id;
+  call.inputs.push_back(&x1);
+  call.inputs.push_back(&x2);
+  tpipe.AddTensor(il_node->inputs[0]);
+  tpipe.AddTensor(il_node->inputs[1]);
+  // value tensor（local target 寻址与元素计数依赖）。
+  tpipe.AddTensor(*il_node->outputs()[0]);
+
+  const ascir::AxisId outer_tb = FindAxisIdByName(g.graph, "z2z3Tb");
+  ASSERT_NE(outer_tb, af::kIdNone);
+  SeedCodegenApiParam(il_node);
+
+  std::string result;
+  ASSERT_EQ(call.Generate(tpipe, {outer_tb}, result), af::SUCCESS);
+  // local target 为 UB 局部目标（区别于 GM 直写链目标）。
+  EXPECT_NE(result.find("(__ubuf__ "), std::string::npos);
+  // 逐 tile 形态：整核 <Tb>_loop_size 实参不得出现；offset 为 (block_dim_offset+Tb)×tile。
+  EXPECT_EQ(result.find("_loop_size"), std::string::npos)
+      << "boundary fusion must use the per-tile form, not the whole-core loop size.";
+  EXPECT_NE(result.find(")) * "), std::string::npos)
+      << "per-tile offset must be (block_dim_offset + Tb) * tile element count.";
+  // 显式 TensorAlloc 跳过：invocation 段不得出现 buffer 定义（TensorAlloc 的
+  // ReinterpretCast 赋值文本）——通用 AllocOutputs 已声明 value tensor，重复定义会
+  // 在设备侧编译期失败（fuzz 用例 afError 族的回归锚点）。
+  EXPECT_EQ(result.find(".template ReinterpretCast<"), std::string::npos)
+      << "boundary fusion must skip the explicit TensorAlloc for the value tensor.";
+  ExpectBoundaryFusionSemanticFeature(il_node);
 }

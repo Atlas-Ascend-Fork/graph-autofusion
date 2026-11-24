@@ -32,7 +32,7 @@ std::vector<std::unique_ptr<TmpBufDesc>> CalcPolygammaTmpSizeV2(const AscNode &n
   // Calculate total tmp buffer size = data_type_size * input_size
   const Expression total_size = Symbol(data_type_size) * input_size;
 
-  GELOGD("Node %s[%s] temp buffer size: %s (equal to input tensor size)", node.GetTypePtr(), node.GetNamePtr(),
+  GELOGD("Node %s[%s] temp buffer size: %s bytes (equal to input tensor size)", node.GetTypePtr(), node.GetNamePtr(),
          total_size.Str().get());
 
   return GetTmpBuffer(total_size);

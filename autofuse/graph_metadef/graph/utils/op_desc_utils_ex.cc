@@ -59,8 +59,8 @@ graphStatus OpDescUtilsEx::CallInferFuncV2(const OpDescPtr &op_desc, Operator &o
   const auto call_infer_shape_range = OperatorFactoryImpl::GetInferShapeRangeFunc();
   if ((call_infer_data_type == nullptr) || (call_infer_shape_v2 == nullptr) || (call_infer_shape_range == nullptr)) {
     GELOGW(
-        "[Call][InferFuncV2] Node %s(%s) has no infer func v2 either v1. Please check op proto to make sure at "
-        "least has one.",
+        "[Call][InferFuncV2] Node %s(%s) has neither infer func v2 nor v1. Please check the op proto to make sure it "
+        "has at least one.",
         op_desc->GetNamePtr(), op_desc->GetTypePtr());
     return GRAPH_FAILED;
   }

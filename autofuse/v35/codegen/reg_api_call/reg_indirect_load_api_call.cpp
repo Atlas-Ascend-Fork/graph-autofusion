@@ -2151,6 +2151,12 @@ bool IndirectLoadRegApiCall::SimtSupportsDualOffsetBody(bool prepass_active) con
   if ((has_post_reduce_ && prepass_active) || template_id_ != ascir::TemplateId::kIndirectLoadSimt) {
     return false;
   }
+  // 边界化形态：actual_size/output_offset 的量纲来自 value 向量化视图（逐 tile 局部
+  // 目标），与双发 body 的整核/裸 gather 寻址语义未组合验证，保守排除（kEmbedding
+  // rank2/axis0 会过下方既有门，但其在 has_local_target 下的消费分支不触发）。
+  if (node != nullptr && ascgen_utils::indirect_load::IsSimtBoundaryFusion(node)) {
+    return false;
+  }
   if (simt_policy_.policy == ascgen_utils::indirect_load::SimtAddressPolicy::kEmbedding) {
     // [kEmbedding 双发] rank2/axis0 整行分裂形态（GenerateSimtInvocation 的 embedding
     // 行分裂分支同域）：u32 body 与静态字面量版本同构（IndirectLoadSimtEmbeddingPolicy
@@ -2492,7 +2498,8 @@ Status IndirectLoadRegApiCall::GenerateSimtInvocation(
   const bool has_local_target = local_chain_iter != output_chains_.end();
   if (has_local_target) {
     GE_ASSERT_TRUE(has_post_reduce_ || local_chain_iter->target_tensor_id == simt_value_tensor_id_,
-                   "IndirectLoad SIMT local output must be the post Reduce chain or the group member value tensor.");
+                   "IndirectLoad SIMT local output must be the post Reduce chain, the group member value tensor, or "
+                   "the boundary-fused value tensor.");
     const Tensor *local_target = tpipe.GetTensor(local_chain_iter->target_tensor_id);
     GE_ASSERT_NOTNULL(local_target, "IndirectLoad SIMT local target is missing.");
     const Tensor *value_tensor = tpipe.GetTensor(simt_value_tensor_id_);
@@ -2503,7 +2510,12 @@ Status IndirectLoadRegApiCall::GenerateSimtInvocation(
     // 址需先于 Context 就位）。
     const bool skips_ub_lifecycle =
         node != nullptr && ascgen_utils::indirect_load::GetTemplateBehavior(node).skips_ub_lifecycle;
-    if (prepass_plan == nullptr && !skips_ub_lifecycle && !local_target->no_need_realloc) {
+    // 边界化与组员空链同构（local target == value tensor == outputs[0]，无重定向分离）：
+    // 行为复位使 skips_ub_lifecycle=false，GenerateBody 的通用 AllocOutputs 已声明 value
+    // tensor，此处再发 TensorAlloc 即重定义——显式跳过（组员形态靠 TBuf 复用租户的
+    // no_need_realloc 抑制，边界化 value tensor 非租户，必须走本跳过）。
+    const bool is_boundary_fusion = node != nullptr && ascgen_utils::indirect_load::IsSimtBoundaryFusion(node);
+    if (prepass_plan == nullptr && !skips_ub_lifecycle && !is_boundary_fusion && !local_target->no_need_realloc) {
       std::string local_target_alloc;
       GE_ASSERT_SUCCESS(tpipe.TensorAlloc(*local_target, local_target_alloc));
       ss << local_target_alloc;
@@ -2517,6 +2529,10 @@ Status IndirectLoadRegApiCall::GenerateSimtInvocation(
     // 元素数为元素偏移。不叠加 metadata 的 has_post_reduce_（调度期快照，组员恒 false，
     // 两份图副本存在漂移可能——以当前图的 GetPostReduceConsumer 为唯一权威判据，与
     // codegen_kernel_loop:908-922 的提升条件、fused 分支的判定保持一致）。
+    // 边界化（boundary=rank-1、outer=G/inner=R 的逐 tile 局部目标布局）与有共享 Reduce
+    // 的组员同构：actual_size=value 向量化元素数、offset=(block_dim_offset + Tb)×tile
+    // 元素数；整核形态（loop_size/block_dim_offset）仅属无 local target 的裸 gather/提升
+    // 形态。
     const bool has_post_reduce_consumer =
         node != nullptr && ascgen_utils::indirect_load::GetPostReduceConsumer(node) != nullptr;
     // [判据漂移检测] 当前图的 GetPostReduceConsumer 是唯一权威判据，调度期 metadata 的
@@ -2534,7 +2550,7 @@ Status IndirectLoadRegApiCall::GenerateSimtInvocation(
           "metadata[%d] vs current graph[%d].",
           node_name.c_str(), has_post_reduce_ ? 1 : 0, has_post_reduce_consumer ? 1 : 0);
     }
-    if (!has_post_reduce_consumer) {
+    if (!has_post_reduce_consumer && !is_boundary_fusion) {
       actual_size_expr = outer_tb_var + "_loop_size";
       output_offset_expr = "static_cast<" + offset_type + ">(block_dim_offset)";
     } else {
@@ -2827,9 +2843,8 @@ Status IndirectLoadRegApiCall::GenerateSimt(const TPipe &tpipe, const std::vecto
   const bool use_prepass = CanUseSimtIndexPrepass(tpipe, prepass_plan);
   const std::string offset_type = GetSimtOffsetType(simt_policy_);
   std::stringstream ss;
-  const std::string simt_feature = std::string(semantic::kSimtPrefix) +
-                                   ascgen_utils::GetSimtSemanticRole(simt_policy_.policy) + semantic::kOffsetPrefix +
-                                   (offset_type == "uint32_t" ? "32" : "64");
+  const std::string simt_feature = ascgen_utils::BuildSimtSemanticFeature(
+      simt_policy_.policy, offset_type == "uint32_t", ascgen_utils::indirect_load::IsSimtBoundaryFusion(node));
   GE_ASSERT_SUCCESS(SetSemanticFeature(simt_feature));
   // [seq-V1] fused primary（六级降级阶梯 L2/L3，见设计文档）：单 evaluator 统一发射全组——
   // 一个 VF_CALL（IndirectLoadSimtFused）启动线程块，每线程逐路串行 index 链求值 →

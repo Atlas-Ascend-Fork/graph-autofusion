@@ -81,7 +81,7 @@ bool IsNeedFfts() {
   return backend_spec->pgo_spec.need_ffts;
 }
 
-void AppendPgoLogDefs(std::stringstream &ss) {
+void AppendPgoLogDefs(std::stringstream &ss, bool direct_link) {
   ss << "constexpr int32_t PGO_MODULE_NAME = static_cast<int32_t>(" << GE_MODULE_NAME << ");" << std::endl;
   ss << "#define PGO_LOG_PREFIX \"%\" PRIu64 \" %s:[PGO][\" PGO_GRAPH_NAME \"] \"" << std::endl;
   ss << "#define DLOGD(fmt, ...) do { dlog_debug(PGO_MODULE_NAME, PGO_LOG_PREFIX fmt, PgoGetTid(), &__FUNCTION__[0U], "
@@ -93,9 +93,15 @@ void AppendPgoLogDefs(std::stringstream &ss) {
   ss << "#define DLOGW(fmt, ...) do { dlog_warn(PGO_MODULE_NAME, PGO_LOG_PREFIX fmt, PgoGetTid(), &__FUNCTION__[0U], "
         "##__VA_ARGS__); } while (false)"
      << std::endl;
-  ss << "#define DLOGE(fmt, ...) do { dlog_error(PGO_MODULE_NAME, PGO_LOG_PREFIX fmt, PgoGetTid(), &__FUNCTION__[0U], "
-        "##__VA_ARGS__); } while (false)"
-     << std::endl;
+  // Standalone GE runners execute optional candidates. The GE compile
+  // orchestration owns the final profiling error after both search stages.
+  if (direct_link) {
+    ss << "#define DLOGE(fmt, ...) do { dlog_error(PGO_MODULE_NAME, PGO_LOG_PREFIX fmt, PgoGetTid(), "
+          "&__FUNCTION__[0U], ##__VA_ARGS__); } while (false)"
+       << std::endl;
+  } else {
+    ss << "#define DLOGE(fmt, ...) DLOGW(fmt, ##__VA_ARGS__)" << std::endl;
+  }
 }
 
 void AppendDynamicLibraryState(std::stringstream &ss) {
@@ -122,7 +128,7 @@ __attribute__((constructor)) void Init() {
     DLOGE("Failed to load %s: %s", kernel_file, dlerror());
     return;
   }
-  DLOGD("Kernel api lib %s load succeed", kernel_file);
+  DLOGD("Kernel api lib %s loaded successfully", kernel_file);
   initialized = true;
 })" << std::endl;
 }
@@ -169,6 +175,7 @@ void TilingLib::GenPgoHeaders(std::stringstream &ss, bool direct_link) const {
   ss << "#include <chrono>" << std::endl;
   ss << "#include <cfloat>" << std::endl;
   ss << "#include <cstdint>" << std::endl;
+  ss << "#include <cstdlib>" << std::endl;
   ss << "#include <atomic>" << std::endl;
   ss << "#include <cerrno>" << std::endl;
   ss << "#include <cstring>" << std::endl;
@@ -178,7 +185,6 @@ void TilingLib::GenPgoHeaders(std::stringstream &ss, bool direct_link) const {
     ss << "#include <cctype>" << std::endl;
     ss << "#include <climits>" << std::endl;
     ss << "#include <cstdio>" << std::endl;
-    ss << "#include <cstdlib>" << std::endl;
     ss << "#include <limits>" << std::endl;
     ss << "#include <type_traits>" << std::endl;
   }
@@ -225,11 +231,11 @@ public:
   CardLock(const char *path) {
     fd_ = open(path, O_RDWR | O_CREAT, 0666);
     if (fd_ == -1) {
-      DLOGE("open lock file %s: %s", path, std::strerror(errno));
+      DLOGW("open lock file %s: %s", path, std::strerror(errno));
       std::exit(1);
     }
     if (flock(fd_, LOCK_EX) == -1) {
-      DLOGE("flock LOCK_EX: %s", std::strerror(errno));
+      DLOGW("flock LOCK_EX: %s", std::strerror(errno));
       std::exit(1);
     }
   }
@@ -270,23 +276,23 @@ void TilingLib::GenPgoAppendSearchTilingData(std::stringstream &ss) const {
   ss << "void AppendPgoSearchTilingData(const AutofuseTilingData &tiling_data, double best_perf, std::ios::openmode "
         "mode = std::ios::app) {"
      << std::endl;
-  ss << "  DLOGD(\"AppendPgoSearchTilingData to file: %s\", search_file);" << std::endl;
-  ss << "  std::ofstream out_file(search_file, mode);" << std::endl;
+  ss << "  const std::string result_file = std::string(search_file) + \".retest\";" << std::endl;
+  ss << "  std::ofstream out_file(result_file, mode);" << std::endl;
   ss << "  if (!out_file.is_open()) {" << std::endl;
-  ss << "    DLOGE(\"Failed to open file:%s\", search_file);" << std::endl;
+  ss << "    DLOGW(\"Failed to open file:%s\", result_file.c_str());" << std::endl;
   ss << "    return;" << std::endl;
   ss << "  }" << std::endl;
   ss << "  PgoSaveTilingKey(tiling_data, best_perf, out_file);" << std::endl;
   ss << "  out_file.close();" << std::endl;
   ss << std::endl;
 
-  ss << "  int fd = ::open(search_file, O_WRONLY);" << std::endl;
+  ss << "  int fd = ::open(result_file.c_str(), O_WRONLY);" << std::endl;
   ss << "  if (fd < 0) {" << std::endl;
-  ss << "    DLOGE(\"Failed to open file:%s\", search_file);" << std::endl;
+  ss << "    DLOGW(\"Failed to open file:%s\", result_file.c_str());" << std::endl;
   ss << "    return;" << std::endl;
   ss << "  }" << std::endl;
   ss << "  if (::fsync(fd) < 0) {" << std::endl;
-  ss << "    DLOGW(\"Failed to fsync file:%s\", search_file);" << std::endl;
+  ss << "    DLOGW(\"Failed to fsync file:%s\", result_file.c_str());" << std::endl;
   ss << "  }" << std::endl;
   ss << "  ::close(fd);" << std::endl;
   ss << std::endl;
@@ -505,6 +511,8 @@ void TilingLib::GenPgoToolDeclarations(const ascir::FusedScheduledResult &fused_
     ss << "const char *config_file = \"" << pgo_dir << "/" << graph_name << "_config.txt" << "\";" << std::endl;
     ss << "const char *search_file = \"" << pgo_dir << "/" << graph_name << "_search.txt" << "\";" << std::endl;
     ss << "const char *kernel_file = \"" << pgo_dir << "/lib" << graph_name << ".so" << "\";" << std::endl;
+    ss << "static bool g_pgo_attempt_recorded = false;" << std::endl;
+    ss << "static int g_pgo_preflight_status = 0;" << std::endl;
   }
   ss << "#define SUCCESS 0" << std::endl;
   ss << "#define FAILED 1" << std::endl;
@@ -512,7 +520,7 @@ void TilingLib::GenPgoToolDeclarations(const ascir::FusedScheduledResult &fused_
   ss << "inline uint64_t PgoGetTid() {" << std::endl;
   ss << "  return static_cast<uint64_t>(syscall(__NR_gettid));" << std::endl;
   ss << "}" << std::endl;
-  AppendPgoLogDefs(ss);
+  AppendPgoLogDefs(ss, direct_link);
 
   GenPgoCardLock(ss);
   if (!direct_link) {
@@ -669,7 +677,7 @@ void TilingLib::GenPgoWrapper(const ascir::FusedScheduledResult &fused_schedule_
   }
 }
 
-void TilingLib::GenPgoAclProfiling(std::stringstream &ss, bool direct_link) const {
+void TilingLib::GenPgoAclProfilingBeginCandidate(std::stringstream &ss, bool direct_link) const {
   if (direct_link) {
     ss << R"(
 int PgoBeginCandidate(void *collector, AutofuseTilingData *tiling_data, uint64_t workspace_size) {
@@ -687,11 +695,16 @@ int PgoBeginCandidate(void *collector) {
 }
 )";
   }
+}
+
+void TilingLib::GenPgoAclProfilingConstants(std::stringstream &ss) const {
   ss << R"(
 static constexpr uint64_t kPgoMeasureLoop = 20U;
 static constexpr size_t kPgoBatchGroupSize = 1000U;
 static constexpr int kPgoRetryCount = 5;
 static constexpr int kPgoProfileUnsupported = -13;
+static constexpr int kPgoReporterBusy = -12;
+static constexpr int kPgoStopFailed = -6;
 static double best_perf = DBL_MAX;
 static std::vector<uint64_t> g_acl_durations;
 static void *g_pgo_collector = nullptr;
@@ -699,20 +712,38 @@ static void *g_pgo_collector = nullptr;
 void ResetProfilingRound() {
   g_acl_durations.clear();
 }
-
-int InitAclPgoEvents() {
-  const int status = AutofusePgoCollectorCreate(g_pgo_device_id, g_stream, &g_pgo_collector);
-  if (status != 0) { DLOGE("InitAclPgoEvents failed, status: %d", status); }
-  return status;
+)";
 }
 
+void TilingLib::GenPgoAclProfilingInit(std::stringstream &ss, bool direct_link) const {
+  ss << R"(
+int InitAclPgoEvents() {
+  const int status = AutofusePgoCollectorCreate(g_pgo_device_id, g_stream, &g_pgo_collector);
+  if (status != 0) { DLOGI("InitAclPgoEvents failed, status: %d", status); }
+)";
+  if (!direct_link) {
+    ss << "  if (status == kPgoProfileUnsupported || status == kPgoReporterBusy) { g_pgo_preflight_status = status; }"
+       << std::endl;
+  }
+  ss << R"(
+  return status;
+}
+)";
+}
+
+void TilingLib::GenPgoAclProfilingDestroy(std::stringstream &ss) const {
+  ss << R"(
 void DestroyAclPgoEvents() {
   if (g_pgo_collector != nullptr) {
     AutofusePgoCollectorDestroy(g_pgo_collector);
     g_pgo_collector = nullptr;
   }
 }
+)";
+}
 
+void TilingLib::GenPgoAclProfilingMeasure(std::stringstream &ss, bool direct_link) const {
+  ss << R"(
 int MeasureAclPgoLaunch(uint64_t workspace_size, AutofuseTilingData *tiling_data) {
   if (g_pgo_collector == nullptr) {
     DLOGI("PGO collector is null");
@@ -723,16 +754,9 @@ int MeasureAclPgoLaunch(uint64_t workspace_size, AutofuseTilingData *tiling_data
     return FAILED;
   }
 )";
-  if (direct_link) {
-    ss << "  const int begin_status = PgoBeginCandidate(g_pgo_collector, tiling_data, workspace_size);" << std::endl;
-  } else {
-    ss << "  const int begin_status = PgoBeginCandidate(g_pgo_collector);" << std::endl;
-  }
+  GenPgoAclProfilingBeginStatus(ss, direct_link);
+  GenPgoAclProfilingAttempt(ss, direct_link);
   ss << R"(
-  if (begin_status != 0) {
-    DLOGE("PgoBeginCandidate failed, status: %d", begin_status);
-    return FAILED;
-  }
   for (uint64_t launch_count = 0U; launch_count < kPgoMeasureLoop; ++launch_count) {
     const int record_status = AutofusePgoCollectorRecordLaunch(g_pgo_collector, launch_count);
     if (record_status != 0) {
@@ -758,6 +782,43 @@ int MeasureAclPgoLaunch(uint64_t workspace_size, AutofuseTilingData *tiling_data
 )" << std::endl;
 }
 
+void TilingLib::GenPgoAclProfilingBeginStatus(std::stringstream &ss, bool direct_link) const {
+  if (direct_link) {
+    ss << "  const int begin_status = PgoBeginCandidate(g_pgo_collector, tiling_data, workspace_size);" << std::endl;
+  } else {
+    ss << "  const int begin_status = PgoBeginCandidate(g_pgo_collector);" << std::endl;
+  }
+  ss << R"(
+  if (begin_status != 0) {
+    DLOGI("PgoBeginCandidate failed, status: %d", begin_status);
+    return begin_status;
+  }
+)";
+}
+
+void TilingLib::GenPgoAclProfilingAttempt(std::stringstream &ss, bool direct_link) const {
+  if (direct_link) {
+    return;
+  }
+  ss << R"(
+  if (!g_pgo_attempt_recorded) {
+    std::ofstream attempted(std::string(search_file) + ".attempted", std::ios::app);
+    g_pgo_attempt_recorded = attempted.is_open();
+    if (!g_pgo_attempt_recorded) {
+      DLOGW("Unable to record that PGO profiling started");
+    }
+  }
+)";
+}
+
+void TilingLib::GenPgoAclProfiling(std::stringstream &ss, bool direct_link) const {
+  GenPgoAclProfilingBeginCandidate(ss, direct_link);
+  GenPgoAclProfilingConstants(ss);
+  GenPgoAclProfilingInit(ss, direct_link);
+  GenPgoAclProfilingDestroy(ss);
+  GenPgoAclProfilingMeasure(ss, direct_link);
+}
+
 void TilingLib::GenPgoBatchProcess(std::stringstream &ss) const {
   ss << R"(int ProfilingBatchProcess(uint64_t workspace_size, std::vector<AutofuseTilingDataPerf>::iterator begin,
                           std::vector<AutofuseTilingDataPerf>::iterator end) {
@@ -768,16 +829,17 @@ void TilingLib::GenPgoBatchProcess(std::stringstream &ss) const {
       AutofusePgoCollectorAbort(g_pgo_collector);
       return FAILED;
     }
-    if (MeasureAclPgoLaunch(workspace_size, &it->tiling_data) != 0) {
+    const int measure_status = MeasureAclPgoLaunch(workspace_size, &it->tiling_data);
+    if (measure_status != 0) {
       AutofusePgoCollectorAbort(g_pgo_collector);
-      return FAILED;
+      return measure_status;
     }
   }
   const int finalize_status = AutofusePgoCollectorFinalizeBatch(g_pgo_collector);
   if (finalize_status != 0) {
     DLOGE("AutofusePgoCollectorFinalizeBatch failed, status: %d", finalize_status);
     AutofusePgoCollectorAbort(g_pgo_collector);
-    return FAILED;
+    return finalize_status;
   }
   uint32_t candidate_index = 0U;
   for (auto it = begin; it != end; ++it, ++candidate_index) {
@@ -828,33 +890,43 @@ void TilingLib::GenPgoGetProfilingBatch(const ascir::FusedScheduledResult &fused
     ss << "  if (!dso_guard) { return FAILED; }" << std::endl;
   }
   GenPgoProfilingBatchSetup(ss);
+  GenPgoProfilingBatchRetry(ss);
+  GenPgoProfilingBatchFailure(ss);
+  GenPgoProfilingBatchCleanup(ss);
+}
+
+void TilingLib::GenPgoProfilingBatchRetry(std::stringstream &ss) const {
   ss << "  int64_t result = 0;" << std::endl;
   ss << "  auto it = profiles->begin();" << std::endl;
   ss << "  while (it != profiles->end()) {" << std::endl;
-  ss << "    auto end_it = (it + kPgoBatchGroupSize >= profiles->end()) ? profiles->end() : it + kPgoBatchGroupSize;"
-     << std::endl;
+  ss << "    auto end_it = it + std::min<size_t>(kPgoBatchGroupSize, std::distance(it, profiles->end()));" << std::endl;
   ss << "    size_t start_index = std::distance(profiles->begin(), it);" << std::endl;
   ss << "    for (int i = 0; i < kPgoRetryCount; i++) {" << std::endl;
   ss << "      auto init_status = InitAclPgoEvents();" << std::endl;
   ss << "      if (init_status == kPgoProfileUnsupported) {" << std::endl;
   ss << "        result = kPgoProfileUnsupported;" << std::endl;
-  ss << "        DLOGW(\"PGO profiling unsupported on this device; fallback to non-PGO path\");" << std::endl;
+  ss << "        DLOGI(\"PGO profiling unsupported on this device; fallback to non-PGO path\");" << std::endl;
   ss << "        break;" << std::endl;
   ss << "      }" << std::endl;
+  ss << "      if (init_status == kPgoReporterBusy) { result = init_status; break; }" << std::endl;
   ss << "      if (init_status != 0) {" << std::endl;
   ss << "        result = FAILED;" << std::endl;
-  ss << "        DLOGW(\"InitAclPgoEvents failed at start_index:%zu retry time:%d\", start_index, i);" << std::endl;
+  ss << "        DLOGD(\"InitAclPgoEvents failed at start_index:%zu retry time:%d\", start_index, i);" << std::endl;
   ss << "        continue;" << std::endl;
   ss << "      }" << std::endl;
   ss << "      result = ProfilingBatchProcess(workspace_size, it, end_it);" << std::endl;
   ss << "      DestroyAclPgoEvents();" << std::endl;
+  ss << "      if (result == kPgoStopFailed || result == kPgoReporterBusy) { break; }" << std::endl;
   ss << "      if (result != 0) {" << std::endl;
-  ss << "        DLOGW(\"ProfilingBatchProcess failed at start_index:%zu retry time:%d\", start_index, i);"
+  ss << "        DLOGD(\"ProfilingBatchProcess failed at start_index:%zu retry time:%d\", start_index, i);"
      << std::endl;
   ss << "      } else {" << std::endl;
   ss << "        break;" << std::endl;
   ss << "      }" << std::endl;
   ss << "    }" << std::endl;
+}
+
+void TilingLib::GenPgoProfilingBatchFailure(std::stringstream &ss) const {
   ss << "    if (result != 0) {" << std::endl;
   ss << "      DestroyAclPgoEvents();" << std::endl;
   ss << "      if (g_workspace != nullptr) {" << std::endl;
@@ -865,6 +937,9 @@ void TilingLib::GenPgoGetProfilingBatch(const ascir::FusedScheduledResult &fused
   ss << "    }" << std::endl;
   ss << "    it = end_it;" << std::endl;
   ss << "  }" << std::endl;
+}
+
+void TilingLib::GenPgoProfilingBatchCleanup(std::stringstream &ss) const {
   ss << "  if (g_workspace != nullptr) {" << std::endl;
   ss << "    auto ret = aclrtFree(g_workspace);" << std::endl;
   ss << "    if (ret != ACL_SUCCESS) {" << std::endl;
@@ -915,7 +990,6 @@ void TilingLib::GenPgoProfilingSetup(std::stringstream &ss) const {
   ss << "      aclrtFree(g_workspace);" << std::endl;
   ss << "      g_workspace = nullptr;" << std::endl;
   ss << "    }" << std::endl;
-  ss << "    DLOGW(\"PGO profiling unsupported on this device; fallback to non-PGO path\");" << std::endl;
   ss << "    return kPgoProfileUnsupported;" << std::endl;
   ss << "  }" << std::endl;
   ss << "  if (init_status != 0) {" << std::endl;
@@ -923,7 +997,7 @@ void TilingLib::GenPgoProfilingSetup(std::stringstream &ss) const {
   ss << "      aclrtFree(g_workspace);" << std::endl;
   ss << "      g_workspace = nullptr;" << std::endl;
   ss << "    }" << std::endl;
-  ss << "    return -1;" << std::endl;
+  ss << "    return init_status;" << std::endl;
   ss << "  }" << std::endl << std::endl;
   ss << "  int64_t result = -1;" << std::endl;
   ss << "  *outCostTime = DBL_MAX;" << std::endl;
@@ -949,7 +1023,7 @@ void TilingLib::GenPgoProfilingLaunch(std::stringstream &ss) const {
   ss << "      aclrtFree(g_workspace);" << std::endl;
   ss << "      g_workspace = nullptr;" << std::endl;
   ss << "    }" << std::endl;
-  ss << "    return -1;" << std::endl;
+  ss << "    return result;" << std::endl;
   ss << "  }" << std::endl;
   ss << "  const int finalize_status = AutofusePgoCollectorFinalizeBatch(g_pgo_collector);" << std::endl;
   ss << "  if (finalize_status != 0) {" << std::endl;
@@ -960,7 +1034,7 @@ void TilingLib::GenPgoProfilingLaunch(std::stringstream &ss) const {
   ss << "      aclrtFree(g_workspace);" << std::endl;
   ss << "      g_workspace = nullptr;" << std::endl;
   ss << "    }" << std::endl;
-  ss << "    return -1;" << std::endl;
+  ss << "    return finalize_status;" << std::endl;
   ss << "  }" << std::endl;
   ss << "  uint64_t elapsed_ns = 0U;" << std::endl;
   ss << "  const int duration_status = AutofusePgoCollectorGetCandidateDurationNs(g_pgo_collector, 0U, &elapsed_ns);"
@@ -1027,7 +1101,7 @@ void TilingLib::GenPgoFunc(const ascir::FusedScheduledResult &fused_schedule_res
      << "&g_stream, reinterpret_cast<void*>(PGOGetProfiling), reinterpret_cast<void*>(PGOGetProfilingBatch));"
      << std::endl;
   ss << "  if (result != 0) {" << std::endl;
-  ss << "    DLOGE(\"pgo search failed. ERROR: %\" PRId64 \"\", result);" << std::endl;
+  ss << "    DLOGW(\"pgo search failed, status: %\" PRId64, result);" << std::endl;
   ss << "    return -1;" << std::endl;
   ss << "  }" << std::endl;
   ss << "  return 0;" << std::endl;
@@ -1048,21 +1122,23 @@ void TilingLib::GenPgoStaticFunc(const ascir::FusedScheduledResult &fused_schedu
   ss << "  uint64_t workspace_size = 0;" << std::endl;
   ss << "  uint32_t block_dim = 0;" << std::endl;
   ss << "  int64_t result = autofuse_tiling_with_config_fn(config_file, &tiling_data, &workspace_size, &block_dim, "
-        "&g_res_limit);"
+        "&g_res_limit, -1);"
      << std::endl;
   ss << "  if (result != 0) {" << std::endl;
-  ss << "    DLOGE(\"autofuse tiling with config failed. ERROR: %\" PRId64 \"\", result);" << std::endl;
+  ss << "    DLOGW(\"autofuse tiling with config failed, status: %\" PRId64, result);" << std::endl;
   ss << "    return -1;" << std::endl;
   ss << "  }" << std::endl;
   ss << "  double out_cost = DBL_MAX;" << std::endl;
   ss << "  for (int i = 0; i < kPgoRetryCount; i++) {" << std::endl;
   ss << "    result = PGOGetProfiling(" << PGOSearchFuncInputOutputCall(fused_schedule_result)
      << "g_stream, workspace_size, &tiling_data, &out_cost);" << std::endl;
-  ss << "    if (result == kPgoProfileUnsupported) {" << std::endl;
-  ss << "      break;" << std::endl;
+  ss << "    if (result == kPgoProfileUnsupported || result == kPgoReporterBusy || result == kPgoStopFailed) {"
+     << std::endl;
+  ss << "      return static_cast<int>(result);" << std::endl;
   ss << "    }" << std::endl;
   ss << "    if (result != 0 || IsEqual(out_cost, DBL_MAX)) {" << std::endl;
-  ss << "      DLOGW(\"get profiling failed.\");" << std::endl;
+  ss << "      DLOGD(\"get profiling failed, status: %\" PRId64, result);" << std::endl;
+  ss << "      if (std::getenv(\"AF_PGO_STARS_DIAGNOSTICS\") != nullptr) { break; }" << std::endl;
   ss << "    } else {" << std::endl;
   ss << "      break;" << std::endl;
   ss << "    }" << std::endl;
@@ -1081,7 +1157,7 @@ void TilingLib::GenPgoProfiling(const ascir::FusedScheduledResult &fused_schedul
      << std::endl;
   GenPgoFunc(fused_schedule_result, ss);
   ss << "typedef int64_t (*AutofuseTilingWithConfigType)(const char *config_file, AutofuseTilingData *tiling, "
-        "uint64_t *workspace_size, uint32_t *blockDim, ResLimit *res_limit);"
+        "uint64_t *workspace_size, uint32_t *blockDim, ResLimit *res_limit, int32_t tiling_case_id);"
      << std::endl;
   ss << "static AutofuseTilingWithConfigType autofuse_tiling_with_config_fn = "
      << "reinterpret_cast<AutofuseTilingWithConfigType>(GetFunc(\"AutofuseTilingWithConfig\"));" << std::endl;
@@ -1090,8 +1166,9 @@ void TilingLib::GenPgoProfiling(const ascir::FusedScheduledResult &fused_schedul
 
 void TilingLib::GenPgoMain(const ascir::FusedScheduledResult &fused_schedule_result, std::stringstream &ss) const {
   ss << "int main(int argc, char *argv[]) {" << std::endl;
-  ss << "  if (argc != 6) {" << std::endl;
-  ss << "    DLOGE(\"Usage: %s <type> <device_id> <aiv_num> <ub_size> <kernel_name>\", argv[0]);" << std::endl;
+  ss << "  if (argc != 6 && argc != 7) {" << std::endl;
+  ss << "    DLOGE(\"Usage: %s <type> <device_id> <aiv_num> <ub_size> <kernel_name> [lock_dir]\", argv[0]);"
+     << std::endl;
   ss << "    return -1;" << std::endl;
   ss << "  }" << std::endl;
   ss << "  int32_t type = static_cast<int32_t>(atoi(argv[1]));" << std::endl;
@@ -1103,7 +1180,8 @@ void TilingLib::GenPgoMain(const ascir::FusedScheduledResult &fused_schedule_res
   ss << "  DLOGI(\"execute info : type: %d, device_id: %d, kernel_name: %s\", type, device_id, g_kernel_name.c_str());"
      << std::endl;
   ss << "  DLOGI(\"execute limit: aiv_num is %d, ub_size is %d bytes\", aiv_num, ub_size);" << std::endl;
-  ss << "  g_npu_lock_file = std::string(pgo_dir) + \"/npu_lock_\" + std::to_string(device_id) + \".lock\";"
+  ss << "  const char *lock_dir = argc == 7 ? argv[6] : pgo_dir;" << std::endl;
+  ss << "  g_npu_lock_file = std::string(lock_dir) + \"/npu_lock_\" + std::to_string(device_id) + \".lock\";"
      << std::endl;
   ss << "  g_kernel_o_file = std::string(pgo_dir) + \"/\" + g_kernel_name + \".o\";" << std::endl;
   ss << "  CardLock lock(g_npu_lock_file.c_str());" << std::endl;
@@ -1117,6 +1195,7 @@ void TilingLib::GenPgoMain(const ascir::FusedScheduledResult &fused_schedule_res
   ss << "    DLOGE(\"Invalid type: %d, expected 0 or 1\", type);" << std::endl;
   ss << "    ret = -1;" << std::endl;
   ss << "  }" << std::endl;
+  ss << "  if (!g_pgo_attempt_recorded && g_pgo_preflight_status != 0) { ret = g_pgo_preflight_status; }" << std::endl;
   GenPgoDeinit(fused_schedule_result, ss);
   ss << "  return ret;" << std::endl;
   ss << "}" << std::endl;

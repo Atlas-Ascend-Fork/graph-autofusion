@@ -77,10 +77,12 @@ __aicore__ inline void SumCheckParams(const LocalTensor<T> &dstTensor, const Loc
   CheckTensorPos<uint8_t>(sharedTmpBuffer, Hardware::UB, "sharedTmpBuffer", "VECIN/VECCALC/VECOUT", "Sum");
   constexpr uint32_t sumInnerAlignLen = 32;
   ASCENDC_ASSERT((1 <= sumParams.n) && (sumParams.n <= sumParams.inner), {
-    KERNEL_LOG(KERNEL_ERROR, "The value of n must be greater than or equal to 1 and less than or equal to inner.");
+    KERNEL_LOG(KERNEL_ERROR, "The value of n must be in [1, inner], got n=%u, inner=%u", sumParams.n, sumParams.inner);
   });
-  ASCENDC_ASSERT((sumParams.inner * sizeof(T) % sumInnerAlignLen == 0),
-                 { KERNEL_LOG(KERNEL_ERROR, "The value of inner * sizeof(T) must be an integer multiple of 32."); });
+  ASCENDC_ASSERT((sumParams.inner * sizeof(T) % sumInnerAlignLen == 0), {
+    KERNEL_LOG(KERNEL_ERROR, "The value of inner * sizeof(T) must be an integer multiple of 32, got %u",
+               sumParams.inner * (uint32_t)sizeof(T));
+  });
 }
 
 template <typename T, int32_t reduceDim = -1, bool isReuseSource = false, bool isBasicBlock = false>

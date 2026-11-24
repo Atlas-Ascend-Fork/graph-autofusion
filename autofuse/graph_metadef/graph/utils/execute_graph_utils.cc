@@ -299,7 +299,7 @@ ExecuteGraphUtils::InsertNodeAfter(const EdgeSrcEndpoint &src, const std::vector
   GE_ASSERT_NOTNULL(insert_node->GetExtendInfo(), "The extend info of insert node:%s is null",
                     insert_node->GetNamePtr());
   GE_ASSERT_TRUE(graph == insert_node->GetExtendInfo()->GetOwnerGraphBarePtr(),
-                 "src:%s and insert_node:%s does not exist in the same graph.", src_node->GetNamePtr(),
+                 "src:%s and insert_node:%s do not exist in the same graph.", src_node->GetNamePtr(),
                  insert_node->GetNamePtr());
 
   const auto src_index = src.index;
@@ -312,7 +312,7 @@ ExecuteGraphUtils::InsertNodeAfter(const EdgeSrcEndpoint &src, const std::vector
     const auto dst_extend_info = dst_node->GetExtendInfo();
     GE_ASSERT_NOTNULL(dst_extend_info, "The extend info of dst node:%s is null", dst_node->GetNamePtr());
     GE_ASSERT_TRUE(graph == dst_extend_info->GetOwnerGraphBarePtr(),
-                   "[Check][Param] dst:%s and insert_node:%s does not exist in the same graph.", dst_node->GetNamePtr(),
+                   "[Check][Param] dst:%s and insert_node:%s do not exist in the same graph.", dst_node->GetNamePtr(),
                    insert_node->GetNamePtr());
 
     const auto old_edge = dst_node->GetInDataEdgeByIndex(dst_index);
@@ -347,7 +347,7 @@ GE_FUNC_DEV_VISIBILITY GE_FUNC_HOST_VISIBILITY graphStatus ExecuteGraphUtils::In
   GE_ASSERT_NOTNULL(insert_node->GetExtendInfo(), "The extend info of insert node:%s is null",
                     insert_node->GetNamePtr());
   GE_ASSERT_TRUE(graph == insert_node->GetExtendInfo()->GetOwnerGraphBarePtr(),
-                 "[Check][Param] src:%s and insert_node:%s does not exist in the same graph.", dst_node->GetNamePtr(),
+                 "[Check][Param] src:%s and insert_node:%s do not exist in the same graph.", dst_node->GetNamePtr(),
                  insert_node->GetNamePtr());
 
   const auto dst_index = dst.index;
@@ -571,7 +571,8 @@ ExecuteGraphUtils::ReplaceEdgeSrc(FastEdge *old_edge, const EdgeSrcEndpoint &new
       (graph->AddEdge(new_src.node, new_src.index, dst_node, old_edge->dst_input) != nullptr)) {
     return GRAPH_SUCCESS;
   }
-  GELOGE(GRAPH_FAILED, "Replace edge failed.");
+  GELOGE(GRAPH_FAILED, "Replace edge failed, dst_node:%s, new src node:%s, index:%d", dst_node->GetNamePtr(),
+         new_src.node->GetNamePtr(), new_src.index);
   return GRAPH_FAILED;
 }
 

@@ -207,7 +207,7 @@ int PgoProfApiAdapter::Start(uint32_t device_id) {
   return Start(device_id, ResolvePgoStarsSamplePeriod(ResolvePgoPlatform(version_status, version)));
 }
 
-int PgoProfApiAdapter::Start(uint32_t device_id, uint32_t sample_period) {
+int PgoProfApiAdapter::Start(uint32_t device_id, uint32_t sample_period, bool capture_ffts) {
   if (!initialized_ || set_command_ == nullptr) return PGO_PROFAPI_UNAVAILABLE;
   // MSPTI may be loaded after capability probing but before the first
   // candidate.  Re-check the global ownership boundary at the operation that
@@ -222,7 +222,7 @@ int PgoProfApiAdapter::Start(uint32_t device_id, uint32_t sample_period) {
   if (set_command_(&command, sizeof(command)) != 0) return PGO_PROFILING_START_FAILED;
   profiling_device_id_ = device_id;
   profiling_command_started_ = true;
-  const int channel_ret = StartStarsChannel(device_id, sample_period);
+  const int channel_ret = StartStarsChannel(device_id, sample_period, capture_ffts);
   if (channel_ret != PGO_SUCCESS) {
     command.type = kCommandStop;
     if (set_command_(&command, sizeof(command)) == 0) {
@@ -251,7 +251,7 @@ int PgoProfApiAdapter::Stop(uint32_t device_id) {
   return CombinePgoStopStatus(channel_ret, command_ret);
 }
 
-int PgoProfApiAdapter::StartStarsChannel(uint32_t device_id, uint32_t sample_period) {
+int PgoProfApiAdapter::StartStarsChannel(uint32_t device_id, uint32_t sample_period, bool capture_ffts) {
   if (!initialized_ || get_channels_ == nullptr || start_channel_ == nullptr) return PGO_CHANNEL_UNAVAILABLE;
   PgoChannelList channels{};
   if (get_channels_(device_id, &channels) != 0 || channels.channel_num == 0 ||
@@ -267,7 +267,7 @@ int PgoProfApiAdapter::StartStarsChannel(uint32_t device_id, uint32_t sample_per
   if (!found) return PGO_CHANNEL_UNAVAILABLE;
   PgoStarsSocLogConfig config{};
   config.acsq_task = kTaskEnable;
-  config.ffts_thread_task = kTaskDisable;
+  config.ffts_thread_task = capture_ffts ? kTaskEnable : kTaskDisable;
   PgoStartPara para{};
   para.channel_type = kProfileTypeTs;
   para.sample_period = sample_period;
@@ -283,7 +283,9 @@ int PgoProfApiAdapter::StartStarsChannel(uint32_t device_id, uint32_t sample_per
 int PgoProfApiAdapter::StopStarsChannel(uint32_t device_id) {
   if (!stars_channel_started_) return PGO_SUCCESS;
   const bool failed = stop_channel_ == nullptr || stop_channel_(device_id, stars_channel_id_) != 0;
-  stars_channel_started_ = false;
+  if (!failed) {
+    stars_channel_started_ = false;
+  }
   return failed ? PGO_PROFILING_STOP_FAILED : PGO_SUCCESS;
 }
 
@@ -322,6 +324,7 @@ void PgoProfApiAdapter::Finalize() {
     }
   }
   if (stars_channel_started_) (void)StopStarsChannel(stars_device_id_);
+  stars_channel_started_ = false;
   if (callback_registered_ && register_callback_ != nullptr) {
     (void)register_callback_(kCompactCallbackType, nullptr, sizeof(void *));
     (void)register_callback_(kTypeInfoCallbackType, nullptr, sizeof(void *));

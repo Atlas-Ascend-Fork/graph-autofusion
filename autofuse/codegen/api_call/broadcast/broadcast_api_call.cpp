@@ -323,7 +323,7 @@ Status BroadcastApiCall::Generate(const TPipe &tpipe, const std::vector<ascir::A
     return af::SUCCESS;
   }
 
-  GELOGE(af::FAILED, "BroadcastApiCall don't support multi discontinuous broadcast axis.");
+  GELOGE(af::FAILED, "BroadcastApiCall doesn't support multi discontinuous broadcast axis.");
   GELOGE(af::FAILED, "x_t_name:%s, axis_id:%s, size:%s, strides:%s, v_axis_id:%s, v_axis_pos:%s, v_strides:%s",
          x.name.c_str(), VectorToStr(x.axis).c_str(), VectorToStr(x.axis_size).c_str(),
          VectorToStr(x.axis_strides).c_str(), VectorToStr(x.vectorized_axis).c_str(),

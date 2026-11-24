@@ -35,7 +35,8 @@ FastTopoSortingMode GetTopoSortingStrategy() {
     } else if (topo_sorting_mode == kTopoSortingReverseDfs) {
       return FastTopoSortingMode::kRDFS;
     } else {
-      GELOGW("OPTION_TOPOSORTING_MODE = %s is invalid", topo_sorting_mode_str.c_str());
+      GELOGW("OPTION_TOPOSORTING_MODE = %s is invalid, expected one of: kDFS, kRDFS, kBFS",
+             topo_sorting_mode_str.c_str());
     }
   }
   if (GetContext().GetTrainGraphFlag()) {
@@ -304,7 +305,7 @@ FastEdge *ExecuteGraph::AddEdge(FastNode *const src, int32_t src_index, FastNode
   }
 
   if (!CheckNodeIsInGraph(src) || !CheckNodeIsInGraph(dst)) {
-    GELOGW("The src %s or dst %s not belong to graph.", src->GetNamePtr(), dst->GetNamePtr());
+    GELOGW("The src %s or dst %s does not belong to graph.", src->GetNamePtr(), dst->GetNamePtr());
   }
 
   return graph_shared_->AddEdge(src, src_index, dst, dst_index);
@@ -392,13 +393,13 @@ ExecuteGraph *ExecuteGraph::AddSubGraph(const std::shared_ptr<ExecuteGraph> &sub
   }
 
   if (name != sub_graph->GetName()) {
-    GELOGW("[Add][Subgraph] The subgraph name %s is different with input %s", sub_graph->GetName().c_str(),
+    GELOGW("[Add][Subgraph] The subgraph name %s is different from the input %s", sub_graph->GetName().c_str(),
            name.c_str());
   }
 
   if (names_to_subgraph_.find(sub_graph->GetName()) != names_to_subgraph_.end()) {
-    REPORT_INNER_ERR_MSG("E18888", "The subgraph %s existed", GetName().c_str());
-    GE_LOGE("[Check][Param] The subgraph %s existed", GetName().c_str());
+    REPORT_INNER_ERR_MSG("E18888", "The subgraph %s already exists", GetName().c_str());
+    GE_LOGE("[Check][Param] The subgraph %s already exists", GetName().c_str());
     return nullptr;
   }
 
@@ -763,9 +764,10 @@ graphStatus ExecuteGraph::TopologicalSortingGraph(const ExecuteGraph *const exec
     for (auto &node : node_vec) {
       (void)itered_nodes_set.insert(node);
     }
-    REPORT_INNER_ERR_MSG("E18888", "Failed to do topo sorting total %zu, iterated %zu, exist closed loop in graph:%s",
+    REPORT_INNER_ERR_MSG("E18888",
+                         "Failed to do topo sorting total %zu, iterated %zu, a closed loop exists in graph:%s",
                          GetDirectNodesSize(), node_vec.size(), GetName().c_str());
-    GELOGW("[Check][Param] Failed to do topo sorting total %zu, iterated %zu, exist closed loop in graph.",
+    GELOGW("[Check][Param] Failed to do topo sorting total %zu, iterated %zu, a closed loop exists in graph.",
            GetDirectNodesSize(), node_vec.size());
     for (auto node : graph_shared_->GetDirectNodeToModify()) {
       if (itered_nodes_set.count(&FastGraphUtils::GetNode(node)) == 0UL) {

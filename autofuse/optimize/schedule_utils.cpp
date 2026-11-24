@@ -538,11 +538,98 @@ Status ScheduleUtils::BuildLoopGroups(const af::AscGraph &graph, std::vector<Loo
     }
     node_to_group.emplace(seed.node, group_id);
     GE_ASSERT_SUCCESS(FillLoopGroupFromSeed(seed, group_id, loop_groups, node_to_group, seed_queue));
-    GELOGD("Build loop group[%zu]: loop_axis[%ld], node cnt[%zu].", group_id, seed.loop_axis,
-           loop_groups[group_id].nodes.size());
+    std::string group_members;
+    for (const auto &member : loop_groups[group_id].nodes) {
+      group_members += " " + member->GetName();
+    }
+    GELOGD("Build loop group[%zu]: loop_axis[%ld], node cnt[%zu], nodes:%s", group_id, seed.loop_axis,
+           loop_groups[group_id].nodes.size(), group_members.c_str());
   }
   GELOGD("Build %zu loop groups in graph[%s].", loop_groups.size(), graph.GetName().c_str());
   return af::SUCCESS;
+}
+
+// 依组间数据边构建组级DAG: 生产组->消费组邻接表(集合去重防重复计度)与入度表;
+// 未入组节点不与任何组有数据边、同组内的数据边均不构成组间依赖(BuildLoopGroups吸附式扩散保证)
+static void BuildGroupDependencyDag(const af::AscGraph &graph,
+                                    const std::unordered_map<af::Node *, size_t> &node_to_group,
+                                    std::vector<std::unordered_set<size_t>> &group_succ,
+                                    std::vector<size_t> &in_degree) {
+  for (const auto &node : graph.GetAllNodes()) {
+    const auto producer_it = node_to_group.find(node.get());
+    if (producer_it == node_to_group.cend()) {
+      continue;  // 未入组节点与组内节点无数据边，不构成组间依赖
+    }
+    for (const auto &out_node : node->GetOutDataNodes()) {
+      if (out_node == nullptr) {
+        continue;
+      }
+      const auto consumer_it = node_to_group.find(out_node.get());
+      if (consumer_it == node_to_group.cend() || consumer_it->second == producer_it->second) {
+        continue;  // 消费者未入组或同组的数据边不构成组间依赖
+      }
+      if (group_succ[producer_it->second].emplace(consumer_it->second).second) {
+        ++in_degree[consumer_it->second];
+      }
+    }
+  }
+}
+
+// 组级DAG的Kahn拓扑排序: 就绪组同层按原组号升序消费保证结果确定性;
+// 组级成环时Kahn无法消费全部组, 返回false(topo_order仅含已排组, 调用方不应使用)
+static bool KahnSortGroupDag(const std::vector<std::unordered_set<size_t>> &group_succ, std::vector<size_t> &in_degree,
+                             std::vector<size_t> &topo_order) {
+  std::priority_queue<size_t, std::vector<size_t>, std::greater<size_t>> ready_groups;  // 同层按原组号升序
+  for (size_t group_id = 0UL; group_id < in_degree.size(); ++group_id) {
+    if (in_degree[group_id] == 0UL) {
+      ready_groups.push(group_id);
+    }
+  }
+  while (!ready_groups.empty()) {
+    const size_t group_id = ready_groups.top();
+    ready_groups.pop();
+    topo_order.emplace_back(group_id);
+    for (const size_t succ_group : group_succ[group_id]) {
+      if (--in_degree[succ_group] == 0UL) {
+        ready_groups.push(succ_group);
+      }
+    }
+  }
+  return topo_order.size() == group_succ.size();
+}
+
+// 按组间数据依赖对BuildLoopGroups结果重编号（典型场景与规则约束见schedule_utils.h声明处注释）：
+// 组级DAG构建 + Kahn拓扑排序得到组间执行序；组级成环时返回false且不修改任何输出，
+// 由调用方保持既有拓扑序。
+bool ScheduleUtils::RenumberLoopGroupsByDependency(const af::AscGraph &graph, std::vector<LoopGroup> &loop_groups,
+                                                   std::unordered_map<af::Node *, size_t> &node_to_group) {
+  const size_t group_cnt = loop_groups.size();
+  std::vector<std::unordered_set<size_t>> group_succ(group_cnt);  // 组级DAG邻接表，去重防重复计度
+  std::vector<size_t> in_degree(group_cnt, 0UL);
+  BuildGroupDependencyDag(graph, node_to_group, group_succ, in_degree);
+
+  std::vector<size_t> topo_order;
+  topo_order.reserve(group_cnt);
+  if (!KahnSortGroupDag(group_succ, in_degree, topo_order)) {
+    GELOGW("Loop group dependency cycle in graph[%s]: only [%zu/%zu] groups sorted, keep original group order.",
+           graph.GetName().c_str(), topo_order.size(), group_cnt);
+    return false;
+  }
+
+  std::vector<size_t> old_to_new(group_cnt);
+  for (size_t new_id = 0UL; new_id < group_cnt; ++new_id) {
+    old_to_new[topo_order[new_id]] = new_id;
+  }
+  std::vector<LoopGroup> sorted_groups;
+  sorted_groups.reserve(group_cnt);
+  for (size_t new_id = 0UL; new_id < group_cnt; ++new_id) {
+    sorted_groups.emplace_back(std::move(loop_groups[topo_order[new_id]]));
+  }
+  loop_groups.swap(sorted_groups);
+  for (auto &node_group : node_to_group) {
+    node_group.second = old_to_new[node_group.second];
+  }
+  return true;
 }
 
 size_t ScheduleUtils::GetUniqueLoopAxisCnt(const af::AscGraph &graph) {
@@ -603,6 +690,63 @@ bool ScheduleUtils::SortHoistedLoadsFirst(af::AscGraph &graph) {
   return true;
 }
 
+// 手工注释：此校验是agent加的兜底校验，如果碍事可以删掉
+// loop group comparator排序后的违例兜底: 扫描全图数据边, 生产者id大于消费者id即为违例;
+// 重编号后理论上无违例, 仍扫出说明存在未建模的组间约束, 回退基础RDFS序保证正确性
+static Status FallbackLoopGroupSortOnViolation(af::AscGraph &graph, bool use_rdfs_v2) {
+  size_t violation_cnt = 0UL;
+  for (const auto &node : graph.GetAllNodes()) {
+    for (const auto &out_node : node->GetOutDataNodes()) {
+      if (out_node == nullptr) {
+        continue;
+      }
+      if (node->GetOpDescBarePtr()->GetId() > out_node->GetOpDescBarePtr()->GetId()) {
+        GELOGW("Topo violation after loop group sort in graph[%s]: producer[%s] -> consumer[%s].",
+               graph.GetName().c_str(), node->GetNamePtr(), out_node->GetNamePtr());
+        ++violation_cnt;
+      }
+    }
+  }
+  if (violation_cnt > 0UL) {
+    GELOGW("Graph [%s] has [%zu] topo violation after loop group sort, fallback to baseline topological order.",
+           graph.GetName().c_str(), violation_cnt);
+    const auto mode = use_rdfs_v2 ? af::TopoSortingMode::kRDFSV2 : af::TopoSortingMode::kRDFS;
+    const auto compute_graph = af::AscGraphUtils::GetComputeGraph(graph);
+    GE_ASSERT_GRAPH_SUCCESS(compute_graph->TopologicalSorting(mode), "TopologicalSorting failed, graph:[%s].",
+                            compute_graph->GetName().c_str());
+  }
+  return af::SUCCESS;
+}
+
+// loop group形态的图排序: BuildLoopGroups分组 -> 组间依赖重编号(组号即comparator的组间执行序,
+// 生产组编号先于消费组) -> comparator排序(组间按组号升序, 组内/未入组按既有topo序) -> 违例兜底回退;
+// 组级成环时放弃组间强制排序, 保持基础RDFS拓扑序
+static Status SortByLoopGroupRule(af::AscGraph &graph, bool use_rdfs_v2) {
+  GELOGI("Graph [%s] will be sorted with loop group rule.", graph.GetName().c_str());
+  std::vector<LoopGroup> loop_groups;
+  std::unordered_map<af::Node *, size_t> node_to_group;
+  GE_ASSERT_SUCCESS(ScheduleUtils::BuildLoopGroups(graph, loop_groups, node_to_group));
+  const bool group_order_valid = ScheduleUtils::RenumberLoopGroupsByDependency(graph, loop_groups, node_to_group);
+  if (!group_order_valid) {
+    return af::SUCCESS;  // 组级依赖成环：放弃组间强制排序，保持基础RDFS拓扑序
+  }
+  const auto func = [&node_to_group](const af::NodePtr &node1, const af::NodePtr &node2) -> bool {
+    auto it1 = node_to_group.find(node1.get());
+    auto it2 = node_to_group.find(node2.get());
+    const bool both_grouped = (it1 != node_to_group.cend()) && (it2 != node_to_group.cend());
+    // 组间按for编号从小到大排（未入组节点不参与组序，退化为按topo序比较）
+    if (both_grouped && it1->second != it2->second) {
+      return it1->second < it2->second;
+    }
+    return node1->GetOpDescBarePtr()->GetId() < node2->GetOpDescBarePtr()->GetId();  // 其余按topo序
+  };
+  const auto compute_graph = af::AscGraphUtils::GetComputeGraph(graph);
+  compute_graph->TopologicalSorting(func);
+  // 兜底: 违例扫描与回退基础序(重编号后理论上无违例, 仍扫出说明存在未建模的组间约束)
+  GE_ASSERT_SUCCESS(FallbackLoopGroupSortOnViolation(graph, use_rdfs_v2));
+  return af::SUCCESS;
+}
+
 Status ScheduleUtils::TopologicalSorting(af::AscGraph &graph, bool use_rdfs_v2) {
   auto compute_graph = af::AscGraphUtils::GetComputeGraph(graph);
   GE_ASSERT_NOTNULL(compute_graph);
@@ -618,26 +762,14 @@ Status ScheduleUtils::TopologicalSorting(af::AscGraph &graph, bool use_rdfs_v2) 
   GE_ASSERT_GRAPH_SUCCESS(compute_graph->TopologicalSorting(mode), "TopologicalSorting failed, graph:[%s].",
                           compute_graph->GetName().c_str());
 
-  if (!IsNeedFixTopo(graph, use_rdfs_v2)) {
-    return af::SUCCESS;
+  // loop grouping 判定须先于 IsNeedFixTopo 早退: 重计算切分(PartitionNormByRecompute)会消除
+  // reduce 上游的全部多输出结构, 使 IsNeedFixTopo 返回 false 而跳过组排序, 重计算链的 load
+  // 与消费者将被基础拓扑序拆进不同循环巢(跨作用域引用/que 跨巢错配), 故先判 loop grouping
+  if (IsNeedLoopGrouping(graph)) {
+    return SortByLoopGroupRule(graph, use_rdfs_v2);
   }
 
-  if (IsNeedLoopGrouping(graph)) {
-    GELOGI("Graph [%s] will be sorted with loop group rule.", graph.GetName().c_str());
-    std::vector<LoopGroup> loop_groups;
-    std::unordered_map<af::Node *, size_t> node_to_group;
-    GE_ASSERT_SUCCESS(BuildLoopGroups(graph, loop_groups, node_to_group));
-    const auto func = [&node_to_group](const af::NodePtr &node1, const af::NodePtr &node2) -> bool {
-      auto it1 = node_to_group.find(node1.get());
-      auto it2 = node_to_group.find(node2.get());
-      const bool both_grouped = (it1 != node_to_group.cend()) && (it2 != node_to_group.cend());
-      // 组间按for编号从小到大排（未入组节点不参与组序，退化为按topo序比较）
-      if (both_grouped && it1->second != it2->second) {
-        return it1->second < it2->second;
-      }
-      return node1->GetOpDescBarePtr()->GetId() < node2->GetOpDescBarePtr()->GetId();  // 其余按topo序
-    };
-    compute_graph->TopologicalSorting(func);
+  if (!IsNeedFixTopo(graph, use_rdfs_v2)) {
     return af::SUCCESS;
   }
 

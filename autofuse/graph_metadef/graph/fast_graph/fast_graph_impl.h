@@ -803,7 +803,7 @@ class FastGraphImpl {
       auto origin_node = *iter;
       if (origin_node == nullptr) {
         REPORT_INNER_ERR_MSG("E18888", "The node is nullptr in src graph.");
-        GELOGE(GRAPH_FAILED, "[DeepCopyNodes] The node is nullptr in src graph.");
+        GELOGW("[DeepCopyNodes] The node is nullptr in src graph, skip it.");
         continue;
       }
 
@@ -822,7 +822,7 @@ class FastGraphImpl {
     for (auto origin_edge : other_graph.edges_) {
       if (origin_edge == nullptr) {
         REPORT_INNER_ERR_MSG("E18888", "The edge is nullptr in src graph.");
-        GELOGE(GRAPH_FAILED, "[DeepCopyEdges] The edge is nullptr in src graph.");
+        GELOGW("[DeepCopyEdges] The edge is nullptr in src graph, skip it.");
         continue;
       }
 
@@ -860,7 +860,7 @@ class FastGraphImpl {
       const ListElement<GraphT *> *origin_graph_listnode = *iter;
       if ((origin_graph_listnode == nullptr) || (origin_graph_listnode->data == nullptr)) {
         REPORT_INNER_ERR_MSG("E18888", "The sub graph is nullptr in src graph.");
-        GELOGE(GRAPH_FAILED, "[DeepCopySubGraphs] The sub graph is nullptr in src graph.");
+        GELOGW("[DeepCopySubGraphs] The sub graph is nullptr in src graph, skip it.");
         continue;
       }
 
@@ -868,7 +868,7 @@ class FastGraphImpl {
       std::shared_ptr<GraphT> copy_sub_graph = std::make_shared<GraphT>(name);
       if (copy_sub_graph == nullptr) {
         REPORT_INNER_ERR_MSG("E18888", "Failed to new sub graph.");
-        GELOGE(GRAPH_FAILED, "[DeepCopySubGraphs] Failed to new sub graph.");
+        GELOGW("[DeepCopySubGraphs] Failed to new sub graph [%s], skip it.", name.c_str());
         continue;
       }
       copy_sub_graph->CompleteCopy(*(origin_graph_listnode->data));

@@ -9,6 +9,8 @@
  */
 
 #include "codegen_tiling_utils.h"
+#include "common_utils.h"
+#include "common/platform_context.h"
 
 #include <cstdint>
 #include <algorithm>
@@ -94,6 +96,66 @@ bool CanPackBmmInput(const ge::AscNodePtr &view) {
   const auto bytes = af::GetSizeByDataType(attr.dtype);
   return attr.repeats.size() == 3U && (!attr.repeats.back().GetConstValue(n) || n == 1) &&
          (bytes == sizeof(int16_t) || bytes == sizeof(int32_t));
+}
+
+using namespace ascgen_utils;
+
+std::string GetKernelTaskType(const ascir::FusedScheduledResult &schedule_results) {
+  if (ascgen_utils::IsJustCubeFixpip(schedule_results)) {
+    return kKernelTaskTypeAICOnly;
+  } else if (ascgen_utils::IsCubeFusedScheduled(schedule_results)) {
+    if (ascgen_utils::IsConv2DFusedScheduled(schedule_results)) {
+      std::string npu_arch;
+      GE_ASSERT_SUCCESS(ge::PlatformContext::GetInstance().GetCurrentPlatformString(npu_arch));
+      if (npu_arch == "5102") {
+        return kKernelTaskTypeMixAICOneOne;
+      } else {
+        return kKernelTaskTypeMixAICOneTwo;
+      }
+    } else {
+      return kKernelTaskTypeMixAICOneTwo;
+    }
+  }
+  return schedule_results.workspace_nodes.size() != 0 ? kKernelTaskTypeMixAIVOneZero : kKernelTaskTypeAIVOnly;
+}
+
+void AppendCvCoreLimitHelperDefs(std::stringstream &ss, const ascir::FusedScheduledResult &result) {
+  const auto kernel_type = GetKernelTaskType(result);
+  const uint32_t task_ratio = kernel_type == kKernelTaskTypeMixAICOneOne ? 1U : 2U;
+  ss << "#include <mutex>\n";
+  ss << "constexpr uint32_t kCvTaskRatio = " << task_ratio << "U;\n";
+  ss << R"(
+// Resource limits are resolved before either tiler assigns work.
+inline bool NormalizeCvCoreLimit(uint32_t &aic_num, uint32_t &aiv_num,
+                                 uint32_t platform_aic, uint32_t platform_aiv) {
+  const uint32_t aic_limit = aic_num == 0U ? platform_aic : std::min(aic_num, platform_aic);
+  const uint32_t aiv_limit = aiv_num == 0U ? platform_aiv : std::min(aiv_num, platform_aiv);
+)";
+  if (kernel_type == kKernelTaskTypeAICOnly) {
+    ss << "  aic_num = aic_limit;\n  aiv_num = aiv_limit;\n  return aic_num != 0U;\n}\n";
+    return;
+  }
+  ss << R"(
+  const uint32_t groups = std::min(aic_limit, aiv_limit / kCvTaskRatio);
+  if (groups == 0U) {
+    return false;
+  }
+  aic_num = groups;
+  aiv_num = groups * kCvTaskRatio;
+  return true;
+}
+
+// GE also tiles static CV nodes after compilation. Export the actual kernel ratio
+// so that its Cube and Vector tilers use the same resource budget.
+extern "C" bool GetCvCoreLimits(uint32_t *aic_num, uint32_t *aiv_num, uint32_t *task_ratio) {
+  if (aic_num == nullptr || aiv_num == nullptr || task_ratio == nullptr ||
+      !NormalizeCvCoreLimit(*aic_num, *aiv_num, *aic_num, *aiv_num)) {
+    return false;
+  }
+  *task_ratio = kCvTaskRatio;
+  return true;
+}
+)";
 }
 
 namespace {

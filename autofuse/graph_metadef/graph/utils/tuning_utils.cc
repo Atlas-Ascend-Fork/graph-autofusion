@@ -140,7 +140,7 @@ graphStatus TuningUtils::ConvertConstToWeightAttr(const ComputeGraphPtr &exe_gra
       GELOGE(FAILED, "[Set][Tensor] to node[%s] failed", op_desc->GetName().c_str());
       return FAILED;
     }
-    GELOGI("Set tensor to node[%s].", op_desc->GetName().c_str());
+    GELOGD("Set tensor to node[%s].", op_desc->GetName().c_str());
   }
   return SUCCESS;
 }
@@ -676,9 +676,9 @@ graphStatus TuningUtils::LinkEnd2NetOutput(NodePtr &end_node, NodePtr &out_node)
       return FAILED;
     }
   } else {
-    REPORT_INNER_ERR_MSG("E18888", "node_name:%s, graph_name:%s handled failed", end_node->GetName().c_str(),
+    REPORT_INNER_ERR_MSG("E18888", "failed to handle node_name:%s, graph_name:%s", end_node->GetName().c_str(),
                          end_node->GetOwnerComputeGraph()->GetName().c_str());
-    GELOGE(FAILED, "[Handle][Node] node_name:%s, graph_name:%s handled failed", end_node->GetName().c_str(),
+    GELOGE(FAILED, "[Handle][Node] failed to handle node_name:%s, graph_name:%s", end_node->GetName().c_str(),
            end_node->GetOwnerComputeGraph()->GetName().c_str());
     return FAILED;
   }
@@ -736,7 +736,7 @@ graphStatus TuningUtils::ConvertFileToGraph(const std::map<int64_t, std::string>
   std::vector<ComputeGraphPtr> root_graphs;
   std::map<std::string, std::vector<ComputeGraphPtr>> name_to_subgraphs;
   if (LoadGraphFromFile(options, root_graphs, name_to_subgraphs) != GRAPH_SUCCESS) {
-    GELOGE(GRAPH_FAILED, "Load graph from file according to options failed");
+    GELOGE(GRAPH_FAILED, "Load graph from file according to options failed, options size:%zu", options.size());
     return GRAPH_FAILED;
   }
 

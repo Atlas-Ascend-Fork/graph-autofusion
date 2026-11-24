@@ -74,7 +74,7 @@ void TracingRecorder::Initialize() {
     finalize_event_handle = AtraceEventCreate(event_name.c_str());
     finalize_event_handles_.emplace_back(finalize_event_handle);
     event_bind_num_ = 1;
-    GELOGI("Create event handle[%s] to ", event_name.c_str());
+    GELOGI("Create event handle[%s] to module[%s].", event_name.c_str(), handle_name.c_str());
   } else {
     event_name.append(std::to_string(finalize_event_handles_.size()));
   }
@@ -116,7 +116,7 @@ void TracingRecorder::Finalize() {
   finalize_event_handles_.clear();
   handles_.clear();
   event_bind_num_ = 0;
-  GELOGI("Event handle and handle of [%s] has been destroyed.", GetHandleName().c_str());
+  GELOGI("Event handle and handle of [%s] have been destroyed.", GetHandleName().c_str());
 }
 
 void TracingRecorder::Report() {
@@ -129,7 +129,7 @@ void TracingRecorder::Report() {
   int32_t offset = 0;
   while (records_num > 0) {
     if (!is_ready_) {
-      GELOGI("%d msg have been left, need reinit and report again.", records_num);
+      GELOGI("%d msgs have been left, need reinit and report again.", records_num);
       Initialize();
     }
     if (is_ready_) {

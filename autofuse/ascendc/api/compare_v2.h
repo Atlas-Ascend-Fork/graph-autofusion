@@ -1287,7 +1287,7 @@ inline __aicore__ void CompareExtendRepeat(const AscendC::LocalTensor<uint8_t> &
   } else if constexpr (AscendC::IsSameType<T, int64_t>::value) {
     if constexpr (mode != CMPMODE::EQ && mode != CMPMODE::NE && mode != CMPMODE::GT && mode != CMPMODE::GE &&
                   mode != CMPMODE::LE) {
-      ASSERT(false && "CompareExtend mode only support EQ/NE/GT/GE/LE when DataType is int64.");
+      ASSERT(false && "CompareExtend mode only supports EQ/NE/GT/GE/LE when DataType is int64.");
     }
     if constexpr (mode == CMPMODE::EQ || mode == CMPMODE::NE) {
       if (input_last_dim_stride * sizeof(int64_t) / ONE_BLK_SIZE <= max_stride &&

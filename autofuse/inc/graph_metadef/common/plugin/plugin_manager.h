@@ -189,7 +189,7 @@ class PluginManager {
                        std::map<std::string, std::shared_ptr<DNNEngine>>>::value) {
         for (const auto &val : arg_temp) {
           if (arg.find(val.first) != arg.end()) {
-            GELOGW("FuncName %s in so %s find the same key: %s, will replace it", func_name.c_str(),
+            GELOGW("FuncName %s in so %s finds the same key: %s, will replace it", func_name.c_str(),
                    handle.first.c_str(), val.first.c_str());
             arg[val.first] = val.second;
           }
@@ -285,7 +285,8 @@ inline std::string GetModelPathByAddr(void *func_ptr) {
   }
 
   if (strlen(dl_info.dli_fname) >= MMPA_MAX_PATH) {
-    GELOGW("The shared library file path is too long!");
+    GELOGW("The shared library file path %s is too long, length: %zu, max: %d", dl_info.dli_fname,
+           strlen(dl_info.dli_fname), static_cast<int32_t>(MMPA_MAX_PATH));
     return std::string();
   }
 

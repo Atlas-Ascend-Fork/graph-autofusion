@@ -53,6 +53,10 @@ class Codegen {
                         const std::map<std::string, std::string> &shape_info, const std::string &pgo_dir,
                         const std::string &core_num,
                         std::map<std::string, std::string> &tiling_file_name_to_content) const;
+  Status GenerateTiling(const ::ascir::FusedScheduledResult &fused_schedule_result,
+                        const std::map<std::string, std::string> &shape_info, const std::string &pgo_dir,
+                        const std::string &core_num, std::map<std::string, std::string> &tiling_file_name_to_content,
+                        uint32_t aicore_num) const;
   std::map<std::string, std::string> GenerateTiling(const ::ascir::FusedScheduledResult &fused_schedule_result,
                                                     const std::map<std::string, std::string> &shape_info,
                                                     const std::string &pgo_dir, const std::string &core_num) const;

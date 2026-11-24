@@ -243,6 +243,19 @@ const char *GetSimtSemanticRole(const indirect_load::SimtAddressPolicy policy) {
   }
 }
 
+std::string BuildSimtSemanticFeature(const indirect_load::SimtAddressPolicy policy, const bool use_uint32_offset,
+                                     const bool boundary_fusion) {
+  std::string feature = std::string(semantic::kSimtPrefix) + GetSimtSemanticRole(policy) + semantic::kOffsetPrefix +
+                        (use_uint32_offset ? "32" : "64");
+  // 边界化形态（SIMT 仅做 gather，输出链交普通 VF）与全链折叠形态 API 集不同，必须能在
+  // 语义名上区分：ATT 成本模型、TopN summary 与 cache/PGO key 都以该名称作为实现身份。
+  if (boundary_fusion) {
+    feature += "/";
+    feature += semantic::kGatherOnly;
+  }
+  return feature;
+}
+
 bool TryGetIndirectLoadMetadata(const af::AscNodePtr &node, IndirectLoadMetadata &metadata) {
   return ascgen_utils::indirect_load::HasLoweringMetadata(node) &&
          ascgen_utils::indirect_load::GetLoweringMetadata(node, metadata) == af::SUCCESS;
@@ -271,6 +284,11 @@ std::string GetIndirectLoadSemanticName(const af::AscNodePtr &node) {
                          metadata.simt.policy.offset_width == ascgen_utils::indirect_load::SimtOffsetWidth::kUint32
                              ? semantic::kOffset32
                              : semantic::kOffset64);
+    }
+    // [边界化语义] 边界化形态（gather-only SIMT）与全链折叠形态 API 集不同，名称必须区分；
+    // 该标记随调度期写入节点，与 lowering metadata 是否可用无关（兜底路径同样要区分）。
+    if (ascgen_utils::indirect_load::IsSimtBoundaryFusion(node)) {
+      AppendSemanticPart(features, semantic::kGatherOnly);
     }
   } else if (template_id == ascir::TemplateId::kIndirectLoadSK) {
     strategy = semantic::kSk;
@@ -1188,7 +1206,7 @@ std::vector<ascir::TensorId> GetWorkspaceTensorIdListInOneScheduleResult(
   for (auto workspace : fused_schedule_result.workspace_nodes) {
     GE_ASSERT_NOTNULL(workspace, "fused schedule result workspace node is null");
     ascir::TensorId tId = workspace->outputs[0].attr.mem.tensor_id;
-    GELOGI("Get workspace tensor id: %ld", tId);
+    GELOGD("Get workspace tensor id: %ld", tId);
     auto index = std::find(tensorId.begin(), tensorId.end(), tId);
     if (index == tensorId.end()) {
       tensorId.emplace_back(tId);
@@ -1203,7 +1221,7 @@ std::vector<ascir::TensorId> GetWorkspaceTensorIdListInOneGraph(
   for (auto workspace : fused_schedule_result.workspace_nodes) {
     GE_ASSERT_NOTNULL(workspace, "fused schedule result workspace node is null");
     ascir::TensorId tId = workspace->outputs[0].attr.mem.tensor_id;
-    GELOGI("Get workspace tensor id: %ld", tId);
+    GELOGD("Get workspace tensor id: %ld", tId);
     // 检查是否在 graph 中存在
     bool is_exist = false;
     for (auto node : graph.GetAllNodes()) {

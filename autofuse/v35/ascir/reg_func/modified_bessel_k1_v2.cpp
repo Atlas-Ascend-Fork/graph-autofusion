@@ -19,7 +19,7 @@ std::vector<std::unique_ptr<af::TmpBufDesc>> CalcModifiedBesselK1TmpSizeV2(const
   auto node_inputs = node.inputs;
   GE_ASSERT_TRUE(node_inputs.Size() > 0, "Node %s[%s] inputs size is 0.", node.GetTypePtr(), node.GetNamePtr());
   uint32_t calc_tmp_buf = MODIFIED_BESSEL_K1_ONE_REPEAT_BYTE_SIZE * MODIFIED_BESSEL_K1_FLOAT_CALC_PROC;
-  GELOGD("Node %s[%s] temp buffer size: %u", node.GetTypePtr(), node.GetNamePtr(), calc_tmp_buf);
+  GELOGD("Node %s[%s] temp buffer size: %u bytes", node.GetTypePtr(), node.GetNamePtr(), calc_tmp_buf);
   Expression tmp_size = af::Symbol(calc_tmp_buf);
   af::TmpBufDesc desc = {tmp_size, -1};
   std::vector<std::unique_ptr<af::TmpBufDesc>> k1_tmp_buf_descs;

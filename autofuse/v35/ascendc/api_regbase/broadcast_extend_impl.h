@@ -37,9 +37,12 @@ __aicore__ inline void GetBroadcastTilingInfoExtendImpl(uint32_t rank, const uin
                                                         BroadcastTilingExtend &tiling) {
   static_assert((constRank == -1) || (constRank <= 9 && constRank > 0),
                 "constRank only supports -1 and the range between 1 and 9");
-  ASCENDC_ASSERT((rank <= 9 && rank > 0), { KERNEL_LOG(KERNEL_ERROR, "rank should be in range [1, 9]"); });
-  ASCENDC_ASSERT((constRank == -1) || (constRank == rank),
-                 { KERNEL_LOG(KERNEL_ERROR, "constRank should be equal to rank when constRank != -1"); });
+  ASCENDC_ASSERT((rank <= 9 && rank > 0),
+                 { KERNEL_LOG(KERNEL_ERROR, "rank should be in range [1, 9], got %u", rank); });
+  ASCENDC_ASSERT((constRank == -1) || (constRank == rank), {
+    KERNEL_LOG(KERNEL_ERROR, "constRank should be equal to rank when constRank != -1, constRank=%d, rank=%u", constRank,
+               rank);
+  });
   constexpr uint32_t maxDim = 9;
 
   uint32_t srcSize = 1;
@@ -260,8 +263,10 @@ __aicore__ inline void BroadcastExtendImpl(const LocalTensor<T> &dst, const Loca
   static_assert(SupportBytes<T, 1, 2, 4, 8>(), "Broadcast only supports type b8/b16/b32/b64 on current device");
   ASCENDC_ASSERT((tiling != nullptr), "BroadcastTilingExtend could not be empty!");
   if constexpr (constRank != -1) {
-    ASCENDC_ASSERT((tiling->oriRank == constRank),
-                   { KERNEL_LOG(KERNEL_ERROR, "Tiling original rank and constRank should be equal!"); });
+    ASCENDC_ASSERT((tiling->oriRank == constRank), {
+      KERNEL_LOG(KERNEL_ERROR, "Tiling original rank and constRank should be equal, oriRank=%u, constRank=%d",
+                 tiling->oriRank, constRank);
+    });
   }
   BroadcastInternal::ShapeCheck(tiling->oriDstShape, dstShape, tiling->oriRank);
   BroadcastInternal::ShapeCheck(tiling->oriSrcShape, srcShape, tiling->oriRank);

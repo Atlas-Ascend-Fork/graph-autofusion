@@ -85,7 +85,7 @@ static graphStatus PlaceholderParser(const OpDescPtr &op_desc, const std::string
   if (pattern_str == ".32b") {
     width = ArgsFormatWidth::BIT32;
   } else if (!pattern_str.empty()) {
-    GELOGE(ge::PARAM_INVALID, "Args format [%s] matched failed, it may be unsupported.", pattern_str.c_str());
+    GELOGE(ge::PARAM_INVALID, "Args format [%s] match failed, it may be unsupported.", pattern_str.c_str());
     return ge::GRAPH_FAILED;
   }
   args_desc.push_back({type, static_cast<int32_t>(width), false, {0}});
@@ -175,8 +175,8 @@ static graphStatus InputCalcSize(const OpDescPtr &op_desc, const ArgDesc &arg_de
   size_t count = 0UL;
   if (arg_desc.ir_idx >= 0) {
     // 非通配符场景
-    GE_ASSERT((static_cast<size_t>(arg_desc.ir_idx) < ir_inputs.size()), "ir_index [%d] is out of range",
-              arg_desc.ir_idx);
+    GE_ASSERT((static_cast<size_t>(arg_desc.ir_idx) < ir_inputs.size()), "ir_index [%d] is out of range [0, %zu)",
+              arg_desc.ir_idx, ir_inputs.size());
     if (ir_inputs[arg_desc.ir_idx].second == IrInputType::kIrInputDynamic) {
       if (arg_desc.folded) {
         ++count;  // pointer to addr
@@ -224,7 +224,8 @@ static graphStatus InputInstanceParser(const OpDescPtr &op_desc, const std::stri
     int32_t ir_idx{0};
     GE_ASSERT_TRUE(sscanf_s(pattern_str.c_str(), "i_instance%d", &ir_idx) == kDigitFormatCnt,
                    "Arg format [%s] is invalid", pattern_str.c_str());
-    GE_ASSERT(static_cast<size_t>(ir_idx) < valid_input_size, "ir index [%d] is invalid.", ir_idx);
+    GE_ASSERT(static_cast<size_t>(ir_idx) < valid_input_size, "ir index [%d] is out of range [0, %zu)", ir_idx,
+              valid_input_size);
     arg_descs.push_back({type, ir_idx, false, {0}});
   }
   return af::SUCCESS;
@@ -268,7 +269,8 @@ static graphStatus OutputInstanceParser(const OpDescPtr &op_desc, const std::str
     int32_t ir_idx{0};
     GE_ASSERT_TRUE(sscanf_s(pattern_str.c_str(), "o_instance%d", &ir_idx) == kDigitFormatCnt,
                    "Arg format [%s] is invalid", pattern_str.c_str());
-    GE_ASSERT(static_cast<size_t>(ir_idx) < valid_output_size, "ir index [%d] is invalid.", ir_idx);
+    GE_ASSERT(static_cast<size_t>(ir_idx) < valid_output_size, "ir index [%d] is out of range [0, %zu)", ir_idx,
+              valid_output_size);
     arg_descs.push_back({type, ir_idx, false, {0}});
   }
   return af::SUCCESS;
@@ -297,7 +299,8 @@ static graphStatus InputParser(const OpDescPtr &op_desc, const std::string &patt
       }
     }
     GE_ASSERT(has_idx, "Arg format [%s] is invalid", pattern_str.c_str());
-    GE_ASSERT(static_cast<size_t>(ir_idx) < ir_inputs.size(), "ir index [%d] is invalid.", ir_idx);
+    GE_ASSERT(static_cast<size_t>(ir_idx) < ir_inputs.size(), "ir index [%d] is out of range [0, %zu)", ir_idx,
+              ir_inputs.size());
 
     bool folded{false};
     if (ir_inputs[static_cast<size_t>(ir_idx)].second == IrInputType::kIrInputDynamic &&
@@ -315,8 +318,8 @@ static graphStatus OutputCalcSize(const OpDescPtr &op_desc, const ArgDesc &arg_d
   size_t count = 0UL;
   if (arg_desc.ir_idx >= 0) {
     // 非通配符场景
-    GE_ASSERT((static_cast<size_t>(arg_desc.ir_idx) < ir_outputs.size()), "ir_index [%d] is out of range",
-              arg_desc.ir_idx);
+    GE_ASSERT((static_cast<size_t>(arg_desc.ir_idx) < ir_outputs.size()), "ir_index [%d] is out of range [0, %zu)",
+              arg_desc.ir_idx, ir_outputs.size());
     if (ir_outputs[arg_desc.ir_idx].second == IrOutputType::kIrOutputDynamic) {
       if (arg_desc.folded) {
         count++;  // pointer to addr
@@ -374,8 +377,8 @@ static graphStatus OutputParser(const OpDescPtr &op_desc, const std::string &pat
       }
     }
     GE_ASSERT(has_idx, "Op[%s] arg format [%s] is invalid", op_desc->GetNamePtr(), pattern_str.c_str());
-    GE_ASSERT(static_cast<size_t>(ir_idx) < ir_outputs.size(), "Op[%s] ir index [%d] is invalid.",
-              op_desc->GetNamePtr(), ir_idx);
+    GE_ASSERT(static_cast<size_t>(ir_idx) < ir_outputs.size(), "Op[%s] ir index [%d] is out of range [0, %zu)",
+              op_desc->GetNamePtr(), ir_idx, ir_outputs.size());
     bool folded{false};
     if (ir_outputs[static_cast<size_t>(ir_idx)].second == IrOutputType::kIrOutputDynamic &&
         pattern_str[pattern_str.length() - 1UL] != '*') {
@@ -416,7 +419,7 @@ static graphStatus InputDescCalcSize(const OpDescPtr &op_desc, const ArgDesc &ar
 static graphStatus OutputDescCalcSize(const OpDescPtr &op_desc, const ArgDesc &arg_desc, size_t &size) {
   const auto &ir_outputs = op_desc->GetIrOutputs();
   GE_ASSERT((arg_desc.ir_idx >= 0 && static_cast<size_t>(arg_desc.ir_idx) < ir_outputs.size()),
-            "ir_index [%d] is out of range", arg_desc.ir_idx);
+            "ir_index [%d] is out of range [0, %zu)", arg_desc.ir_idx, ir_outputs.size());
   auto ir_name = ir_outputs[static_cast<size_t>(arg_desc.ir_idx)].first;
 
   if (arg_desc.folded) {

@@ -223,7 +223,54 @@ af::Status ApplyGraphPassGroup(af::AscGraph &graph, const IndirectLoadGroup &gro
     GE_ASSERT_SUCCESS(ClearSimtTemplateRoles(graph));
   }
   std::vector<RewrittenGraphAnalysis> analyses(members.size());
+  // [共享生产者视图隔离] AnalyzeRewrittenGraph 的 ApplyTemplatePathLayouts 会把成员 input/index
+  // 的直接生产者物理视图就地写回（ApplyPhysicalView 改 sched.axis 与 output 的 axis/repeats/
+  // strides）。组成员共享同一生产者（如同一个 index Broadcast）时，后分析的成员会读到被前
+  // 一个成员改写过的视图，导致各成员 TemplateLogicalView/policy 不一致（如 index sizes
+  // [56240,8] 与 [1,8] 分裂，第二路寻址错误）。逐成员分析前把直接生产者恢复到分析前快照，
+  // 保证所有成员从同一视图出发；最终视图由最后一个成员的分析写回（组内布局一致）。
+  struct DirectProducerViewSnapshot {
+    std::string name;
+    std::vector<ascir::AxisId> sched_axis;
+    std::vector<ascir::AxisId> axis;
+    std::vector<af::Expression> repeats;
+    std::vector<af::Expression> strides;
+  };
+  std::vector<DirectProducerViewSnapshot> producer_snapshots;
+  std::set<std::string> recorded_producers;
+  for (const af::AscNodePtr &member : members) {
+    for (size_t input_idx = 0UL; input_idx < static_cast<size_t>(kIndirectLoadInputCount); ++input_idx) {
+      const af::AscNodePtr producer = ascgen_utils::indirect_load::GetInputProducer(member, input_idx);
+      if (producer == nullptr || producer->outputs().empty() || producer->outputs()[0] == nullptr ||
+          !recorded_producers.insert(producer->GetName()).second) {
+        continue;
+      }
+      const auto &output_attr = producer->outputs()[0]->attr;
+      producer_snapshots.push_back(
+          {producer->GetName(), producer->attr.sched.axis, output_attr.axis, output_attr.repeats, output_attr.strides});
+    }
+  }
+  const auto restore_direct_producers = [&producer_snapshots](const af::AscNodePtr &member) {
+    for (size_t input_idx = 0UL; input_idx < static_cast<size_t>(kIndirectLoadInputCount); ++input_idx) {
+      const af::AscNodePtr producer = ascgen_utils::indirect_load::GetInputProducer(member, input_idx);
+      if (producer == nullptr || producer->outputs().empty() || producer->outputs()[0] == nullptr) {
+        continue;
+      }
+      for (const auto &snapshot : producer_snapshots) {
+        if (snapshot.name != producer->GetName()) {
+          continue;
+        }
+        producer->attr.sched.axis = snapshot.sched_axis;
+        auto &output_attr = producer->outputs()[0]->attr;
+        output_attr.axis = snapshot.axis;
+        output_attr.repeats = snapshot.repeats;
+        output_attr.strides = snapshot.strides;
+        break;
+      }
+    }
+  };
   for (size_t index = 0UL; index < members.size(); ++index) {
+    restore_direct_producers(members[index]);
     GE_ASSERT_SUCCESS(AnalyzeRewrittenGraph(graph, members[index], template_id, is_candidate_legal, analyses[index]));
     if (!is_candidate_legal) {
       return af::SUCCESS;

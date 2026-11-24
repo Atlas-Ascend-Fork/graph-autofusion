@@ -112,8 +112,8 @@ PgoPlatformType ResolvePgoPlatform(int version_status, int64_t version) {
   }
 }
 
-uint64_t ResolvePgoDeviceFrequency(int frequency_status, int64_t frequency, PgoPlatformType platform) {
-  if (frequency_status == PGO_SUCCESS) return frequency > 0 ? static_cast<uint64_t>(frequency) : 0U;
+uint64_t ResolvePgoDeviceTicksPerMs(int frequency_status, int64_t ticks_per_ms, PgoPlatformType platform) {
+  if (frequency_status == PGO_SUCCESS) return ticks_per_ms > 0 ? static_cast<uint64_t>(ticks_per_ms) : 0U;
   return platform == PgoPlatformType::kAscendV6 ? 1000U : 50U;
 }
 
@@ -171,12 +171,12 @@ int ProbePgoCapability(PgoReporterOwnership ownership, uint32_t device_id, void 
   capability->kernel_activity_reporter_supported = false;
   capability->serial_stream_supported = capability->stars_task_track_supported;
   if (get_info != nullptr) {
-    int64_t frequency = 0;
-    const int frequency_status =
-        get_info(device_id, static_cast<int32_t>(kSystemModule), static_cast<int32_t>(kDeviceOscFrequency), &frequency);
-    capability->timestamp_frequency_hz = ResolvePgoDeviceFrequency(frequency_status, frequency, platform);
+    int64_t ticks_per_ms = 0;
+    const int frequency_status = get_info(device_id, static_cast<int32_t>(kSystemModule),
+                                          static_cast<int32_t>(kDeviceOscFrequency), &ticks_per_ms);
+    capability->timestamp_ticks_per_ms = ResolvePgoDeviceTicksPerMs(frequency_status, ticks_per_ms, platform);
   }
-  capability->device_timestamp_supported = capability->timestamp_frequency_hz != 0;
+  capability->device_timestamp_supported = capability->timestamp_ticks_per_ms != 0;
   dlclose(profapi);
   dlclose(hal);
   // Match MSPTI: a failed oscillator query falls back to the platform default

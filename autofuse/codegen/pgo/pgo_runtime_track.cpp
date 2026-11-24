@@ -24,6 +24,7 @@ constexpr uint16_t kMagic = 0x5a5a;
 constexpr uint32_t kTaskTrackType = 802;
 constexpr uint32_t kStreamExpandType = 804;
 constexpr uint32_t kRuntimeDataLength = 40;
+constexpr uint32_t kStreamExpandDataLength = 4;
 constexpr size_t kCompactInfoLength = 64;
 // A 1000-candidate batch produces at most 20,000 kernel task tracks. Keep
 // callback insertion allocation-free while covering the complete batch.
@@ -196,8 +197,13 @@ int32_t DispatchRuntimeTrack(uint32_t aging_flag, const void *data, uint32_t len
       ReleaseCallback();
       return PGO_DATA_UNAVAILABLE;
     }
-    if (compact.magic == kMagic && compact.level == kRuntimeLevel && compact.data_len == kRuntimeDataLength &&
-        compact.type == kStreamExpandType) {
+    if (compact.magic == kMagic && compact.level == kRuntimeLevel && compact.type == kStreamExpandType) {
+      // The control payload is MsprofStreamExpandSpecInfo, a four-byte entry
+      // carried in the same compact envelope as the forty-byte task track.
+      if (compact.data_len != kStreamExpandDataLength && compact.data_len != kRuntimeDataLength) {
+        ReleaseCallback();
+        return PGO_DATA_UNAVAILABLE;
+      }
       if (compact.data[0] > 1U) {
         ReleaseCallback();
         return PGO_DATA_UNAVAILABLE;

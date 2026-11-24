@@ -418,7 +418,7 @@ graphStatus FormatRefiner::DataNodeFormatProcess(const ComputeGraphPtr &graph,
                                                  const std::vector<NodePtr> &anchor_data_nodes,
                                                  const Format data_format) {
   if (!(IsGraphInferred(graph) && (!TypeUtilsInner::IsInternalFormat(data_format)) && (data_format != FORMAT_ND))) {
-    GELOGI("no necessary to do DataNodeFormatProcess. is_graph_inferred:%d, data_format:%s",
+    GELOGI("Not necessary to do DataNodeFormatProcess. is_graph_inferred:%d, data_format:%s",
            static_cast<int32_t>(IsGraphInferred(graph)), TypeUtils::FormatToSerialString(data_format).c_str());
     return GRAPH_SUCCESS;
   }

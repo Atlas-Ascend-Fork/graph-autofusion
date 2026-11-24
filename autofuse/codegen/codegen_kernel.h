@@ -215,9 +215,9 @@ class TQue : public Variable {
   TQue(const TQue &queue, const std::string &queue_name, const std::string &buffer_name);
   TQue(ascir::QueId que_id, ascir::Position src_position, const std::string &src_position_name,
        const std::string &dst_position_name);
-  std::string AllocBuf(const bool with_define = true) const;
+  std::string AllocBuf() const;
   std::string EnqueBuf() const;
-  std::string DequeBuf(const bool is_unit_first) const;
+  std::string DequeBuf() const;
   std::string FreeBuf() const;
 };
 
@@ -325,7 +325,12 @@ class Tiler : public Code {
   /* 尾块生成处理 */
   std::string GenAxisSizeNew(const ascir::AxisId id) const;
   std::string GenInnerLoopSizeAndActualSize(const ascir::AxisId id, const ascir::AxisId loop_axis) const;
+  // 循环收尾恢复：将配对派生自loop_axis的IsInner轴actual_size恢复为整块值（三段式的恢复段，
+  // 见GenAxisSizeNew的IsInner分支头部定义与GenInnerLoopSizeAndActualSize循环内赋值）
+  std::string GenRestoreInnerActualSize(const ascir::AxisId loop_axis) const;
   std::string CalcFromAxis(const ascir::AxisId id, bool is_define = true) const;
+  // [列分块] 为 merged 轴的 block 级展开值派生各子轴的块内索引。
+  void AppendMergedSubAxisDerivations(std::stringstream &ss, const Axis &from) const;
 
  private:
   uint32_t tiling_case_id;

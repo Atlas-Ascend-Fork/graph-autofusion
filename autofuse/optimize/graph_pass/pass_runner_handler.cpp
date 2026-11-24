@@ -13,9 +13,9 @@
 namespace optimize {
 Status autoschedule::PassRunnerHandler::RunPasses(af::AscGraph &graph) {
   const auto &platform = PlatformFactory::GetInstance().GetPlatform();
-  GE_CHECK_NOTNULL(platform, "Platform is not found.");
+  GE_CHECK_NOTNULL(platform, " Platform is not found.");
   const auto &pass_runner = platform->GetPassRunner();
-  GE_CHECK_NOTNULL(pass_runner, "Get pass runner by platform failed.");
+  GE_CHECK_NOTNULL(pass_runner, " Get pass runner by platform failed.");
   return pass_runner->RunPasses(graph);
 }
 }  // namespace optimize

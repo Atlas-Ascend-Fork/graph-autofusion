@@ -851,8 +851,8 @@ graphStatus GeTensorDesc::GetValueRange(std::vector<std::pair<int64_t, int64_t>>
   for (const auto &ele : value_range) {
     // here must be only two elements because pair
     if (ele.size() != PAIR_ELEMENT_SIZE) {
-      REPORT_INNER_ERR_MSG("E18888", "value_range must contain only 2 value but really is %zu", ele.size());
-      GELOGE(GRAPH_FAILED, "[Check][Param] value_range must contain only 2 value but really is %zu", ele.size());
+      REPORT_INNER_ERR_MSG("E18888", "value_range must contain only 2 values but really is %zu", ele.size());
+      GELOGE(GRAPH_FAILED, "[Check][Param] value_range must contain only 2 values but really is %zu", ele.size());
       return GRAPH_FAILED;
     }
     range.emplace_back(std::make_pair(ele[PAIR_ELEMENT_KEY], ele[PAIR_ELEMENT_VALUE]));
@@ -886,8 +886,8 @@ graphStatus GeTensorDesc::GetShapeRange(std::vector<std::pair<int64_t, int64_t>>
   for (const auto &ele : shape_range) {
     // here must be only two elements because pair
     if (ele.size() != PAIR_ELEMENT_SIZE) {
-      REPORT_INNER_ERR_MSG("E18888", "shape_range must contain only 2 value but really is %zu", ele.size());
-      GELOGE(GRAPH_FAILED, "[Check][Param] shape_range must contain only 2 value but really is %zu", ele.size());
+      REPORT_INNER_ERR_MSG("E18888", "shape_range must contain only 2 values but really is %zu", ele.size());
+      GELOGE(GRAPH_FAILED, "[Check][Param] shape_range must contain only 2 values but really is %zu", ele.size());
       return GRAPH_FAILED;
     }
     std::pair<int64_t, int64_t> pair({ele[PAIR_ELEMENT_KEY], ele[PAIR_ELEMENT_VALUE]});
@@ -904,8 +904,9 @@ graphStatus GeTensorDesc::GetOriginShapeRange(std::vector<std::pair<int64_t, int
   for (const auto &ele : origin_shape_range) {
     // here must be only two elements because pair
     if (ele.size() != PAIR_ELEMENT_SIZE) {
-      REPORT_INNER_ERR_MSG("E18888", "origin_shape_range must contain only 2 value but really is %zu", ele.size());
-      GELOGE(GRAPH_FAILED, "[Check][Param] origin_shape_range must contain only 2 value but really is %zu", ele.size());
+      REPORT_INNER_ERR_MSG("E18888", "origin_shape_range must contain only 2 values but really is %zu", ele.size());
+      GELOGE(GRAPH_FAILED, "[Check][Param] origin_shape_range must contain only 2 values but really is %zu",
+             ele.size());
       return GRAPH_FAILED;
     }
     std::pair<int64_t, int64_t> pair({ele[PAIR_ELEMENT_KEY], ele[PAIR_ELEMENT_VALUE]});
@@ -1900,7 +1901,7 @@ bool TensorUtils::IsShapeEqual(const GeShape &src, const GeShape &dst) {
   const auto dst_dims = dst.GetDims();
   for (size_t i = 0UL; i < src_dims.size(); ++i) {
     if ((src_dims[i] == -1) || (dst_dims[i] == -1)) {
-      GELOGW("src dim %d is %d, dst dim %d is %d, there has unknown shape.", i, src_dims[i], i, dst_dims[i]);
+      GELOGW("src dim %d is %d, dst dim %d is %d, there is an unknown shape.", i, src_dims[i], i, dst_dims[i]);
       continue;
     }
     if (src_dims[i] != dst_dims[i]) {

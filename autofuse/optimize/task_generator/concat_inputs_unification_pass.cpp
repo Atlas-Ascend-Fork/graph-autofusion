@@ -62,7 +62,7 @@ bool ConcatInputUnificationPass::CanOptimize(const af::AscNodePtr &concat_node, 
   const auto dtype_size = ge::GetSizeByDataType(concat_node->outputs[0].attr.dtype);
   GE_WARN_ASSERT(dtype_size > 0, "unsupported output data type");
   if (IsSrcColSizeOverLimit(concat_node, concat_dim, dtype_size)) {
-    GELOGI("dst col size over limit, cannot optimize");
+    GELOGI("dst col size over limit (max 128 bytes), cannot optimize");
     return false;
   }
 

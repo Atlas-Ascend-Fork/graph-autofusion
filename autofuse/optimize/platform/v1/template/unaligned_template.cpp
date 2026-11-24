@@ -92,7 +92,7 @@ Status UnalignedTemplate::ReverseDfsUnAlignNode(af::AscGraph &impl_graph, const 
 af::Status UnalignedTemplate::Generate(const af::AscGraph &origin_graph,
                                        [[maybe_unused]] const af::AscGraph &based_case, af::AscGraph &new_case) {
   if (!ScheduleUtils::NotNeedAlignVectorStride(origin_graph)) {
-    GELOGD("Not need to generate unaligned template for TilingCase: %s", origin_graph.GetName().c_str());
+    GELOGD("No need to generate unaligned template for TilingCase: %s", origin_graph.GetName().c_str());
     return af::FAILED;
   }
   // step1: 收集所有的Store节点，因为Output只有1个输入且必定是Store

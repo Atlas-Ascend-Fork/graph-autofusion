@@ -238,8 +238,8 @@ bool CaptureHostBufferArguments(const aclmdlRIKernelTaskParams &params, KernelSp
     }
     if (offset > bufferSize || size > bufferSize - offset) {
       SK_DLOGE("aclmdlRISpecOptimize parameter exceeds host buffer: kernel=%s streamId=%d taskId=%" PRId64
-               " parameter=%zu",
-               request.kernelEntry.c_str(), request.streamId, request.taskId, index);
+               " parameter=%zu offset=%zu size=%zu bufferSize=%zu",
+               request.kernelEntry.c_str(), request.streamId, request.taskId, index, offset, size, bufferSize);
       return false;
     }
     offsets[index] = offset;

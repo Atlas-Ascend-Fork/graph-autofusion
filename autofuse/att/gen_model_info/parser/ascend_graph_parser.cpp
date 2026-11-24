@@ -895,7 +895,7 @@ af::Status AscendGraphParser::CalculateReservedUbSize(const af::AscGraph &graph)
     }
   }
   for (const auto &reserve_ub : tuning_space_->reserve_ub) {
-    GELOGD("Got calculate reserved ub size[%s:%u]", reserve_ub.first.c_str(), reserve_ub.second);
+    GELOGD("Got calculated reserved UB size [%s:%u].", reserve_ub.first.c_str(), reserve_ub.second);
   }
   return af::SUCCESS;
 }
@@ -1013,7 +1013,7 @@ af::Status AscendGraphParser::GraphParser(const af::AscGraph &graph) {
   }
   auto ret = realpath(json_path.c_str(), realpath_file);
   if (ret == nullptr) {
-    GELOGD("Json path [%s] unfound.", json_path.c_str());
+    GELOGD("Json path [%s] not found.", json_path.c_str());
     return af::SUCCESS;
   }
   std::ofstream tuning_space_file(realpath_file, std::ios::trunc);

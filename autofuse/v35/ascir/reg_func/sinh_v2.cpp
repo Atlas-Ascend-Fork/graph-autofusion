@@ -20,7 +20,7 @@ std::vector<std::unique_ptr<TmpBufDesc>> CalcSinhTmpSizeV2(const AscNode &node) 
   GE_ASSERT_TRUE(node_inputs.Size() > 0, "Node %s[%s] inputs size is 0.", node.GetTypePtr(), node.GetNamePtr());
   uint32_t calc_tmp_buf = SINH_ONE_REPEAT_BYTE_SIZE *
                           ((node_inputs[0].attr.dtype == ge::DT_FLOAT16) ? SINH_HALF_CALC_PROC : SINH_FLOAT_CALC_PROC);
-  GELOGD("Node %s[%s] temp buffer size: %u", node.GetTypePtr(), node.GetNamePtr(), calc_tmp_buf);
+  GELOGD("Node %s[%s] temp buffer size: %u bytes", node.GetTypePtr(), node.GetNamePtr(), calc_tmp_buf);
   Expression tmp_size = Symbol(calc_tmp_buf);
   TmpBufDesc desc = {tmp_size, -1};
   std::vector<std::unique_ptr<TmpBufDesc>> tmp_buf_descs;

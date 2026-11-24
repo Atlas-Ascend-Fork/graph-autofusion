@@ -15,15 +15,6 @@ import types
 
 import pytest
 
-from compile_test_utils import (
-    PYTHON_DIR,
-    load_compile_module,
-    make_tbe_log_stub_modules,
-)
-
-MODULE_NAME = "autofuse.compile_adapter"
-MODULE_PATH = os.path.join(PYTHON_DIR, "compile_adapter.py")
-
 
 def _host_compile_args(tmpdir):
     return type(
@@ -274,32 +265,6 @@ def _clear_cann_root_envs(monkeypatch):
         monkeypatch.delenv(env_name, raising=False)
 
 
-@pytest.fixture()
-def compile_adapter_module():
-    ascendc_compile_module = types.ModuleType("autofuse.ascendc_compile")
-
-    class CompileError(Exception):
-        pass
-
-    def _noop_main(args):
-        return None
-
-    ascendc_compile_module.CompileError = CompileError
-    ascendc_compile_module.main = _noop_main
-    with load_compile_module(
-        MODULE_NAME,
-        MODULE_PATH,
-        extra_autofuse_attrs={"ascendc_compile": ascendc_compile_module},
-        extra_modules={
-            "autofuse.ascendc_compile": ascendc_compile_module,
-            # Stub tbe log so the fixture never triggers the real (slow, and
-            # process-global-state polluting) TBE package init.
-            **make_tbe_log_stub_modules(),
-        },
-    ) as loaded_module:
-        yield loaded_module
-
-
 def test_host_compile_defaults_to_abi_1(compile_adapter_module):
     argv = ["--output_file=host.so", "--compile_options=-Werror"]
 
@@ -348,6 +313,37 @@ def test_pgo_get_top_result_missing_file_returns_failure(
         None,
         None,
     )
+
+
+@pytest.mark.parametrize(
+    "duration", ["1.79769e+308", "1.7976931348623157e308", "NaN", "inf", "0", "-1"]
+)
+def test_pgo_cannot_publish_invalid_duration(
+    compile_adapter_module, tmp_path, duration
+):
+    config = tmp_path / "fusion_config.txt"
+    config.write_text("1\n1 2 # 23\n")
+
+    assert not compile_adapter_module.pgo_generate_config(config, f"1 3 # {duration}")
+    assert compile_adapter_module.pgo_read_config(config) == "1 2 # 23"
+
+
+def test_pgo_atomic_publish_failure_keeps_the_previous_config(
+    compile_adapter_module, monkeypatch, tmp_path
+):
+    config = tmp_path / "fusion_config.txt"
+    config.write_text("1\n1 2 # 23\n")
+
+    def fail_replace(source, target):
+        assert target == config
+        assert os.path.dirname(source) == str(tmp_path)
+        raise OSError("commit failed")
+
+    monkeypatch.setattr(compile_adapter_module.os, "replace", fail_replace)
+    with pytest.raises(OSError, match="commit failed"):
+        compile_adapter_module.pgo_generate_config(config, "1 3 # 22")
+    assert compile_adapter_module.pgo_read_config(config) == "1 2 # 23"
+    assert list(tmp_path.iterdir()) == [config]
 
 
 def test_jit_compile_records_atrace_and_reports(compile_adapter_module, tmpdir, capsys):
@@ -1223,3 +1219,14 @@ def test_compile_result_carries_baked_for_device_obj(compile_adapter_module):
         {"kernel_obj_path": "/tmp/k.o", "kernel_source_path": "/tmp/k.cpp"},
     )
     assert out["baked"] is False
+
+
+def test_parse_compile_args_keeps_cv_core_limits_explicit(compile_adapter_module):
+    limited, _, _ = compile_adapter_module.prepare_compile_context(
+        ["--output_file=x.so", "--aic_num=5", "--aiv_num=7"], "device_obj", None
+    )
+    assert (limited.aic_num, limited.aiv_num) == (5, 7)
+    defaults, _, _ = compile_adapter_module.prepare_compile_context(
+        ["--output_file=x.so"], "all", None
+    )
+    assert (defaults.aic_num, defaults.aiv_num) == (0, 0)

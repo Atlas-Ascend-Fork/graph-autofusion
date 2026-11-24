@@ -652,8 +652,10 @@ Operator &Operator::SetInput(uint32_t dst_index, const Operator &src_oprt, uint3
   }
   std::string dst_name = operator_impl_->GetOpDescImpl()->GetInputNameByIndex(dst_index);
   if (dst_name.empty()) {
-    REPORT_INNER_ERR_MSG("E18888", "Set by dst_index:%u failed, dst_index is invalid.", dst_index);
-    GELOGE(af::FAILED, "[GetInputNameByIndex] by index:%u failed, dst_index is invalid.", dst_index);
+    REPORT_INNER_ERR_MSG("E18888", "Set by dst_index:%u failed, dst_index is invalid, valid range is [0, %zu).",
+                         dst_index, operator_impl_->GetInputsSize());
+    GELOGE(af::FAILED, "[GetInputNameByIndex] by index:%u failed, dst_index is invalid, valid range is [0, %zu).",
+           dst_index, operator_impl_->GetInputsSize());
     return *this;
   }
   return SetInput(dst_name.c_str(), src_oprt, src_index);
@@ -1290,7 +1292,7 @@ int32_t Operator::GetDynamicOutputNum(const char_t *name) const {
   GE_CHK_BOOL_EXEC(AttrUtils::GetInt(operator_impl_->GetOpDescImpl(), DYNAMIC_OUTPUT_TD_NUM(op_name), num),
                    REPORT_INNER_ERR_MSG("E18888", "get attr %s failed, op:%s.", op_name.c_str(),
                                         operator_impl_->GetOpDescImpl()->GetName().c_str());
-                   return num, "[Get][Init] %s failed", op_name.c_str());
+                   return num, "[Get][Int] %s failed", op_name.c_str());
   return num;
 }
 
@@ -1370,9 +1372,9 @@ graphStatus Operator::VerifyAll() {
     for (const int64_t &dim : ishape) {
       GE_CHK_BOOL_RET_STATUS(dim > 0, ge::GRAPH_FAILED,
                              "[Check][Param] operator input %s shape contains negative or zero dimension, "
-                             "node:%s, index:%d.",
+                             "node:%s, index:%d, dim:%ld, dim must be greater than 0.",
                              iname.c_str(), operator_impl_->GetOpDescImpl()->GetName().c_str(),
-                             operator_impl_->GetOpDescImpl()->GetInputIndexByName(iname));
+                             operator_impl_->GetOpDescImpl()->GetInputIndexByName(iname), dim);
     }
   }
   // Check all attributes defined
@@ -2985,8 +2987,9 @@ class GraphBuilderImpl {
           continue;
         }
         auto node_ptr = graph_->AddNode(op_impl->op_desc_);
-        GE_CHK_BOOL_EXEC(node_ptr != nullptr, REPORT_INNER_ERR_MSG("E18888", "add node failed.");
-                         return ge::GRAPH_FAILED, "[Add][Node] failed.");
+        GE_CHK_BOOL_EXEC(node_ptr != nullptr,
+                         REPORT_INNER_ERR_MSG("E18888", "add node %s failed.", op_impl->GetName().c_str());
+                         return ge::GRAPH_FAILED, "[Add][Node] failed, op name:%s.", op_impl->GetName().c_str());
         (void)(all_nodes_info_.insert(std::make_pair(op_impl, node_ptr)));
         (void)(stable_all_nodes_info_.insert(std::make_pair(op_impl, node_ptr)));
 
@@ -3242,7 +3245,7 @@ ComputeGraphPtr GraphUtilsEx::CreateGraphFromOperator(const std::string &name, c
   auto graph_builder_impl = GraphBuilderImpl(name);
   ComputeGraphPtr compute_graph = graph_builder_impl.BuildGraph(inputs);
   GE_CHK_BOOL_EXEC(compute_graph != nullptr, REPORT_INNER_ERR_MSG("E18888", "BuildGraph failed, as return nullptr.");
-                   return compute_graph, "[Build][Graph] Computer graph is nullptr");
+                   return compute_graph, "[Build][Graph] Compute graph is nullptr");
   compute_graph->SetAllNodesInfo(graph_builder_impl.GetAllNodesInfo());
   if (HasSameNameNode(compute_graph)) {
     GELOGW("[CreateGraph][Check] Nodes with same name exist in one compute graph is not allowed, graph_name: %s",

@@ -40,8 +40,8 @@ std::vector<std::unique_ptr<TmpBufDesc>> CalcExp2TmpSizeV2(const AscNode &node) 
   // 乘以存活节点系数之前，做一次32B对齐
   const Expression total_size = sym::Align(Symbol(data_type_size) * input_size, 32) * Symbol(max_live_node_cnt);
 
-  GELOGD("Node %s[%s] inputs are not all scalar or ub scalar, return size= %s.", node.GetTypePtr(), node.GetNamePtr(),
-         total_size.Str().get());
+  GELOGD("Node %s[%s] inputs are not all scalar or ub scalar, return size= %s bytes.", node.GetTypePtr(),
+         node.GetNamePtr(), total_size.Str().get());
   return GetTmpBuffer(total_size);
 }
 }  // namespace ascir

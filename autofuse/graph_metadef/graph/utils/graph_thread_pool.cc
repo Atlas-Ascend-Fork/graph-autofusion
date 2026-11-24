@@ -53,7 +53,7 @@ void GraphThreadPool::ThreadFunc(GraphThreadPool *const thread_pool) {
   if (thread_pool == nullptr) {
     return;
   }
-  GELOGI("Thread started success");
+  GELOGI("Thread started successfully");
   while (!thread_pool->is_stoped_) {
     std::function<void()> task;
     {

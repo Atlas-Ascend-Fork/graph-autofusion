@@ -591,8 +591,12 @@ std::string TilingLib::GenerateMatMulTilingCode(const CompileInfo &compile_info,
   if (device_id_iter != compile_info.extra_info.end()) {
     code_ss << "compile_info.device_id = \"" << device_id_iter->second << "\";\n";
   }
-  code_ss << "compile_info.aicore_num = " << compile_info.aicore_num << ";\n";
-  code_ss << "compile_info.aiv_num = " << compile_info.aiv_num << ";\n";
+  code_ss << "uint32_t platform_aic = 0U;\nuint32_t platform_aiv = 0U;\n";
+  code_ss << "if (!GetCubePlatformCoreLimits(compile_info, platform_aic, platform_aiv) ||\n"
+             "    !NormalizeCvCoreLimit(cv_aic_num, cv_aiv_num, platform_aic, platform_aiv)) {\n"
+             "  return false;\n}\n";
+  code_ss << "compile_info.aicore_num = cv_aic_num;\n";
+  code_ss << "compile_info.aiv_num = cv_aiv_num;\n";
   code_ss << "compile_info.op_kernel_lib = \"" << compile_info.op_kernel_lib << "\";\n";
   code_ss << "compile_info.op_impl_mode = \"" << compile_info.op_impl_mode << "\";\n\n";
 
@@ -668,10 +672,12 @@ std::string TilingLib::ProcessCubeKernelTilingFromFusedResult(const ascir::Fused
 std::map<std::string, std::string> TilingLib::GenerateCVFusionStatic(
     const ::ascir::FusedScheduledResult &fused_schedule_result,
     const ascir::FusedScheduledResult &elemwise_schedule_result, const std::map<std::string, std::string> &shape_info,
-    const std::string &pgo_dir, const std::string &core_num) const {
+    const std::string &pgo_dir, const std::string &core_num, uint32_t aicore_num) const {
   std::stringstream ss;
   AppendCvUbStageSizeSelection(fused_schedule_result, elemwise_schedule_result, ss);
-  ss << TilingFuncDef(fused_schedule_result, elemwise_schedule_result, shape_info, pgo_dir, core_num) << std::endl;
+  AppendCvCoreLimitHelperDefs(ss, fused_schedule_result);
+  ss << TilingFuncDef(fused_schedule_result, elemwise_schedule_result, shape_info, pgo_dir, core_num, aicore_num)
+     << std::endl;
   ss << TilingData("Autofuse").GenerateConst(elemwise_schedule_result, false) << std::endl;
 
   const bool cv_broadcast = ascir::HasCvBroadcast(fused_schedule_result);
@@ -700,7 +706,7 @@ extern "C" bool IsCVSafetyBlockIdxScheduled(int64_t tiling_key) {
 std::map<std::string, std::string> TilingLib::GenerateCVFusionDynamic(
     const ascir::FusedScheduledResult &fused_schedule_result,
     const ascir::FusedScheduledResult &elemwise_schedule_result, const std::map<std::string, std::string> &shape_info,
-    const std::string &pgo_dir, const std::string &core_num) const {
+    const std::string &pgo_dir, const std::string &core_num, uint32_t aicore_num) const {
   std::stringstream ss;
   std::stringstream call_cube_tiling;
   std::stringstream shape_symbol;
@@ -713,10 +719,12 @@ std::map<std::string, std::string> TilingLib::GenerateCVFusionDynamic(
       }
     }
   }
-  shape_symbol << "int64_t &ws_size, uint32_t &cube_block_dim, int64_t &tiling_key, uint32_t &basem, uint32_t &basen, "
+  shape_symbol << "uint32_t &cv_aic_num, uint32_t &cv_aiv_num, int64_t &ws_size, uint32_t &cube_block_dim, int64_t "
+                  "&tiling_key, uint32_t &basem, uint32_t &basen, "
                   "CVAutofuseTilingData *tiling_data";
   call_cube_tiling << "using namespace ge::autofuse;" << std::endl;
   AppendCvBaseAlignHelperDefs(call_cube_tiling);
+  AppendCvCoreLimitHelperDefs(call_cube_tiling, fused_schedule_result);
   MatMulCubeInfo cube_info;
   GE_ASSERT_SUCCESS(ExtractMatMulCubeInfoFromFusedResult(fused_schedule_result, cube_info),
                     "[Extract][MatMulCubeInfo]Failed to extract MatMul cube info from FusedScheduledResult");
@@ -729,6 +737,7 @@ std::map<std::string, std::string> TilingLib::GenerateCVFusionDynamic(
   call_cube_tiling << "std::vector<uint8_t> g_matmul_tiling_bytes;\n\n";
 
   call_cube_tiling << "extern \"C\" bool CallCubeTiling(" << shape_symbol.str() << ") {" << std::endl;
+  call_cube_tiling << "static std::mutex cube_tiling_mutex;\nstd::lock_guard<std::mutex> lock(cube_tiling_mutex);\n";
   call_cube_tiling << ProcessCubeKernelTilingFromFusedResult(fused_schedule_result) << std::endl;
   call_cube_tiling << "return true;" << std::endl;
   call_cube_tiling << "}" << std::endl;
@@ -736,7 +745,8 @@ std::map<std::string, std::string> TilingLib::GenerateCVFusionDynamic(
 
   AppendCvUbFusionStageSizeName(elemwise_schedule_result, ss);
   AppendCvUbStageSizeSelection(fused_schedule_result, elemwise_schedule_result, ss);
-  ss << TilingFuncDef(fused_schedule_result, elemwise_schedule_result, shape_info, pgo_dir, core_num) << std::endl;
+  ss << TilingFuncDef(fused_schedule_result, elemwise_schedule_result, shape_info, pgo_dir, core_num, aicore_num)
+     << std::endl;
 
   std::map<std::string, std::string> result;
   result[kTilingDefAndConstIdentify] = ss.str();

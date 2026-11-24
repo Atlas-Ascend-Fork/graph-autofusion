@@ -951,8 +951,9 @@ bool OnnxUtils::DecodeNodeLink(const std::vector<onnx::NodeProto> &node_proto_ve
 
 void OnnxUtils::DecodeAttribute(const af::onnx::AttributeProto &attr_proto, std::vector<std::string> &strings) {
   if (attr_proto.type() != af::onnx::AttributeProto_AttributeType_STRINGS) {
-    REPORT_INNER_ERR_MSG("E18888", "Attribute %s call wrong decode attribute function", attr_proto.name().c_str());
-    GELOGE(GRAPH_FAILED, "[Check][Param] Attribute %s call wrong decode attribute function", attr_proto.name().c_str());
+    REPORT_INNER_ERR_MSG("E18888", "Attribute %s calls the wrong decode attribute function", attr_proto.name().c_str());
+    GELOGE(GRAPH_FAILED, "[Check][Param] Attribute %s calls the wrong decode attribute function",
+           attr_proto.name().c_str());
     return;
   }
   for (int32_t i = 0; i < attr_proto.strings_size(); i++) {
@@ -962,8 +963,9 @@ void OnnxUtils::DecodeAttribute(const af::onnx::AttributeProto &attr_proto, std:
 
 void OnnxUtils::DecodeAttribute(const af::onnx::AttributeProto &attr_proto, std::string &value) {
   if (attr_proto.type() != af::onnx::AttributeProto_AttributeType_STRING) {
-    REPORT_INNER_ERR_MSG("E18888", "Attribute %s call wrong decode attribute function", attr_proto.name().c_str());
-    GELOGE(GRAPH_FAILED, "[Check][Param] Attribute %s call wrong decode attribute function", attr_proto.name().c_str());
+    REPORT_INNER_ERR_MSG("E18888", "Attribute %s calls the wrong decode attribute function", attr_proto.name().c_str());
+    GELOGE(GRAPH_FAILED, "[Check][Param] Attribute %s calls the wrong decode attribute function",
+           attr_proto.name().c_str());
     return;
   }
   value = attr_proto.s();
@@ -971,8 +973,9 @@ void OnnxUtils::DecodeAttribute(const af::onnx::AttributeProto &attr_proto, std:
 
 void OnnxUtils::DecodeAttribute(const af::onnx::AttributeProto &attr_proto, std::vector<int64_t> &ints) {
   if (attr_proto.type() != af::onnx::AttributeProto_AttributeType_INTS) {
-    REPORT_INNER_ERR_MSG("E18888", "Attribute %s call wrong decode attribute function", attr_proto.name().c_str());
-    GELOGE(GRAPH_FAILED, "[Check][Param] Attribute %s call wrong decode attribute function", attr_proto.name().c_str());
+    REPORT_INNER_ERR_MSG("E18888", "Attribute %s calls the wrong decode attribute function", attr_proto.name().c_str());
+    GELOGE(GRAPH_FAILED, "[Check][Param] Attribute %s calls the wrong decode attribute function",
+           attr_proto.name().c_str());
     return;
   }
   for (int32_t i = 0; i < attr_proto.ints_size(); i++) {
@@ -982,8 +985,9 @@ void OnnxUtils::DecodeAttribute(const af::onnx::AttributeProto &attr_proto, std:
 
 void OnnxUtils::DecodeAttribute(const af::onnx::AttributeProto &attr_proto, int64_t &value) {
   if (attr_proto.type() != af::onnx::AttributeProto_AttributeType_INT) {
-    REPORT_INNER_ERR_MSG("E18888", "Attribute %s call wrong decode attribute function", attr_proto.name().c_str());
-    GELOGE(GRAPH_FAILED, "[Check][Param] Attribute %s call wrong decode attribute function", attr_proto.name().c_str());
+    REPORT_INNER_ERR_MSG("E18888", "Attribute %s calls the wrong decode attribute function", attr_proto.name().c_str());
+    GELOGE(GRAPH_FAILED, "[Check][Param] Attribute %s calls the wrong decode attribute function",
+           attr_proto.name().c_str());
     return;
   }
   value = attr_proto.i();
@@ -994,9 +998,9 @@ void OnnxUtils::DecodeNodeAttributeForOpInDesc(const onnx::AttributeProto &attr_
                                                const OpDescPtr &op_desc) {
   const auto tensor_desc = op_desc->MutableInputDesc(static_cast<uint32_t>(idx));
   if ((tensor_desc == nullptr) || (tensor_desc->impl_ == nullptr)) {
-    REPORT_INNER_ERR_MSG("E18888", "MutableInputDesc index:%d return nullptr, op:%s, attr:%s", idx,
+    REPORT_INNER_ERR_MSG("E18888", "MutableInputDesc index:%d returns nullptr, op:%s, attr:%s", idx,
                          op_desc->GetName().c_str(), attr_name_for_input_desc.c_str());
-    GELOGE(GRAPH_FAILED, "[Invoke][MutableInputDesc] index:%d return nullptr, op name %s, attr name %s", idx,
+    GELOGE(GRAPH_FAILED, "[Invoke][MutableInputDesc] index:%d returns nullptr, op name %s, attr name %s", idx,
            op_desc->GetName().c_str(), attr_name_for_input_desc.c_str());
     return;
   }
@@ -1037,9 +1041,9 @@ void OnnxUtils::DecodeNodeAttributeForOpOutDesc(const onnx::AttributeProto &attr
                                                 const OpDescPtr &op_desc) {
   const auto tensor_desc = op_desc->MutableOutputDesc(static_cast<uint32_t>(index));
   if ((tensor_desc == nullptr) || (tensor_desc->impl_ == nullptr)) {
-    REPORT_INNER_ERR_MSG("E18888", "MutableOutputDesc index:%d return nullptr, op:%s, attr:%s", index,
+    REPORT_INNER_ERR_MSG("E18888", "MutableOutputDesc index:%d returns nullptr, op:%s, attr:%s", index,
                          op_desc->GetName().c_str(), attr_name_for_output_desc.c_str());
-    GELOGE(GRAPH_FAILED, "[Invoke][MutableOutputDesc] index:%d return nullptr, op name %s, attr name %s", index,
+    GELOGE(GRAPH_FAILED, "[Invoke][MutableOutputDesc] index:%d returns nullptr, op name %s, attr name %s", index,
            op_desc->GetName().c_str(), attr_name_for_output_desc.c_str());
     return;
   }
@@ -1228,7 +1232,7 @@ bool OnnxUtils::DecodeGraph(const int32_t recursion_depth, const onnx::GraphProt
 
   graph = ComGraphMakeShared<ComputeGraph>(graph_proto.name());
   GE_CHK_BOOL_EXEC(graph != nullptr, REPORT_INNER_ERR_MSG("E18888", "create ComputeGraph failed.");
-                   return false, "[Create][ComputeGraph]ComputeGraph make shared failed");
+                   return false, "[Create][ComputeGraph] ComputeGraph make shared failed");
   /// 1. Decode all nodes first, node should include input
   /// and output nodes and nodes which represent sub graphs
   std::map<std::string, NodePtr> node_map;

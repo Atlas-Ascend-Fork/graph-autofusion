@@ -19,7 +19,7 @@ std::vector<std::unique_ptr<TmpBufDesc>> CalcScaledModifiedBesselK1TmpSizeV2(con
   auto node_inputs = node.inputs;
   GE_ASSERT_TRUE(node_inputs.Size() > 0, "Node %s[%s] inputs size is 0.", node.GetTypePtr(), node.GetNamePtr());
   uint32_t calc_tmp_buf = SCALED_MODIFIED_BESSEL_K1_ONE_REPEAT_BYTE_SIZE * SCALED_MODIFIED_BESSEL_K1_FLOAT_CALC_PROC;
-  GELOGD("Node %s[%s] temp buffer size: %u", node.GetTypePtr(), node.GetNamePtr(), calc_tmp_buf);
+  GELOGD("Node %s[%s] temp buffer size: %u bytes", node.GetTypePtr(), node.GetNamePtr(), calc_tmp_buf);
   Expression tmp_size = Symbol(calc_tmp_buf);
   TmpBufDesc desc = {tmp_size, -1};
   std::vector<std::unique_ptr<TmpBufDesc>> k1_tmp_buf_descs;

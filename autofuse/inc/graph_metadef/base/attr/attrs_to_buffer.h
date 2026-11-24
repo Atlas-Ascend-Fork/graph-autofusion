@@ -226,7 +226,11 @@ inline bool AppendAttr(const ge::AnyValue &attr, std::vector<std::vector<uint8_t
     case ge::AnyValue::VT_LIST_LIST_INT:
       return AppendVectorVectorAttr<int64_t>(attr, attrs);
     default:
-      GELOGE(af::FAILED, "Does not support the attr type now, attr type %d", attr.GetValueType());
+      GELOGE(af::FAILED,
+             "Does not support the attr type now, attr type %d, supported types: VT_FLOAT, VT_BOOL, VT_INT, "
+             "VT_DATA_TYPE, VT_STRING, VT_LIST_BOOL, VT_LIST_FLOAT, VT_LIST_INT, VT_LIST_DATA_TYPE, VT_LIST_STRING, "
+             "VT_LIST_LIST_FLOAT, VT_LIST_LIST_INT",
+             attr.GetValueType());
       return false;
   }
 }

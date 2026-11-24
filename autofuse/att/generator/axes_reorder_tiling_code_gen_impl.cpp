@@ -33,7 +33,7 @@ bool IsEnableEqualOrderTiling(const ModelInfo &model_info) {
   for (const auto &pair : order_to_axes) {
     const std::vector<std::string> &axes = pair.second;
     size_t count = axes.size();
-    GE_WARN_ASSERT(
+    GE_ASSERT(
         count <= kMaxEqualOrderAxesCount,
         "[DFX]Equal order tiling algorithm does not support more than %d split axes with same order value, count[%zu]",
         kMaxEqualOrderAxesCount, count);

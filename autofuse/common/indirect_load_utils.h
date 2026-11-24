@@ -565,6 +565,16 @@ std::vector<af::AscNodePtr> GetAllIndirectLoadNodes(const af::AscGraph &graph);
 // 链不进入 SIMT 计划（作为普通向量代码在全部 SIMT invocation 之后执行）。
 af::Status SetSimtGroupMember(const af::AscNodePtr &node);
 bool IsSimtGroupMember(const af::AscNodePtr &node);
+// 单 gather 边界化融合标记（调度期两阶段判定决策，决策点总写以自愈陈旧值）：输出链含
+// 不可标量发射算子（如 pow/fmod/remainder，无 V2 标量实现）时置位——SIMT 计划仅保留
+// index 链（组员空链同构），IL 只执行 gather，value 逐 tile 写 UB 局部目标（value
+// tensor），输出链作为普通 VF 代码在同一循环迭代内消费。消费方：GetTemplateBehavior
+// 的行为复位（发现性/提升排除，与 post-Reduce 同一机制）、BuildSimtLoweringMetadata
+// 的空链合成、codegen 的逐 tile 调用形态与 local target 分配跳过。
+af::Status SetSimtBoundaryFusion(const af::AscNodePtr &node, bool enabled);
+bool IsSimtBoundaryFusion(const af::AscNodePtr &node);
+// [列分块] 边界化列分块的单次调用 inner 跨度（未标记或非法时返回 0）。
+int64_t GetSimtColumnTileInner(const af::AscNodePtr &node);
 // seq-V1 融合发射标记：组的 primary IL 携带该标记时，codegen 生成单个 fused invocation
 // （IndirectLoadSimtFused，逐路串行 load + 寄存器归并）；非 primary 成员跳过发射。
 af::Status SetSimtFusedPrimary(const af::AscNodePtr &node, const std::vector<std::string> &member_names);

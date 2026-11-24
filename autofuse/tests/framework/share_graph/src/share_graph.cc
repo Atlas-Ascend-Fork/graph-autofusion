@@ -13346,39 +13346,39 @@ af::ComputeGraphPtr ShareGraph::AsinhBf16FusedGraph(size_t dims_size) {
   return compute_graph;
 }
 
-static void CreateAtanBf16AscGraph(af::AscGraph &graph, size_t dims_size) {
+static void CreateAtanAscGraph(af::AscGraph &graph, size_t dims_size, af::DataType dtype) {
   // Data 节点
   af::ascir_op::Data x("data0", graph);
   x.ir_attr.SetIndex(0);
-  x.y.dtype = af::DataType::DT_BF16;
+  x.y.dtype = dtype;
 
   // Load 节点
   af::ascir_op::Load xLocal("load0");
   xLocal.x = x.y;
-  xLocal.y.dtype = af::DataType::DT_BF16;
+  xLocal.y.dtype = dtype;
 
   // Atan 操作
   af::ascir_op::Atan atan("atan");
   atan.x = xLocal.y;
-  atan.y.dtype = af::DataType::DT_BF16;
+  atan.y.dtype = dtype;
 
   // Store 节点
   af::ascir_op::Store x_out("store");
   x_out.x = atan.y;
-  x_out.y.dtype = af::DataType::DT_BF16;
+  x_out.y.dtype = dtype;
 
   // Output 节点
   af::ascir_op::Output y("output");
   y.x = x_out.y;
   y.ir_attr.SetIndex(0);
-  y.y.dtype = af::DataType::DT_BF16;
+  y.y.dtype = dtype;
 
   // 设置维度信息
   ConstructVVAscGraphAxisInfo(graph, dims_size);
 }
 
-af::ComputeGraphPtr ShareGraph::AtanBf16FusedGraph(size_t dims_size) {
-  auto builder = GraphBuilder("atan_bf16_test");
+static af::ComputeGraphPtr AtanFusedGraphByDtype(size_t dims_size, af::DataType dtype, const std::string &test_name) {
+  auto builder = GraphBuilder(test_name);
   auto data0 = builder.AddNode("data0", "Data", 0, 1);
   af::AttrUtils::SetInt(data0->GetOpDescBarePtr(), "_parent_node_index", 0);
 
@@ -13392,13 +13392,21 @@ af::ComputeGraphPtr ShareGraph::AtanBf16FusedGraph(size_t dims_size) {
     return nullptr;
   }
   auto ascbc_node = compute_graph->FindNode("ascbc");
-  af::AscGraph sub_graph("atan_bf16_test");
-  CreateAtanBf16AscGraph(sub_graph, dims_size);
+  af::AscGraph sub_graph(test_name.c_str());
+  CreateAtanAscGraph(sub_graph, dims_size, dtype);
 
   std::string sub_graph_str;
   af::AscGraphUtils::SerializeToReadable(sub_graph, sub_graph_str);
   af::AttrUtils::SetStr(ascbc_node->GetOpDescBarePtr(), "ascgraph", sub_graph_str);
   return compute_graph;
+}
+
+af::ComputeGraphPtr ShareGraph::AtanBf16FusedGraph(size_t dims_size) {
+  return AtanFusedGraphByDtype(dims_size, af::DataType::DT_BF16, "atan_bf16_test");
+}
+
+af::ComputeGraphPtr ShareGraph::AtanFp16FusedGraph(size_t dims_size) {
+  return AtanFusedGraphByDtype(dims_size, af::DataType::DT_FLOAT16, "atan_fp16_test");
 }
 
 static void CreateAtanhBf16AscGraph(af::AscGraph &graph, size_t dims_size) {

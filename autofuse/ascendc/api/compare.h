@@ -49,7 +49,7 @@ inline __aicore__ void CompareScalarExtend(const AscendC::LocalTensor<T> &dst,  
                                            const uint32_t cal_cnt,                     // total numbers
                                            AscendC::LocalTensor<uint8_t> &tmp_buf) {
   if (mode != CMPMODE::EQ && mode != CMPMODE::NE) {
-    ASSERT(false && "CompareScalarExtend mode only support EQ/NE when DataType is int64.");
+    ASSERT(false && "CompareScalarExtend mode only supports EQ/NE when DataType is int64.");
   }
 
   // ------ Step1: duplicate tensors -----
@@ -565,7 +565,7 @@ inline __aicore__ void CompareExtend(const LocalTensor<OutT> &dst, const LocalTe
   if constexpr (AscendC::IsSameType<InT, int32_t>::value && AscendC::IsSameType<OutT, uint8_t>::value) {
     if (mode != CMPMODE::GT && mode != CMPMODE::GE && mode != CMPMODE::LE && mode != CMPMODE::LT &&
         mode != CMPMODE::NE && mode != CMPMODE::EQ) {
-      ASSERT(false && "CompareExtend mode only support EQ/GT/GE/LE/LT/NE when DataType is int32.");
+      ASSERT(false && "CompareExtend mode only supports EQ/GT/GE/LE/LT/NE when DataType is int32.");
     }
     if (mode == CMPMODE::GT || mode == CMPMODE::GE || mode == CMPMODE::LE || mode == CMPMODE::LT ||
         mode == CMPMODE::NE) {
@@ -904,7 +904,7 @@ inline __aicore__ void CompareExtend(const AscendC::LocalTensor<T> &dst,        
                                      const uint32_t cal_cnt,                     // total numbers
                                      AscendC::LocalTensor<uint8_t> &tmp_buf) {
   if (mode != CMPMODE::EQ && mode != CMPMODE::NE && mode != CMPMODE::GT && mode != CMPMODE::GE && mode != CMPMODE::LE) {
-    ASSERT(false && "CompareExtend mode only support EQ/NE/GT/GE/LE when DataType is int64.");
+    ASSERT(false && "CompareExtend mode only supports EQ/NE/GT/GE/LE when DataType is int64.");
   }
 
   if (mode == CMPMODE::EQ || mode == CMPMODE::NE) {

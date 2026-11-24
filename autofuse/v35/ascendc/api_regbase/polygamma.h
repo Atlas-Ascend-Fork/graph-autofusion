@@ -233,7 +233,8 @@ __aicore__ inline void PolyGammaExtend(const LocalTensor<T> &dstTensor, const Lo
     return;
   }
 
-  ASCENDC_ASSERT((n >= 0), { KERNEL_LOG(KERNEL_ERROR, "PolyGamma only supports non-negative integer order n"); });
+  ASCENDC_ASSERT((n >= 0),
+                 { KERNEL_LOG(KERNEL_ERROR, "PolyGamma only supports non-negative integer order n, got n=%d", n); });
 
   if (n == 0) {
     // n=0: Digamma

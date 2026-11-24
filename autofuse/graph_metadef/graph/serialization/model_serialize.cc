@@ -74,7 +74,7 @@ af::Buffer AllocBufferByModelDef(const af::proto::ModelDef &model_def) {
   Buffer buffer(model_def.ByteSize());
 #endif
   GE_ASSERT_TRUE(buffer.GetSize() != 0UL, "get size failed");
-  GE_ASSERT_TRUE((buffer.GetData() != nullptr), "get size failed");
+  GE_ASSERT_TRUE((buffer.GetData() != nullptr), "buffer data is nullptr");
   return buffer;
 }
 }  // namespace
@@ -339,7 +339,7 @@ GE_FUNC_DEV_VISIBILITY GE_FUNC_HOST_VISIBILITY bool ModelSerializeImp::Serialize
   for (const auto &output : graph->GetGraphOutNodesInfo()) {
     if (output.first != nullptr) {
       graph_proto->add_output(output.first->GetName() + ":" + std::to_string(output.second));
-      GELOGI("Add output to graph proto, node name:%s, index:%d", output.first->GetName().c_str(), output.second);
+      GELOGD("Add output to graph proto, node name:%s, index:%d", output.first->GetName().c_str(), output.second);
     }
   }
   // ComputeGraph中的属性序列化
@@ -1076,7 +1076,7 @@ Status ModelSerialize::SerializeModel(const Model &model, const bool not_dump_al
 bool ModelSerializeImp::LoadWeightFromFile(const std::string &file_path, const int64_t &length,
                                            std::string &weight) const {
   if (length <= 0L) {
-    GELOGE(GRAPH_FAILED, "Value length is less than 0.");
+    GELOGE(GRAPH_FAILED, "Value length %ld is invalid, it must be greater than 0.", length);
     return false;
   }
   // Issue #275: upper bound check to prevent OOM from malformed model files
@@ -1087,7 +1087,7 @@ bool ModelSerializeImp::LoadWeightFromFile(const std::string &file_path, const i
   }
   auto bin_data = std::unique_ptr<char_t[]>(new (std::nothrow) char_t[length]);
   if (bin_data == nullptr) {
-    GELOGE(FAILED, "[Allocate][Mem]Allocate mem failed");
+    GELOGE(FAILED, "[Allocate][Mem] Allocate mem failed, size:%ld", length);
     return false;
   }
   std::string air_directory;
@@ -1101,7 +1101,7 @@ bool ModelSerializeImp::LoadWeightFromFile(const std::string &file_path, const i
   }
   size_t data_len = static_cast<size_t>(length);
   if (GetBinFromFile(weight_path, static_cast<char_t *>(bin_data.get()), data_len) != GRAPH_SUCCESS) {
-    GELOGE(GRAPH_FAILED, "Get bin from file failed.");
+    GELOGE(GRAPH_FAILED, "Get bin from file [%s] failed.", weight_path.c_str());
     return false;
   }
   weight = std::string(bin_data.get(), length);
@@ -1154,7 +1154,7 @@ bool ModelSerialize::UnserializeModel(const uint8_t *const data, const size_t le
 
   auto &model_proto = *model_proto_ptr;
   if (!ReadProtoFromBinaryFile(data, len, &model_proto)) {
-    GELOGE(GRAPH_FAILED, "[Read][Proto] from binaryfile failed.");
+    GELOGE(GRAPH_FAILED, "[Read][Proto] from binary file failed.");
     return false;
   }
   ModelSerializeImp model_imp;
@@ -1180,7 +1180,7 @@ bool ModelSerialize::UnserializeModel(af::proto::ModelDef &model_def, Model &mod
   model_imp.SetAirModelPath(path);
   model_imp.SetProtobufOwner(model_def_ptr);
   if (!model_imp.UnserializeModel(model, *model_def_ptr)) {
-    GELOGE(GRAPH_FAILED, "[Unserialize][Model] fail");
+    GELOGE(GRAPH_FAILED, "[Unserialize][Model] failed");
     return false;
   }
   return model.IsValid();

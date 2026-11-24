@@ -81,14 +81,18 @@ struct ExtractIndexTypeBySize<sizeof(uint64_t)> {
 
 __aicore__ inline void DstShapeCheck(const uint32_t *dstShape, uint32_t dim) {
   for (uint16_t i = 0; i < dim; ++i) {
-    ASCENDC_ASSERT((dstShape[i] <= U16_MAX), { KERNEL_LOG(KERNEL_ERROR, "shape should be less than uint16 max"); });
+    ASCENDC_ASSERT((dstShape[i] <= U16_MAX), {
+      KERNEL_LOG(KERNEL_ERROR, "shape should be less than uint16 max, got shape[%u]=%u", i, dstShape[i]);
+    });
   }
 }
 
 __aicore__ inline void ShapeCheck(uint32_t *tillingShape, const uint32_t *shape, uint32_t rank) {
   for (uint16_t i = 0; i < rank; ++i) {
-    ASCENDC_ASSERT((shape[i] == tillingShape[i]),
-                   { KERNEL_LOG(KERNEL_ERROR, "Tiling shape should be equal to shape!"); });
+    ASCENDC_ASSERT((shape[i] == tillingShape[i]), {
+      KERNEL_LOG(KERNEL_ERROR, "Tiling shape should be equal to shape, shape[%u]=%u, tillingShape[%u]=%u", i, shape[i],
+                 i, tillingShape[i]);
+    });
   }
 }
 }  // namespace BroadcastInternal

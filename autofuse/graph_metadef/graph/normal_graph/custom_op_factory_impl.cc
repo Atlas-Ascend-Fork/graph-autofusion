@@ -17,7 +17,7 @@ namespace af {
 Status CustomOpFactoryImpl::RegisterCustomOpCreator(const AscendString &op_type, const BaseOpCreator &op_creator) {
   const auto it = custom_op_creators_.find(op_type);
   if (it != custom_op_creators_.cend()) {
-    GELOGW("[CUSTOM OP] custom op creator for %s already exist.", op_type.GetString());
+    GELOGW("[CUSTOM OP] custom op creator for %s already exists.", op_type.GetString());
     return GRAPH_FAILED;
   }
   (void)custom_op_creators_.emplace(op_type, op_creator);

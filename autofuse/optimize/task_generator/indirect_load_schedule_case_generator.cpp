@@ -58,6 +58,7 @@ using indirect_load_detail::CollectRewrittenBoundaries;
 using indirect_load_detail::AnalyzeRewrittenGraph;
 using indirect_load_detail::ApplyTemplatePathLayouts;
 using indirect_load_detail::CollectRewrittenRegion;
+using indirect_load_detail::CollectSimtBackwardRegion;
 
 // —— S3 自 indirect_load_detail 引入 ——
 using indirect_load_detail::AnnotateSimtGroupFanoutBranches;
@@ -68,6 +69,7 @@ using indirect_load_detail::BuildSkPartitionOrder;
 using indirect_load_detail::CollectIndirectLoadEntry;
 using indirect_load_detail::CopyBoundaryTensorAttr;
 using indirect_load_detail::CopyWorkspaceTensorAttr;
+using indirect_load_detail::FindUnemittableSimtEvaluatorNode;
 using indirect_load_detail::GenerateGroupCandidates;
 using indirect_load_detail::IndirectLoadGroup;
 using indirect_load_detail::InsertWorkspaceBoundary;
@@ -77,7 +79,9 @@ using indirect_load_detail::PartitionNormReduceBoundaries;
 using indirect_load_detail::PartitionSkGraph;
 using indirect_load_detail::PlanSimtEmission;
 using indirect_load_detail::PlanSimtFusedEmission;
+using indirect_load_detail::SeedGroupMemberValueVectorizedViews;
 using indirect_load_detail::SimtEmissionPlan;
+using indirect_load_detail::SplitBoundaryFusionColumnTile;
 
 // —— S1 自 indirect_load_detail 引入 ——
 using indirect_load_detail::CollectGroupAccessStats;
@@ -337,6 +341,79 @@ af::Status ApplyGraphPass(af::AscGraph &graph, const af::AscNodePtr &indirect_lo
   }
   GE_ASSERT_SUCCESS(CompleteInputDataTensorAttrs(analysis));
 
+  // [边界化两阶段判定] SIMT 求值器把 IL 前向链整体折叠为标量表达式，链上出现无 V2
+  // 标量实现的算子（pow/fmod/remainder 等，按 V2 能力查询判定，不设算子白名单）时
+  // 发射期必然断言失败——降级为边界化形态：SIMT 只做 gather，value 逐 tile 写 UB
+  // 局部目标（组员空链同构），输出链交普通 VF 代码在同一循环迭代内消费。
+  // 判定对象为“求值器消费链”：无 post-Reduce 时即整条输出链；有 post-Reduce 时为其
+  // Reduce 之前的 producer 链（Reduce 及其后置链本就由普通调度执行，不进入求值器）。
+  // 判定先于区域校验与角色注解执行：融合区域（index_region）同步收缩为 index 链，
+  // ValidateSimtTemplateRegion 的“求值器消费集全部可发射”校验收缩为 index 链校验
+  // （index 链无法退出求值器——index 计算必须折叠，不可发射时直接拒绝候选），
+  // AnnotateSimtTemplateRoles/AnnotateSimtFanoutBranches 在收缩后的区域上工作（输出链
+  // 不再获得求值器角色）。形状保持 Norm（Softmax）的输入视图播种与常规 Reduce 不同，
+  // 维持既有路径不参与本判定；SK 分段重定向形态（output workspace 边界）同理。
+  const bool is_shape_preserving_norm =
+      analysis.post_reduce != nullptr && af::ops::IsOps<af::ascir_op::Softmax>(analysis.post_reduce);
+  bool boundary_fusion = false;
+  if (template_id == ascir::TemplateId::kIndirectLoadSimt && !is_shape_preserving_norm &&
+      !ascir::IsSkSegmentedSimt(*indirect_load) && analysis.output_store != nullptr) {
+    // output_chain：从 Store 回溯的整条输出链，用于把输出侧闭包移出 SIMT 求值器；
+    // evaluator_chain：当前形态下真正进入标量求值器的节点集，用于可发射性判定。
+    NodeSet output_chain;
+    NodeSet evaluator_chain;
+    bool chain_ready = CollectSimtBackwardRegion({analysis.output_store}, indirect_load, output_chain);
+    if (chain_ready) {
+      if (analysis.post_reduce == nullptr) {
+        evaluator_chain = output_chain;
+      } else {
+        const af::AscNodePtr local_producer =
+            ascgen_utils::indirect_load::GetSimtPostReduceLocalProducer(indirect_load);
+        chain_ready =
+            local_producer != nullptr && CollectSimtBackwardRegion({local_producer}, indirect_load, evaluator_chain);
+      }
+    }
+    if (chain_ready) {
+      const auto unemittable = FindUnemittableSimtEvaluatorNode(graph, evaluator_chain);
+      if (unemittable != nullptr) {
+        const size_t output_rank = indirect_load->outputs()[0]->attr.axis.size();
+        // 无 post-Reduce 时边界化轴布局要求 outer/inner 分离（boundary=rank-1）：rank-1
+        // 输出无行结构可分离，逐 tile 局部目标形态退化，拒绝候选回退其他模板。有
+        // post-Reduce 时 boundary 取 first_reduce，由 Reduce 布局提供行/归约段分离。
+        if (analysis.post_reduce == nullptr && output_rank <= 1UL) {
+          is_candidate_legal = false;
+          GELOGI(
+              "[IndirectLoad] Reject SIMT boundary fusion candidate: rank-%zu output has no separable row axis, "
+              "node[%s].",
+              output_rank, indirect_load->GetNamePtr());
+          return af::SUCCESS;
+        }
+        boundary_fusion = true;
+        GELOGI(
+            "[IndirectLoad] SIMT evaluator chain node[%s] has no scalar emission; fall back to boundary fusion "
+            "(gather-only SIMT), post_reduce[%s], node[%s].",
+            unemittable->GetNamePtr(), analysis.post_reduce == nullptr ? "none" : analysis.post_reduce->GetNamePtr(),
+            indirect_load->GetNamePtr());
+        // 融合区域收缩：输出链闭包（含汇入链中的 side-input）退出 SIMT 求值器，
+        // index_region 收缩为 index 链（与多 gather 组员计划同构）。有 post-Reduce 时
+        // 一并退出的是整条输出链（含 Reduce 及其后置链，均转普通调度执行）。
+        analysis.index_region.erase(std::remove_if(analysis.index_region.begin(), analysis.index_region.end(),
+                                                   [&output_chain](const af::AscNodePtr &node) {
+                                                     return output_chain.count(node.get()) != 0UL;
+                                                   }),
+                                    analysis.index_region.end());
+      }
+    }
+  }
+  if (boundary_fusion && analysis.output_store != nullptr && analysis.post_reduce == nullptr) {
+    // [边界化列分块] 无 post-Reduce 时下游 VF 链 tile 块 = 行 × 全列会超平台 UB，
+    // 拆分列轴收敛块大小。有 post-Reduce 时 tile 已由归约段（inner=归约段×后缀）
+    // 界定，拆列会改变 Reduce 的输入视图，保持原布局。
+    GE_ASSERT_SUCCESS(
+        SplitBoundaryFusionColumnTile(graph, indirect_load, analysis.output_store, analysis.index_region));
+  }
+  GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::SetSimtBoundaryFusion(indirect_load, boundary_fusion));
+
   // The SIMT template overwrites this boundary from its post-reduce layout; without a post Reduce the
   // full output rank is the boundary. The SIMD template does not use this value.
   size_t boundary = indirect_load->outputs()[0]->attr.axis.size();
@@ -350,6 +427,16 @@ af::Status ApplyGraphPass(af::AscGraph &graph, const af::AscNodePtr &indirect_lo
     GE_ASSERT_SUCCESS(AnnotateSimtScheduleRoles(graph, indirect_load, analysis));
   }
   GE_ASSERT_SUCCESS(NormalizeTemplateAxes(graph, indirect_load, template_id, analysis, boundary));
+  // [边界化视图播种] value tensor 的向量化视图按模板 vectorized 轴播种（与组员同构）：
+  // 行为复位使 preserves_vectorized_axis 失效，调度期通用 DeriveNodeVectorizedAxes 会
+  // 重算写入，播种提供调度前的中间态防护（actual_size/offset 表达式的量纲来源，
+  // CalcVectorizedElementCount 读该视图）。
+  if (ascgen_utils::indirect_load::IsSimtBoundaryFusion(indirect_load)) {
+    GE_ASSERT_SUCCESS(SeedGroupMemberValueVectorizedViews({indirect_load}, is_candidate_legal));
+    if (!is_candidate_legal) {
+      return af::SUCCESS;
+    }
+  }
   GE_ASSERT_SUCCESS(CompletePreservedVectorizedViews(graph));
   GE_ASSERT_SUCCESS(FinalizeTemplate(indirect_load, template_id));
   bool metadata_supported = false;

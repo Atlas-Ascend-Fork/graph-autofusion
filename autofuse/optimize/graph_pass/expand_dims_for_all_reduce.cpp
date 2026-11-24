@@ -46,7 +46,7 @@ Status ExpandDimsAtFirst(ascir::ImplGraph &owner_graph, const std::string &name,
   const auto src_axes = graph_attr->axis;  // copy
   std::vector<af::AxisPtr> new_axes;
   std::shared_ptr<af::Axis> const_axis = af::MakeShared<af::Axis>();
-  GE_CHECK_NOTNULL(const_axis, "create axis failed");
+  GE_CHECK_NOTNULL(const_axis, " create axis failed");
   const_axis->id = 0;
   const_axis->name = name;
   const_axis->type = af::Axis::kAxisTypeOriginal;
@@ -54,7 +54,7 @@ Status ExpandDimsAtFirst(ascir::ImplGraph &owner_graph, const std::string &name,
   new_axes.push_back(std::move(const_axis));
   for (const auto &src_axis : src_axes) {
     std::shared_ptr<af::Axis> new_axis = af::MakeShared<af::Axis>();
-    GE_CHECK_NOTNULL(new_axis, "create axis failed");
+    GE_CHECK_NOTNULL(new_axis, " create axis failed");
     new_axis->id = src_axis->id + 1;
     new_axis->name = src_axis->name;
     new_axis->type = src_axis->type;
@@ -97,10 +97,10 @@ Status ExpandDimsForAllReducePass::RunPass(af::AscGraph &graph) {
     for (const auto output_attr : node->outputs()) {
       output_attr->attr.axis = new_axis_ids;
       GE_ASSERT_TRUE(output_attr->attr.strides.size() == old_axis_ids.size(),
-                     "Expand dims for all reduce failed node:%s, Strides mismatches with reduce, cannot be modified.",
+                     "Expand dims for all reduce failed node:%s, Strides mismatch with reduce, cannot be modified.",
                      node->GetName().c_str());
       GE_ASSERT_TRUE(output_attr->attr.repeats.size() == old_axis_ids.size(),
-                     "Expand dims for all reduce failed node:%s, Repeats mismatches with reduce, cannot be modified.",
+                     "Expand dims for all reduce failed node:%s, Repeats mismatch with reduce, cannot be modified.",
                      node->GetName().c_str());
       if (output_attr->attr.strides[0UL] == 0) {
         output_attr->attr.strides.insert(output_attr->attr.strides.begin(), af::ops::One);

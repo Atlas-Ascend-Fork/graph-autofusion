@@ -1363,8 +1363,8 @@ class FrexpAscIrCodegenImplV2 : public AscIrCodegenV2 {
     GE_ASSERT_TRUE(!IsNodeHasScalarInput(node), "Node %s[%s] does not support scalar input", node.GetTypePtr(),
                    node.GetNamePtr());
     AscNodeOutputs node_outputs = node.outputs;
-    GE_ASSERT_TRUE(node_outputs().size() == 2U, "Node %s[%s] output tensor size is not equal with 2", node.GetTypePtr(),
-                   node.GetNamePtr());
+    GE_ASSERT_TRUE(node_outputs().size() == 2U, "Node %s[%s] output tensor size %zu is not equal to 2",
+                   node.GetTypePtr(), node.GetNamePtr(), node_outputs().size());
     GE_ASSERT_SUCCESS(ValidateShapeConsistencyWithOutput(node, 0U),
                       "Node %s[%s] check mantissa shape consistency failed", node.GetTypePtr(), node.GetNamePtr());
     GE_ASSERT_SUCCESS(ValidateShapeConsistencyWithOutput(node, 1U),
@@ -4475,7 +4475,7 @@ class AtanAscIrCodegenImplV2 : public SimtFloatUnaryAscIrCodegenImplV2 {
   }
   [[nodiscard]] std::pair<std::vector<ge::DataType>, std::vector<ge::DataType>> GetConversionDtype(
       const AscNode &node) override {
-    std::map<ge::DataType, ge::DataType> dtype_conversion_map = {{DT_BF16, DT_FLOAT}};
+    std::map<ge::DataType, ge::DataType> dtype_conversion_map = {{DT_BF16, DT_FLOAT}, {DT_FLOAT16, DT_FLOAT}};
     return GetConversionFromDtypeMap(node, dtype_conversion_map);
   }
   [[nodiscard]] std::vector<std::string> LoadApiHeaderFiles([[maybe_unused]] bool is_dynamic) const override {

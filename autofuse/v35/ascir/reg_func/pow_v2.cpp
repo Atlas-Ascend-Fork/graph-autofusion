@@ -38,8 +38,8 @@ std::vector<std::unique_ptr<TmpBufDesc>> CalcPowTmpSizeV2(const AscNode &node) {
       pow_scratch_size = POW_SCRATCH_SEG * FLOAT_SIZE * POW_SCRATCH_ALIGN;
     }
     const Expression total_size = Symbol(data_type_size) * input_size + Symbol(32 * 2) + Symbol(pow_scratch_size);
-    GELOGD("Node %s[%s] inputs are all scalar or ub scalar, return size= %s.", node.GetTypePtr(), node.GetNamePtr(),
-           total_size.Str().get());
+    GELOGD("Node %s[%s] inputs are all scalar or ub scalar, return size= %s bytes.", node.GetTypePtr(),
+           node.GetNamePtr(), total_size.Str().get());
     return GetTmpBuffer(total_size);
   } else {
     uint32_t max_live_node_cnt = 0U;
@@ -57,8 +57,8 @@ std::vector<std::unique_ptr<TmpBufDesc>> CalcPowTmpSizeV2(const AscNode &node) {
     // 乘以存活节点系数之前，做一次32B对齐
     const Expression total_size = sym::Align(Symbol(data_type_size) * input_size, 32) * Symbol(max_live_node_cnt);
 
-    GELOGD("Node %s[%s] inputs are not all scalar or ub scalar, return size= %s.", node.GetTypePtr(), node.GetNamePtr(),
-           total_size.Str().get());
+    GELOGD("Node %s[%s] inputs are not all scalar or ub scalar, return size= %s bytes.", node.GetTypePtr(),
+           node.GetNamePtr(), total_size.Str().get());
     return GetTmpBuffer(total_size);
   }
 }

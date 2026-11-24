@@ -1348,6 +1348,14 @@ Status Optimizer::OptimizeForHintGraph(af::AscGraph &hint_graph,
  * @return
  */
 Status Optimizer::LoadOpSeqAdjust(af::AscGraph &impl_graph) {
+  // [多循环轴不调序] DoSeqAdjustment 的 id 前移 + ReorderByNodeId 隐含单轴节点连续排列假设
+  // (前移段紧缩、其余节点顺延), 多循环轴下节点 id 按轴交错, 重排后生产者可能落到消费者
+  // 之后, 下游 TopologicalSorting 检出违例报错; 本调序仅是单轴多 load 流水的性能启发式,
+  // 多循环轴图直接跳过(外提 Load 的 BlockOuter 标记轴不计入轴数, 不影响外提场景)
+  if (ScheduleUtils::GetUniqueLoopAxisCnt(impl_graph) > 1U) {
+    GELOGI("Graph[%s] has multiple loop axes, skip LoadOpSeqAdjust.", impl_graph.GetName().c_str());
+    return af::SUCCESS;
+  }
   std::map<int64_t, int64_t> need_forward_nodes_id;
   int64_t first_load_id = kInvalidNodeId;
   GE_ASSERT_SUCCESS(SearchNodesNeedForward(impl_graph, need_forward_nodes_id, first_load_id));
@@ -1384,16 +1392,20 @@ Status Optimizer::Optimize(af::AscGraph &hint_graph, FusedScheduledResult &fused
                     "Failed to optimize for graph:[%s].", hint_graph.GetName().c_str());
   // 内存分配
   BufQueAllocator allocator;
-  GE_CHK_STATUS_RET(allocator.PrepareImplGraphMemoryPlan(fused_scheduled_result));
+  GE_CHK_STATUS_RET(allocator.PrepareImplGraphMemoryPlan(fused_scheduled_result),
+                    "PrepareImplGraphMemoryPlan failed, graph:[%s].", hint_graph.GetName().c_str());
   if (options_.graph_type == GraphType::kAscGraph) {
     fused_scheduled_result.fused_graph_name = hint_graph.GetName().c_str();
     fused_scheduled_result.origin_vars.assign(original_var_set.begin(), original_var_set.end());
   }
-  GE_CHK_STATUS_RET(StaticUbTemplateFilter().Filter(fused_scheduled_result));
-  GE_CHK_STATUS_RET(allocator.CollectFusedIoNodes(fused_scheduled_result));
+  GE_CHK_STATUS_RET(StaticUbTemplateFilter().Filter(fused_scheduled_result),
+                    "StaticUbTemplateFilter filter failed, graph:[%s].", hint_graph.GetName().c_str());
+  GE_CHK_STATUS_RET(allocator.CollectFusedIoNodes(fused_scheduled_result), "CollectFusedIoNodes failed, graph:[%s].",
+                    hint_graph.GetName().c_str());
   const auto compute_graph = af::AscGraphUtils::GetComputeGraph(hint_graph);
   GE_ASSERT_NOTNULL(compute_graph);
-  GE_CHK_STATUS_RET(optimize::L2CacheHintManager::ParseGraph(*compute_graph, fused_scheduled_result));
+  GE_CHK_STATUS_RET(optimize::L2CacheHintManager::ParseGraph(*compute_graph, fused_scheduled_result),
+                    "L2CacheHintManager::ParseGraph failed, graph:[%s].", hint_graph.GetName().c_str());
   GELOGI("AllocBufQue end");
   TryEnableGroupParallel(fused_scheduled_result);
   ExecSeqAdvancedOfLoad(fused_scheduled_result);

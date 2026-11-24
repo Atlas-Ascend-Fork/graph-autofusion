@@ -180,6 +180,19 @@ class TestBuildConvArgs:
     """Test _build_conv_args"""
 
     @staticmethod
+    @pytest.mark.parametrize(
+        "is_extend_conv2d, expected_op_type",
+        [(False, "ActConv2DV2"), (True, "ActExtendConv2D")],
+    )
+    def test_get_conv_tiling_op_type(
+        asc_codegen_compile_module, is_extend_conv2d, expected_op_type
+    ):
+        assert (
+            asc_codegen_compile_module._get_conv_tiling_op_type(is_extend_conv2d)
+            == expected_op_type
+        )
+
+    @staticmethod
     def test_build_conv_args_basic(asc_codegen_compile_module):
         """Test basic Conv2D argument construction - verify format conversion"""
         # Important: when the list length is 3, args_list[1] == args_list[-2], causing shared references
@@ -433,9 +446,9 @@ class TestGenerateCmakeLists:
         with open(cmake_file, "r") as f:
             content = f.read()
 
-            # 验证 Conv2D 相关路径
-            assert "conv2d_v2" in content
-            assert "ops_nn/ascendc/conv2d_v2" in content
+            # 验证 Conv2D 相关路径（统一使用 act_conv 自定义算子路径）
+            assert "act_conv" in content
+            assert "ops_nn/ascendc/act_conv/conv2d_v2" in content
 
             # 验证 cube_kernel_tiling_wrapper.cpp (动态 shape)
             assert "cube_kernel_tiling_wrapper.cpp" in content

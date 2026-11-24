@@ -32,19 +32,62 @@ class CalcGeluTmpSizeV2Test : public ::testing::Test {
 };
 
 TEST_F(CalcGeluTmpSizeV2Test, CalcGeluTmpSizeV2_ShouldReturnCorrectSize_WhenNodelsValid) {
-  af::SizeVar s0(af::Symbol("s0"));
-  af::SizeVar s1(af::Symbol("s1"));
-  af::SizeVar s2(af::Symbol("s2"));
-
-  af::Axis z0{.id = 0, .name = "z0", .type = af::Axis::Type::kAxisTypeTileOuter, .size = s0.expr};
-  af::Axis z1{.id = 1, .name = "z1", .type = af::Axis::Type::kAxisTypeTileInner, .size = s1.expr};
-  af::Axis z2{.id = 2, .name = "z2", .type = af::Axis::Type::kAxisTypeOriginal, .size = s2.expr};
-
   af::AscGraph graph("test");
-  af::ascir_op::Data x("x", graph);
-  auto node = graph.FindNode("x");
+  auto s0 = graph.CreateSizeVar("s0");
+  auto s1 = graph.CreateSizeVar("s1");
+  auto s2 = graph.CreateSizeVar("s2");
+
+  auto z0 = graph.CreateAxis("z0", s0);
+  auto zo = graph.CreateAxis("zo", s1 + s2);
+  auto zo_s_0 = graph.CreateAxis("zo_s_0", Axis::Type::kAxisTypeOriginal, s1, {zo.id}, af::kIdNone);
+  auto zo_s_1 = graph.CreateAxis("zo_s_1", Axis::Type::kAxisTypeOriginal, s2, {zo.id}, af::kIdNone);
+
+  af::ascir_op::Data x1("x1", graph);
+  af::ascir_op::Load load1("load1");
+  af::ascir_op::Gelu gelu("gelu");
+  af::ascir_op::Store store("store");
+  af::ascir_op::Output y("y");
+
+  x1.attr.sched.axis = {z0.id, zo_s_0.id};
+  x1.y.dtype = ge::DT_FLOAT;
+  *x1.y.axis = {z0.id, zo_s_0.id};
+  *x1.y.repeats = {s0, s1};
+  *x1.y.strides = {s1, Symbol(1)};
+
+  load1.x = x1.y;
+  load1.attr.sched.axis = {z0.id, zo_s_0.id};
+  load1.y.dtype = ge::DT_FLOAT;
+  *load1.y.axis = {z0.id, zo_s_0.id};
+  *load1.y.repeats = {s0, s1};
+  *load1.y.strides = {s1, Symbol(1)};
+  *load1.y.vectorized_axis = {z0.id, zo_s_0.id};
+
+  gelu.x = load1.y;
+  gelu.attr.sched.axis = {z0.id, zo_s_0.id};
+  gelu.y.dtype = ge::DT_FLOAT;
+  *gelu.y.axis = {z0.id, zo_s_0.id};
+  *gelu.y.repeats = {s0, s1};
+  *gelu.y.strides = {s1, Symbol(1)};
+
+  store.x = gelu.y;
+  store.attr.sched.axis = {z0.id, zo_s_0.id};
+  store.y.dtype = ge::DT_FLOAT;
+  *store.y.axis = {z0.id, zo_s_0.id};
+  *store.y.repeats = {s0, s1};
+  *store.y.strides = {s1, Symbol(1)};
+
+  y.x = store.y;
+  y.attr.sched.axis = {z0.id, zo_s_0.id};
+  y.y.dtype = ge::DT_FLOAT;
+  *y.y.axis = {z0.id, zo_s_0.id};
+  *y.y.repeats = {s0, s1};
+  *y.y.strides = {s1, Symbol(1)};
+
+  std::shared_ptr<af::AscNode> node = graph.FindNode("gelu");
+  node->inputs[0].attr.vectorized_strides = {s1, Symbol(1)};
   std::vector<std::unique_ptr<af::TmpBufDesc>> result = CalcGeluTmpSizeV2(*node);
   ASSERT_EQ(result.size(), 1);
+  // GELU_CALC_PROC(3) * 256 = 768 bytes
   ASSERT_EQ(result[0]->size, af::Symbol(768));
   ASSERT_EQ(result[0]->life_time_axis_id, -1);
 }

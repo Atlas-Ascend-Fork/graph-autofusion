@@ -56,13 +56,15 @@ Status ArangeApiCall::Generate(const TPipe &tpipe, const std::vector<ascir::Axis
   std::vector<std::pair<std::string, std::string>> broadcast_frames;
   GE_ASSERT_TRUE(output.vectorized_axis.size() == output.vectorized_axis_pos.size() &&
                      output.vectorized_axis.size() == output.vectorized_strides.size(),
-                 "Arange vectorized layout metadata size mismatch");
+                 "Arange vectorized layout metadata sizes must be equal, axis=%zu, axis_pos=%zu, strides=%zu",
+                 output.vectorized_axis.size(), output.vectorized_axis_pos.size(), output.vectorized_strides.size());
   for (size_t i = output.vectorized_axis.size(); i > 0U; --i) {
     const auto index = i - 1U;
     const auto id = output.vectorized_axis[index];
     const auto pos = output.vectorized_axis_pos[index];
     GE_ASSERT_TRUE(pos < output.axis_size.size() && pos < output.axis_strides.size(),
-                   "Arange vectorized axis position is out of range");
+                   "Arange vectorized axis position is out of range, pos=%u, axis_size.size=%zu, axis_strides.size=%zu",
+                   pos, output.axis_size.size(), output.axis_strides.size());
     // 退化轴(size 1 且逻辑 stride 0): 对物理偏移(size 1)和逻辑取值(stride 0)
     // 均无贡献, 物化结果即扁平一维序列; 跳过该轴, 扩维由 Broadcast 通用路径处理。
     if (af::SymbolicUtils::StaticCheckEq(output.axis_size[pos], af::sym::kSymbolOne) == af::TriBool::kTrue &&
@@ -71,7 +73,9 @@ Status ArangeApiCall::Generate(const TPipe &tpipe, const std::vector<ascir::Axis
     }
     const auto &axis = tpipe.tiler.GetAxis(id);
     GE_CHK_BOOL_RET_STATUS(af::SymbolicUtils::StaticCheckEq(output.axis_size[pos], axis.size) == af::TriBool::kTrue,
-                           af::FAILED, "Arange ApiCall requires a bounded vectorized layout");
+                           af::FAILED,
+                           "Arange ApiCall requires a bounded vectorized layout, pos=%u, axis_size=%s, expect=%s", pos,
+                           output.axis_size[pos].Str().get(), axis.size.Str().get());
     const bool fixed = std::find(current_axis.begin(), current_axis.end(), id) != current_axis.end();
     for (const auto current : current_axis) {
       GE_CHK_BOOL_RET_STATUS(current == id || !tpipe.tiler.IsFrom(current, id), af::FAILED,
@@ -98,7 +102,8 @@ Status ArangeApiCall::Generate(const TPipe &tpipe, const std::vector<ascir::Axis
     } else {
       GE_CHK_BOOL_RET_STATUS(
           !has_fixed_axis && af::SymbolicUtils::StaticCheckEq(output.axis_strides[pos], stride) == af::TriBool::kTrue,
-          af::FAILED, "Arange ApiCall requires a contiguous logical suffix");
+          af::FAILED, "Arange ApiCall requires a contiguous logical suffix, pos=%u, axis_stride=%s, expect stride=%s",
+          pos, output.axis_strides[pos].Str().get(), stride.Str().get());
       GE_CHK_BOOL_RET_STATUS(
           slice.vectorized_axis.empty() || !tpipe.tiler.GetAxis(slice.vectorized_axis.front()).IsInner(), af::FAILED,
           "Arange ApiCall cannot flatten a multi-axis inner tail");

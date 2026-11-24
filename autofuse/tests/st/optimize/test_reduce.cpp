@@ -494,6 +494,7 @@ TEST_F(OptimizerReduceSt, TestReduce_PatitionNorm) {
   optimize::Optimizer optimizer(optimize::OptimizerOptions{});
   optimizer.Optimize(graph, fused_scheduled_result);
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results.size(), 1UL);
+  // 通用模板 1 + R 轴分核模板 1 + 全载模板 1
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0UL].size(), 3UL);
 }
 
@@ -538,6 +539,7 @@ TEST_F(OptimizerReduceSt, TestReduce_Four_Elewise_Store_V2) {
   optimize::Optimizer optimizer(optimize::OptimizerOptions{});
   optimizer.Optimize(graph, fused_scheduled_result);
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results.size(), 1UL);
+  // 通用模板 1 + R 轴分核模板 1 + 全载模板 1
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0UL].size(), 3UL);
 }
 
@@ -547,6 +549,7 @@ TEST_F(OptimizerReduceSt, TestReduce_Three_Elewise_Store_Multi_Citation) {
   optimize::Optimizer optimizer(optimize::OptimizerOptions{});
   optimizer.Optimize(graph, fused_scheduled_result);
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results.size(), 1UL);
+  // 通用模板 1 + R 轴分核模板 1 + 全载模板 1
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0UL].size(), 3UL);
 }
 
@@ -591,6 +594,7 @@ TEST_F(OptimizerReduceSt, TestReduce_Three_Elewise_Reduce_Post_Node_Multi_Input_
   optimize::Optimizer optimizer(optimize::OptimizerOptions{});
   optimizer.Optimize(graph, fused_scheduled_result);
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results.size(), 1UL);
+  // 通用模板 1 + R 轴分核模板 1 + 全载模板 1
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0UL].size(), 3UL);
 }
 
@@ -600,6 +604,7 @@ TEST_F(OptimizerReduceSt, TestReduce_Three_Elewise_Store_Multi_Citation_Multi_Ou
   optimize::Optimizer optimizer(optimize::OptimizerOptions{});
   optimizer.Optimize(graph, fused_scheduled_result);
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results.size(), 1UL);
+  // 通用模板 1 + R 轴分核模板 1 + 全载模板 1
   ASSERT_EQ(fused_scheduled_result.node_idx_to_scheduled_results[0UL].size(), 3UL);
 }
 

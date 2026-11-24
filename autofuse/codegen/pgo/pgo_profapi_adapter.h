@@ -57,12 +57,12 @@ class PgoProfApiAdapter {
 
   int Initialize(CompactCallback callback, PgoReporterOwnership ownership = PgoReporterOwnership::kExclusive);
   int Start(uint32_t device_id);
-  int Start(uint32_t device_id, uint32_t sample_period);
+  int Start(uint32_t device_id, uint32_t sample_period, bool capture_ffts = false);
   int Stop(uint32_t device_id);
   // Start/stop the driver STARS_SOC_LOG channel.  The profapi command and
   // channel are intentionally separate, matching MSPTI's DevTaskManager and
   // DevProfTaskStars lifecycle.
-  int StartStarsChannel(uint32_t device_id, uint32_t sample_period = 20);
+  int StartStarsChannel(uint32_t device_id, uint32_t sample_period = 20, bool capture_ffts = false);
   int StopStarsChannel(uint32_t device_id);
   int FlushStarsChannel(uint32_t device_id, uint32_t *data_len);
   int ReadStarsChannel(uint32_t device_id, std::vector<uint8_t> &buffer);

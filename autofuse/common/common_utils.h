@@ -75,6 +75,7 @@ inline constexpr char kSlice[] = "Slice";
 inline constexpr char kCast[] = "Cast";
 inline constexpr char kOffset32[] = "Offset32";
 inline constexpr char kOffset64[] = "Offset64";
+inline constexpr char kGatherOnly[] = "GatherOnly";
 inline constexpr char kNddma[] = "NDDMA";
 inline constexpr char kNddmaSlice[] = "NDDMA.Slice";
 inline constexpr char kNddmaTranspose[] = "NDDMA.Transpose";
@@ -89,6 +90,7 @@ inline constexpr char kReduceAllLoad[] = "Reduce/AllLoad";
 inline constexpr char kReduceRCore[] = "Reduce/RCore";
 inline constexpr char kReducePhase1[] = "Reduce/RCore/Phase1";
 inline constexpr char kReducePhase2[] = "Reduce/RCore/Phase2";
+inline constexpr char kReduceNormRecompute[] = "Reduce/NormRecompute";
 inline constexpr char kConcatOffsetStore[] = "Concat/GM/OffsetStore";
 inline constexpr char kSplitOffsetLoad[] = "Split/GM/OffsetLoad";
 inline constexpr char kTransposeFold[] = "Transpose/Load/Fold";
@@ -261,6 +263,11 @@ std::string SubStringReplace(std::string &ori, const std::string &from, const st
 std::string GenValidName(const std::string &t_name);
 std::string NormalizeTemplateSemanticName(const std::string &name);
 const char *GetSimtSemanticRole(indirect_load::SimtAddressPolicy policy);
+// [边界化语义] SIMT 形态的 API feature：地址策略 + offset 宽度 +（边界化）gather-only 维度。
+// 同一 policy/offset 下，全链折叠形态与边界化形态（仅 gather、输出链交 VF）必须是不同身份，
+// 否则 ATT/TopN/cache 无法区分实现。
+std::string BuildSimtSemanticFeature(indirect_load::SimtAddressPolicy policy, bool use_uint32_offset,
+                                     bool boundary_fusion);
 std::string MakeTemplateSemanticName(const std::string &family, const std::string &strategy = "",
                                      const std::string &role = "", const std::vector<std::string> &api_features = {},
                                      const std::vector<std::string> &transforms = {});
