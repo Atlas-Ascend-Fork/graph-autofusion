@@ -104,6 +104,24 @@ TEST_F(ConcatInputUnificationPassTest, AllInputsIsLoad) {
   EXPECT_EQ(ConcatInputUnificationPass::Run(graphs), af::SUCCESS);
   EXPECT_TRUE(graphs[0].FindNode("load0_ub_cpy_input_0") == nullptr);
 }
+// src_col_size * dtype_size 超过 256/2 = 128 时才会走 IsSrcColSizeOverLimit 置位分支，
+// 上面的 DstColSizeOverLimit(s1=34, fp16 -> 68) 并未真正越限，这里显式构造越限输入
+// （fp16: s1=65 -> 130 > 128），覆盖 LogSrcColSizeOverLimit 的常量表达式路径。
+TEST_F(ConcatInputUnificationPassTest, DstColSizeReallyOverLimit) {
+  const auto graph = Build2InputGraph(af::Symbol("s0"), af::Symbol(65));
+  std::vector<::ascir::ImplGraph> graphs{graph};
+  EXPECT_EQ(ConcatInputUnificationPass::Run(graphs), af::SUCCESS);
+  EXPECT_TRUE(graphs[0].FindNode("load0_ub_cpy_input_0") == nullptr);
+}
+
+// concat_dim 越界时 GetColSize 访问 repeats 越界，这里只验证非常量表达式路径：
+// 当 src_col_size 为符号量时 CanOptimize 直接返回 false（不进入越限判定）。
+TEST_F(ConcatInputUnificationPassTest, SrcColSizeSymbolicNotOverLimit) {
+  const auto graph = Build2InputGraph(af::Symbol("s0"), af::Symbol("s1"));
+  std::vector<::ascir::ImplGraph> graphs{graph};
+  EXPECT_EQ(ConcatInputUnificationPass::Run(graphs), af::SUCCESS);
+}
+
 TEST_F(ConcatInputUnificationPassTest, InputShared) {
   const auto graph = BuildGraphShareInput();
   std::vector<::ascir::ImplGraph> graphs{graph};
