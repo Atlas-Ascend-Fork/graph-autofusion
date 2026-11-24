@@ -2434,8 +2434,10 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, PostReduceUsesSkWhenOuterAxisIsReduc
   std::vector<std::string> score_functions;
   ASSERT_EQ(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
 
+  // [SK-segmented SIMT] R>G layout: SIMD whole-graph still gated, but the SK->SIMT
+  // redirect registers a segmented SIMT candidate alongside plain SK.
   EXPECT_EQ(FindGeneratedGraphByTemplate(graphs, ascir::TemplateId::kIndirectLoadSimd), graphs.end());
-  EXPECT_EQ(FindGeneratedGraphByTemplate(graphs, ascir::TemplateId::kIndirectLoadSimt), graphs.end());
+  EXPECT_NE(FindGeneratedGraphByTemplate(graphs, ascir::TemplateId::kIndirectLoadSimt), graphs.end());
   EXPECT_NE(FindGeneratedGraphByTemplate(graphs, ascir::TemplateId::kIndirectLoadSK), graphs.end());
 }
 
@@ -2610,8 +2612,10 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, SkKeepsCandidateWhenReduceFansOutToS
   std::vector<af::AscGraph> graphs;
   std::vector<std::string> score_functions;
   ASSERT_EQ(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
+  // [SK-segmented SIMT] R>G fanout layout: SIMD whole-graph still gated; the SK->SIMT
+  // redirect may register a segmented candidate. SK plain candidate must survive with
+  // both fanout branches intact.
   EXPECT_EQ(FindGeneratedGraphByTemplate(graphs, ascir::TemplateId::kIndirectLoadSimd), graphs.end());
-  EXPECT_EQ(FindGeneratedGraphByTemplate(graphs, ascir::TemplateId::kIndirectLoadSimt), graphs.end());
   const auto sk_iter = FindGeneratedGraphByTemplate(graphs, ascir::TemplateId::kIndirectLoadSK);
   ASSERT_NE(sk_iter, graphs.end());
   // 双直连分支必须都在 SK 候选图中存活：物化 Store（含独立 Output）与 Elementwise 链各自终止于 Store。
