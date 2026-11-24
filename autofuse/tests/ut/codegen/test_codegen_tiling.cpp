@@ -8142,12 +8142,12 @@ TEST_F(TestCodegenTiling, InductorMatmulDispatchShouldPruneOnlyUnreachableBasicS
     ASSERT_FALSE(launch.empty());
 
     // ASWT retains Basic-only-platform and non-full-load Slice/Fixpipe fallbacks.
-    // K=0/ToMul/ToMultiMul return Basic keys independently of offset_x.
+    // K=0/ToMul/ToFmaMul return Basic keys independently of offset_x.
     const std::vector<std::string> retained = {
         "0, 0, 0, MatMulV3BasicTilingData",    "0, 1, 0, MatMulV3BasicTilingData",
         "0, 2, 0, MatMulV3BasicTilingData",    "0, 0, 1, MatMulV3BasicTilingData",
         "0, 0, 2, MatMulV3BasicTilingData",    "2, 0, 0, MatMulV3KEqZeroBasicTilingData",
-        "3, 0, 0, MatMulToMulBasicTilingData", "4, 0, 0, MatMulToVectorBasicTilingData"};
+        "3, 0, 0, MatMulToMulBasicTilingData", "4, 0, 0, MatMulFmaTilingData"};
     for (const auto &strategy : retained) {
       EXPECT_NE(launch.find("_DISPATCH_MATMUL(1, " + strategy + ");"), std::string::npos) << strategy;
     }
@@ -8226,12 +8226,12 @@ TEST_F(TestCodegenTiling, InductorRtLaunchDispatchShouldPruneTensorOnlyBasicMode
     }
 
     // Basic 平台可达模式保留 api_level=1 发射（实例化由平台守卫设备编译期裁剪）；
-    // K=0/ToMul/ToMultiMul 与 offset_x 无关，仅 api_level=1 存在。
+    // K=0/ToMul/ToFmaMul 与 offset_x 无关，仅 api_level=1 存在。
     const std::vector<std::string> retained = {
         "0, 0, 0, MatMulV3BasicTilingData",    "0, 1, 0, MatMulV3BasicTilingData",
         "0, 2, 0, MatMulV3BasicTilingData",    "0, 0, 1, MatMulV3BasicTilingData",
         "0, 0, 2, MatMulV3BasicTilingData",    "2, 0, 0, MatMulV3KEqZeroBasicTilingData",
-        "3, 0, 0, MatMulToMulBasicTilingData", "4, 0, 0, MatMulToVectorBasicTilingData"};
+        "3, 0, 0, MatMulToMulBasicTilingData", "4, 0, 0, MatMulFmaTilingData"};
     for (const auto &strategy : retained) {
       EXPECT_NE(entry.find("_DISPATCH_MATMUL(1, " + strategy + ");"), std::string::npos) << strategy;
     }

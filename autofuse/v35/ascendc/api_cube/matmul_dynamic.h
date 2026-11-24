@@ -18,8 +18,8 @@
 #ifndef MAT_MUL_TO_MUL
 #define MAT_MUL_TO_MUL 3
 #endif
-#ifndef MAT_MUL_TO_MULTI_MUL
-#define MAT_MUL_TO_MULTI_MUL 4
+#ifndef MAT_MUL_FMA_MUL
+#define MAT_MUL_FMA_MUL 4
 #endif
 #ifndef MAT_MUL_SLICE
 #define MAT_MUL_SLICE 5
@@ -192,10 +192,10 @@ __aicore__ inline __attribute__((always_inline)) void mat_mul_v3(GM_ADDR aGM, GM
     MatmulV3Advanced::MatMulToMulActKernel<DTYPE_X1, DTYPE_X2, DTYPE_Y, DTYPE_BIAS, aLayout, bLayout, layout::RowMajor>(
         aGM, bGM, biasGM, cGM, workspaceGM, tilingData);
   } else if constexpr (API_LEVEL == MAT_MUL_BASIC_LEVEL && FULL_LOAD == MAT_MUL_NO_FULL_LOAD &&
-                       MODEL == MAT_MUL_TO_MULTI_MUL && L0C2OUT_MODEL == MAT_MUL_ON_THE_FLY) {
-    GET_TILING_DATA_WITH_STRUCT(MatMulToVectorBasicTilingData, tilingData, tilingGM);
-    MatmulV3Advanced::MatMulToVectorActKernel<DTYPE_X1, DTYPE_X2, DTYPE_Y, DTYPE_BIAS, aLayout, bLayout,
-                                              layout::RowMajor>(aGM, bGM, biasGM, cGM, workspaceGM, tilingData);
+                       MODEL == MAT_MUL_FMA_MUL && L0C2OUT_MODEL == MAT_MUL_ON_THE_FLY) {
+    GET_TILING_DATA_WITH_STRUCT(MatMulFmaTilingData, tilingData, tilingGM);
+    MatmulV3Advanced::MatMulFmaMulActKernel<DTYPE_X1, DTYPE_X2, DTYPE_Y, DTYPE_BIAS, aLayout, bLayout,
+                                            layout::RowMajor>(aGM, bGM, biasGM, cGM, workspaceGM, tilingData);
   } else if constexpr (API_LEVEL == MAT_MUL_TENSOR_LEVEL) {
     GET_TILING_DATA_WITH_STRUCT(MatMulV3BasicTilingData, tilingData, tilingGM);
     MatmulV3Advanced::MatMulTensorCommonKernel<DTYPE_X1, DTYPE_X2, DTYPE_Y, DTYPE_BIAS, layoutA, layoutB, layoutC,
@@ -311,10 +311,10 @@ __aicore__ inline __attribute__((always_inline)) void mat_mul_v3_fusion(GM_ADDR 
     MatmulV3Advanced::MatMulToMulActKernel<DTYPE_X1, DTYPE_X2, DTYPE_Y, DTYPE_BIAS, aLayout, bLayout, layout::RowMajor>(
         aGM, bGM, biasGM, cGM, workspaceGM, tilingData);
   } else if constexpr (API_LEVEL == MAT_MUL_BASIC_LEVEL && FULL_LOAD == MAT_MUL_NO_FULL_LOAD &&
-                       MODEL == MAT_MUL_TO_MULTI_MUL && L0C2OUT_MODEL == MAT_MUL_ON_THE_FLY) {
-    GET_TILING_DATA_WITH_STRUCT(MatMulToVectorBasicTilingData, tilingData, tilingGM);
-    MatmulV3Advanced::MatMulToVectorActKernel<DTYPE_X1, DTYPE_X2, DTYPE_Y, DTYPE_BIAS, aLayout, bLayout,
-                                              layout::RowMajor>(aGM, bGM, biasGM, cGM, workspaceGM, tilingData);
+                       MODEL == MAT_MUL_FMA_MUL && L0C2OUT_MODEL == MAT_MUL_ON_THE_FLY) {
+    GET_TILING_DATA_WITH_STRUCT(MatMulFmaTilingData, tilingData, tilingGM);
+    MatmulV3Advanced::MatMulFmaMulActKernel<DTYPE_X1, DTYPE_X2, DTYPE_Y, DTYPE_BIAS, aLayout, bLayout,
+                                            layout::RowMajor>(aGM, bGM, biasGM, cGM, workspaceGM, tilingData);
   } else if constexpr (API_LEVEL == MAT_MUL_TENSOR_LEVEL && FULL_LOAD == MAT_MUL_B_FULL_LOAD &&
                        MODEL == MAT_MUL_BASIC && L0C2OUT_MODEL == MAT_MUL_ON_THE_FLY &&
                        AscendC::Std::is_same_v<DTYPE_Y, float>) {
@@ -435,10 +435,10 @@ __aicore__ inline __attribute__((always_inline)) void mat_mul_v3_fusion_db(GM_AD
     MatmulV3Advanced::MatMulToMulActKernel<DTYPE_X1, DTYPE_X2, DTYPE_Y, DTYPE_BIAS, aLayout, bLayout, layout::RowMajor>(
         aGM, bGM, biasGM, cGM, workspaceGM, tilingData);
   } else if constexpr (API_LEVEL == MAT_MUL_BASIC_LEVEL && FULL_LOAD == MAT_MUL_NO_FULL_LOAD &&
-                       MODEL == MAT_MUL_TO_MULTI_MUL && L0C2OUT_MODEL == MAT_MUL_ON_THE_FLY) {
-    GET_TILING_DATA_WITH_STRUCT(MatMulToVectorBasicTilingData, tilingData, tilingGM);
-    MatmulV3Advanced::MatMulToVectorActKernel<DTYPE_X1, DTYPE_X2, DTYPE_Y, DTYPE_BIAS, aLayout, bLayout,
-                                              layout::RowMajor>(aGM, bGM, biasGM, cGM, workspaceGM, tilingData);
+                       MODEL == MAT_MUL_FMA_MUL && L0C2OUT_MODEL == MAT_MUL_ON_THE_FLY) {
+    GET_TILING_DATA_WITH_STRUCT(MatMulFmaTilingData, tilingData, tilingGM);
+    MatmulV3Advanced::MatMulFmaMulActKernel<DTYPE_X1, DTYPE_X2, DTYPE_Y, DTYPE_BIAS, aLayout, bLayout,
+                                            layout::RowMajor>(aGM, bGM, biasGM, cGM, workspaceGM, tilingData);
   } else if constexpr (API_LEVEL == MAT_MUL_TENSOR_LEVEL && FULL_LOAD == MAT_MUL_NO_FULL_LOAD &&
                        MODEL == MAT_MUL_BASIC && L0C2OUT_MODEL == MAT_MUL_1V1_ND_ALIG_FIXPIPE) {
     GET_TILING_DATA_WITH_STRUCT(MatMulV3BasicTilingData, tilingData, tilingGM);

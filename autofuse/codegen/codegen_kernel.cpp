@@ -7497,10 +7497,10 @@ std::string Kernel::GenKernelFuncCallForInductor(const ascir::FusedScheduledResu
           ss << "    _DISPATCH_MATMUL(" << api_level << ", 3, 0, 0, MatMulToMulBasicTilingData);" << std::endl;
         }
         if (api_level == 1) {
-          // 分支16: BASIC_LEVEL, NO_FULL_LOAD, TO_MULTI_MUL, ON_THE_FLY
+          // 分支16: BASIC_LEVEL, NO_FULL_LOAD, TO_FMA_MUL, ON_THE_FLY
           ss << "  } else CV_DISPATCH_IF (API_LEVEL == " << api_level
              << " && FULL_LOAD == 0 && MODEL == 4 && L0C2OUT_MODEL == 0) {" << std::endl;
-          ss << "    _DISPATCH_MATMUL(" << api_level << ", 4, 0, 0, MatMulToVectorBasicTilingData);" << std::endl;
+          ss << "    _DISPATCH_MATMUL(" << api_level << ", 4, 0, 0, MatMulFmaTilingData);" << std::endl;
         }
       }
       ss << "  } else {" << std::endl;
@@ -7625,7 +7625,7 @@ const std::vector<CvDispatchBranch> &GetCvMatmulDispatchBranches() {
       {1, 7, 0, 2, 0, "MatMulV3BasicTilingData"},    {1, 2, 0, 0, 0, "MatMulV3KEqZeroBasicTilingData"},
       {1, 0, 2, 1, 0, "MatMulV3BasicTilingData"},    {1, 0, 0, 1, 0, "MatMulV3BasicTilingData"},
       {1, 0, 0, 2, 0, "MatMulV3BasicTilingData"},    {1, 0, 2, 2, 0, "MatMulV3BasicTilingData"},
-      {1, 3, 0, 0, 0, "MatMulToMulBasicTilingData"}, {1, 4, 0, 0, 0, "MatMulToVectorBasicTilingData"},
+      {1, 3, 0, 0, 0, "MatMulToMulBasicTilingData"}, {1, 4, 0, 0, 0, "MatMulFmaTilingData"},
       {2, 0, 0, 0, 0, "MatMulV3BasicTilingData"},    {2, 5, 0, 0, 0, "MatMulV3BasicTilingData"},
       {2, 6, 0, 0, 0, "MatMulV3BasicTilingData"},    {2, 0, 2, 0, 0, "MatMulV3BasicTilingData"},
       {2, 0, 1, 0, 0, "MatMulV3BasicTilingData"},    {2, 1, 0, 0, 0, "MatMulV3BasicTilingData"},
