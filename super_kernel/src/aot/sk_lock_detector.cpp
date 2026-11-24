@@ -20,6 +20,7 @@
 #include "super_kernel.h"
 #include <functional>
 #include <map>
+#include <mutex>
 
 int64_t LockDetector::deviceRealCubeNum = 0;
 int64_t LockDetector::deviceRealVecNum = 0;
@@ -64,25 +65,26 @@ void LockDetector::Init(SuperKernelGraph &graph) {
   skStreamIds.clear();
   graph_ = &graph;
 
-  if (deviceRealCubeNum == 0 && deviceRealVecNum == 0) {
-    GetDeviceCores();
-  } else {
-    SK_LOGD("[lock detector] LockDetector::Init: Using cached device cores: cube=%lu, vec=%lu", deviceRealCubeNum,
-            deviceRealVecNum);
-  }
+  GetDeviceCores();
 }
 
 aclError LockDetector::GetDeviceCores() {
+  static std::mutex deviceCoresMutex;
+  std::lock_guard<std::mutex> lock(deviceCoresMutex);
   if (deviceRealCubeNum != 0 && deviceRealVecNum != 0) {
     return ACL_SUCCESS;
   }
 
-  aclError ret = GetDeviceCoreNums(deviceRealCubeNum, deviceRealVecNum);
+  int64_t cubeNum = 0;
+  int64_t vecNum = 0;
+  aclError ret = GetDeviceCoreNums(cubeNum, vecNum);
   if (ret != ACL_SUCCESS) {
     SK_LOGE("[lock detector] GetDeviceCores failed, ret=%d", ret);
     return ret;
   }
 
+  deviceRealCubeNum = cubeNum;
+  deviceRealVecNum = vecNum;
   SK_LOGI("[lock detector] GetDeviceCores success, cube=%ld, vec=%ld", deviceRealCubeNum, deviceRealVecNum);
   return ACL_SUCCESS;
 }
