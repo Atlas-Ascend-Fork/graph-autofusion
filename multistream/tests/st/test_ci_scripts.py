@@ -46,6 +46,7 @@ def test_ci_dispatch_has_multistream_job_and_both_branch_cases():
     text = _UT.read_text(encoding="utf-8")
     assert text.count("UT_Test_Python_multistream)") >= 2
     assert text.count("--module=multistream --no-autofuse") >= 2
+    assert text.count("build.sh -u -s -c --module=multistream --no-autofuse") >= 2
 
 
 @pytest.mark.parametrize("entry_name", ["multistream_py_ut", "multistream_py_st"])
