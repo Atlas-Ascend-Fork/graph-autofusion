@@ -286,6 +286,9 @@ __aicore__ inline void ReduceProdRAOverVLVF(__ubuf__ T *dstAddr, __ubuf__ T *src
   }
   ReduceProdRAOverVLMergeTail<T, Trait, Binaryfunc, isReuseSource>(dstAddr, srcAddr, addr, dimA, mainR, tailR, loopANum,
                                                                    noNeedCopy);
+  if (noNeedCopy == 1U) {
+    return;
+  }
   ReduceProdRAOverVLFoldMain<T, Trait, Binaryfunc>(addr, dimA, mainR, loopANum, mainTimes, avgFolds);
   if (foldOne == 1U) {
     ReduceProdRAOverVLFoldOne<T, Trait, Binaryfunc>(dstAddr, addr, dimA, loopANum);
@@ -415,6 +418,7 @@ __simd_vf__ inline void ReduceProdAROverVLReuseSourceUnAlignedB64VF(__ubuf__ T *
   Reg::RegTensor<T, Trait> vreg1;
   Reg::RegTensor<T, Trait> accumulator;
   Reg::RegTensor<T, Trait> tempOne;
+  Reg::UnalignReg unalignedSrc;
 
   Reg::Duplicate(accumulator, 1);
   Reg::Duplicate(tempOne, 1);
@@ -424,7 +428,9 @@ __simd_vf__ inline void ReduceProdAROverVLReuseSourceUnAlignedB64VF(__ubuf__ T *
     for (uint32_t offset = 0; offset < dimR; offset += vecElemNum) {
       uint32_t count = dimR - offset < vecElemNum ? dimR - offset : vecElemNum;
       Reg::MaskReg mask = Reg::UpdateMask<T, Trait>(count);
-      Reg::LoadAlign(vreg0, src + offset);
+      __ubuf__ T *loadAddr = src + offset;
+      Reg::LoadUnAlignPre(unalignedSrc, loadAddr);
+      Reg::LoadUnAlign(vreg0, unalignedSrc, loadAddr, count);
       Reg::Select(vreg0, vreg0, tempOne, mask);
       Reg::MaskReg allMask = Reg::CreateMask<T, Reg::MaskPattern::ALL, Trait>();
       Reducefunc(vreg1, vreg0, allMask);

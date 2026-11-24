@@ -83,7 +83,7 @@ std::vector<std::unique_ptr<TmpBufDesc>> CalcReduceTmpSizeV2(const AscNode &node
   Expression rFusedExpression = attr->axis[node.attr.sched.loop_axis]->size;
   if (IsNeedAccumulation(node)) {
     // 高阶API使用  a.UB * r.UB， ar场景需要加一个block，生命周期为-1
-    Expression api_size = GetByteSize(sym::Mul(a_in_ub_exp, r_in_ub_exp));
+    Expression api_size = GetByteSize(sym::Mul(a_in_ub_exp, r_in_ub_exp), node_inputs[0].attr.dtype);
     if (node.GetType() == "Prod") {
       api_size = sym::Add(api_size, Symbol(kPerformanceOptimization));
     }
@@ -99,13 +99,13 @@ std::vector<std::unique_ptr<TmpBufDesc>> CalcReduceTmpSizeV2(const AscNode &node
     if (isAr) {
       a_in_ub_exp = GetAlignSize(a_in_ub_exp);
     }
-    Expression a_size = GetByteSize(a_in_ub_exp);
+    Expression a_size = GetByteSize(a_in_ub_exp, node_inputs[0].attr.dtype);
     TmpBufDesc desc3 = {a_size, 0};
     tmp_buf_desc.emplace_back(std::make_unique<TmpBufDesc>(desc3));
   } else {
     // 高阶api部分 先按照最大的申请
     if (!is_reuse_source) {
-      Expression api_size = GetByteSize(sym::Mul(a_in_ub_exp, r_in_ub_exp));
+      Expression api_size = GetByteSize(sym::Mul(a_in_ub_exp, r_in_ub_exp), node_inputs[0].attr.dtype);
       TmpBufDesc desc1 = {api_size, -1};
       tmp_buf_desc.emplace_back(std::make_unique<TmpBufDesc>(desc1));
     }

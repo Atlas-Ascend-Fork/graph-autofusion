@@ -351,6 +351,23 @@ TEST_F(CalcReduceTmpSizeV2Test, ArgmaxInt64ValueBuffersUseEightBytes) {
   }
 }
 
+TEST_F(CalcReduceTmpSizeV2Test, ProdInt64TmpBuffersUseInputDtypeSize) {
+  af::AscGraph graph("prod_int64_tmp");
+  Expression s1;
+  Expression s2;
+  CreateGraphReduceAccWithInputMultiRefs<af::DT_INT64>(graph, s1, s2);
+  auto node = graph.FindNode("prod0");
+  node->inputs[0].attr.vectorized_strides = {s2, af::Symbol(1)};
+  node->outputs[0].attr.vectorized_strides = {af::Symbol(1), af::Symbol(0)};
+  const auto result = CalcReduceTmpSizeV2(*node);
+  ASSERT_EQ(result.size(), 2U);
+
+  const auto expected_api_size = sym::Align(s2, 8) * s1 * af::Symbol(8) + af::Symbol(256) + af::Symbol(32);
+  const auto expected_a_size = sym::Align(s1, 8) * af::Symbol(8);
+  EXPECT_TRUE(sym::AssertSymbolEq(result[0]->size, expected_api_size, __FILE__, __LINE__));
+  EXPECT_TRUE(sym::AssertSymbolEq(result[1]->size, expected_a_size, __FILE__, __LINE__));
+}
+
 TEST_F(CalcReduceTmpSizeV2Test, HasUpstreamBroadcastOnReduceAxis_ReturnsTrue_WhenAllBranchesHaveBroadcast) {
   af::AscGraph graph("test_all_broadcast");
   Expression s1;

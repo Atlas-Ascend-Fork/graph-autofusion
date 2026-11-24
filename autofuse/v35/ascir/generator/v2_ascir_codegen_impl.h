@@ -3397,7 +3397,24 @@ class MulAscIrCodegenImplV2 : public AscIrCodegenV2 {
     }
     const auto input_nodes = node.GetInDataNodes();
     const auto producer = std::find_if(input_nodes.begin(), input_nodes.end(), [](const NodePtr &input_node) {
-      return input_node != nullptr && input_node->GetType() == "Prod";
+      NodePtr current = input_node;
+      if (current != nullptr && current->GetType() == "Cast" && current->GetInDataNodesSize() == 1U) {
+        const auto cast_inputs = current->GetInDataNodes();
+        NodePtr previous = !cast_inputs.empty() ? *cast_inputs.begin() : nullptr;
+        const auto current_dtype = static_cast<AscNode *>(current.get())->outputs[0].attr.dtype;
+        const auto previous_dtype = previous == nullptr ? ge::DataType::DT_UNDEFINED
+                                                        : static_cast<AscNode *>(previous.get())->outputs[0].attr.dtype;
+        const auto producer_dtype = previous == nullptr || previous->GetInDataNodesSize() != 1U
+                                        ? ge::DataType::DT_UNDEFINED
+                                        : static_cast<AscNode *>(previous.get())->inputs[0].attr.dtype;
+        if (current_dtype != ge::DataType::DT_INT8 || previous == nullptr || previous->GetType() != "Cast" ||
+            previous->GetInDataNodesSize() != 1U || previous_dtype != ge::DataType::DT_UINT8 ||
+            producer_dtype != ge::DataType::DT_INT16) {
+          return false;
+        }
+        current = *previous->GetInDataNodes().begin();
+      }
+      return current != nullptr && current->GetType() == "Prod";
     });
     if (producer == input_nodes.end()) {
       return {};

@@ -1344,6 +1344,44 @@ TEST_F(RegReduceApicallTest, ReduceProdIntegerDtypeConversions) {
   }
 }
 
+TEST_F(RegReduceApicallTest, ProdInt8EpilogueMulRecognizesTruncationCastChain) {
+  af::AscGraph graph("prod_int8_mul_cast_chain");
+
+  af::ascir_op::Data data("data", graph);
+  data.y.dtype = af::DT_INT8;
+  af::ascir_op::Cast cast_to_int16("cast_to_int16");
+  cast_to_int16.x = data.y;
+  cast_to_int16.y.dtype = af::DT_INT16;
+
+  af::ascir_op::Prod prod("prod");
+  prod.x = cast_to_int16.y;
+  prod.y.dtype = af::DT_INT16;
+
+  af::ascir_op::Cast cast_to_uint8("cast_to_uint8");
+  cast_to_uint8.x = prod.y;
+  cast_to_uint8.y.dtype = af::DT_UINT8;
+  af::ascir_op::Cast cast_to_int8("cast_to_int8");
+  cast_to_int8.x = cast_to_uint8.y;
+  cast_to_int8.y.dtype = af::DT_INT8;
+
+  af::ascir_op::Data other("other", graph);
+  other.y.dtype = af::DT_INT8;
+  af::ascir_op::Mul mul("mul");
+  mul.x1 = cast_to_int8.y;
+  mul.x2 = other.y;
+  mul.y.dtype = af::DT_INT8;
+
+  auto mul_node = graph.FindNode("mul");
+  ASSERT_NE(mul_node, nullptr);
+  auto codegen_impl = ascgen_utils::GetAscIrCodegenImpl(mul_node->GetType());
+  ASSERT_NE(codegen_impl, nullptr);
+  auto *codegen_impl_v2 = dynamic_cast<af::ascir::AscIrCodegenV2 *>(codegen_impl.get());
+  ASSERT_NE(codegen_impl_v2, nullptr);
+  const auto output_cast_paths = codegen_impl_v2->GetOutputConversionPath(*mul_node);
+  ASSERT_EQ(output_cast_paths.size(), 1U);
+  ASSERT_EQ(output_cast_paths[0], (std::vector<af::DataType>({af::DT_UINT8, af::DT_INT8})));
+}
+
 TEST_F(RegReduceApicallTest, ReduceProdUsesReuseSourceWhenSourceIsExclusive) {
   std::vector<ascir::AxisId> current_axis;
   std::vector<std::reference_wrapper<const Tensor>> inputs;
