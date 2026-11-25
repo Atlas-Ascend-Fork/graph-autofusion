@@ -161,6 +161,52 @@ class TestSuperKernel:
                 mock_raise.assert_called()
 
     @staticmethod
+    def test_compile_rewrites_shorter_generated_source(tmp_dir):
+        kernel_name = "test_rewrite_source"
+        one_op = {"op_list": [{"bin_path": "", "json_path": "", "kernel_name": "add"}]}
+        two_ops = {
+            "op_list": [
+                {"bin_path": "", "json_path": "", "kernel_name": "add"},
+                {"bin_path": "", "json_path": "", "kernel_name": "add"},
+            ]
+        }
+        reused_dir = os.path.join(tmp_dir, "reused_output")
+        clean_dir = os.path.join(tmp_dir, "clean_output")
+        os.makedirs(reused_dir, exist_ok=True)
+        os.makedirs(clean_dir, exist_ok=True)
+
+        def compile_source(kernel_meta_dir, kernel_info):
+            with mock.patch.object(
+                CommonUtility, "get_kernel_meta_dir", return_value=kernel_meta_dir
+            ):
+                sk_compile(kernel_info, kernel_name)
+            generated = [
+                name
+                for name in os.listdir(kernel_meta_dir)
+                if name.startswith(kernel_name) and name.endswith("_kernel.cpp")
+            ]
+            assert len(generated) == 1
+            fd = os.open(os.path.join(kernel_meta_dir, generated[0]), os.O_RDONLY)
+            with os.fdopen(fd, "rb") as source:
+                return source.read()
+
+        with (
+            mock.patch("builtins.open", new_callable=mock.mock_open, read_data="{}"),
+            mock.patch("json.load", return_value=sub_op_add_json),
+            mock.patch("subprocess.run"),
+            mock.patch.object(
+                CommonUtility, "is_support_super_kernel", return_value=True
+            ),
+            mock.patch("superkernel.super_kernel.compile_super_kernel"),
+        ):
+            longer_source = compile_source(reused_dir, two_ops)
+            reused_source = compile_source(reused_dir, one_op)
+            clean_source = compile_source(clean_dir, one_op)
+
+        assert len(longer_source) > len(clean_source)
+        assert reused_source == clean_source
+
+    @staticmethod
     def test_gen_early_start_config_pre_op_is_aiv():
         with mock.patch("json.load", return_value=sub_op_add_json):
             pre_sub_operator = SubOperatorInfos(0, info_dict, 0, {})

@@ -881,7 +881,7 @@ auto_gen_{super_operator.kernel_name}_kernel(void) {{\n'
         with os.fdopen(
             os.open(
                 super_operator.kernel_file,
-                os.O_RDWR | os.O_CREAT,
+                os.O_RDWR | os.O_CREAT | os.O_TRUNC,
                 stat.S_IWUSR | stat.S_IRUSR,
             ),
             "w",
@@ -1339,7 +1339,7 @@ not have any send event, op:{sub_operator.kernel_name}, event_list:{sub_operator
         with os.fdopen(
             os.open(
                 super_operator.kernel_file,
-                os.O_RDWR | os.O_CREAT,
+                os.O_RDWR | os.O_CREAT | os.O_TRUNC,
                 stat.S_IWUSR | stat.S_IRUSR,
             ),
             "w",
