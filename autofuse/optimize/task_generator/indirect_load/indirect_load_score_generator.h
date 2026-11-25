@@ -30,7 +30,7 @@ namespace indirect_load_detail {
 // 逐成员判定（无全组代表值）：历史静态路径取末成员 lookup 作代表并全组门控、动态
 // 路径取首成员——成员 lookup 不同时两侧结论分歧；统一算法逐成员投票后两端一致。
 // 不可物化成员（叶子含本图原始 sizevar 之外的符号）从分子分母同时剔除（N = 可评估
-// 成员数，不引入方向性偏差）；N==0 时双方 0 分，由候选序破平局。叶子符号判定按词法
+// 成员数，不引入方向性偏差）；N==0 时双方 0 分，由 ATT 比较性能估值。叶子符号判定按词法
 // token：表达式 Str() 的全部标识符 token ∈ 原始 sizevar 名集合（ContainVar 为子串
 // 语义，ks 会假命中 ks0，不作判据；Replace 为表达式整体匹配，改用 Subs 符号替换）。
 enum class GroupCandidateForm {

@@ -5838,7 +5838,6 @@ TEST_F(TestBackendUserSideInputFanoutE2e, GeneratesUserSideInputFanoutKernel) {
 using TestBackendUserEmbeddingSumE2e = indirect_load_test::PrecisionBackendE2e;
 
 TEST_F(TestBackendUserEmbeddingSumE2e, GeneratesUserEmbeddingSumKernel) {
-  ASSERT_NE(testing::UnitTest::GetInstance(), nullptr);
   indirect_load_test::BackendGraph backend(kUserEmbeddingSumGraphName, "input0", "input1", af::DT_FLOAT, af::DT_INT32);
   const auto graph = backend.Finalize(
 #if defined(IL_USER_EMBEDDING_SUM_RANK2)
@@ -5852,7 +5851,9 @@ TEST_F(TestBackendUserEmbeddingSumE2e, GeneratesUserEmbeddingSumKernel) {
   ASSERT_NE(graph, nullptr);
   codegen::CodegenResult result;
 #if defined(IL_USER_EMBEDDING_SUM_SIMD)
-  indirect_load_test::GenerateForTemplate(graph, {}, ascir::TemplateId::kIndirectLoadSimd, result);
+  // Pass the symbolic inputs through AutofuseTiling to initialize every SIMD candidate.
+  const std::map<std::string, std::string> shape_info{{"ks0", "ks0"}, {"s44", "s44"}};
+  indirect_load_test::GenerateForTemplate(graph, shape_info, ascir::TemplateId::kIndirectLoadSimd, result);
   EXPECT_NE(result.kernel.find("// IndirectLoad SIMD"), std::string::npos);
 #else
   indirect_load_test::GenerateForTemplate(graph, {}, ascir::TemplateId::kIndirectLoadSimt, result);

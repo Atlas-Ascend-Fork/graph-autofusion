@@ -610,6 +610,41 @@ TEST_F(TestGenModelInfo, GenTilingImplAutoFuseV3WithScoreFunc) {
   EXPECT_NE(tiling_func.find(R"(graphTilingData)"), std::string::npos);
 }
 
+TEST_F(TestGenModelInfo, GenTilingImplAutoFuseV3WithScheduleResultScoreBuckets) {
+  af::AscGraph graph("graph");
+  FusedParsedScheduleResult all_model_infos;
+  std::map<std::string, std::string> options{{kTilingDataTypeName, "graphTilingData"}};
+  ASSERT_EQ(CreateFaAscGraphWithAllModelInfos("", "HighPerf", graph, all_model_infos, options), af::SUCCESS);
+  auto schedule_results = CreateScheduleResultWithSingleAscGraph({1, 1, 1}, graph);
+  auto &result = schedule_results.node_idx_to_scheduled_results[0][2];
+  result.score_func = "int32_t CalcScore(graphTilingData &tiling_data) { return -1; }";
+
+  std::map<std::string, std::string> tiling_funcs;
+  ASSERT_TRUE(GenTilingImplAutoFuseV3("AddLayerNorm", schedule_results, options, tiling_funcs, true));
+  std::string tiling_func;
+  CombineTilings(tiling_funcs, tiling_func);
+
+  const auto entry =
+      tiling_func.find("bool GetTiling(graphTilingData &tiling_data, int32_t tiling_case_id, double *perf) {");
+  ASSERT_NE(entry, std::string::npos);
+  const auto end = tiling_func.find("} // namespace AscGraph0", entry);
+  ASSERT_NE(end, std::string::npos);
+  const auto selection = tiling_func.substr(entry, end - entry);
+  EXPECT_NE(selection.find("int32_t scores[3]{}"), std::string::npos);
+  EXPECT_NE(selection.find("scores[2] = AscGraph0ScheduleResult2::CalcScore(tiling_data)"), std::string::npos);
+  EXPECT_NE(selection.find("if (max_score > 0)"), std::string::npos);
+  EXPECT_NE(selection.find("if (scores[index] != max_score) { continue; }"), std::string::npos);
+  const std::string no_solution = "if (IsEqual(best_perf, -1))";
+  const auto primary = selection.find(no_solution);
+  ASSERT_NE(primary, std::string::npos);
+  const auto fallback = selection.find(no_solution, primary + no_solution.size());
+  ASSERT_NE(fallback, std::string::npos);
+  EXPECT_NE(selection.substr(primary, fallback - primary)
+                .find("if (scores[index] == -1 || (max_score > 0 && scores[index] == max_score))"),
+            std::string::npos);
+  EXPECT_NE(selection.find("if (scores[index] != -1) { continue; }", fallback), std::string::npos);
+}
+
 TEST_F(TestGenModelInfo, GenTilingImplAutoFuseV3WithScoreFuncByEnv) {
   setenv("AUTOFUSE_DFX_FLAGS",
          "--autofuse_att_algorithm=HighPerf;--att_accuracy_level=0;--att_ub_threshold=20;--force_template_op_name="

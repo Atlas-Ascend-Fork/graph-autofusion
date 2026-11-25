@@ -820,7 +820,7 @@ af::Status ApplyGraphPassMixed(af::AscGraph &graph, const std::vector<af::AscNod
 // 多 gather 水平融合候选生成（并存竞标制）：全部形态在调度期并存生成、进同一竞争
 // 池交 CalcScore 竞标——L1/L4 共模板候选（SIMD×2 + SIMT×1，SIMT 内部按寄存器压力
 // 模型定型 L2/L3/L4）+ L5 混模板候选（异构选择时产出，同构跳过）+ L6 SK 分段桥接
-// 候选（打分恒 0 的终态兜底，仅当其余候选均被否决或垫底时胜出）。统一打分为成员偏好
+// 候选（打分为 0，可参与 ATT 性能比较）。统一打分为成员偏好
 // 满足模型（GenerateGroupScoreFunc），同一套组聚合输入对全部形态可比；tiling 期
 // 资源失败的兜底由 SK 在场结构性成立（单 gather 四候选并存机制的组路径推广）。
 af::Status GenerateGroupCandidates(ascir::HintGraph &graph, const IndirectLoadGroup &group,
@@ -990,7 +990,7 @@ af::Status GenerateGroupCandidates(ascir::HintGraph &graph, const IndirectLoadGr
   }
   // [L6 SK 分段桥接候选]（并存兜底，打分恒 0）：逐成员复用单 gather SK 流水（workspace
   // 边界把各路 IL 隔入独立段、归并/输出链作为消费段独立调度——各段保留各自调度）。
-  // 仅当其余候选均被否决或垫底时胜出——tiling 期资源失败的兜底由此结构性成立；SK 自身
+  // ATT 按性能估值比较可用的兜底候选；SK 自身
   // 不可行（Transpose / 复合 Norm / SK 校验否决 / dtype 门控）时无此候选。
   if (!sk_blocked) {
     ascir::ImplGraph candidate_graph(graph.GetName().c_str());
