@@ -181,12 +181,12 @@ aclError aclskOptimize(aclmdlRI model, aclskOptions *options) {
   }
   SK_LOGI("End dump kernel binaries");
 
-  SK_LOGI("Start dump tasks after update by use rts api to JSON...");
+  SK_LOGI("Start dump tasks after update by using rts api to JSON...");
   ret = DumpMdlJson(model, metaDir, "sk_mdl_updated");
   if (ret != ACL_SUCCESS) {
     return ret;
   }
-  SK_LOGI("End dump tasks after update by use rts api to JSON");
+  SK_LOGI("End dump tasks after update by using rts api to JSON");
   return ACL_SUCCESS;
 }
 

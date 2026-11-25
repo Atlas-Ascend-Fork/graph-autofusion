@@ -289,7 +289,7 @@ Status FusedGraphUnfolder::MergeInputNodes(const af::ComputeGraphPtr &graph, af:
     (void)ScheduleUtils::GetNodeIrAttrIndex(node, index);
     GE_ASSERT_TRUE(index >= 0, "Ir attr index:[%ld] is invalid, node:[%s], expect >= 0.", index, node->GetNamePtr());
     const auto parent_node_in_anchor = asc_backend->GetInDataAnchor(static_cast<int32_t>(index));
-    GE_CHECK_NOTNULL(parent_node_in_anchor, "Parent output anchor is nullptr, data:[%s], index:[%d].",
+    GE_CHECK_NOTNULL(parent_node_in_anchor, " Parent output anchor is nullptr, data:[%s], index:[%d].",
                      node->GetNamePtr(), static_cast<int32_t>(index));
     const auto src_out_anchor = parent_node_in_anchor->GetPeerOutAnchor();
     if ((src_out_anchor == nullptr) || (src_out_anchor->GetOwnerNodeBarePtr() == nullptr)) {

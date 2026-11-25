@@ -350,7 +350,7 @@ class SuperOperatorInfos:
                     CommonUtility().ascendc_raise_python_err(
                         ERR_CODE,
                         (
-                            f"send op {event_send[send_id].kernel_name_for_multi_stream} can not same with recv op \
+                            f"send op {event_send[send_id].kernel_name_for_multi_stream} cannot be the same as recv op \
 {event_recv[send_id].kernel_name_for_multi_stream}"
                         ),
                     )

@@ -1,5 +1,7 @@
 # Cast (CastExtend) V2 Performance Model
 
+English | [简体中文](./design.md)
+
 ## Scope
 
 - Targeting the v35 (V2) ASCIR `Cast` node, corresponding to the regbase API `CastExtend`;

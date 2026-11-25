@@ -1,5 +1,7 @@
 # `afir.remove_pad` 接通设计（T5）
 
+简体中文 | [English](./2026-09-30-afir-remove-pad-design_en.md)
+
 > 2026-09-30 · 上游：[向量化轴合轴设计](2026-09-28-afir-vectorized-axis-collapse-design.md) 探针结论 P5、
 > [elementwise 遗留问题清单](2026-09-22-afir-elementwise-remaining-issues.md)
 >
@@ -78,7 +80,7 @@
   `ApiFamily::Shared`，选不选中由供给表查询决定，不由 SoC 字符串决定。
   32B 这个数来自 UB 的访问粒度，与 bridge 里 `kTmpBufferAlignmentBytes` 同一个常量口径，
   不是芯片判别。
-- **日志**：不新增默认日志。判据在每个 `afir.remove_pad` 上跑一次（O(段数 × 2)）。
+- **日志**：不新增默认日志。判据在每个 `afir.remove_pad` 上跑一次（O（段数 × 2））。
 - **SuperKernel 解耦**：不碰 `super_kernel/`。
 
 ## 假设和依赖关系
@@ -312,7 +314,7 @@ lit 是主入口（详见「测试用例设计」）。`ElementTypeMatrixTest` �
 | Python/C++ 混合绑定 | 不适用 | 不碰 `compiler/py_module/` |
 | 构建与打包 | **适用（轻）** | 两个 CMakeLists 各加一个源文件，不改安装路径、产物名与第三方依赖 |
 | 测试与覆盖率 | **适用** | 四条 lit（两正两反）；E2E 见「测试边界」 |
-| 性能与日志 | **适用（轻）** | 编译期每个 `afir.remove_pad` 上一次 O(段数) 判据；执行期是净收益（这个节点存在的理由就是省 MTE3 带宽）；不新增日志 |
+| 性能与日志 | **适用（轻）** | 编译期每个 `afir.remove_pad` 上一次 O（段数）判据；执行期是净收益（这个节点存在的理由就是省 MTE3 带宽）；不新增日志 |
 | 兼容性 | 不适用 | 无对外接口、配置、产物布局变化；MLIR 路径仍由 `AF_ENABLE_MLIR_CODEGEN` 控制 |
 
 ## 性能
@@ -377,7 +379,7 @@ struct RemovePadShape {
 
 ### 关键技术/算法
 
-两处已在「功能需求」里展开：分段形态分类（O(段数)）与 32B 整除的结构判据（O(树大小)）。
+两处已在「功能需求」里展开：分段形态分类（O（段数））与 32B 整除的结构判据（O（树大小））。
 
 ### 流程设计
 

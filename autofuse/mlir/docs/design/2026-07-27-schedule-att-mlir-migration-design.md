@@ -1,5 +1,7 @@
 # Autofuse 从 ScheduledResult 到 MLIR 的编译流程迁移设计
 
+简体中文 | [English](./2026-07-27-schedule-att-mlir-migration-design_en.md)
+
 > **2026-10-22 状态更新**：生产 MLIR Codegen 路由、AFIR→AscendC、legacy/MLIR 对照入口已落地，
 > 开关为 `AF_ENABLE_MLIR_CODEGEN`；ATT/Schedule 完整迁移和 legacy 退役仍是长期目标。
 > 以下旧日期的状态及代码盘点是历史基线，不能据此判断生产链路尚未接入。当前流程见
@@ -205,7 +207,7 @@ PartB 对应 AutoSchedule::DoAutoSchedule：
 - Scheduler::DoScheduler 执行 split、merge、reorder、bind、cache 等变换；
 - 产出多个 AutoScheduleOutput。
 
-非 Reduce-first-stage 路径在 optimize/optimize.cpp:1020 把多个 AutoScheduleOutput 放入同一个 ScheduleGroup.impl_graphs。RCore 第一阶段在 :520 为每个第一阶段结果复制 ScheduledResult，再继续追加后续 stage。
+非 Reduce-first-stage 路径在 optimize/optimize.cpp:1020 把多个 AutoScheduleOutput 放入同一个 ScheduleGroup.impl_graphs。RCore 第一阶段在 `:520` 为每个第一阶段结果复制 ScheduledResult，再继续追加后续 stage。
 
 因此，一个 `ScheduledResult` 是完整方案；一个 `ScheduleGroup` 是方案中的 stage；一个 `impl_graph` 是该 stage
 的一种实现 template。
@@ -240,7 +242,7 @@ AppendFuncCall 位于 codegen/codegen_kernel.cpp:3438。它递归遍历 per_grou
 
 mlir/bridge/ScheduleToAfir/ScheduleToAfir.cpp:216 的 ScheduleResultToAfir 实际接收整个 FusedScheduledResult。
 
-其 :223-231 直接四层遍历，并把每个 impl_graph 追加到同一个 KernelInfo.graphs：
+其 `:223-231` 直接四层遍历，并把每个 impl_graph 追加到同一个 KernelInfo.graphs：
 
     for node results
       for scheduled result
@@ -382,11 +384,11 @@ codegen/codegen.cpp:392 的 MaybeDumpAfirFromSchedule 位于 legacy kernel、til
 
 bridge 只写 template_counts_per_stage，entry 用除法/取模解码。这样 IR 大小是：
 
-    O(各 stage template 数量之和)
+    O（各 stage template 数量之和）
 
 而不是：
 
-    O(各 stage template 数量乘积)
+    O（各 stage template 数量乘积）
 
 如果 Ascend 编译器需要 TILING_KEY_IS 常量分支，在 AFIR lowering 末端增加 PlanDispatchSpecializePass：
 
@@ -1114,7 +1116,7 @@ VerifyPlanModule 必须检查：
 | compiler/py_module | 增加 off/on/compare 路由；对外返回不变 |
 | att | M2 新增 MLIR analysis/host tiling 路径；legacy 文件不重构 |
 | optimize | M3 新增 MLIR-native Schedule；legacy 文件不重构 |
-| codegen | legacy 实现保持；不再把 :392 dump hook 当迁移入口 |
+| codegen | legacy 实现保持；不再把 `:392` dump hook 当迁移入口 |
 
 ## 错误处理
 

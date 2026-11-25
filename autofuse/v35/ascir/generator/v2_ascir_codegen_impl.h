@@ -1363,7 +1363,7 @@ class FrexpAscIrCodegenImplV2 : public AscIrCodegenV2 {
     GE_ASSERT_TRUE(!IsNodeHasScalarInput(node), "Node %s[%s] does not support scalar input", node.GetTypePtr(),
                    node.GetNamePtr());
     AscNodeOutputs node_outputs = node.outputs;
-    GE_ASSERT_TRUE(node_outputs().size() == 2U, "Node %s[%s] output tensor size %zu is not equal with 2",
+    GE_ASSERT_TRUE(node_outputs().size() == 2U, "Node %s[%s] output tensor size %zu is not equal to 2",
                    node.GetTypePtr(), node.GetNamePtr(), node_outputs().size());
     GE_ASSERT_SUCCESS(ValidateShapeConsistencyWithOutput(node, 0U),
                       "Node %s[%s] check mantissa shape consistency failed", node.GetTypePtr(), node.GetNamePtr());

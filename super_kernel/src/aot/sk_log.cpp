@@ -31,7 +31,7 @@ void ReportErrorMessageInner(const std::string &code, const char *fmt, ...) {
   va_start(argList, fmt);
   auto ret = vsnprintf_s(buf.data(), LIMIT_PREDEFINED_MESSAGE, LIMIT_PREDEFINED_MESSAGE - 1U, fmt, argList);
   if (ret == -1) {
-    SK_DLOGE("Construct error message failed, maybe the length of error message exceed limits: %zu",
+    SK_DLOGE("Construct error message failed, maybe the length of error message exceeds the limit: %zu",
              LIMIT_PREDEFINED_MESSAGE);
   }
   va_end(argList);

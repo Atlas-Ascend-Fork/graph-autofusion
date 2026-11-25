@@ -502,7 +502,7 @@ dy_block_num = ((uint64_t){kernel_type.value}) << 32 | (*blockNumAddr);
             )
         else:
             CommonUtility().ascendc_raise_python_err(
-                ERR_CODE, (f"kernel type {kernel_type} do not support!")
+                ERR_CODE, (f"kernel type {kernel_type} is not supported!")
             )
         return case_block
 
@@ -686,7 +686,9 @@ kernelType == {SuperKernelKernelType.KERNEL_TYPE_MIX_AIC_1_0.value}) {{
         if self.early_start_set_flag or self.early_start_wait_flag:
             CommonUtility().ascendc_raise_python_err(
                 ERR_CODE,
-                (f"{self.kernel_name} is dynamic op, do not support early start"),
+                (
+                    f"{self.kernel_name} is a dynamic op and does not support early start"
+                ),
             )
         # for hard sync of dynamic op
         self.set_early_start_complement_blocks("ASCEND_IS_AIV", "true")
@@ -747,7 +749,7 @@ param_base[{dynamic_extra_param_offset + 1}], param_base[{dynamic_extra_param_of
         CommonUtility().ascendc_raise_python_err(
             ERR_CODE,
             (
-                f"The binary {binary_file} of {self.kernel_name} do not found .text section"
+                f"The binary {binary_file} of {self.kernel_name} does not contain a .text section"
             ),
         )
         return 0
@@ -1292,5 +1294,5 @@ param_base[{dynamic_extra_param_offset + 1}], param_base[{dynamic_extra_param_of
             )
         else:
             CommonUtility().ascendc_raise_python_err(
-                ERR_CODE, (f"kernel type {self.kernel_type} do not support!")
+                ERR_CODE, (f"kernel type {self.kernel_type} is not supported!")
             )

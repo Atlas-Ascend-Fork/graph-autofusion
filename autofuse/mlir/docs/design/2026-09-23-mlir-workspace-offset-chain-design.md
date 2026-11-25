@@ -1,5 +1,7 @@
 # MLIR 路径 workspace 偏移链路设计
 
+简体中文 | [English](./2026-09-23-mlir-workspace-offset-chain-design_en.md)
+
 > 状态：设计中（2026-09-23）
 > 关联：[2026-09-21-afir-reduce-sum-ra-lowering-design.md](2026-09-21-afir-reduce-sum-ra-lowering-design.md) §3.8 / §3.10、
 > [2026-08-13-tiling-data-schema-and-header-generation-design.md](2026-08-13-tiling-data-schema-and-header-generation-design.md)
@@ -458,7 +460,7 @@ GenKernelEntry
 
 ### 编译时长
 
-三处改动都是 O(workspace 节点数) 的常数级遍历，workspace 节点数是个位数量级。
+三处改动都是 O（workspace 节点数）的常数级遍历，workspace 节点数是个位数量级。
 FR5 的校验只查一次根 `TilingSchema` 成员，不新增源码扫描。
 编译时长影响不可测量。
 

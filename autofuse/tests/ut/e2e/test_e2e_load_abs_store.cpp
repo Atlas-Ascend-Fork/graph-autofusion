@@ -555,7 +555,7 @@ __attribute__((constructor)) void Init() {
     DLOGE("Failed to load %s: %s", kernel_file, dlerror());
     return;
   }
-  DLOGD("Kernel api lib %s load succeed", kernel_file);
+  DLOGD("Kernel api lib %s loaded successfully", kernel_file);
   initialized = true;
 }
 

@@ -1,5 +1,7 @@
 # `afir.transpose` 端到端落地与泛化设计（transpose 类 op）
 
+简体中文 | [English](./2026-10-19-afir-transpose-e2e-design_en.md)
+
 > **文档说明**：本文档描述 transpose 类 op（`afir.transpose` / `afir.pad`）在 MLIR codegen
 > 路径上的端到端设计与后续泛化路线，覆盖：算子本体（方言定义、bridge 接入、发射器）、
 > 跨步搬运的整图使能、调度/ATT 侧配套、测试与验收口径。旧基线曾通过回归；当前补丁的验证以 review 文档最新记录为准，
@@ -692,9 +694,9 @@ printer 落 `lib/Target/AscendC/Autofuse/Transpose.cpp`：
 
 ### 编译时长
 
-第一部分：每个 `afir.transpose` 上一次 perm 分析（O(轴数)）+ reg 档一次
-`collapseVectorizedAxes` + O(段数) 数组物化，capability 与 pattern 各算一遍（×2），与
-RemovePad/Nddma 同约定。第二部分：合轴对每个 load/store 一次 O(轴数≤5) 的符号比较。
+第一部分：每个 `afir.transpose` 上一次 perm 分析（O（轴数））+ reg 档一次
+`collapseVectorizedAxes` + O（段数）数组物化，capability 与 pattern 各算一遍（×2），与
+RemovePad/Nddma 同约定。第二部分：合轴对每个 load/store 一次 O（轴数≤5）的符号比较。
 对整图编译时长影响可忽略（<1%）。
 
 ### 执行性能

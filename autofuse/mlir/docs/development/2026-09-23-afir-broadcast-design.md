@@ -1,5 +1,7 @@
 # L-7　`afir.broadcast` 接通断头路——设计
 
+简体中文 | [English](./2026-09-23-afir-broadcast-design_en.md)
+
 **日期**：2026-09-23　**对应清单项**：L-7（`2026-09-22-afir-elementwise-remaining-issues.md`）
 
 本文只写判断和证据。**清单里 L-7 那一节记的三条前置有两条不成立，记的「真卡点」也只说对了
@@ -316,7 +318,7 @@ legacy 对应的事实是：它的偏移与长度都取自**张量自己的** de
 
 ## 五、性能
 
-编译期：新增一个 implementation 的注册与一次 descriptor 扫描，O(向量化轴数)，可忽略。
+编译期：新增一个 implementation 的注册与一次 descriptor 扫描，O（向量化轴数），可忽略。
 执行期：发的调用与 legacy 逐字相同，无差异。内存：mem 侧那块 tmp buffer 本来就由 ATT 算进预算，
 不新增占用。无新增默认日志。
 

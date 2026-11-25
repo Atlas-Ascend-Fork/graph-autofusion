@@ -1,5 +1,7 @@
 # 转置泛化测试设计（P1-P5，legacy 场景对齐）
 
+简体中文 | [English](./2026-10-29-afir-transpose-generalization-test-design_en.md)
+
 > 上游设计：[2026-10-19-afir-transpose-e2e-design.md](2026-10-19-afir-transpose-e2e-design.md)（第一/二部分已交付，
 > 其「扩展步骤 P1-P5」章节为本设计的输入）。本文档以**测试**为主体，包含验证暴露的 MLIR schema/ATT 适配及空 include 修复；本阶段是
 > 「逐形态验证并登记能力缺口」。本轮用户明确只交付 legacy Inductor 迁移，TF 排除；
@@ -158,7 +160,7 @@ legacy 没有现成用例的形态靠这一步补锚）→ 有缺口按上游设
    沿用新基线 nddma 实现，不以旧 A7 归因预先挂起。
    legacy 无组合形态现成用例（broadcast、reduce 各自的族都在），用同图对照补锚。
 4. 输出：mem 档 `broadcast_transpose_8x37x23`：`(1,37,23)` brc→`(8,37,23)`→021；
-   `transpose_sum_2x37x23`：021→sum(末轴)，输出 `[2,23,1]`。均有独立 oracle；
+   `transpose_sum_2x37x23`：021→sum（末轴），输出 `[2,23,1]`。均有独立 oracle；
    legacy 同图参数对照与真机结果需单独记录，不能用 CPU oracle 结果替代。
 
    legacy 锚：v35 域 `NddmaCaseBrc*` 族（broadcast×nddma 调度层 6+ 条）、`ReduceNeedAlignment`；

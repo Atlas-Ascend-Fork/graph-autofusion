@@ -1,5 +1,7 @@
 # Slice/Split/StridedSlice/SplitV(D) 自动融合算子 — 综合技术文档
 
+简体中文 | [English](../../../../en/autofuse/design/features/slice_split.md)
+
 
 ---
 
@@ -296,7 +298,7 @@ i_k = start[k] + o_k × stride[k]
 
 | 阶段 | 节点状态 |
 |------|---------|
-| **BeforeAutofuse** | `x0`(Data, axis `[z0, z1=s1+s2]`) → `load0`(Load, `SetOffset(s1)` 跳过 s1 元素，strides `{s1+s2, One}` 实现步进) → `store`(Store) → `y`(Output) |
+| **BeforeAutofuse** | `x0`（Data，axis `[z0, z1=s1+s2]`）→ `load0`（Load，`SetOffset(s1)` 跳过 s1 元素，strides `{s1+s2, One}` 实现步进）→ `store`(Store) → `y`(Output) |
 | **AfterInferOutput** | compute_type 赋值：Load→`kComputeLoad`，Store→`kComputeStore` |
 | **AfterGetApiInfo** | API 类型：Load/Store→`kAPITypeCompute`，计算单元→`kUnitMTE2`（内存搬运引擎） |
 | **AfterScheduler** | 轴切分（`TileSplit`/`BlockSplit`/`ApplySplit`），向量化轴/步长设置，对齐到 8 元素（32B/sizeof(float)） |
