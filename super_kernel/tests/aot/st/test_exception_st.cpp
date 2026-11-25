@@ -156,10 +156,10 @@ TEST_F(AotSystemTest, ExceptionCallbackRejectsMissingAndFailedRuntimeInformation
   const auto size = exception.argsSize;
   exception.argsSize = 0;
   exception.Raise();
-  ExpectExceptionLog("no args, callback return");
+  ExpectExceptionLog("Missing or incomplete SK argument header, deviceArgsLen=0");
   exception.argsSize = size - 1;
   exception.Raise();
-  ExpectExceptionLog("exceeds skDeviceEntryArgsPtrLen");
+  ExpectExceptionLog("Invalid SK argument size");
   exception.argsSize = size;
   const auto validArgs = exception.args;
   exception.args = nullptr;

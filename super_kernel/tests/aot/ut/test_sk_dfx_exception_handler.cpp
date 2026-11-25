@@ -220,17 +220,16 @@ aclError Fake_aclrtGetArgsFromExceptionInfo_Success(const aclrtExceptionInfo *ex
                                                     uint32_t *argsLen) {
   (void)exceptionInfo;
   *args = reinterpret_cast<void *>(0x3000);  // Directly return GM address
-  // Use g_mockDeviceBufferSize if set, otherwise fallback to 8 (original behavior)
-  *argsLen = g_mockDeviceBufferSize > 0 ? static_cast<uint32_t>(g_mockDeviceBufferSize) : 8;
+  *argsLen = g_mockDeviceBufferSize > 0 ? static_cast<uint32_t>(g_mockDeviceBufferSize) : sizeof(SkHeaderInfo);
   return ACL_SUCCESS;
 }
 
-// Mock that returns small argsLen for testing totalSize > skDeviceEntryArgsPtrLen
+// Return a length that can hold the header but not the entire argument buffer.
 aclError Fake_aclrtGetArgsFromExceptionInfo_SmallLen(const aclrtExceptionInfo *exceptionInfo, void **args,
                                                      uint32_t *argsLen) {
   (void)exceptionInfo;
   *args = reinterpret_cast<void *>(0x3000);
-  *argsLen = 8;  // Very small, triggers totalSize > ptrLen check
+  *argsLen = sizeof(SkHeaderInfo);
   return ACL_SUCCESS;
 }
 
@@ -276,7 +275,7 @@ aclError Fake_aclrtGetArgsFromExceptionInfo_Short(const aclrtExceptionInfo *exce
                                                   uint32_t *argsLen) {
   (void)exceptionInfo;
   *args = reinterpret_cast<void *>(0x2000);
-  *argsLen = 4;  // Less than 8
+  *argsLen = sizeof(SkHeaderInfo) - 1;
   return ACL_SUCCESS;
 }
 
@@ -324,18 +323,13 @@ TEST_F(SkDfxExceptionHandlerTest, ExtractTaskQueue_EmptyOffsets) {
 }
 
 TEST_F(SkDfxExceptionHandlerTest, ExtractTaskQueue_WithTaskCounts) {
-  // Setup test data
-  uint32_t skDeviceEntryArgsSize = sizeof(SkHeaderInfo);
-  SkHeaderInfo headerInfo;
-  headerInfo.aicQueOffset = skDeviceEntryArgsSize;
-  headerInfo.aivQueOffset = skDeviceEntryArgsSize + sizeof(TaskQue) + sizeof(TaskInfo);
-  headerInfo.counterOffset = 0;
-  headerInfo.dfxOffset = 0;
-  headerInfo.eventConfigOffset = 0;
-  headerInfo.nodeCnt = 0;
-  headerInfo.totalSize = 1024;
-
-  uint8_t buffer[1024] = {0};
+  alignas(SkDeviceEntryArgs) uint8_t buffer[1024] = {};
+  SkHeaderInfo headerInfo = {};
+  headerInfo.aicQueOffset = sizeof(SkHeaderInfo);
+  headerInfo.aicQueSize = sizeof(TaskQue) + 2 * sizeof(TaskInfo);
+  headerInfo.aivQueOffset = headerInfo.aicQueOffset + headerInfo.aicQueSize;
+  headerInfo.aivQueSize = sizeof(TaskQue) + 3 * sizeof(TaskInfo);
+  headerInfo.totalSize = sizeof(buffer);
   SkDeviceEntryArgs *deviceArgs = reinterpret_cast<SkDeviceEntryArgs *>(buffer);
   deviceArgs->skHeader = headerInfo;
 
@@ -354,6 +348,30 @@ TEST_F(SkDfxExceptionHandlerTest, ExtractTaskQueue_WithTaskCounts) {
   EXPECT_TRUE(result);
   EXPECT_EQ(handler->aicTaskCnt, 2);
   EXPECT_EQ(handler->aivTaskCnt, 3);
+}
+
+TEST_F(SkDfxExceptionHandlerTest, ExtractTaskQueue_RejectsInvalidQueueSizesAndCounts) {
+  alignas(SkDeviceEntryArgs) uint8_t buffer[sizeof(SkHeaderInfo) + sizeof(TaskQue) + sizeof(TaskInfo)] = {};
+  auto *deviceArgs = reinterpret_cast<SkDeviceEntryArgs *>(buffer);
+  auto &header = deviceArgs->skHeader;
+  header.totalSize = sizeof(buffer);
+  header.aivQueOffset = sizeof(SkHeaderInfo);
+  auto *queue = reinterpret_cast<TaskQue *>(buffer + header.aivQueOffset);
+  handler->skDeviceEntryArgsHost = deviceArgs;
+  handler->skHeaderInfoHost = &header;
+
+  header.aivQueSize = sizeof(TaskQue) - 1;
+  EXPECT_FALSE(handler->ExtractTaskQueue());
+
+  header.aivQueSize = sizeof(TaskQue);
+  EXPECT_TRUE(handler->ExtractTaskQueue());
+  queue->taskCnt = 1;
+  queue->cap = 1;
+  EXPECT_FALSE(handler->ExtractTaskQueue());
+
+  header.aivQueSize += sizeof(TaskInfo);
+  queue->cap = 0;
+  EXPECT_FALSE(handler->ExtractTaskQueue());
 }
 
 TEST_F(SkDfxExceptionHandlerTest, FreeResources_AllNull) {
@@ -694,6 +712,18 @@ TEST_F(SkDfxExceptionHandlerTest, PrintCoreSymbols_LaunchOrigin_NoSKExecutedYet)
 
   free(buffer);
   SUCCEED();
+}
+
+TEST_F(SkDfxExceptionHandlerTest, PrintCoreSymbols_MissingCounterRegionSkipsTrace) {
+  alignas(SkDeviceEntryArgs) uint8_t buffer[sizeof(SkCounterInfo)] = {};
+  auto *deviceArgs = reinterpret_cast<SkDeviceEntryArgs *>(buffer);
+  handler->skDeviceEntryArgsHost = deviceArgs;
+  handler->skHeaderInfoHost = &deviceArgs->skHeader;
+  handler->hasOpTrace_ = true;
+
+  ut_log::LogBuffer::Instance().Clear();
+  handler->PrintCoreSymbols(0, RT_CORE_TYPE_AIC, 0, 0);
+  EXPECT_TRUE(ut_log::LogBuffer::Instance().GetContent().empty());
 }
 
 TEST_F(SkDfxExceptionHandlerTest, PrintCoreSymbols_LaunchSKEntryLaunched_PrintNextOp) {
@@ -2641,6 +2671,7 @@ TEST_F(SkDfxExceptionHandlerTest, ExceptionDumpInfoCallBack_SuperKernelException
   headerInfo.nodeCnt = 1;
   headerInfo.dfxOffset = sizeof(SkHeaderInfo);
   headerInfo.aicQueOffset = headerInfo.dfxOffset + sizeof(SkDfxInfo);
+  headerInfo.aicQueSize = sizeof(TaskQue) + sizeof(TaskInfo);
   const std::string modelId = "model_dfx_callback_route_model";
   uint16_t modelIdIndex = SkEventRecorder::Instance().RegisterModelId(modelId);
   headerInfo.modelIdIndexAndSkScopeId = static_cast<uint64_t>(modelIdIndex) << 40;
@@ -2725,6 +2756,7 @@ TEST_F(SkDfxExceptionHandlerTest, ExceptionDumpInfoCallBack_SameBinHandle_Return
   headerInfo.nodeCnt = 2;
   headerInfo.dfxOffset = sizeof(SkHeaderInfo);
   headerInfo.aicQueOffset = headerInfo.dfxOffset + sizeof(SkDfxInfo) * 2;
+  headerInfo.aicQueSize = sizeof(TaskQue) + 2 * sizeof(TaskInfo);
   headerInfo.modelIdIndexAndSkScopeId = 0;
 
   SkDfxInfo *dfxInfo = reinterpret_cast<SkDfxInfo *>(buffer + headerInfo.dfxOffset);
@@ -2958,7 +2990,7 @@ TEST_F(SkDfxExceptionHandlerTest, ValidateSkHeaderOffsets_DfxOffsetExceedsTotalS
 // ==================== totalSize vs skDeviceEntryArgsPtrLen Validation Tests ====================
 
 TEST_F(SkDfxExceptionHandlerTest, ExtractSkEntryArgs_TotalSizeExceedsPtrLen_ReturnsFalse) {
-  // Use SmallLen mock so skDeviceEntryArgsPtrLen=8 < totalSize
+  // The runtime-reported length covers only the header, while totalSize covers the entire buffer.
   constexpr size_t bufferSize = 256;
   uint8_t *buffer = static_cast<uint8_t *>(malloc(bufferSize));
   ASSERT_NE(buffer, nullptr);
@@ -2984,6 +3016,48 @@ TEST_F(SkDfxExceptionHandlerTest, ExtractSkEntryArgs_TotalSizeExceedsPtrLen_Retu
   g_mockDeviceBuffer = nullptr;
   g_mockDeviceBufferSize = 0;
   free(buffer);
+}
+
+TEST_F(SkDfxExceptionHandlerTest, ExtractSkEntryArgs_TotalSizeChangesBetweenCopies_ReturnsFalse) {
+  SkHeaderInfo header = {};
+  header.totalSize = sizeof(header);
+
+  MOCKER(aclrtGetArgsFromExceptionInfo).stubs().will(invoke(Fake_aclrtGetArgsFromExceptionInfo_Success));
+  MOCKER(aclrtMallocHost).stubs().will(invoke(Fake_aclrtMallocHost_Success));
+  MOCKER(aclrtFreeHost).stubs().will(invoke(Fake_aclrtFreeHost_Success));
+  g_mockDeviceBufferSize = sizeof(header);
+  g_mockDeviceBuffer = reinterpret_cast<uint8_t *>(&header);
+  MOCKER(aclrtMemcpy)
+      .stubs()
+      .will(invoke(+[](void *dst, size_t destMax, const void *src, size_t count, aclrtMemcpyKind kind) -> aclError {
+        auto ret = Fake_aclrtMemcpy_DeviceToHost(dst, destMax, src, count, kind);
+        ++reinterpret_cast<SkHeaderInfo *>(g_mockDeviceBuffer)->totalSize;
+        return ret;
+      }));
+
+  std::unique_ptr<sk::logger::LogContextGuard> logContext;
+  EXPECT_FALSE(handler->ExtractSkEntryArgs(reinterpret_cast<aclrtExceptionInfo *>(0x500), logContext));
+  handler->FreeResources();
+  g_mockDeviceBuffer = nullptr;
+  g_mockDeviceBufferSize = 0;
+}
+
+TEST_F(SkDfxExceptionHandlerTest, ExtractSkEntryArgs_TotalSizeCannotHoldHeader) {
+  SkHeaderInfo header = {};
+  header.totalSize = sizeof(SkHeaderInfo) - 1;
+  g_mockDeviceBufferSize = sizeof(header);
+  g_mockDeviceBuffer = reinterpret_cast<uint8_t *>(&header);
+
+  MOCKER(aclrtGetArgsFromExceptionInfo).stubs().will(invoke(Fake_aclrtGetArgsFromExceptionInfo_Success));
+  MOCKER(aclrtMallocHost).stubs().will(invoke(Fake_aclrtMallocHost_Success));
+  MOCKER(aclrtMemcpy).expects(once()).will(invoke(Fake_aclrtMemcpy_DeviceToHost));
+  MOCKER(aclrtFreeHost).stubs().will(invoke(Fake_aclrtFreeHost_Success));
+
+  std::unique_ptr<sk::logger::LogContextGuard> logContext;
+  EXPECT_FALSE(handler->ExtractSkEntryArgs(reinterpret_cast<aclrtExceptionInfo *>(0x500), logContext));
+  handler->FreeResources();
+  g_mockDeviceBuffer = nullptr;
+  g_mockDeviceBufferSize = 0;
 }
 
 TEST_F(SkDfxExceptionHandlerTest, ExtractSkEntryArgs_InvalidOffsetFailsValidation_ReturnsFalse) {

@@ -115,25 +115,26 @@ bool SuperKernelExceptionHandler::CopySkDeviceEntryArgsToHost(
   logContext = std::make_unique<sk::logger::LogContextGuard>(modelId.empty() ? UNKNOWN_MODEL_ID : modelId);
 
   // Step 2: Now that we know totalSize, copy all SkDeviceEntryArgs data to host at once
-  SK_LOGI("---Total SkDeviceEntryArgs size: %lu bytes", skHeaderInfoHost->totalSize);
-  if (skHeaderInfoHost->totalSize > skDeviceEntryArgsPtrLen) {
-    SK_LOGE("totalSize(%lu) exceeds skDeviceEntryArgsPtrLen(%u), invalid device address range",
-            skHeaderInfoHost->totalSize, skDeviceEntryArgsPtrLen);
+  const uint64_t copySize = skHeaderInfoHost->totalSize;
+  SK_LOGI("---Total SkDeviceEntryArgs size: %lu bytes", copySize);
+  if (copySize < sizeof(SkHeaderInfo) || copySize > skDeviceEntryArgsPtrLen) {
+    SK_LOGE("Invalid SK argument size: totalSize=%lu, headerSize=%zu, deviceArgsLen=%u", copySize, sizeof(SkHeaderInfo),
+            skDeviceEntryArgsPtrLen);
     aclrtFreeHost(skHeaderInfoHost);
     skHeaderInfoHost = nullptr;
     return false;
   }
 
-  if (CheckError(aclrtMallocHost((void **)(&skDeviceEntryArgsHost), skHeaderInfoHost->totalSize),
+  if (CheckError(aclrtMallocHost((void **)(&skDeviceEntryArgsHost), copySize),
                  "aclrtMallocHost for skDeviceEntryArgsHost") != ACL_SUCCESS) {
     aclrtFreeHost(skHeaderInfoHost);
     skHeaderInfoHost = nullptr;
     return false;
   }
 
-  if (CheckError(aclrtMemcpy(skDeviceEntryArgsHost, skHeaderInfoHost->totalSize, skDeviceEntryArgsDev,
-                             skHeaderInfoHost->totalSize, ACL_MEMCPY_DEVICE_TO_HOST),
-                 "aclrtMemcpy for skDeviceEntryArgs") != ACL_SUCCESS) {
+  if (CheckError(
+          aclrtMemcpy(skDeviceEntryArgsHost, copySize, skDeviceEntryArgsDev, copySize, ACL_MEMCPY_DEVICE_TO_HOST),
+          "aclrtMemcpy for skDeviceEntryArgs") != ACL_SUCCESS) {
     aclrtFreeHost(skHeaderInfoHost);
     skHeaderInfoHost = nullptr;
     return false;
@@ -147,6 +148,13 @@ bool SuperKernelExceptionHandler::CopySkDeviceEntryArgsToHost(
 
   // Update skHeaderInfoHost to point to skHeaderInfo in skDeviceEntryArgsHost
   skHeaderInfoHost = &(skDeviceEntryArgsHost->skHeader);
+
+  if (skHeaderInfoHost->totalSize != copySize) {
+    SK_LOGE("SK argument size changed between copies: copied=%lu, header totalSize=%lu", copySize,
+            skHeaderInfoHost->totalSize);
+    FreeResources();
+    return false;
+  }
 
   // Validate all offsets in SkHeaderInfo to prevent out-of-bounds access
   if (!ValidateSkHeaderOffsets()) {
@@ -169,8 +177,8 @@ bool SuperKernelExceptionHandler::ExtractSkDeviceEntryArgsPtr(aclrtExceptionInfo
     return false;
   }
 
-  if (skDeviceEntryArgsPtrLen < 8 || skDeviceEntryArgsDev == nullptr) {
-    SK_DLOGI("no args, callback return");
+  if (skDeviceEntryArgsPtrLen < sizeof(SkHeaderInfo) || skDeviceEntryArgsDev == nullptr) {
+    SK_DLOGI("Missing or incomplete SK argument header, deviceArgsLen=%u", skDeviceEntryArgsPtrLen);
     return false;
   }
   return true;
@@ -264,31 +272,36 @@ bool SuperKernelExceptionHandler::ValidateSkHeaderOffsets() {
 }
 
 bool SuperKernelExceptionHandler::ExtractTaskQueue() {
-  // Data is already in skDeviceEntryArgsHost, accessed via offset
-  // Extract task counts
-  uint8_t *dataBase = reinterpret_cast<uint8_t *>(skDeviceEntryArgsHost);
-
-  if (skHeaderInfoHost->aicQueOffset > 0) {
-    TaskQue *aicTaskQue = reinterpret_cast<TaskQue *>(dataBase + skHeaderInfoHost->aicQueOffset);
-    aicTaskCnt = aicTaskQue->taskCnt;
-    for (uint32_t i = 0; i < aicTaskCnt; ++i) {
-      if (aicTaskQue->taskInfos[i].type == SkTaskType::TYPE_FUNC) {
-        funcNodeIndices_.insert(aicTaskQue->taskInfos[i].index);
+  const auto *dataBase = reinterpret_cast<const uint8_t *>(skDeviceEntryArgsHost);
+  const auto extractQueue = [&](const char *coreType, uint32_t offset, uint32_t size, uint32_t &taskCount) {
+    taskCount = 0;
+    if (offset == 0) {
+      return true;
+    }
+    // ValidateSkHeaderOffsets has checked that the declared queue fits in the copied buffer.
+    if (offset < sizeof(SkHeaderInfo) || offset % alignof(TaskQue) != 0 || size < sizeof(TaskQue)) {
+      SK_LOGE("Invalid %s task queue header: offset=%u, size=%u", coreType, offset, size);
+      return false;
+    }
+    const auto *queue = reinterpret_cast<const TaskQue *>(dataBase + offset);
+    const size_t serializedCapacity = (size - sizeof(TaskQue)) / sizeof(TaskInfo);
+    if (queue->taskCnt > queue->cap || queue->taskCnt > serializedCapacity) {
+      SK_LOGE("Invalid %s task queue count: taskCnt=%u, cap=%u, serializedCapacity=%zu", coreType, queue->taskCnt,
+              queue->cap, serializedCapacity);
+      return false;
+    }
+    taskCount = queue->taskCnt;
+    for (uint32_t i = 0; i < taskCount; ++i) {
+      const TaskInfo &task = queue->taskInfos[i];
+      if (task.type == SkTaskType::TYPE_FUNC) {
+        funcNodeIndices_.insert(task.index);
       }
     }
-  }
+    return true;
+  };
 
-  if (skHeaderInfoHost->aivQueOffset > 0) {
-    TaskQue *aivTaskQue = reinterpret_cast<TaskQue *>(dataBase + skHeaderInfoHost->aivQueOffset);
-    aivTaskCnt = aivTaskQue->taskCnt;
-    for (uint32_t i = 0; i < aivTaskCnt; ++i) {
-      if (aivTaskQue->taskInfos[i].type == SkTaskType::TYPE_FUNC) {
-        funcNodeIndices_.insert(aivTaskQue->taskInfos[i].index);
-      }
-    }
-  }
-
-  return true;
+  return extractQueue("AIC", skHeaderInfoHost->aicQueOffset, skHeaderInfoHost->aicQueSize, aicTaskCnt) &&
+         extractQueue("AIV", skHeaderInfoHost->aivQueOffset, skHeaderInfoHost->aivQueSize, aivTaskCnt);
 }
 
 void SuperKernelExceptionHandler::PrintSkHeaderInfo() const {
@@ -726,7 +739,7 @@ void SuperKernelExceptionHandler::PrintCoreSymbols(uint32_t coreId, rtCoreType_t
     return;
   }
 
-  if (!hasOpTrace_) {
+  if (!hasOpTrace_ || skHeaderInfoHost->counterOffset == 0) {
     return;
   }
 
