@@ -143,7 +143,7 @@ def _compile_kernel(
     import torch_npu  # noqa: F401
     from autofuse.pyautofuse import ascir, Autofuser, AutofuserOptions
     from autofuse.compile_adapter import jit_compile, jit_compile_bin
-    from tbe.common.platform import platform_info
+    from asc_op_compile_base.common.platform import platform_info
 
     torch.npu.set_device(0)
     soc = torch.npu.get_device_name(0)

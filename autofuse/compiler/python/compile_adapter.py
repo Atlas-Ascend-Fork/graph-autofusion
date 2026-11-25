@@ -18,7 +18,7 @@ import time
 import re
 from typing import List
 
-import tbe.common.utils.log as logger
+import asc_op_compile_base.common.utils.log as logger
 
 from autofuse import ascendc_compile
 

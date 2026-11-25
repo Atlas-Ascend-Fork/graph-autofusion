@@ -114,10 +114,10 @@ def _patch_module(original_modules, name, module):
     return module
 
 
-def make_tbe_log_stub_modules():
-    """Build sys.modules stubs for tbe.common.utils.log.
+def make_asc_log_stub_modules():
+    """Build sys.modules stubs for asc_op_compile_base.common.utils.log.
 
-    Loading the real TBE log module takes ~1 minute and its package init
+    Loading the real ASC log module takes ~1 minute and its package init
     pollutes process-global state, which makes ascir Optimize tests that run
     later in the same pytest process fail with "Optimize fail". Compile
     modules under test only use info/warning/error logging, so a stub keeps
@@ -132,19 +132,21 @@ def make_tbe_log_stub_modules():
         stubs[name] = module
         return module
 
-    tbe_module = _stub("tbe")
-    _stub("tbe.common")
-    _stub("tbe.common.utils")
+    asc_module = _stub("asc_op_compile_base")
+    _stub("asc_op_compile_base.common")
+    _stub("asc_op_compile_base.common.utils")
     log_module = _stub(
-        "tbe.common.utils.log",
+        "asc_op_compile_base.common.utils.log",
         info=_AscCodegenDummyLogger.info,
         warning=_AscCodegenDummyLogger.warning,
         error=_AscCodegenDummyLogger.error,
         debug=lambda *args, **kwargs: None,
     )
-    tbe_module.common = stubs["tbe.common"]
-    stubs["tbe.common"].utils = stubs["tbe.common.utils"]
-    stubs["tbe.common.utils"].log = log_module
+    asc_module.common = stubs["asc_op_compile_base.common"]
+    stubs["asc_op_compile_base.common"].utils = stubs[
+        "asc_op_compile_base.common.utils"
+    ]
+    stubs["asc_op_compile_base.common.utils"].log = log_module
     return stubs
 
 
@@ -155,37 +157,41 @@ def _stub_module(original_modules, name, **attrs):
     return _patch_module(original_modules, name, module)
 
 
-def _stub_tbe_common_modules(original_modules):
-    _stub_module(original_modules, "tbe")
-    _stub_module(original_modules, "tbe.common")
-    _stub_module(
-        original_modules, "tbe.common.buildcfg", get_current_build_config=lambda: {}
-    )
-    _stub_module(original_modules, "tbe.common.utils")
+def _stub_asc_common_modules(original_modules):
+    _stub_module(original_modules, "asc_op_compile_base")
+    _stub_module(original_modules, "asc_op_compile_base.common")
     _stub_module(
         original_modules,
-        "tbe.common.utils.log",
+        "asc_op_compile_base.common.buildcfg",
+        get_current_build_config=lambda: {},
+    )
+    _stub_module(original_modules, "asc_op_compile_base.common.utils")
+    _stub_module(
+        original_modules,
+        "asc_op_compile_base.common.utils.log",
         info=_AscCodegenDummyLogger.info,
         error=_AscCodegenDummyLogger.error,
         warning=_AscCodegenDummyLogger.warning,
     )
     _stub_module(
         original_modules,
-        "tbe.common.utils.op_tiling",
+        "asc_op_compile_base.asc_op_compiler.op_tiling",
         do_op_tiling=lambda *args, **kwargs: None,
     )
     _stub_module(
         original_modules,
-        "tbe.common.context",
+        "asc_op_compile_base.common.context",
         get_context=lambda: types.SimpleNamespace(get_compile_info=lambda: {}),
     )
 
 
-def _stub_tikcpp_modules(original_modules):
-    tikcpp_module = _stub_module(original_modules, "tbe.tikcpp")
+def _stub_asc_op_compiler_modules(original_modules):
+    compiler_module = _stub_module(
+        original_modules, "asc_op_compile_base.asc_op_compiler"
+    )
     _stub_module(
         original_modules,
-        "tbe.tikcpp.compile_op",
+        "asc_op_compile_base.asc_op_compiler.compile_op",
         CommonUtility=types.SimpleNamespace(
             print_compile_log=lambda *args, **kwargs: None
         ),
@@ -195,17 +201,15 @@ def _stub_tikcpp_modules(original_modules):
     )
     _stub_module(
         original_modules,
-        "tbe.tikcpp.get_op_tiling",
+        "asc_op_compile_base.asc_op_compiler.get_op_tiling",
         TilingInfo=object,
         _change_param_name_to_name=lambda *args, **kwargs: None,
         gen_static_shape_v2=lambda *args, **kwargs: None,
     )
-    tikcpp_module.OpInfo = object
+    compiler_module.OpInfo = object
 
 
 def _stub_asc_compile_base_modules(original_modules):
-    _stub_module(original_modules, "asc_op_compile_base")
-    _stub_module(original_modules, "asc_op_compile_base.common")
     _stub_module(original_modules, "asc_op_compile_base.common.platform")
     _stub_module(
         original_modules,
@@ -274,8 +278,8 @@ def _restore_modules(original_modules):
 def load_asc_codegen_compile_module():
     original_modules = {}
     try:
-        _stub_tbe_common_modules(original_modules)
-        _stub_tikcpp_modules(original_modules)
+        _stub_asc_common_modules(original_modules)
+        _stub_asc_op_compiler_modules(original_modules)
         _stub_asc_compile_base_modules(original_modules)
         _stub_autofuse_compile_modules(original_modules)
         yield _load_asc_codegen_compile_module(original_modules)
