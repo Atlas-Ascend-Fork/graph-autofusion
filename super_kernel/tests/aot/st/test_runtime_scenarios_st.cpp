@@ -123,8 +123,6 @@ TEST_F(AotSystemTest, RuntimeFailuresBeforeUpdateLeaveModelRecoverable) {
       [] { SkUtSetAclmdlRIGetIdRet(ACL_ERROR_FAILURE); },
       [] { SkUtSetAclmdlRIGetStreamsRet(0, ACL_ERROR_FAILURE); },
       [] { SkUtSetAclrtStreamGetIdRet(ACL_ERROR_FAILURE); },
-      [] { SkUtSetAclrtGetDeviceRet(ACL_ERROR_FAILURE); },
-      [] { SkUtSetAclrtGetDeviceInfoRet(ACL_ERROR_FAILURE); },
       [] { SkUtSetAclmdlRIDestroyRegisterCallbackRet(ACL_ERROR_FAILURE); },
       [] { SkUtSetBinaryGetFunctionNullHandle(1); },
   };
@@ -142,6 +140,37 @@ TEST_F(AotSystemTest, RuntimeFailuresBeforeUpdateLeaveModelRecoverable) {
     EXPECT_EQ(SkUtGetModelDestroyCallbackCount(), 0U);
     EXPECT_EQ(sk::test::OutstandingAllocations(), 0U);
   }
+}
+
+TEST_F(AotSystemTest, DeviceCoreQueryFailuresBeforeUpdateLeaveModelRecoverable) {
+  const char *failure = std::getenv("SK_ST_DEVICE_CORE_FAILURE");
+  if (failure == nullptr) {
+    const auto *test = testing::UnitTest::GetInstance()->current_test_info();
+    const std::string filter = std::string("--gtest_filter=") + test->test_suite_name() + "." + test->name();
+    for (const char *scenario : {"device", "device_info"}) {
+      SCOPED_TRACE(scenario);
+      EXPECT_EQ(sk::test::RunProcess({"/proc/self/exe", filter, "--gtest_repeat=1"},
+                                     std::string("SK_ST_DEVICE_CORE_FAILURE=") + scenario),
+                0);
+    }
+    return;
+  }
+
+  if (std::string(failure) == "device") {
+    SkUtSetAclrtGetDeviceRet(ACL_ERROR_FAILURE);
+  } else {
+    ASSERT_EQ(failure, std::string("device_info"));
+    SkUtSetAclrtGetDeviceInfoRet(ACL_ERROR_FAILURE);
+  }
+  sk::test::Model model;
+  auto stream = model.AddStream();
+  auto task = model.AddKernel(stream, "runtime_failure");
+  EXPECT_NE(aclskOptimize(model.Handle(), nullptr), ACL_SUCCESS);
+  EXPECT_EQ(model.UpdateAttempts(), 0U);
+  EXPECT_EQ(model.Snapshot(task).setParamsCount, 0U);
+  model.Destroy();
+  EXPECT_EQ(SkUtGetModelDestroyCallbackCount(), 0U);
+  EXPECT_EQ(sk::test::OutstandingAllocations(), 0U);
 }
 
 TEST_F(AotSystemTest, DynamicTaskGroupRemainsOutsideFusion) {
