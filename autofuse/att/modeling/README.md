@@ -5,7 +5,9 @@
 ```text
 modeling/
 ├── README.md / README_en.md
-├── v1/README.md / README_en.md
+├── v1/
+│   ├── README.md / README_en.md
+│   └── mte2/load/          # A3 采集证据与原归档参数快照
 └── v35/
     ├── design.md / design_en.md
     ├── common/op_head_cost/
@@ -13,6 +15,8 @@ modeling/
     ├── mte3/store/
     └── vector/
 ```
+
+Load 采集资料按 A3 → [v1/mte2/load](v1/mte2/load/README.md)、A5 → [v35/mte2/load](v35/mte2/load/README.md) 归档。原始采集仓中的 A3/A5 路径保留作为证据索引。
 
 每个模型包含 `design.md`、`cases.csv` 可执行描述符，以及 `results/<run_id>/` 下的版本/命令索引、samples 和报告。既有没有 run ID 的摘要保留在 `results/` 根，不再重复 `results/v35` 平台层。`direct-store-v1` 等 run ID 表示实验修订，不代表平台 V1；占位分类不代表已支持相应模型。
 

@@ -2,6 +2,8 @@
 
 Archive models for load paths such as `load` and `nddma`.
 
+- [Load (GM2UB) model archive](load/README_en.md): A5 base-model collection design, implementation parameters, and later calibrated branches.
+
 ## Content to Add
 
 - Modeling methods: performance hypotheses, experimental design, and formula fitting.
