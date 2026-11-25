@@ -17,7 +17,7 @@ import pytest
 from compile_test_utils import (
     PYTHON_DIR,
     load_compile_module,
-    make_asc_log_stub_modules,
+    make_tbe_log_stub_modules,
 )
 
 MODULE_NAME = "autofuse.compile_adapter"
@@ -42,9 +42,9 @@ def compile_adapter_module():
         extra_autofuse_attrs={"ascendc_compile": ascendc_compile_module},
         extra_modules={
             "autofuse.ascendc_compile": ascendc_compile_module,
-            # Stub asc log so the fixture never triggers the real (slow, and
-            # process-global-state polluting) ASC package init.
-            **make_asc_log_stub_modules(),
+            # Stub tbe log so the fixture never triggers the real (slow, and
+            # process-global-state polluting) TBE package init.
+            **make_tbe_log_stub_modules(),
         },
     ) as loaded_module:
         yield loaded_module

@@ -22,20 +22,17 @@ import fcntl
 from collections import namedtuple
 from contextlib import contextmanager
 
-from asc_op_compile_base.common.buildcfg import get_current_build_config
-from asc_op_compile_base.asc_op_compiler.compile_op import (
-    CommonUtility,
-    AscendCLogLevel,
-)
+from tbe.common.buildcfg import get_current_build_config
+from tbe.tikcpp.compile_op import CommonUtility, AscendCLogLevel
 from asc_op_compile_base.common.platform.platform_info import get_soc_spec
-import asc_op_compile_base.common.utils.log as logger
-from asc_op_compile_base.asc_op_compiler.get_op_tiling import (
+import tbe.common.utils.log as logger
+from tbe.tikcpp.get_op_tiling import (
     TilingInfo,
     _change_param_name_to_name,
     gen_static_shape_v2,
 )
-from asc_op_compile_base.asc_op_compiler.op_tiling import do_op_tiling
-from asc_op_compile_base.common.context import get_context
+from tbe.common.utils.op_tiling import do_op_tiling
+from tbe.common.context import get_context
 
 # Python3 lib pyautofuse.so
 from .pyautofuse import Schedule, CodeGen, ascir
@@ -692,7 +689,7 @@ def cv_core_limit_context(context, aic_num, aiv_num):
 
 
 def get_codegen_compile_context():
-    import asc_op_compile_base.common.context.op_context as op_context
+    import tbe.common.context.op_context as op_context
 
     context = op_context.get_context()
     op_info = context.get_op_info()
@@ -3247,6 +3244,7 @@ def _asc_graph_compile_impl(*args, temp_dir, params):
         tiling_key=tiling_key_list[0],
         kernel_type=kernel_type_list[0],
         is_cube=is_cube,
+        is_conv=is_conv,
     )
     timestamp_set(False, graph_name, "CompileDevice")
     host_build_dir = get_host_build_dir(temp_dir, use_cv_common)

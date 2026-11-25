@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from functools import wraps
 from typing import List
 
-import asc_op_compile_base.common.utils.log as logger
+import tbe.common.utils.log as logger
 from asc_op_compile_base.common.platform.platform_info import get_soc_spec
 
 
@@ -599,8 +599,6 @@ def build_host_include_options(temp_dir):
         "-I",
         f"{ASCEND_PATH}/{machine}-linux/ascendc/include/highlevel_api",
         "-I",
-        f"{ASCEND_PATH}/{machine}-linux/ascendc/include/highlevel_api",
-        "-I",
         f"{ASCEND_PATH}/opp/built-in/op_impl/ai_core/tbe/impl/ascendc/mat_mul_v3",
         "-I",
         f"{ASCEND_PATH}/opp/built-in/op_impl/ai_core/tbe/impl/ops_nn/ascendc/mat_mul_v3",
@@ -950,8 +948,6 @@ def build_device_compile_command(args: argparse.Namespace, temp_dir, base_device
         f"{temp_dir}/device",
         "-I",
         f"{ASCEND_PATH}/{machine}-linux/asc/include",
-        "-I",
-        f"{ASCEND_PATH}/{machine}-linux/ascendc/include/highlevel_api",
         "-I",
         f"{ASCEND_PATH}/opp/built-in/op_impl/ai_core/tbe/impl/ascendc/common",
         "-I",

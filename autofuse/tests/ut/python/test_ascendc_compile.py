@@ -23,7 +23,7 @@ import pytest
 from compile_test_utils import (
     PYTHON_DIR,
     load_compile_module,
-    make_asc_log_stub_modules,
+    make_tbe_log_stub_modules,
 )
 
 MODULE_NAME = "autofuse.compiler.python.ascendc_compile"
@@ -62,9 +62,9 @@ def ascendc_compile_module():
             "asc_op_compile_base.common.platform"
         ),
         "asc_op_compile_base.common.platform.platform_info": platform_info_module,
-        # Stub asc log so the fixture never triggers the real (slow, and
-        # process-global-state polluting) ASC package init.
-        **make_asc_log_stub_modules(),
+        # Stub tbe log so the fixture never triggers the real (slow, and
+        # process-global-state polluting) TBE package init.
+        **make_tbe_log_stub_modules(),
     }
     with load_compile_module(
         MODULE_NAME, MODULE_PATH, extra_modules=extra_modules
@@ -848,8 +848,6 @@ def test_compile_device_obj_includes_machine_asc_headers(
     cmd, stage_name = calls[0]
     assert stage_name == "Device"
     assert "/usr/local/Ascend/cann/aarch64-linux/asc/include" in cmd
-    # device 编译 include 根与 host 侧 build_host_include_options 对称：高阶 API 头基座必须存在
-    assert "/usr/local/Ascend/cann/aarch64-linux/ascendc/include/highlevel_api" in cmd
 
 
 def _defined_macros(cmd):
