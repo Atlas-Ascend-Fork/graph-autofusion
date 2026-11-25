@@ -4943,14 +4943,104 @@ TEST_F(TestCodegenTiling, NBroadCastConsumerAlignmentIsIndependentOfTheCubeFragm
   EXPECT_EQ(graph.GetAllAxis()[0]->align, original_align);
 }
 
-TEST_F(TestCodegenTiling, GeDynamicCvPreservesAllUbCandidatesAndCommonBoundary) {
+TEST_F(TestCodegenTiling, CvStageSizeResolvesConstantAndSymbolicCandidates) {
+  af::AscGraph scalar("scalar");
+  const auto one = scalar.CreateSizeVar(int64_t{1});
+  auto scalar_axis = scalar.CreateAxis("a0a1t", one);
+  scalar.FindAxis(scalar_axis.id)->type = af::Axis::kAxisTypeTileInner;
+  af::AscGraph dynamic("dynamic");
+  auto dynamic_axis = dynamic.CreateAxis("renamed_axis", dynamic.CreateSizeVar("vector_width"));
+  dynamic.FindAxis(dynamic_axis.id)->type = af::Axis::kAxisTypeTileInner;
+  af::AscGraph m_broadcast("m_broadcast");
+  auto broadcast_axis = m_broadcast.CreateAxis("nt", m_broadcast.CreateSizeVar(int64_t{7}));
+  m_broadcast.FindAxis(broadcast_axis.id)->type = af::Axis::kAxisTypeTileInner;
+  af::ascir_op::Data input("input", m_broadcast);
+  ASSERT_EQ(ascir::SetCvBroadcastShape(m_broadcast.FindNode("input"), {af::Symbol(3), af::Symbol(7)}, broadcast_axis.id,
+                                       {af::Symbol(1), af::Symbol(7)}),
+            af::SUCCESS);
+  ascir::ScheduleGroup group;
+  group.impl_graphs = {scalar, dynamic, m_broadcast};
+  ascir::ScheduledResult result;
+  result.schedule_groups = {group};
+  result.cube_type = ascir::CubeTemplateType::kUBFuse;
+  ascir::FusedScheduledResult fields;
+  fields.node_idx_to_scheduled_results = {{result}};
+  auto header = codegen::TilingData("Autofuse").Generate(fields);
+  const std::string sdk_include = "#include \"kernel_tiling/kernel_tiling.h\"\n";
+  ASSERT_NE(header.find(sdk_include), std::string::npos);
+  header.erase(header.find(sdk_include), sdk_include.size());
+  ascir::FusedScheduledResult fused;
+  fused.node_idx_to_scheduled_results = {{result}};
+  std::stringstream helper;
+  AppendCvUbStageSizeSelection(fused, fields, helper);
+  EXPECT_NE(header.find("#define GET_CV_STAGE_SIZE"), std::string::npos);
+  EXPECT_EQ(header.find("a0a1t_size"), std::string::npos);
+  EXPECT_EQ(helper.str().find("get_a0a1t_size"), std::string::npos);
+  EXPECT_TRUE(CompileAndRunCode(header + helper.str() + R"(
+int main() {
+  AutofuseTilingData data{};
+  data.set_vector_width(64U);
+  return GetCvUbStageSize(data, 0U) == 1U && GetCvUbStageSize(data, 1U) == 64U &&
+         GetCvUbStageSize(data, 2U) == 21U && GetCvUbStageSize(data, 3U) == 0U ? 0 : 1;
+}
+)"));
+}
+
+TEST_F(TestCodegenTiling, CvCommonStageAccessorIsEmittedByTilingDataGeneration) {
+  af::AscGraph graph("common_constant_stage");
+  const auto axis = graph.CreateAxis("constant_stage", graph.CreateSizeVar(int64_t{1}));
+  graph.FindAxis(axis.id)->type = af::Axis::kAxisTypeTileInner;
+  ascir::ScheduleGroup group;
+  group.impl_graphs = {graph};
+  ascir::ScheduledResult result;
+  result.cube_type = ascir::CubeTemplateType::kCommon;
+  result.schedule_groups = {group};
+  ascir::FusedScheduledResult fused;
+  fused.node_idx_to_scheduled_results = {{result}};
+  auto header = codegen::TilingData("Autofuse").Generate(fused);
+  const std::string sdk_include = "#include \"kernel_tiling/kernel_tiling.h\"\n";
+  ASSERT_NE(header.find(sdk_include), std::string::npos);
+  header.erase(header.find(sdk_include), sdk_include.size());
+  ASSERT_NE(header.find("#define GET_CV_STAGE_SIZE"), std::string::npos);
+  EXPECT_TRUE(CompileAndRunCode(header + R"(
+int main() {
+  AutofuseTilingData data{};
+  return GET_CV_STAGE_SIZE(data) == 1U ? 0 : 1;
+}
+)"));
+}
+
+TEST_F(TestCodegenTiling, CvStageAccessorCompilesWithoutConstantFields) {
+  af::AscGraph graph("stage_accessor");
+  auto scalar = graph.CreateAxis("a0a1t", graph.CreateSizeVar(int64_t{1}));
+  graph.FindAxis(scalar.id)->type = af::Axis::kAxisTypeTileInner;
+  auto dynamic = graph.CreateAxis("renamed", graph.CreateSizeVar("vector_width"));
+  graph.FindAxis(dynamic.id)->type = af::Axis::kAxisTypeTileInner;
+  for (const bool first_inner : {true, false}) {
+    std::stringstream accessor;
+    codegen::AppendCvStageSizeAccessor(graph, first_inner, accessor);
+    const auto source = accessor.str() + R"(
+#include <cstdint>
+struct Data {uint32_t vector_width = 32U;};
+struct Wrapper {Data tiling_data; uint32_t stage_size_name;};
+int main() {
+  const Data device_data{};
+  Wrapper host{};
+  host.stage_size_name = GET_CV_STAGE_SIZE(host.tiling_data);
+  return host.stage_size_name == GET_CV_STAGE_SIZE(device_data) && host.stage_size_name == )" +
+                        (first_inner ? "1U" : "32U") + " ? 0 : 1; }\n";
+    EXPECT_TRUE(CompileAndRunCode(source));
+  }
+}
+
+namespace {
+void CreateMultiCandidateCvStageGraph(ascir::FusedScheduledResult &fused, af::AscGraph &original) {
   af::AscGraph graph("matmul_multi_candidates");
   CreateMatmulElemwiseDynamicGraph(graph);
   optimize::Optimizer optimizer(optimize::OptimizerOptions{});
-  ascir::FusedScheduledResult fused;
   ASSERT_EQ(optimizer.Optimize(graph, fused), af::SUCCESS);
   auto &ub = fused.node_idx_to_scheduled_results[0][0];
-  const auto original = ub.schedule_groups[0].impl_graphs[0];
+  original = ub.schedule_groups[0].impl_graphs[0];
   ub.schedule_groups[0].impl_graphs.clear();
   // Candidate identities and buffer policies come from the optimizer order, not their numeric position.
   size_t candidate = 0U;
@@ -4974,6 +5064,34 @@ TEST_F(TestCodegenTiling, GeDynamicCvPreservesAllUbCandidatesAndCommonBoundary) 
   auto common = ub;
   common.cube_type = ascir::CubeTemplateType::kCommon;
   fused.node_idx_to_scheduled_results[0].push_back(common);
+}
+
+void CheckCvUbStageSizeSelection(const std::string &host, const std::string &stage_field) {
+  const auto helper = host.find("static inline uint32_t GetCvUbStageSize(");
+  ASSERT_NE(helper, std::string::npos);
+  const auto helper_end = host.find("\n}\n", helper);
+  ASSERT_NE(helper_end, std::string::npos);
+  const std::string tiling_data =
+      "#include <cstdint>\nstruct AutofuseTilingData { uint32_t " + stage_field + " = 64U; };\n";
+  const std::string check_stage_sizes = R"(
+int main() {
+  const AutofuseTilingData data{};
+  return GetCvUbStageSize(data, 0U) == 64U && GetCvUbStageSize(data, 1U) == 64U &&
+                 GetCvUbStageSize(data, 2U) == 64U && GetCvUbStageSize(data, 3U) == 64U &&
+                 GetCvUbStageSize(data, 4U) == 0U
+             ? 0
+             : 1;
+}
+)";
+  EXPECT_TRUE(CompileAndRunCode(tiling_data + host.substr(helper, helper_end + 3U - helper) + check_stage_sizes));
+}
+}  // namespace
+
+TEST_F(TestCodegenTiling, GeDynamicCvPreservesAllUbCandidatesAndCommonBoundary) {
+  ascir::FusedScheduledResult fused;
+  af::AscGraph original("cv_stage_original");
+  CreateMultiCandidateCvStageGraph(fused, original);
+  ASSERT_FALSE(original.GetAllAxis().empty());
 
   const auto files = this->Generate(fused, {{"s0", "64"}, {"s1", "64"}}, "", "0");
   const auto &host = files.at(codegen::kTilingDefAndConstIdentify);
@@ -4983,8 +5101,14 @@ TEST_F(TestCodegenTiling, GeDynamicCvPreservesAllUbCandidatesAndCommonBoundary) 
   EXPECT_NE(host.find("get_tiling_key() - 4"), std::string::npos);
   EXPECT_NE(host.find("ub_mode = (non_db ? 0U : 1U)"), std::string::npos);
   EXPECT_NE(host.find("GetCvUbStageSize(tiling->tiling_data, ub_case)"), std::string::npos);
-  EXPECT_NE(host.find("case 1U: return data.get_cv_stage_1_size();"), std::string::npos);
-  EXPECT_NE(host.find("case 2U: return data.get_cv_stage_0_size();"), std::string::npos);
+  std::string stage_field;
+  for (const auto &axis : original.GetAllAxis()) {
+    if (axis->type == af::Axis::kAxisTypeTileInner) {
+      stage_field = axis->size.Str().get();
+    }
+  }
+  EXPECT_NE(host.find("case 1U: return data." + stage_field + ";"), std::string::npos);
+  EXPECT_NE(host.find("case 2U: return data." + stage_field + ";"), std::string::npos);
 
   // The n-broadcast Inductor path must preserve this same candidate/key/DB
   // mapping instead of assuming that cases 0 and 1 are the two buffer modes.
@@ -5001,29 +5125,7 @@ TEST_F(TestCodegenTiling, GeDynamicCvPreservesAllUbCandidatesAndCommonBoundary) 
   EXPECT_NE(inductor_host.find("ub_case < 4U"), std::string::npos);
   EXPECT_NE(inductor_host.find("get_tiling_key() - 4"), std::string::npos);
   EXPECT_NE(inductor_host.find("GetCvUbStageSize(tiling->tiling_data, ub_case)"), std::string::npos);
-  const auto helper = inductor_host.find("static inline uint32_t GetCvUbStageSize(");
-  ASSERT_NE(helper, std::string::npos);
-  const auto helper_end = inductor_host.find("\n}\n", helper);
-  ASSERT_NE(helper_end, std::string::npos);
-  const std::string tiling_data = R"(
-#include <cstdint>
-struct AutofuseTilingData {
-  uint32_t get_cv_stage_0_size() const { return 64U; }
-  uint32_t get_cv_stage_1_size() const { return 32U; }
-};
-)";
-  const std::string check_stage_sizes = R"(
-int main() {
-  const AutofuseTilingData data{};
-  return GetCvUbStageSize(data, 0U) == 64U && GetCvUbStageSize(data, 1U) == 32U &&
-                 GetCvUbStageSize(data, 2U) == 64U && GetCvUbStageSize(data, 3U) == 32U &&
-                 GetCvUbStageSize(data, 4U) == 0U
-             ? 0
-             : 1;
-}
-)";
-  EXPECT_TRUE(
-      CompileAndRunCode(tiling_data + inductor_host.substr(helper, helper_end + 3U - helper) + check_stage_sizes));
+  CheckCvUbStageSizeSelection(inductor_host, stage_field);
 
   const auto budget_guard = inductor_host.find("if (cv_cube_reserve + 256U >= limit->ub_size) {continue;}");
   const auto budget = inductor_host.find("set_ub_size((limit->ub_size - 256U - cv_cube_reserve) / cv_row_capacity)");
@@ -8040,12 +8142,12 @@ TEST_F(TestCodegenTiling, InductorMatmulDispatchShouldPruneOnlyUnreachableBasicS
     ASSERT_FALSE(launch.empty());
 
     // ASWT retains Basic-only-platform and non-full-load Slice/Fixpipe fallbacks.
-    // K=0/ToMul/ToMultiMul return Basic keys independently of offset_x.
+    // K=0/ToMul/ToFmaMul return Basic keys independently of offset_x.
     const std::vector<std::string> retained = {
         "0, 0, 0, MatMulV3BasicTilingData",    "0, 1, 0, MatMulV3BasicTilingData",
         "0, 2, 0, MatMulV3BasicTilingData",    "0, 0, 1, MatMulV3BasicTilingData",
         "0, 0, 2, MatMulV3BasicTilingData",    "2, 0, 0, MatMulV3KEqZeroBasicTilingData",
-        "3, 0, 0, MatMulToMulBasicTilingData", "4, 0, 0, MatMulToVectorBasicTilingData"};
+        "3, 0, 0, MatMulToMulBasicTilingData", "4, 0, 0, MatMulFmaTilingData"};
     for (const auto &strategy : retained) {
       EXPECT_NE(launch.find("_DISPATCH_MATMUL(1, " + strategy + ");"), std::string::npos) << strategy;
     }
@@ -8124,12 +8226,12 @@ TEST_F(TestCodegenTiling, InductorRtLaunchDispatchShouldPruneTensorOnlyBasicMode
     }
 
     // Basic 平台可达模式保留 api_level=1 发射（实例化由平台守卫设备编译期裁剪）；
-    // K=0/ToMul/ToMultiMul 与 offset_x 无关，仅 api_level=1 存在。
+    // K=0/ToMul/ToFmaMul 与 offset_x 无关，仅 api_level=1 存在。
     const std::vector<std::string> retained = {
         "0, 0, 0, MatMulV3BasicTilingData",    "0, 1, 0, MatMulV3BasicTilingData",
         "0, 2, 0, MatMulV3BasicTilingData",    "0, 0, 1, MatMulV3BasicTilingData",
         "0, 0, 2, MatMulV3BasicTilingData",    "2, 0, 0, MatMulV3KEqZeroBasicTilingData",
-        "3, 0, 0, MatMulToMulBasicTilingData", "4, 0, 0, MatMulToVectorBasicTilingData"};
+        "3, 0, 0, MatMulToMulBasicTilingData", "4, 0, 0, MatMulFmaTilingData"};
     for (const auto &strategy : retained) {
       EXPECT_NE(entry.find("_DISPATCH_MATMUL(1, " + strategy + ");"), std::string::npos) << strategy;
     }

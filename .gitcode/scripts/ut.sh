@@ -50,7 +50,7 @@ coverage_save="true"
 if [ "${target_branch}" == "master" ] || [ "${target_branch}" == "develop" ]; then
 	case "${ut_type}" in
 		UT_Test_Python_multistream)
-			bash build.sh -u -c --module=multistream --no-autofuse -f ${WORKSPACE}/pr_filelist.txt
+			bash build.sh -u -s -c --module=multistream --no-autofuse -f ${WORKSPACE}/pr_filelist.txt
 			ret=$?
 			;;
 		UT_Test_Python_superkernel)
@@ -114,7 +114,7 @@ if [ "${target_branch}" == "master" ] || [ "${target_branch}" == "develop" ]; th
 else
 	case "${ut_type}" in
 		UT_Test_Python_multistream)
-			bash build.sh -u -c --module=multistream --no-autofuse
+			bash build.sh -u -s -c --module=multistream --no-autofuse
 			ret=$?
 			;;
 		UT_Test_Python_superkernel)

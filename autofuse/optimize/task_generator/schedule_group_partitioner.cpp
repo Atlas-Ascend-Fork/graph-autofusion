@@ -436,6 +436,7 @@ Status ScheduleGroupGraphPartitioner::MergeGraphs(::ascir::ImplGraph &dst,
       GE_CHK_STATUS_RET(af::GraphUtils::RelinkGraphEdges(asc_node, node_clone_map), "RelinkGraphEdges failed");
     }
   }
+  GELOGI("MergeGraphs: merged %zu graph(s) into %s", group.size(), dst.GetName().c_str());
 
   GE_CHK_STATUS_RET(ScheduleUtils::TopologicalSorting(dst), "Failed to sort merged graph");
   return af::SUCCESS;

@@ -10,6 +10,7 @@
 
 #include "platform/common/base_alignment_strategy.h"
 #include "alignment_strategy.h"
+#include "common_utils.h"
 #include "ascir_utils.h"
 #include "graph/utils/graph_utils.h"
 #include "ascir_ops_utils.h"
@@ -95,6 +96,11 @@ af::Status AlignmentStrategy::EleWiseAlignmentInferFunc(const af::AscNodePtr &no
   bool has_fix_unaligned = false;
   auto out_type = AlignmentType::kNotAligned;
   for (const auto &input : node->inputs()) {
+    // A scalar has no row layout to impose on the tensor operand.
+    if (ascgen_utils::IsScalarInput(input->attr.repeats)) {
+      GELOGD("Skip scalar input alignment for EleWise node[%s].", node->GetNamePtr());
+      continue;
+    }
     auto alignment_iter = tensor_to_align_type_.find(&input->attr);
     if (alignment_iter == tensor_to_align_type_.end()) {
       continue;

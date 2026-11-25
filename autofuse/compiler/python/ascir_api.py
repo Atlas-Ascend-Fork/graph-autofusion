@@ -1787,8 +1787,6 @@ def Prod(
         x,
         dtype=ascir.dtypes.int16,
         axis=axis,
-        size=size,
-        stride=stride,
     )
     product = _common_in_1_out_1_normal_op(
         "Prod", owner_graph, executed, axis=axis, size=size, stride=stride

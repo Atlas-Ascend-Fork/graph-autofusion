@@ -337,6 +337,8 @@ Status MergeDuplicatedCopyNodesInSubGraph(ascir::ImplGraph &sub_graph) {
       GE_CHK_STATUS_RET(ScheduleUtils::RemoveNode(sub_graph, copies[i], canonical->GetOutDataAnchor(0UL)),
                         "Merge duplicated copy node [%s] failed.", copies[i]->GetName().c_str());
     }
+    GELOGI("Merged %zu duplicated copy node(s) into [%s](id=%lld), sub graph [%s].", copies.size() - 1UL,
+           canonical->GetNamePtr(), canonical->GetOpDescBarePtr()->GetId(), sub_graph.GetName().c_str());
   }
   bool has_removed = false;
   do {

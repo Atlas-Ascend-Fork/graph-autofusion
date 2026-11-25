@@ -160,7 +160,11 @@ TEST(CodegenKernel, RegLogicalNotApiCallCVStage) {
   call.inputs.push_back(&x1);
   std::string result;
   call.Generate(tpipe, current_axis, result);
-  EXPECT_EQ(result,
-            std::string{
-                "LogicalNotExtend(local_1[0], local_0[0], tmp_buf_0, ((local_0_actual_size + 16 - 1) / 16 * 16));\n"});
+  // CV rows have different physical pitches for FP32 input and INT16 output.
+  EXPECT_EQ(result, std::string{"local_1_actual_size = curAivM * ((curAivN + 16 - 1) / 16 * 16);\n"
+                                "for (uint32_t cv_row = 0; cv_row < ConvertToUint32(curAivM); cv_row++) {\n"
+                                "  LogicalNotExtend(local_1[cv_row * ConvertToUint32(((curAivN + 16 - 1) / 16 * 16))], "
+                                "local_0[cv_row * ConvertToUint32(((curAivN + 8 - 1) / 8 * 8))], "
+                                "tmp_buf_0, ConvertToUint32(curAivN));\n"
+                                "}\n"});
 }

@@ -199,7 +199,7 @@ Expr GetRepeatEle(const std::string &dtype) {
 af::Status GetPositiveConstValue(const Expr &value, const std::string &name, int64_t &const_value) {
   GE_ASSERT_TRUE(value.IsConstExpr(), "%s must be const.", name.c_str());
   value.GetConstValue(const_value);
-  GE_ASSERT_TRUE(const_value > 0, "%s[%ld] is invalid, must be positive.", name.c_str(), const_value);
+  GE_ASSERT_TRUE(const_value > 0, "%s must be positive, actual value:%ld.", name.c_str(), const_value);
   return af::SUCCESS;
 }
 
@@ -1619,7 +1619,10 @@ af::Status AddReduceMergeCost(const ReduceApiPerfContext &exec_context, Elementw
 
 af::Status ReduceApiPerf(const ReduceApiPerfContext &context, const ReduceOpCostModel &model, PerfOutputInfo &perf) {
   ReduceApiPerfContext exec_context = context;
-  GE_ASSERT_SUCCESS(BuildValidatedReduceExecContext(context, model, exec_context));
+  const af::Status exec_status = BuildValidatedReduceExecContext(context, model, exec_context);
+  if (exec_status != af::SUCCESS) {
+    return exec_status;
+  }
   const auto &nd = exec_context.node_detail;
   const bool is_b64 = IsB64Dtype(nd.input_dtype[0]);
   GELOGD(

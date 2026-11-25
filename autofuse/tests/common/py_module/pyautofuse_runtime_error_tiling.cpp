@@ -28,3 +28,8 @@ extern "C" bool CodegenTiling(const std::string &op_name, const ascir::FusedSche
   (void)tiling_func;
   throw std::runtime_error("pyautofuse runtime error test");
 }
+
+extern "C" bool CodegenTilingOutOfRange(const std::string &, const ascir::FusedScheduledResult &,
+                                        std::map<std::string, std::string> &, std::map<std::string, std::string> &) {
+  throw std::out_of_range("pyautofuse out of range test");
+}

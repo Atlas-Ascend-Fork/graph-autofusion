@@ -16,6 +16,7 @@
 #include "reduce/reduce_common_util_3510_impl.h"
 #include "reduce/reduce_common_ar_reuse_align_3510_impl.h"
 #include "reduce/reduce_common_ar_ra_reuse_unalign_3510_impl.h"
+#include "reduce/reduce_prod_3510_impl.h"
 #include "reduce/reduce_common_ra_reuse_align_3510_impl.h"
 
 namespace AscendC {
@@ -49,6 +50,10 @@ __aicore__ inline void ReduceAllB64ARCompute(__ubuf__ T *dstAddr, __ubuf__ T *sr
                  Reg::ReduceMin<T, Reg::MaskMergeMode::ZEROING, Reg::RegTensor<T, Reg::RegTraitNumTwo>>, isReuseSource>(
         dstAddr, srcAddr, tmpAddr, srcShape[0], srcShape[1]);
   } else {
+    if constexpr (!isReuseSource) {
+      ReduceProdCopyUnaligned<T>(tmpAddr, srcAddr, srcShape[0] * srcShape[1]);
+      srcAddr = tmpAddr;
+    }
     ReduceARReuseSourceUnAligned<
         T, Reg::RegTraitNumTwo, Reg::Min<T, Reg::MaskMergeMode::ZEROING, Reg::RegTensor<T, Reg::RegTraitNumTwo>>,
         Reg::ReduceMin<T, Reg::MaskMergeMode::ZEROING, Reg::RegTensor<T, Reg::RegTraitNumTwo>>>(
@@ -64,6 +69,10 @@ __aicore__ inline void ReduceAllB64RACompute(__ubuf__ T *dstAddr, __ubuf__ T *sr
                            Reg::Min<T, Reg::MaskMergeMode::ZEROING, Reg::RegTensor<T, Reg::RegTraitNumTwo>>,
                            isReuseSource>(dstAddr, srcAddr, tmpAddr, srcShape[1], srcShape[0]);
   } else {
+    if constexpr (!isReuseSource) {
+      ReduceProdCopyUnaligned<T>(tmpAddr, srcAddr, srcShape[1] * srcShape[0]);
+      srcAddr = tmpAddr;
+    }
     ReduceRAReuseSourceUnAlignedB64<T, Reg::RegTraitNumTwo,
                                     Reg::Min<T, Reg::MaskMergeMode::ZEROING, Reg::RegTensor<T, Reg::RegTraitNumTwo>>>(
         dstAddr, srcAddr, srcShape[1], srcShape[0]);

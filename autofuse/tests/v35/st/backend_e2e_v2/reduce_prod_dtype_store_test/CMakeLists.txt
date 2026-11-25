@@ -22,6 +22,14 @@ function(add_reduce_prod_dtype_cols_st_test test_name dtype input_dtype compute_
     target_compile_definitions(${test_name}_e2e_v2 PRIVATE REDUCE_TEST_COLS=${cols})
 endfunction()
 
+function(add_reduce_prod_partial_mask_st_test test_name dtype input_dtype compute_dtype rows cols)
+    add_reduce_prod_dtype_st_test(${test_name} ${dtype} ${input_dtype} ${compute_dtype})
+    target_compile_definitions(${test_name}_e2e_v2 PRIVATE
+        REDUCE_TEST_ROWS=${rows}
+        REDUCE_TEST_COLS=${cols}
+        REDUCE_PARTIAL_MASK_CASE=1)
+endfunction()
+
 add_reduce_prod_dtype_st_test(reduce_prod_int8_store_test af::DT_INT8 int8_t int16_t)
 add_reduce_prod_dtype_st_test(reduce_prod_int16_store_test af::DT_INT16 int16_t int16_t)
 add_reduce_prod_dtype_cols_st_test(reduce_prod_int32_store_test af::DT_INT32 int32_t int32_t 1028)
@@ -31,6 +39,7 @@ add_reduce_prod_dtype_cols_st_test(reduce_prod_int32_1025_store_test af::DT_INT3
 add_reduce_prod_dtype_cols_st_test(reduce_prod_int64_1025_store_test af::DT_INT64 int64_t int64_t 1025)
 add_reduce_prod_dtype_cols_st_test(reduce_prod_int64_129800_store_test af::DT_INT64 int64_t int64_t 129800)
 add_reduce_prod_dtype_cols_st_test(reduce_prod_float_1025_store_test af::DT_FLOAT float float 1025)
+add_reduce_prod_partial_mask_st_test(reduce_prod_int64_partial_mask_store_test af::DT_INT64 int64_t int64_t 4 3)
 
 set(prod_ra_case_workdir ${CMAKE_CURRENT_BINARY_DIR}/reduce_prod_int8_ra_store_test)
 file(MAKE_DIRECTORY ${prod_ra_case_workdir})

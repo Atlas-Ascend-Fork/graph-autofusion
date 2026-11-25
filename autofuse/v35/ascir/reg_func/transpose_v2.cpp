@@ -15,8 +15,8 @@ namespace ascir {
 bool GetTensorVectorizedRepeats(const AscTensorAttr &attr, std::vector<Expression> &output_vectorized_repeats) {
   for (size_t i = 0; i < attr.vectorized_axis.size(); i++) {
     auto it = std::find(attr.axis.begin(), attr.axis.end(), attr.vectorized_axis[i]);
-    GE_ASSERT_TRUE(it != attr.axis.end(), "Incorrect axis ID %ld in vectorized_axis, must exist in attr.axis",
-                   attr.vectorized_axis[i]);
+    GE_ASSERT_TRUE(it != attr.axis.end(), "Incorrect axis ID:%ld in vectorized_axis, node tensor valid axis size:%zu",
+                   attr.vectorized_axis[i], attr.axis.size());
     auto axis_id = static_cast<uint64_t>(std::distance(attr.axis.begin(), it));
     output_vectorized_repeats.emplace_back(attr.repeats[axis_id]);
   }

@@ -9,6 +9,7 @@
  */
 
 #include <Python.h>
+#include <exception>
 
 #include "optimize.h"
 #include "codegen.h"
@@ -43,8 +44,15 @@ void AssignDefaultIoIndex(af::AscGraph &graph) {
 class DumpGraphGuard {
  public:
   DumpGraphGuard() = default;
-  ~DumpGraphGuard() {
-    ascir::AscGraphDumperContext::GetThreadLocalCtx().DumpWatchedGraphs();
+  ~DumpGraphGuard() noexcept {
+    // Diagnostic dumping must not terminate the process or replace the codegen error.
+    try {
+      ascir::AscGraphDumperContext::GetThreadLocalCtx().DumpWatchedGraphs();
+    } catch (const std::exception &e) {
+      GELOGE(af::FAILED, "Failed to dump watched graphs: %s", e.what());
+    } catch (...) {
+      GELOGE(af::FAILED, "Failed to dump watched graphs: unknown exception");
+    }
   }
   static void ReInit() {
     ascir::AscGraphDumperContext::GetThreadLocalCtx().ClearAllWatchGraphs();
@@ -280,8 +288,8 @@ PyObject *Autofuser::CodegenImpl(PyObject *self, PyObject *args, PyObject *kwds,
   af::Status ret = af::FAILED;
   try {
     ret = self_->codegen->GenerateForInductor(fused_schedule_result->fused_schedule_result, result, launch_decouple);
-  } catch (const std::runtime_error &e) {
-    GELOGE(af::FAILED, "Caught a runtime_error: %s", e.what());
+  } catch (const std::exception &e) {
+    GELOGE(af::FAILED, "Caught a codegen exception: %s", e.what());
   }
   PY_ASSERT_SUCCESS(ret, "Codegen generate kernel failed or abort");
   DumpGraphGuard::ReInit();
@@ -331,8 +339,8 @@ PyObject *Autofuser::AutofuseBackend(PyObject *self, PyObject *args, PyObject *k
     if (ret != af::SUCCESS) {
       return PyErr_Format(PyExc_RuntimeError, "Codegen generate kernel failed");
     }
-  } catch (const std::runtime_error &e) {
-    GELOGE(af::FAILED, "Caught a runtime_error: %s", e.what());
+  } catch (const std::exception &e) {
+    GELOGE(af::FAILED, "Caught a codegen exception: %s", e.what());
     return PyErr_Format(PyExc_RuntimeError, "Codegen generate kernel failed: %s", e.what());
   }
 
@@ -759,8 +767,8 @@ PyObject *CodeGen::device_code_generator(PyObject *self_pyobject, PyObject *args
     }
     GE_CHK_BOOL_RET_SPECIAL_STATUS(ret != af::SUCCESS, PyErr_Format(PyExc_ValueError, "codegen generate kernel fail"),
                                    "codegen generate kernel fail");
-  } catch (const std::runtime_error &e) {
-    GELOGE(af::FAILED, "Caught a runtime_error: %s", e.what());
+  } catch (const std::exception &e) {
+    GELOGE(af::FAILED, "Caught a codegen exception: %s", e.what());
     return PyErr_Format(PyExc_ValueError, "codegen generate kernel fail: %s", e.what());
   }
 
@@ -814,8 +822,8 @@ PyObject *CodeGen::GenerateHostCodeResult(CodeGen::Object *self,
     // 释放字典的所有权
     GE_DISMISS_GUARD(py_tilings_guard);
     return Py_BuildValue("(NO)", py_tilings, PyUnicode_FromString(infer_shape.c_str()));
-  } catch (const std::runtime_error &e) {
-    GELOGE(af::FAILED, "Caught a runtime_error: %s", e.what());
+  } catch (const std::exception &e) {
+    GELOGE(af::FAILED, "Caught a codegen exception: %s", e.what());
     return PyErr_Format(PyExc_ValueError, "codegen generate host fail: %s", e.what());
   }
 }

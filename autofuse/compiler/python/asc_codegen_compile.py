@@ -26,11 +26,6 @@ from tbe.common.buildcfg import get_current_build_config
 from tbe.tikcpp.compile_op import CommonUtility, AscendCLogLevel
 from asc_op_compile_base.common.platform.platform_info import get_soc_spec
 import tbe.common.utils.log as logger
-
-# Python3 lib pyautofuse.so
-from .pyautofuse import Schedule, CodeGen, ascir
-from .ascbc_kernel_compile import ascbc_kernel_compile, camel_to_snake
-from .compile_adapter import TILING_HEADER_FILES, get_pgo_env_flag, get_pgo_topn
 from tbe.tikcpp.get_op_tiling import (
     TilingInfo,
     _change_param_name_to_name,
@@ -38,6 +33,11 @@ from tbe.tikcpp.get_op_tiling import (
 )
 from tbe.common.utils.op_tiling import do_op_tiling
 from tbe.common.context import get_context
+
+# Python3 lib pyautofuse.so
+from .pyautofuse import Schedule, CodeGen, ascir
+from .ascbc_kernel_compile import ascbc_kernel_compile, camel_to_snake
+from .compile_adapter import TILING_HEADER_FILES, get_pgo_env_flag, get_pgo_topn
 
 
 def _log_warning(message, *args):

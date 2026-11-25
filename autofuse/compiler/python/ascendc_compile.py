@@ -18,19 +18,20 @@ import re
 import shutil
 import stat
 import sys
-import tbe.common.utils.log as logger
 import argparse
 import subprocess
 import platform
 import tempfile
 import uuid
+import time
 from contextlib import contextmanager, nullcontext
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
-import time
 from dataclasses import dataclass
 from functools import wraps
 from typing import List
+
+import tbe.common.utils.log as logger
 from asc_op_compile_base.common.platform.platform_info import get_soc_spec
 
 

@@ -2434,8 +2434,10 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, PostReduceUsesSkWhenOuterAxisIsReduc
   std::vector<std::string> score_functions;
   ASSERT_EQ(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
 
+  // [SK-segmented SIMT] R>G layout: SIMD whole-graph still gated, but the SK->SIMT
+  // redirect registers a segmented SIMT candidate alongside plain SK.
   EXPECT_EQ(FindGeneratedGraphByTemplate(graphs, ascir::TemplateId::kIndirectLoadSimd), graphs.end());
-  EXPECT_EQ(FindGeneratedGraphByTemplate(graphs, ascir::TemplateId::kIndirectLoadSimt), graphs.end());
+  EXPECT_NE(FindGeneratedGraphByTemplate(graphs, ascir::TemplateId::kIndirectLoadSimt), graphs.end());
   EXPECT_NE(FindGeneratedGraphByTemplate(graphs, ascir::TemplateId::kIndirectLoadSK), graphs.end());
 }
 
@@ -2610,8 +2612,10 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, SkKeepsCandidateWhenReduceFansOutToS
   std::vector<af::AscGraph> graphs;
   std::vector<std::string> score_functions;
   ASSERT_EQ(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
+  // [SK-segmented SIMT] R>G fanout layout: SIMD whole-graph still gated; the SK->SIMT
+  // redirect may register a segmented candidate. SK plain candidate must survive with
+  // both fanout branches intact.
   EXPECT_EQ(FindGeneratedGraphByTemplate(graphs, ascir::TemplateId::kIndirectLoadSimd), graphs.end());
-  EXPECT_EQ(FindGeneratedGraphByTemplate(graphs, ascir::TemplateId::kIndirectLoadSimt), graphs.end());
   const auto sk_iter = FindGeneratedGraphByTemplate(graphs, ascir::TemplateId::kIndirectLoadSK);
   ASSERT_NE(sk_iter, graphs.end());
   // 双直连分支必须都在 SK 候选图中存活：物化 Store（含独立 Output）与 Elementwise 链各自终止于 Store。
@@ -4242,9 +4246,10 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, DualGatherSharedPostReduceUsesReduce
   ASSERT_NE(sum, nullptr);
   EXPECT_EQ(sum->inputs[0].attr.vectorized_axis, axes.vectorized_axes);
 
-  // 无共享 Reduce 的组（默认形态）：boundary=rank（inner 为空）、成员 value 视图保持空
-  // （整核调用形态不依赖向量化视图）。
-  const auto bare_graphs = GenerateDualGatherCases();
+  // 无共享 Reduce 的组（默认形态）：逐 tile 布局——boundary=rank-1（inner 为最内输出轴
+  // 的模板合并轴），成员 value 视图按模板 vectorized 轴播种（逐 tile actual_size 的来源）。
+  // FindAxis 为非 const 成员：与前半段一致取非 const（见函数头注释）。
+  auto bare_graphs = GenerateDualGatherCases();
   ASSERT_EQ(bare_graphs.size(), 4UL);
   const auto bare_simt = std::find_if(bare_graphs.begin(), bare_graphs.end(), [](const af::AscGraph &candidate) {
     const auto il0 = candidate.FindNode("dual_indirect_load0");
@@ -4255,8 +4260,12 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, DualGatherSharedPostReduceUsesReduce
   ASSERT_NE(bare_il0, nullptr);
   ascgen_utils::indirect_load::TemplateAxes bare_axes;
   ASSERT_EQ(ascgen_utils::indirect_load::GetTemplateAxes(bare_il0, bare_axes), af::SUCCESS);
-  EXPECT_EQ(bare_axes.inner_axis, af::kIdNone);
-  EXPECT_TRUE(bare_il0->outputs()[0]->attr.vectorized_axis.empty());
+  EXPECT_NE(bare_axes.inner_axis, af::kIdNone);
+  ASSERT_NE(bare_simt->FindAxis(bare_axes.inner_axis), nullptr);
+  ASSERT_FALSE(bare_axes.vectorized_axes.empty());
+  const auto &bare_value = bare_il0->outputs()[0]->attr;
+  EXPECT_EQ(bare_value.vectorized_axis, bare_axes.vectorized_axes);
+  ASSERT_EQ(bare_value.vectorized_axis.size(), bare_value.vectorized_strides.size());
 }
 
 TEST(IndirectLoadScheduleCaseGeneratorTest, DualGatherNormalizesAliasAxesForGroupFusion) {
@@ -7150,4 +7159,137 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, TailDenseDynamicWindowEmitsRuntimeTi
   EXPECT_NE(score_functions[2].find("tie_payload_0"), std::string::npos);
   EXPECT_NE(score_functions[0].find(" * 64LL >= "), std::string::npos);
   EXPECT_NE(score_functions[0].find(" + 32768LL <= 253952LL"), std::string::npos);
+}
+
+namespace {
+// 静态 shape 的 IL 图构造。Load 与其 Data 的 AscOpOutput 绑定在局部 operator 上，
+// 必须由调用方声明后以引用传入 helper 填充（同 InitDataLoad 约束）。
+std::vector<af::AxisId> MakeStaticAxes(af::AscGraph &graph, const std::vector<af::Expression> &output_sizes) {
+  std::vector<af::AxisId> ids;
+  for (size_t dim = 0UL; dim < output_sizes.size(); ++dim) {
+    ids.push_back(graph.CreateAxis("a" + std::to_string(dim), output_sizes[dim]).id);
+  }
+  return ids;
+}
+
+void InitAxisDeclarationDataLoad(af::AscGraph &graph, const char *data_name, int32_t data_index, af::DataType dtype,
+                                 const std::vector<af::AxisId> &axes, const std::vector<af::Expression> &sizes,
+                                 const std::vector<af::Expression> &strides, af::ascir_op::Load &load) {
+  af::ascir_op::Data data(data_name, graph);
+  data.y.dtype = dtype;
+  data.attr.api.compute_type = af::ComputeType::kComputeInvalid;
+  data.attr.api.type = af::ApiType::kAPITypeBuffer;
+  data.ir_attr.SetIndex(data_index);
+  data.attr.sched.axis = axes;
+  *data.y.axis = axes;
+  *data.y.repeats = sizes;
+  *data.y.strides = strides;
+  load.x = data.y;
+  SetNodeView(load, dtype, axes, sizes, strides);
+}
+
+af::AscGraph BuildStaticAxisDeclarationGraph(const int64_t axis, const af::Expression &max_value,
+                                             const std::vector<af::Expression> &input_sizes,
+                                             const std::vector<af::Expression> &input_strides,
+                                             const std::vector<af::Expression> &index_sizes,
+                                             const std::vector<af::Expression> &index_strides,
+                                             const std::vector<af::Expression> &output_sizes,
+                                             const std::vector<af::Expression> &output_strides) {
+  af::AscGraph graph("indirect_load_axis_declaration_ut_graph");
+  const std::vector<af::AxisId> axes = MakeStaticAxes(graph, output_sizes);
+
+  af::ascir_op::Load input_load("input_load");
+  InitAxisDeclarationDataLoad(graph, "input_data", 0, ge::DT_FLOAT, axes, input_sizes, input_strides, input_load);
+  af::ascir_op::Load index_load("index_load");
+  InitAxisDeclarationDataLoad(graph, "index_data", 1, ge::DT_INT32, axes, index_sizes, index_strides, index_load);
+
+  af::ascir_op::IndirectLoad indirect_load("indirect_load");
+  graph.AddNode(indirect_load);
+  indirect_load.x1 = input_load.y;
+  indirect_load.x2 = index_load.y;
+  indirect_load.attr.sched.axis = axes;
+  indirect_load.ir_attr.SetAxis(axis);
+  indirect_load.ir_attr.SetNegative_index_support(true);
+  indirect_load.ir_attr.SetNeed_check_bound(true);
+  indirect_load.ir_attr.SetMax(max_value);
+  SetNodeView(indirect_load, ge::DT_FLOAT, axes, output_sizes, output_strides);
+
+  af::ascir_op::Store store("store");
+  graph.AddNode(store);
+  store.ir_attr.SetOffset(af::sym::kSymbolZero);
+  store.x = indirect_load.y;
+  SetNodeView(store, ge::DT_FLOAT, axes, output_sizes, output_strides);
+  af::ascir_op::Output output("output");
+  graph.AddNode(output);
+  output.ir_attr.SetIndex(0);
+  output.x = store.y;
+  output.y.dtype = ge::DT_FLOAT;
+  output.attr.api.compute_type = af::ComputeType::kComputeInvalid;
+  output.attr.api.type = af::ApiType::kAPITypeBuffer;
+  output.attr.sched.axis = axes;
+  *output.y.axis = axes;
+  *output.y.repeats = output_sizes;
+  *output.y.strides = output_strides;
+  return graph;
+}
+
+int64_t GetIndirectLoadAxisAttr(const af::AscGraph &graph, const std::string &node_name) {
+  int64_t axis = -1;
+  const auto node = graph.FindNode(node_name.c_str());
+  if (node != nullptr && node->attr.ir_attr != nullptr) {
+    const auto *ir_attr = node->attr.ir_attr->DownCastTo<af::ascir_op::IndirectLoad::AscIndirectLoadIrAttrDef>();
+    if (ir_attr != nullptr) {
+      (void)ir_attr->GetAxis(axis);
+    }
+  }
+  return axis;
+}
+}  // namespace
+
+// 输入视图 [1, vocab]（vocab 在 Dim1）而 axis 指向 Dim0：max 唯一匹配其它维时
+// axis 被重映射到 Dim1。
+TEST(IndirectLoadScheduleCaseGeneratorTest, RemapsAxisWhenCandidateViewMovedGatherDim) {
+  auto graph = BuildStaticAxisDeclarationGraph(0, af::Symbol(2100000), {af::Symbol(1), af::Symbol(2100000)},
+                                               {af::Symbol(2100000), af::Symbol(1)}, {af::Symbol(1), af::Symbol(39)},
+                                               {af::Symbol(39), af::Symbol(1)}, {af::Symbol(1), af::Symbol(39)},
+                                               {af::Symbol(39), af::Symbol(1)});
+  optimize::IndirectLoadScheduleCaseGenerator generator;
+  std::vector<af::AscGraph> graphs;
+  std::vector<std::string> score_functions;
+  EXPECT_EQ(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
+  const auto simt_iter = FindGeneratedGraphByTemplate(graphs, ascir::TemplateId::kIndirectLoadSimt);
+  ASSERT_NE(simt_iter, graphs.end());
+  EXPECT_EQ(GetIndirectLoadAxisAttr(*simt_iter, "indirect_load"), 1);
+}
+
+// max 为宽松上界（大于 axis 维尺寸且与任何维都不相等）：不改写不拒绝，候选
+// 正常生成，axis 保持原值。
+TEST(IndirectLoadScheduleCaseGeneratorTest, KeepsAxisWhenMaxIsLooseUpperBound) {
+  auto graph = BuildStaticAxisDeclarationGraph(
+      1, af::Symbol(32), {af::Symbol(30), af::Symbol(6), af::Symbol(23)},
+      {af::Symbol(138), af::Symbol(23), af::Symbol(1)}, {af::Symbol(30), af::Symbol(3), af::Symbol(23)},
+      {af::Symbol(69), af::Symbol(23), af::Symbol(1)}, {af::Symbol(30), af::Symbol(3), af::Symbol(23)},
+      {af::Symbol(69), af::Symbol(23), af::Symbol(1)});
+  optimize::IndirectLoadScheduleCaseGenerator generator;
+  std::vector<af::AscGraph> graphs;
+  std::vector<std::string> score_functions;
+  EXPECT_EQ(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
+  const auto simt_iter = FindGeneratedGraphByTemplate(graphs, ascir::TemplateId::kIndirectLoadSimt);
+  ASSERT_NE(simt_iter, graphs.end());
+  EXPECT_EQ(GetIndirectLoadAxisAttr(*simt_iter, "indirect_load"), 1);
+}
+
+// 正常形态（max == sizes[axis]）：不触发重映射，axis 保持原值。
+TEST(IndirectLoadScheduleCaseGeneratorTest, KeepsAxisWhenMaxMatchesGatherDim) {
+  auto graph = BuildStaticAxisDeclarationGraph(1, af::Symbol(2100000), {af::Symbol(1), af::Symbol(2100000)},
+                                               {af::Symbol(2100000), af::Symbol(1)}, {af::Symbol(1), af::Symbol(39)},
+                                               {af::Symbol(39), af::Symbol(1)}, {af::Symbol(1), af::Symbol(39)},
+                                               {af::Symbol(39), af::Symbol(1)});
+  optimize::IndirectLoadScheduleCaseGenerator generator;
+  std::vector<af::AscGraph> graphs;
+  std::vector<std::string> score_functions;
+  EXPECT_EQ(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
+  const auto simt_iter = FindGeneratedGraphByTemplate(graphs, ascir::TemplateId::kIndirectLoadSimt);
+  ASSERT_NE(simt_iter, graphs.end());
+  EXPECT_EQ(GetIndirectLoadAxisAttr(*simt_iter, "indirect_load"), 1);
 }

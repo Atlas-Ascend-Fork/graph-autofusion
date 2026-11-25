@@ -268,15 +268,15 @@ def test_ms_st_09_csv_compatibility(tmp_path, caplog):
             "Extra",
         ),
     )
-    caplog.set_level(logging.INFO, logger="multistream")
+    caplog.set_level(logging.DEBUG, logger="multistream")
     result = ms.plan(dag, profiling_path=csv_path)
     assert len(mapping(result, nodes)) == 4
     messages = [record.getMessage() for record in caplog.records]
     for fragment in (
-        "scope/a: time=3.000000, cube=3, vec=0",
-        "b: time=1.000000, cube=0, vec=2",
-        "c: time=1.000000, cube=1, vec=2",
-        "d: time=1.000000, cube=2, vec=1",
+        "scope/a: time=3.000000 us, cube=3, vec=0",
+        "b: time=1.000000 us, cube=0, vec=2",
+        "c: time=1.000000 us, cube=1, vec=2",
+        "d: time=1.000000 us, cube=2, vec=1",
     ):
         assert any(fragment in message for message in messages)
     for invalid in (

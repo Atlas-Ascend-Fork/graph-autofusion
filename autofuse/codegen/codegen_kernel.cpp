@@ -6383,7 +6383,7 @@ Status Kernel::GenerateVecFuncOfCVFusion(std::stringstream &result, bool vector_
     result << "stage_size1 = KernelUtils::Max(tmpTilingData.nL0 / " << vec_num << ", 16) * basen_align;" << std::endl;
     if (is_dynamic && is_inductor) {
       result << "#ifdef INDUCTOR_CONST_TILING_DATA" << std::endl;
-      result << "const uint32_t stage_size_name = kConstTilingData.tiling_data.STAGE_SIZE_NAME;" << std::endl;
+      result << "const uint32_t stage_size_name = GET_CV_STAGE_SIZE(kConstTilingData.tiling_data);" << std::endl;
       result << "#else" << std::endl;
       result << "const uint32_t stage_size_name = params.stage_size_name;" << std::endl;
       result << "#endif" << std::endl;
@@ -6394,7 +6394,7 @@ Status Kernel::GenerateVecFuncOfCVFusion(std::stringstream &result, bool vector_
       } else {
         result << "AutofuseTilingData autofuse_tiling_size;" << std::endl;
       }
-      result << "const uint32_t stage_size_name = autofuse_tiling_size.STAGE_SIZE_NAME;" << std::endl;
+      result << "const uint32_t stage_size_name = GET_CV_STAGE_SIZE(autofuse_tiling_size);" << std::endl;
     }
     result << "const int32_t compute_size = stage_size_name > 144 ? stage_size_name : 144;" << std::endl;
     result << "int32_t stage_size = compute_size;" << std::endl;
@@ -6408,7 +6408,7 @@ Status Kernel::GenerateVecFuncOfCVFusion(std::stringstream &result, bool vector_
       result << "const AutofuseTilingData& autofuse_tiling_size = kConstTilingData.tiling_data;" << std::endl;
       result << "const uint32_t stage_size_name = "
              << (tpipe.cv_output_broadcast ? "kConstTilingData.stage_size_name"
-                                           : "autofuse_tiling_size.STAGE_SIZE_NAME")
+                                           : "GET_CV_STAGE_SIZE(autofuse_tiling_size)")
              << ";" << std::endl;
       result << "const int32_t basen_basem_align = kConstTilingData.cube_ub_stage_size * sizeof(" << dtype_name << ");"
              << std::endl;
@@ -6451,7 +6451,7 @@ Status Kernel::GenerateVecFuncOfCVFusion(std::stringstream &result, bool vector_
       } else {
         result << "AutofuseTilingData autofuse_tiling_size;" << std::endl;
         result << "const uint32_t stage_size_name = " << (tpipe.cv_m_broadcast ? tpipe.cv_m_size_expr + " * " : "")
-               << "autofuse_tiling_size.STAGE_SIZE_NAME;" << std::endl;
+               << "GET_CV_STAGE_SIZE(autofuse_tiling_size);" << std::endl;
         result << "stage_size_type = static_cast<int64_t>(stage_size_name / basen_align);" << std::endl;
       }
       result << "#endif" << std::endl;
@@ -7497,10 +7497,10 @@ std::string Kernel::GenKernelFuncCallForInductor(const ascir::FusedScheduledResu
           ss << "    _DISPATCH_MATMUL(" << api_level << ", 3, 0, 0, MatMulToMulBasicTilingData);" << std::endl;
         }
         if (api_level == 1) {
-          // 分支16: BASIC_LEVEL, NO_FULL_LOAD, TO_MULTI_MUL, ON_THE_FLY
+          // 分支16: BASIC_LEVEL, NO_FULL_LOAD, TO_FMA_MUL, ON_THE_FLY
           ss << "  } else CV_DISPATCH_IF (API_LEVEL == " << api_level
              << " && FULL_LOAD == 0 && MODEL == 4 && L0C2OUT_MODEL == 0) {" << std::endl;
-          ss << "    _DISPATCH_MATMUL(" << api_level << ", 4, 0, 0, MatMulToVectorBasicTilingData);" << std::endl;
+          ss << "    _DISPATCH_MATMUL(" << api_level << ", 4, 0, 0, MatMulFmaTilingData);" << std::endl;
         }
       }
       ss << "  } else {" << std::endl;
@@ -7625,7 +7625,7 @@ const std::vector<CvDispatchBranch> &GetCvMatmulDispatchBranches() {
       {1, 7, 0, 2, 0, "MatMulV3BasicTilingData"},    {1, 2, 0, 0, 0, "MatMulV3KEqZeroBasicTilingData"},
       {1, 0, 2, 1, 0, "MatMulV3BasicTilingData"},    {1, 0, 0, 1, 0, "MatMulV3BasicTilingData"},
       {1, 0, 0, 2, 0, "MatMulV3BasicTilingData"},    {1, 0, 2, 2, 0, "MatMulV3BasicTilingData"},
-      {1, 3, 0, 0, 0, "MatMulToMulBasicTilingData"}, {1, 4, 0, 0, 0, "MatMulToVectorBasicTilingData"},
+      {1, 3, 0, 0, 0, "MatMulToMulBasicTilingData"}, {1, 4, 0, 0, 0, "MatMulFmaTilingData"},
       {2, 0, 0, 0, 0, "MatMulV3BasicTilingData"},    {2, 5, 0, 0, 0, "MatMulV3BasicTilingData"},
       {2, 6, 0, 0, 0, "MatMulV3BasicTilingData"},    {2, 0, 2, 0, 0, "MatMulV3BasicTilingData"},
       {2, 0, 1, 0, 0, "MatMulV3BasicTilingData"},    {2, 1, 0, 0, 0, "MatMulV3BasicTilingData"},

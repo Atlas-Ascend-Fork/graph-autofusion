@@ -266,6 +266,17 @@ TEST(TestApiReduceExtend, ReduceProdInt64CoversAlignedAndUnalignedB64Paths) {
         });
     EXPECT_EQ(output, (std::vector<int64_t>{2, 2}));
   }
+  {
+    auto input = makeInput(2, 68);
+    input[67] = 2;
+    input[68] = 3;
+    input.back() = 5;
+    auto output = RunReduce<int64_t, AscendC::Pattern::Reduce::AR>(
+        input, 2, 2, 68, [](auto &dst, auto &src, auto &tmp, const uint32_t *shape) {
+          AscendC::ReduceProdExtend<int64_t, AscendC::Pattern::Reduce::AR>(dst, src, tmp, shape, true);
+        });
+    EXPECT_EQ(output, (std::vector<int64_t>{4, 15}));
+  }
 
   std::vector<int64_t> raExpected(32, 1);
   raExpected.front() = 2;
@@ -457,6 +468,22 @@ TEST(TestApiReduceExtend, ReduceProdInt32RaCoverOutputLargerThanVectorLength) {
   EXPECT_EQ(output, expected);
 }
 
+TEST(TestApiReduceExtend, ReduceProdFloatRaNoReuseSourceKeepsTwoRows) {
+  constexpr uint32_t outputCount = 128U;
+  constexpr uint32_t reduceCount = 2U;
+  std::vector<float> input(outputCount * reduceCount, 1.0F);
+  input.front() = 2.0F;
+  input[outputCount + 1U] = 3.0F;
+  auto output = RunReduce<float, AscendC::Pattern::Reduce::RA>(
+      input, outputCount, reduceCount, outputCount, [](auto &dst, auto &src, auto &tmp, const uint32_t *shape) {
+        AscendC::ReduceProdExtend<float, AscendC::Pattern::Reduce::RA, false>(dst, src, tmp, shape, true);
+      });
+  std::vector<float> expected(outputCount, 1.0F);
+  expected[0] = 2.0F;
+  expected[1] = 3.0F;
+  EXPECT_EQ(output, expected);
+}
+
 template <typename T, typename Pattern>
 void TestProdNoReuseSourcePreservesUnalignedSource(uint32_t dim0, uint32_t dim1) {
   std::vector<T> input(dim0 * dim1, T{1});
@@ -518,6 +545,61 @@ void TestProdNoReuseSourcePreservesUnalignedSource(uint32_t dim0, uint32_t dim1)
   EXPECT_EQ(sourceAfter, expectedInput);
 }
 
+template <typename T>
+std::vector<T> RunLogicalReduceWithSourceAfter(const std::vector<T> &input, uint32_t outputCount, uint32_t dim0,
+                                               uint32_t dim1, bool isAny, bool isAr,
+                                               std::vector<T> &sourceAfterOutput) {
+  const uint32_t inputBytes = AlignUp(input.size() * sizeof(T), ONE_BLK_SIZE);
+  const uint32_t outputBytes = AlignUp(outputCount * sizeof(T), ONE_BLK_SIZE);
+  auto *inputGm = static_cast<T *>(AscendC::GmAlloc(inputBytes));
+  auto *outputGm = static_cast<T *>(AscendC::GmAlloc(outputBytes));
+  auto *sourceAfterGm = static_cast<T *>(AscendC::GmAlloc(inputBytes));
+  std::copy(input.begin(), input.end(), inputGm);
+  std::fill_n(outputGm, outputBytes / sizeof(T), T{});
+
+  auto kernel = [isAny, isAr](T *kernelInput, T *kernelOutput, T *kernelSourceAfter, uint32_t shape0, uint32_t shape1) {
+    TPipe pipe;
+    TBuf<TPosition::VECCALC> srcBuffer;
+    TBuf<TPosition::VECCALC> dstBuffer;
+    TBuf<TPosition::VECCALC> tmpBuffer;
+    pipe.InitBuffer(srcBuffer, AlignUp(shape0 * shape1 * sizeof(T), ONE_BLK_SIZE));
+    pipe.InitBuffer(dstBuffer, AlignUp((isAr ? shape0 : shape1) * sizeof(T), ONE_BLK_SIZE));
+    pipe.InitBuffer(tmpBuffer, AlignUp(shape0 * shape1 * sizeof(T), ONE_BLK_SIZE));
+
+    LocalTensor<T> src = srcBuffer.Get<T>();
+    LocalTensor<T> dst = dstBuffer.Get<T>();
+    LocalTensor<uint8_t> tmp = tmpBuffer.Get<uint8_t>();
+    GmToUb(src, kernelInput, shape0 * shape1);
+    const uint32_t shape[] = {shape0, shape1};
+    if (isAny) {
+      if (isAr) {
+        AscendC::ReduceExtendInternal::Internal::ReduceAnyB64ARCompute<T, false>(
+            (__ubuf__ T *)dst.GetPhyAddr(), (__ubuf__ T *)src.GetPhyAddr(), (__ubuf__ T *)tmp.GetPhyAddr(), shape);
+      } else {
+        AscendC::ReduceExtendInternal::Internal::ReduceAnyB64RACompute<T, false>(
+            (__ubuf__ T *)dst.GetPhyAddr(), (__ubuf__ T *)src.GetPhyAddr(), (__ubuf__ T *)tmp.GetPhyAddr(), shape);
+      }
+    } else if (isAr) {
+      AscendC::ReduceExtendInternal::Internal::ReduceAllB64ARCompute<T, false>(
+          (__ubuf__ T *)dst.GetPhyAddr(), (__ubuf__ T *)src.GetPhyAddr(), (__ubuf__ T *)tmp.GetPhyAddr(), shape);
+    } else {
+      AscendC::ReduceExtendInternal::Internal::ReduceAllB64RACompute<T, false>(
+          (__ubuf__ T *)dst.GetPhyAddr(), (__ubuf__ T *)src.GetPhyAddr(), (__ubuf__ T *)tmp.GetPhyAddr(), shape);
+    }
+    UbToGm(kernelOutput, dst, isAr ? shape0 : shape1);
+    UbToGm(kernelSourceAfter, src, shape0 * shape1);
+  };
+  AscendC::SetKernelMode(KernelMode::AIV_MODE);
+  ICPU_RUN_KF(kernel, 1, inputGm, outputGm, sourceAfterGm, dim0, dim1);
+
+  std::vector<T> output(outputGm, outputGm + outputCount);
+  sourceAfterOutput.assign(sourceAfterGm, sourceAfterGm + input.size());
+  AscendC::GmFree(inputGm);
+  AscendC::GmFree(outputGm);
+  AscendC::GmFree(sourceAfterGm);
+  return output;
+}
+
 TEST(TestApiReduceExtend, ReduceProdNoReuseSourcePreservesUnalignedSource) {
   TestProdNoReuseSourcePreservesUnalignedSource<float, AscendC::Pattern::Reduce::AR>(2, 72);
   TestProdNoReuseSourcePreservesUnalignedSource<float, AscendC::Pattern::Reduce::RA>(3, 33);
@@ -527,6 +609,29 @@ TEST(TestApiReduceExtend, ReduceProdNoReuseSourcePreservesUnalignedSource) {
   TestProdNoReuseSourcePreservesUnalignedSource<int32_t, AscendC::Pattern::Reduce::RA>(3, 33);
   TestProdNoReuseSourcePreservesUnalignedSource<int64_t, AscendC::Pattern::Reduce::AR>(2, 36);
   TestProdNoReuseSourcePreservesUnalignedSource<int64_t, AscendC::Pattern::Reduce::RA>(3, 6);
+}
+
+TEST(TestApiReduceExtend, ReduceAnyAllInt64NoReuseSourcePreservesUnalignedSource) {
+  const std::vector<int64_t> anyInput{0, 1, 0, 0, 0, 0};
+  const std::vector<int64_t> allInput{1, 0, 1, 1, 1, 1};
+  const std::vector<int64_t> anyExpected{1, 0};
+  const std::vector<int64_t> allExpected{0, 1};
+  std::vector<int64_t> sourceAfter;
+  auto anyArOutput = RunLogicalReduceWithSourceAfter<int64_t>(anyInput, 2U, 2U, 3U, true, true, sourceAfter);
+  EXPECT_EQ(anyArOutput, anyExpected);
+  EXPECT_EQ(sourceAfter, anyInput);
+
+  auto anyRaOutput = RunLogicalReduceWithSourceAfter<int64_t>(anyInput, 3U, 2U, 3U, true, false, sourceAfter);
+  EXPECT_EQ(anyRaOutput, (std::vector<int64_t>{0, 1, 0}));
+  EXPECT_EQ(sourceAfter, anyInput);
+
+  auto allArOutput = RunLogicalReduceWithSourceAfter<int64_t>(allInput, 2U, 2U, 3U, false, true, sourceAfter);
+  EXPECT_EQ(allArOutput, allExpected);
+  EXPECT_EQ(sourceAfter, allInput);
+
+  auto allRaOutput = RunLogicalReduceWithSourceAfter<int64_t>(allInput, 3U, 2U, 3U, false, false, sourceAfter);
+  EXPECT_EQ(allRaOutput, (std::vector<int64_t>{1, 0, 1}));
+  EXPECT_EQ(sourceAfter, allInput);
 }
 
 TEST(TestApiReduceExtend, ReduceProdCopyUnalignedPreservesData) {

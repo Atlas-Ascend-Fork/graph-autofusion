@@ -223,6 +223,21 @@ af::Status codegen::TilingData::ProcessCubeFusionResult(ascir::FusedScheduledRes
   return af::SUCCESS;
 }
 
+namespace {
+void AppendCvStageSizeAccessorForResult(const ascir::FusedScheduledResult &fused_schedule_result,
+                                        const ascir::FusedScheduledResult &elemwise_schedule_result, bool is_inductor,
+                                        std::stringstream &ss) {
+  if (ascgen_utils::IsCubeFusedScheduled(fused_schedule_result) &&
+      !elemwise_schedule_result.node_idx_to_scheduled_results.empty() &&
+      !elemwise_schedule_result.node_idx_to_scheduled_results[0].empty() &&
+      !elemwise_schedule_result.node_idx_to_scheduled_results[0][0].schedule_groups.empty() &&
+      !elemwise_schedule_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs.empty()) {
+    const auto &graph = elemwise_schedule_result.node_idx_to_scheduled_results[0][0].schedule_groups[0].impl_graphs[0];
+    codegen::AppendCvStageSizeAccessor(graph, is_inductor, ss);
+  }
+}
+}  // namespace
+
 std::string codegen::TilingData::Generate(const ascir::FusedScheduledResult &fused_schedule_result, bool is_inductor) {
   std::stringstream ss;
   std::stringstream ss1;  // ss1 是最外层的tilingData结构体定义
@@ -286,6 +301,7 @@ std::string codegen::TilingData::Generate(const ascir::FusedScheduledResult &fus
       }
     }
   }
+  AppendCvStageSizeAccessorForResult(fused_schedule_result, elemwise_schedule_result, is_inductor, ss);
   generate_footer();
   if (ascgen_utils::IsCubeFusedScheduled(fused_schedule_result) && is_inductor) {
     bool is_batch = false;

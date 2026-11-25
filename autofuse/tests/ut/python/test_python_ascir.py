@@ -26,6 +26,19 @@ except ImportError:
 from ascir import Max, Min, Mod
 
 PYF_PATH = os.path.dirname(os.path.realpath(__file__))
+SOURCE_ASCIR_API_PATH = os.path.abspath(
+    os.path.join(PYF_PATH, "../../..", "compiler", "python", "ascir_api.py")
+)
+
+
+def load_source_ascir_api(module_name):
+    spec = importlib.util.spec_from_file_location(module_name, SOURCE_ASCIR_API_PATH)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.ascir = ascir
+    return module
+
+
 RUNTIME_ERROR_TILING_LIB = (
     Path(__file__).resolve().parents[4]
     / "build"
@@ -386,17 +399,19 @@ class TestAscir:
 
     @staticmethod
     def test_graph_create_node_with_prod_int8_api():
-        ascir.utils.set_platform("3510", 1, 245760)
+        ascir_mod = ascir
+        source_ascir_api = load_source_ascir_api("source_prod_ascir_api")
+        ascir_mod.utils.set_platform("3510", 1, 245760)
         try:
-            graph = ascir.HintGraph("test_prod_int8_api")
+            graph = ascir_mod.HintGraph("test_prod_int8_api")
             s0 = graph.create_size("s0")
             axis = graph.create_axis("axis", s0)
 
-            x = ascir_api.Data(graph, dtype=ascir.dtypes.int8)
-            output = ascir_api.Prod(graph, x, axis=[axis])
+            x = source_ascir_api.Data(graph, dtype=ascir_mod.dtypes.int8)
+            output = source_ascir_api.Prod(graph, x, axis=[axis])
 
-            assert output.dtype == ascir.dtypes.int8
-            debug_str = ascir.utils.debug_str(graph)
+            assert output.dtype == ascir_mod.dtypes.int8
+            debug_str = ascir_mod.utils.debug_str(graph)
             assert "data_0: Data" in debug_str
             assert ".y: int8_t" in debug_str
             assert "cast_0: Cast" in debug_str
@@ -408,17 +423,47 @@ class TestAscir:
             assert ".x = cast_1.y" in debug_str
             assert ".y: int8_t" in debug_str
 
-            stored = ascir_api.Store(
+            stored = source_ascir_api.Store(
                 graph,
                 output,
                 axis=[axis],
                 size=[s0],
-                stride=[ascir.SizeExpr(1)],
+                stride=[ascir_mod.SizeExpr(1)],
             )
-            ascir_api.Output(graph, stored, dtype=ascir.dtypes.int8)
+            source_ascir_api.Output(graph, stored, dtype=ascir_mod.dtypes.int8)
             Autofuser(AutofuserOptions()).schedule(graph)
         finally:
-            ascir.utils.set_platform("2201", 1, 245760)
+            ascir_mod.utils.set_platform("2201", 1, 245760)
+
+    @staticmethod
+    def test_graph_create_node_with_prod_int8_api_keeps_input_cast_view():
+        ascir_mod = ascir
+        source_ascir_api = load_source_ascir_api("source_prod_view_ascir_api")
+        ascir_mod.utils.set_platform("3510", 1, 245760)
+        try:
+            graph = ascir_mod.HintGraph("test_prod_int8_input_view")
+            input_size = graph.create_size("input_size")
+            output_size = graph.create_size("output_size")
+            input_axis = graph.create_axis("input_axis", input_size)
+            output_axis = graph.create_axis("output_axis", output_size)
+
+            x = source_ascir_api.Data(graph, dtype=ascir_mod.dtypes.int8)
+            output = source_ascir_api.Prod(
+                graph,
+                x,
+                axis=[input_axis, output_axis],
+                size=[ascir_mod.SizeExpr(1), output_size],
+                stride=[ascir_mod.SizeExpr(0), ascir_mod.SizeExpr(1)],
+            )
+
+            metadata = source_ascir_api._get_metadata(graph)
+            cast = next(op for op in metadata.ops if op.type == "Cast")
+            assert list(cast.y.size) == [input_size, output_size]
+            assert list(cast.y.strides) == [output_size, ascir_mod.SizeExpr(1)]
+            assert output.size == [ascir_mod.SizeExpr(1), output_size]
+            assert output.strides == [ascir_mod.SizeExpr(0), ascir_mod.SizeExpr(1)]
+        finally:
+            ascir_mod.utils.set_platform("2201", 1, 245760)
 
     @staticmethod
     def test_index_expr_and_arange_api():
@@ -944,22 +989,40 @@ class TestAutofuseLoadAbsStore:
         hint_graph = self.construct_graph()
         tiling_def, host_tiling, op_kernel = fuser.autofuse_backend(hint_graph)
 
-    def test_autofuse_backend_runtime_error_does_not_return_partial_result(self):
+    @pytest.mark.parametrize("entry", ["autofuse_backend", "codegen", "codegen_bin"])
+    @pytest.mark.parametrize(
+        "symbol,message",
+        [
+            ("CodegenTiling", "pyautofuse runtime error test"),
+            ("CodegenTilingOutOfRange", "pyautofuse out of range test"),
+        ],
+    )
+    def test_codegen_exceptions_do_not_return_partial_result(
+        self, entry, symbol, message
+    ):
         assert RUNTIME_ERROR_TILING_LIB.is_file(), (
             f"missing runtime error tiling library: {RUNTIME_ERROR_TILING_LIB}"
         )
         options = AutofuserOptions(
             tiling_lib_path=str(RUNTIME_ERROR_TILING_LIB),
-            tiling_lib_codegen_symbol="CodegenTiling",
+            tiling_lib_codegen_symbol=symbol,
         )
         fuser = Autofuser(options)
 
         hint_graph = self.construct_graph()
+        graph = (
+            hint_graph if entry == "autofuse_backend" else fuser.schedule(hint_graph)
+        )
+        expected = (
+            rf"^Codegen generate kernel failed: {message}$"
+            if entry == "autofuse_backend"
+            else "Codegen generate kernel failed or abort"
+        )
         with pytest.raises(
-            RuntimeError,
-            match=r"^Codegen generate kernel failed: pyautofuse runtime error test$",
+            RuntimeError if entry == "autofuse_backend" else TypeError,
+            match=expected,
         ):
-            fuser.autofuse_backend(hint_graph)
+            getattr(fuser, entry)(graph)
 
 
 def configure_concrete_op(op, axis, size):

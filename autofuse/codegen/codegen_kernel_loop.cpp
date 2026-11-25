@@ -1098,7 +1098,17 @@ Status Loop::GenerateLoop(const Tiler &tiler, const TPipe &tpipe, std::vector<as
       auto peer = tiler.GetAxis(axis.split_pair_other_id);
       ss << "int32_t block_dim_offset = " << peer.Str() << " * " << tiler.Size(axis.size) << ";" << std::endl;
       ApiCall *call = FindIndirectLoadOpCall(this, true);
+      // 融合发射的 UB 归并（register_merge=false 且无 post-Reduce）不做提升：成员 value 只驻留
+      // 单 tile 的 UB 目标，调用须在 tile 循环体内发射——逐 tile actual_size/offset 中的 tile 变量
+      // 才在作用域内，且与后置向量链的迭代空间一致。
+      bool per_tile_fused_ub_merge = false;
       if (call != nullptr) {
+        const auto fused_il = std::dynamic_pointer_cast<af::AscNode>(call->node);
+        per_tile_fused_ub_merge = fused_il != nullptr && ascgen_utils::indirect_load::IsSimtFusedPrimary(fused_il) &&
+                                  !ascgen_utils::indirect_load::GetSimtFusedMergeInfo(fused_il).register_merge &&
+                                  ascgen_utils::indirect_load::GetPostReduceConsumer(fused_il) == nullptr;
+      }
+      if (call != nullptr && !per_tile_fused_ub_merge) {
         const auto behavior =
             ascgen_utils::indirect_load::GetTemplateBehavior(std::dynamic_pointer_cast<af::AscNode>(call->node));
         const auto indirect_load = std::dynamic_pointer_cast<af::AscNode>(call->node);
@@ -1163,8 +1173,19 @@ Status Loop::GenerateLoop(const Tiler &tiler, const TPipe &tpipe, std::vector<as
         GE_CHK_STATUS_RET(call->Generate(tpipe, current_axis, call_code), "Codegen generate hoisted call failed");
         ss << call_code << std::endl;
         call->skip_api_emit = true;
-        current_axis.pop_back();
-        return af::SUCCESS;
+        // 提升点结束本子树的充分条件：evaluator 同时产出最终结果（单 gather 与 L2 寄存器
+        // 归并）。UB 归并的 fused evaluator 只写组员 UB 局部目标，归并/输出链与 Store 仍由
+        // 本循环体的普通向量代码发射，提前返回会丢掉整条链与输出；此时继续发射循环体，
+        // 组员自身发射已由 skip_api_emit 抑制，不会重复。
+        const auto hoisted_indirect_load = std::dynamic_pointer_cast<af::AscNode>(call->node);
+        const bool evaluator_owns_output =
+            hoisted_indirect_load == nullptr ||
+            !ascgen_utils::indirect_load::IsSimtFusedPrimary(hoisted_indirect_load) ||
+            ascgen_utils::indirect_load::GetSimtFusedMergeInfo(hoisted_indirect_load).register_merge;
+        if (evaluator_owns_output) {
+          current_axis.pop_back();
+          return af::SUCCESS;
+        }
       }
     }
     if (tpipe.cv_fusion_type == ascir::CubeTemplateType::kUBFuse &&

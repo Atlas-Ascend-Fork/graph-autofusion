@@ -15,6 +15,7 @@
 
 #include "aclmodel_specialization.h"
 
+#include <cinttypes>
 #include <new>
 #include <stdexcept>
 
@@ -32,7 +33,14 @@ aclError OptimizeModelImpl(aclmdlRI modelRI, aclmdlRISpecOptions *options, bool 
   try {
     FeatureManager featureManager;
     if (!featureManager.Init(options, isScopeJit)) {
-      SK_DLOGE("%s invalid configuration: model=%p", apiName, modelRI);
+      // 非法配置项的名称、当前值与期望值已由 CompileOptionFeature 校验时逐项输出，此处补充结论。
+      SK_DLOGE("%s invalid configuration: model=%p options=%p specCompileOptionCount=%" PRIu64
+               " specSKFeatureCount=%" PRIu64
+               ", reason=invalid specCompileOptions or specSKFeatures, "
+               "expected each option non-null and kernelName pattern valid",
+               apiName, modelRI, static_cast<const void *>(options),
+               options == nullptr ? 0UL : options->specCompileOptionCount,
+               options == nullptr ? 0UL : options->specSKFeatureCount);
       return ACL_ERROR_INVALID_PARAM;
     }
     AclSpecOptimizer optimizer;

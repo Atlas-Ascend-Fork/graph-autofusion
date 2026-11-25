@@ -105,7 +105,7 @@ std::vector<autoschedule::AutoScheduleOutput> BaseTemplateGenerator::GetBasedCas
     merged.insert(merged.end(), generated_cases.begin(), generated_cases.end());
     return merged;
   }
-  GELOGW("Unknown generation mode: %u, valid modes are: 0-kBaseCase, 1-kAppendCase", mode);
+  GELOGW("Unknown generation mode: %u, valid modes are 0(base case) and 1(append case).", static_cast<uint32_t>(mode));
   return {};
 }
 

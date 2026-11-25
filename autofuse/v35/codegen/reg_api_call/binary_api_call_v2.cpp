@@ -43,8 +43,8 @@ Status BinaryApiCallV2::BuildApiParam(const TPipe &tpipe, const std::vector<asci
       y.Str(), true, CombinedExprFactory::SymbolVar(tpipe.tiler.TensorVectorizedOffset(current_axis, y)));
   api_param->cal_count = CombinedExprFactory::SymbolVar(x1.actual_size.Str());
 
-  GE_CHK_STATUS_RET(CodegenApiParam::Register(this->node, api_param),
-                    "Failed to register codegen api param for node %s", this->node->GetNamePtr());
+  GE_CHK_STATUS_RET(CodegenApiParam::Register(this->node, api_param), "Register codegen api param for node[%s] failed",
+                    this->node_name.c_str());
   return af::SUCCESS;
 }
 

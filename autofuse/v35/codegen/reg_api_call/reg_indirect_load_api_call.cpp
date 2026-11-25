@@ -2515,6 +2515,11 @@ Status IndirectLoadRegApiCall::GenerateSimtInvocation(
     // tensor，此处再发 TensorAlloc 即重定义——显式跳过（组员形态靠 TBuf 复用租户的
     // no_need_realloc 抑制，边界化 value tensor 非租户，必须走本跳过）。
     const bool is_boundary_fusion = node != nullptr && ascgen_utils::indirect_load::IsSimtBoundaryFusion(node);
+    // 融合发射的 UB 归并（无共享 Reduce）与边界化同构：调用按逐 tile 的 actual_size/offset 发射，
+    // 成员 value 写本 tile 的 UB 局部目标，由同一循环体内的向量代码消费。
+    const bool is_fused_ub_merge_no_reduce = node != nullptr && ascgen_utils::indirect_load::IsSimtFusedPrimary(node) &&
+                                             !ascgen_utils::indirect_load::GetSimtFusedMergeInfo(node).register_merge &&
+                                             ascgen_utils::indirect_load::GetPostReduceConsumer(node) == nullptr;
     if (prepass_plan == nullptr && !skips_ub_lifecycle && !is_boundary_fusion && !local_target->no_need_realloc) {
       std::string local_target_alloc;
       GE_ASSERT_SUCCESS(tpipe.TensorAlloc(*local_target, local_target_alloc));
@@ -2550,7 +2555,7 @@ Status IndirectLoadRegApiCall::GenerateSimtInvocation(
           "metadata[%d] vs current graph[%d].",
           node_name.c_str(), has_post_reduce_ ? 1 : 0, has_post_reduce_consumer ? 1 : 0);
     }
-    if (!has_post_reduce_consumer && !is_boundary_fusion) {
+    if (!has_post_reduce_consumer && !is_boundary_fusion && !is_fused_ub_merge_no_reduce) {
       actual_size_expr = outer_tb_var + "_loop_size";
       output_offset_expr = "static_cast<" + offset_type + ">(block_dim_offset)";
     } else {
@@ -3478,7 +3483,10 @@ Status IndirectLoadRegApiCall::GenerateSimt(const TPipe &tpipe, const std::vecto
       ss << "};\n";
       std::string fused_actual_size_expr;
       std::string fused_output_offset_expr;
-      if (merge_info.register_merge || !fused_has_post_reduce_consumer) {
+      // 寄存器归并（L2）由 evaluator 折叠整链并直写输出，按整核一次调用；
+      // UB 归并（L3，含无共享 Reduce）成员 value 只驻留单 tile 的 UB 目标，必须逐 tile 调用，
+      // 否则整核 local_index 空间与 tile 目标错位。
+      if (merge_info.register_merge) {
         fused_actual_size_expr = outer_tb_var + "_loop_size";
         fused_output_offset_expr = "static_cast<" + body_offset_type + ">(block_dim_offset)";
       } else {
