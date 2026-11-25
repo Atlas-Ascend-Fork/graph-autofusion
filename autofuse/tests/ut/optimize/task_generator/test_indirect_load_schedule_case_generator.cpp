@@ -1161,6 +1161,104 @@ af::AscGraph BuildPostReduceGraph(const std::string &suffix, bool reduce_outer =
   }
   return graph;
 }
+// 动态归一化链的除数侧：IndexExpr(归约轴长度)→Broadcast(int64)→Cast(f32) 接入 TrueDiv
+// 第二输入。IndexExpr 无输入，值由 ir_attr.expr 在标量求值器内运行期求值。
+void BuildDynamicIndexExprDivisorChain(af::AscGraph &graph, const af::Expression &divisor,
+                                       const std::vector<af::AxisId> &axes, const std::vector<af::Expression> &repeats,
+                                       const std::vector<af::Expression> &strides, af::ascir_op::TrueDiv &true_div) {
+  af::ascir_op::IndexExpr index_expr("index_expr", graph);
+  index_expr.ir_attr.SetExpr(divisor);
+  index_expr.y.dtype = af::DT_INT64;
+  af::ascir_op::Broadcast div_broadcast("div_broadcast");
+  div_broadcast.x = index_expr.y;
+  SetNodeView(div_broadcast, af::DT_INT64, axes, repeats, strides);
+  af::ascir_op::Cast div_cast("div_cast");
+  div_cast.x = div_broadcast.y;
+  SetNodeView(div_cast, af::DT_FLOAT, axes, repeats, strides);
+  true_div.x2 = div_cast.y;
+}
+
+// 归一化结果的后置消费尾段：旁路加数 Load→Add→Store→Output。
+void BuildPostDivAddStoreTail(af::AscGraph &graph, const af::AscOpOutput &input, const std::vector<af::AxisId> &axes,
+                              const std::vector<af::Expression> &repeats, const std::vector<af::Expression> &strides) {
+  af::ascir_op::Data addend("addend", graph);
+  addend.ir_attr.SetIndex(2);
+  SetNodeView(addend, af::DT_FLOAT, axes, repeats, strides);
+  af::ascir_op::Load addend_load("addend_load");
+  addend_load.x = addend.y;
+  SetNodeView(addend_load, af::DT_FLOAT, axes, repeats, strides);
+  addend_load.attr.api.compute_type = af::ComputeType::kComputeLoad;
+  addend_load.attr.api.type = af::ApiType::kAPITypeCompute;
+  addend_load.attr.api.unit = af::ComputeUnit::kUnitMTE2;
+  af::ascir_op::Add add("post_div_add");
+  add.x1 = input;
+  add.x2 = addend_load.y;
+  SetNodeView(add, af::DT_FLOAT, axes, repeats, strides);
+  SetVectorApi(add);
+  af::ascir_op::Store store("store");
+  store.x = add.y;
+  SetNodeView(store, af::DT_FLOAT, axes, repeats, strides);
+  af::ascir_op::Output output("output");
+  output.x = store.y;
+  output.ir_attr.SetIndex(0);
+  SetNodeView(output, af::DT_FLOAT, axes, repeats, strides);
+}
+
+// gather→sum→truediv(动态 IndexExpr 除数)→add→store：动态 shape 归一化链。mean 在前端
+// 拆解为 sum 与除以归约轴长度，动态长度使除数成为无输入的 IndexExpr 运行期标量表达式
+// 节点（复刻 tc_af_inductor_gather_reduce_dy_0028 的动态图形态，轴结构/调度轴/IL 属性
+// 与前端 HintGraph 一致）。SIMT lowering 的反向 walk 与节点校验须把 IndexExpr 当作标量
+// 终止边界，而不是缺输入的非法节点。
+af::AscGraph BuildPostReduceDynamicIndexExprDivGraph() {
+  af::AscGraph graph("indirect_load_dynamic_div_ut_graph");
+  const af::Expression rows = graph.CreateSizeVar("rows");
+  const af::Expression cols = graph.CreateSizeVar("cols");
+  const af::Expression src_cols = graph.CreateSizeVar("src_cols");
+  const auto a0 = graph.CreateAxis("a0", rows);
+  const auto a1 = graph.CreateAxis("a1", cols);
+  const std::vector<af::AxisId> sched_axes = {a0.id, a1.id};
+  const std::vector<af::Expression> gather_repeats = {rows, cols};
+  const std::vector<af::Expression> gather_strides = {cols, af::sym::kSymbolOne};
+  const std::vector<af::Expression> source_repeats = {rows, src_cols};
+  const std::vector<af::Expression> source_strides = {src_cols, af::sym::kSymbolOne};
+  const std::vector<af::Expression> reduced_repeats = {rows, af::sym::kSymbolOne};
+  const std::vector<af::Expression> reduced_strides = {af::sym::kSymbolOne, af::sym::kSymbolZero};
+
+  af::ascir_op::Data x("x", graph);
+  x.ir_attr.SetIndex(0);
+  SetNodeView(x, af::DT_FLOAT, sched_axes, source_repeats, source_strides);
+  af::ascir_op::Load input_load("input_load");
+  input_load.x = x.y;
+  SetNodeView(input_load, af::DT_FLOAT, sched_axes, source_repeats, source_strides);
+  af::ascir_op::Data index("index", graph);
+  index.ir_attr.SetIndex(1);
+  SetNodeView(index, af::DT_INT32, sched_axes, gather_repeats, gather_strides);
+  af::ascir_op::Load index_load("index_load");
+  index_load.x = index.y;
+  SetNodeView(index_load, af::DT_INT32, sched_axes, gather_repeats, gather_strides);
+  af::ascir_op::IndirectLoad indirect_load("indirect_load");
+  indirect_load.x1 = input_load.y;
+  indirect_load.x2 = index_load.y;
+  indirect_load.ir_attr.SetAxis(1);
+  indirect_load.ir_attr.SetNegative_index_support(true);
+  indirect_load.ir_attr.SetNeed_check_bound(true);
+  indirect_load.ir_attr.SetMax(src_cols);
+  SetNodeView(indirect_load, af::DT_FLOAT, sched_axes, gather_repeats, gather_strides);
+
+  af::ascir_op::Sum sum("sum");
+  sum.x = indirect_load.y;
+  sum.attr.api.compute_type = af::ComputeType::kComputeReduce;
+  sum.attr.sched.axis = sched_axes;
+  SetNodeView(sum, af::DT_FLOAT, sched_axes, reduced_repeats, reduced_strides);
+
+  af::ascir_op::TrueDiv true_div("true_div");
+  true_div.x1 = sum.y;
+  SetNodeView(true_div, af::DT_FLOAT, sched_axes, reduced_repeats, reduced_strides);
+  SetVectorApi(true_div);
+  BuildDynamicIndexExprDivisorChain(graph, cols, sched_axes, reduced_repeats, reduced_strides, true_div);
+  BuildPostDivAddStoreTail(graph, true_div.y, sched_axes, reduced_repeats, reduced_strides);
+  return graph;
+}
 
 af::AscGraph BuildShapeEnlargingInputPreGraph() {
   af::AscGraph graph("indirect_load_shape_enlarging_input_pre_ut_graph");
@@ -2460,6 +2558,17 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, PostReduceAllowsDtypeCastBeforeStore
   std::vector<af::AscGraph> graphs;
   std::vector<std::string> score_functions;
 
+  ASSERT_EQ(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
+  EXPECT_NE(FindGeneratedGraphByTemplate(graphs, ascir::TemplateId::kIndirectLoadSimt), graphs.end());
+}
+
+TEST(IndirectLoadScheduleCaseGeneratorTest, PostReduceDynamicIndexExprDivisorKeepsSimtCandidate) {
+  auto graph = BuildPostReduceDynamicIndexExprDivGraph();
+  optimize::IndirectLoadScheduleCaseGenerator generator;
+  std::vector<af::AscGraph> graphs;
+  std::vector<std::string> score_functions;
+  // 修复前：SIMT lowering 反向 walk 到无输入的 IndexExpr 除数节点触发缺输入断言，
+  // Generate 整体失败（tc_af_inductor_gather_reduce_dy_0028 的 Optimize fail）。
   ASSERT_EQ(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
   EXPECT_NE(FindGeneratedGraphByTemplate(graphs, ascir::TemplateId::kIndirectLoadSimt), graphs.end());
 }
