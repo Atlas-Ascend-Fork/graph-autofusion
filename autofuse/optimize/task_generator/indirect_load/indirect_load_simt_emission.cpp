@@ -180,8 +180,12 @@ af::Status PlanSimtFusedEmission(const af::AscGraph &graph, const std::vector<af
       }
       continue;
     }
-    if (af::ops::IsOps<af::ascir_op::Scalar>(node) || af::ops::IsOps<af::ascir_op::ScalarData>(node) ||
-        af::ops::IsOps<af::ascir_op::Arange>(node)) {
+    // 常量/运行时输入引用不做标量计算，豁免后作为链终点结束回溯；Arange 是真正的
+    // 计算节点（生成 gather 坐标），与 L2 判定的"链上节点全部可标量发射"口径一致，
+    // 必须走 CanEmitSimtScalar 真实查询（不可发射则 has_unsupported_side_input 回退
+    // L3），避免调度期放行、发射期 EmitSimtArangeExpr 断言硬挂（与 index 链/输出链
+    // 两条判定路径同一事实源）。
+    if (af::ops::IsOps<af::ascir_op::Scalar>(node) || af::ops::IsOps<af::ascir_op::ScalarData>(node)) {
       continue;
     }
     if (!af::ops::IsOps<af::ascir_op::Transpose>(node) && !CanEmitSimtScalar(node)) {

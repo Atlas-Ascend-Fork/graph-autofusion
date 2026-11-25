@@ -142,13 +142,14 @@ af::Status ValidateSimtTemplateRegion(const RewrittenGraphAnalysis &analysis, bo
     }
     // Compile-time Scalar values are emitted as local constants by the SIMT evaluator.
     // ScalarData is runtime input and still requires an explicit context/GM binding.
-    if (af::ops::IsOps<af::ascir_op::Arange>(node)) {
-      continue;
-    }
     if (af::ops::IsOps<af::ascir_op::ScalarData>(node) || HasControlEdge(node)) {
       return af::SUCCESS;
     }
     const bool is_gm_boundary = af::ops::IsOps<af::ascir_op::Load>(node) || af::ops::IsOps<af::ascir_op::Store>(node);
+    // Arange 不再无条件豁免：其 SIMT 专用发射路径 EmitSimtArangeExpr 有前置条件
+    // （ArangeAscIrCodegenImplV2::IsSimtScalarSupported：零输入、int32/int64、单一
+    // varying 轴），与发射期同一 V2 能力查询，不可发射时在此拒绝候选（index 链无法
+    // 退出求值器——index 计算必须折叠），而不是放行到 codegen 硬失败。
     if (!is_gm_boundary && !CanEmitSimtScalar(node)) {
       GELOGD("[IndirectLoad] SIMT scalar codegen does not support node[%s, %s].", node->GetNamePtr(),
              node->GetTypePtr());
