@@ -69,24 +69,22 @@ void LockDetector::Init(SuperKernelGraph &graph) {
 }
 
 aclError LockDetector::GetDeviceCores() {
-  static std::mutex deviceCoresMutex;
-  std::lock_guard<std::mutex> lock(deviceCoresMutex);
-  if (deviceRealCubeNum != 0 && deviceRealVecNum != 0) {
-    return ACL_SUCCESS;
-  }
+  static std::once_flag deviceCoresInitFlag;
+  static aclError deviceCoresInitResult = ACL_ERROR_FAILURE;
+  std::call_once(deviceCoresInitFlag, []() {
+    int64_t cubeNum = 0;
+    int64_t vecNum = 0;
+    deviceCoresInitResult = GetDeviceCoreNums(cubeNum, vecNum);
+    if (deviceCoresInitResult != ACL_SUCCESS) {
+      SK_LOGE("[lock detector] GetDeviceCores failed, ret=%d", deviceCoresInitResult);
+      return;
+    }
 
-  int64_t cubeNum = 0;
-  int64_t vecNum = 0;
-  aclError ret = GetDeviceCoreNums(cubeNum, vecNum);
-  if (ret != ACL_SUCCESS) {
-    SK_LOGE("[lock detector] GetDeviceCores failed, ret=%d", ret);
-    return ret;
-  }
-
-  deviceRealCubeNum = cubeNum;
-  deviceRealVecNum = vecNum;
-  SK_LOGI("[lock detector] GetDeviceCores success, cube=%ld, vec=%ld", deviceRealCubeNum, deviceRealVecNum);
-  return ACL_SUCCESS;
+    deviceRealCubeNum = cubeNum;
+    deviceRealVecNum = vecNum;
+    SK_LOGI("[lock detector] GetDeviceCores success, cube=%ld, vec=%ld", deviceRealCubeNum, deviceRealVecNum);
+  });
+  return deviceCoresInitResult;
 }
 
 std::pair<uint64_t, uint64_t> LockDetector::GetAvailableCores(bool isSuperKernel) const {

@@ -319,11 +319,6 @@ class TestLockDetector : public ::testing::Test {
 };
 
 TEST_F(TestLockDetector, ConcurrentDeviceCoreInitialization) {
-  const auto savedCubeNum = LockDetector::deviceRealCubeNum;
-  const auto savedVecNum = LockDetector::deviceRealVecNum;
-  LockDetector::deviceRealCubeNum = 0;
-  LockDetector::deviceRealVecNum = 0;
-
   std::atomic<bool> allSucceeded{true};
   std::vector<std::thread> threads;
   for (int i = 0; i < 16; ++i) {
@@ -340,8 +335,6 @@ TEST_F(TestLockDetector, ConcurrentDeviceCoreInitialization) {
   EXPECT_TRUE(allSucceeded);
   EXPECT_GT(LockDetector::deviceRealCubeNum, 0);
   EXPECT_GT(LockDetector::deviceRealVecNum, 0);
-  LockDetector::deviceRealCubeNum = savedCubeNum;
-  LockDetector::deviceRealVecNum = savedVecNum;
 }
 
 // Test 1: one stream, kernel node (after wait node) exceeds max sk cube/vec num
