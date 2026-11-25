@@ -1,5 +1,7 @@
 # MLIR 计划选择的可行性与回退
 
+简体中文 | [English](./2026-09-28-mlir-plan-selection-feasibility-fallback-design_en.md)
+
 > **接口迁移说明（2026-10-22）**：正文提及的 `AF_MLIR_PINNED_*` / `AF_MLIR_ENABLE_PLAN_PINNING` 是历史接口，现已移除；当前使用 ATT `AUTOFUSE_DFX_FLAGS` 的 `--force_schedule_result` / `--force_tiling_case`。候选编号须核对当前 shape 的 schedule dump。
 
 > **当前实现核对（2026-10-22）**：本文下方保留原设计及历史验收记录，不能据其中的“当前/今天”判断现状。
@@ -331,7 +333,7 @@ kernel 二进制与 TilingData 结构随计划数增大。TilingData 是每个 (
 ### 关键数据结构
 
 - `PlanSelection{subgraph_id, plan_id, template_ids_per_stage}`：不变。静态路径下 `selections`
-  的长度从「子图数」变为「全部 (子图, 计划) 数」，与动态路径一致。
+  的长度从「子图数」变为「全部（子图，计划）数」，与动态路径一致。
 - `MlirCandidatePreparation`：拆分后 `bundle` 不再与 `narrowed_result` 同时产出，需要重新界定
   这个结构体的边界，或拆成两个。
 - `BuiltPlanModules`：增加幸存者的 `selections`，供需求 3 判断是否重新收窄。

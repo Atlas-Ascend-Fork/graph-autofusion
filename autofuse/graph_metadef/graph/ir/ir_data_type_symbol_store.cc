@@ -81,7 +81,7 @@ graphStatus IRDataTypeSymbolStore::InferDtype(const OpDescPtr &op) const {
 
   std::map<size_t, std::pair<size_t, size_t>> ir_output_2_range;
   GE_WARN_ASSERT_GRAPH_SUCCESS(af::GetIrOutputDescRange(op, ir_output_2_range));
-  GE_WARN_ASSERT(ir_output_2_range.size() == op->GetIrOutputs().size(), "Failed get output instance info of %s %s",
+  GE_WARN_ASSERT(ir_output_2_range.size() == op->GetIrOutputs().size(), "Failed to get output instance info of %s %s",
                  op->GetName().c_str(), op->GetType().c_str());
 
   GE_WARN_ASSERT(output_syms_.size() == op->GetIrOutputs().size(), "Op %s %s has %zu ir outputs, but %zu output syms",
@@ -164,7 +164,7 @@ SymDtype *IRDataTypeSymbolStore::DeclareSymbol(const std::string &sym_id, const 
 SymDtype *IRDataTypeSymbolStore::DeclareSymbol(const std::string &sym_id, const Promote &types) {
   std::vector<SymDtype *> syms;
   for (auto &id : types.Syms()) {
-    GE_ASSERT(id != sym_id, "Trying promote symbol %s with itself", sym_id.c_str());
+    GE_ASSERT(id != sym_id, "Trying to promote symbol %s with itself", sym_id.c_str());
     auto *sym = GetOrCreateSymbol(id);
     GE_ASSERT_NOTNULL(sym);
     syms.emplace_back(sym);

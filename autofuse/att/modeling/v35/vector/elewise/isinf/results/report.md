@@ -1,5 +1,7 @@
 # IsInf 模型验证报告
 
+简体中文 | [English](./report_en.md)
+
 > 本报告基于 [samples.csv](samples.csv) 的实测数据（5 条，float32→bool 主路径，用例集沿用
 > IsNan 同参数梯度）。model_predict_cycles 按 [design.md](../design.md) 公式推导，
 > 5 条全部与闭式公式一致。误差定义：`error = (predict - measured) / measured * 100%`，
@@ -20,7 +22,7 @@
 
 ### 用例明细
 
-| input→output | outer_loop | cal_count | rt | 预测 (cycles) | 实测 (cycles) | 误差 | 单块折算 (模型 7) |
+| input→output | outer_loop | cal_count | rt | 预测 (cycles) | 实测 (cycles) | 误差 | 单块折算（模型 7） |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | float32→bool | 100 | 64 | 1 | 5500 | 5906.92 | -6.89% | 11.07 |
 | float32→bool | 100 | 128 | 2 | 6200 | 6045.45 | +2.56% | 6.23 |

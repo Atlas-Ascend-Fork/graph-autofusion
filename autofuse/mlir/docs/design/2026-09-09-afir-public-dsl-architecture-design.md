@@ -1,5 +1,7 @@
 # AFIR DSL 架构重构设计
 
+简体中文 | [English](./2026-09-09-afir-public-dsl-architecture-design_en.md)
+
 | | |
 |---|---|
 | **日期** | 2026-09-09 |
@@ -854,7 +856,7 @@ tensor→buffer 边界本身，而非其之前。此项随 Schedule 迁入 MLIR�
 | `axis_id` + `axis_role` | IR 结构上不存在的反向引用，角色是自由字符串 | 合为 `#afir.axis_binding<axis = N, role = ...>`，role 进 `AxisValueRole` 枚举 |
 | `vectorized_axis` | 影子拷贝：值即局部侧 `TensorDescAttr.vectorized_axis` | 删除，唯一读点改读该 descriptor |
 
-替代通路：`scf.for` 携带 `#afir.axis_binding<axis = N, role = loop>`，循环生成物化出的标量值携带 `role = axis_index | axis_size | loop_size | tail_size | actual_size`，`TransferPlan::findAxisValue` 按 (轴, 角色) 反查。角色枚举化后，拼错从「查不到值 → 静默回退到 identity 搬运」变成解析期失败。
+替代通路：`scf.for` 携带 `#afir.axis_binding<axis = N, role = loop>`，循环生成物化出的标量值携带 `role = axis_index | axis_size | loop_size | tail_size | actual_size`，`TransferPlan::findAxisValue` 按（轴，角色）反查。角色枚举化后，拼错从「查不到值 → 静默回退到 identity 搬运」变成解析期失败。
 
 **步 6（`#afir.layout`）——接口契约逼出三处与 3.1 不同的形态。**
 

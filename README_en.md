@@ -11,7 +11,7 @@ English | [简体中文](./README.md)
 
 ## 🚀Overview
 
-Graph-autofusion is a lightweight, decoupled component collection for Ascend chips. It aims to accelerate model execution through various fusion-related technologies. Currently, the SuperKernel component and Autofuse component are open sourced, and more fusion-related modules will be continuously released in the future.
+Graph-autofusion is a lightweight, decoupled component collection for Ascend chips. It aims to accelerate model execution through various fusion-related technologies. Currently, the SuperKernel component, the Autofuse component, the Multistream stream-planning component, and the model specialization (model_specialization) component are open sourced, and more fusion-related modules will be continuously released in the future.
 
 Component features:
 
@@ -57,6 +57,8 @@ graph-autofusion/
 │   ├── env_install                           # Environment installation documentation
 │   ├── figures                               # Documentation figure resources
 │   └── guidelines                            # Development guidelines and templates
+├── model_specialization                      # Model specialization component. Specialized kernels, source code, and tests are in this subdirectory.
+├── multistream                                # Multistream stream-planning component. Stream-planning source code, tests, and documentation are in this subdirectory.
 ├── scripts                                   # Build, environment installation, and test scripts
 │   ├── env_install                           # Environment installation scripts
 │   ├── package                               # Packaging scripts

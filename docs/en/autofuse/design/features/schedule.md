@@ -1,5 +1,7 @@
 # Schedule
 
+English | [简体中文](../../../../zh/autofuse/design/features/schedule.md)
+
 The Schedule module of AutoFuse is the core component connecting computation definition and efficient code generation. Its core capability is to flexibly rearrange and optimize the computation process: without changing the computation semantics, flexibly adjust the computation implementation through computation rearrangement and scheduling primitive calls to obtain better performance. Optimization methods include loop merging, solution space generation, parallel optimization, memory optimization, and multi-template generation.
 
 When a user defines a HintGraph describing Scalar computation logic through AscIR, the Schedule module will perform scheduling optimization on the computation based on hardware characteristics, and generate multiple ImplGraphs expressing splitting and memory relationships, providing a foundation for the Codegen and Auto Tiling modules to support them in generating high-performance Kernel code.

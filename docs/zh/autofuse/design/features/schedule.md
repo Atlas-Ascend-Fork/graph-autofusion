@@ -1,5 +1,7 @@
 # Schedule
 
+简体中文 | [English](../../../../en/autofuse/design/features/schedule.md)
+
 自动融合的 Schedule 模块是连接计算定义与高效代码生成的核心组件，其核心能力在于对计算过程进行灵活的重排与优化：在不改变计算语义的前提下，通过计算重排、调度原语调用等方式灵活调整计算实现，以获得更佳的性能。优化手段包括循环合并、解空间生成、并行优化、内存优化及多模板生成等。
 
 当用户通过 AscIR 定义一张描述 Scalar 计算逻辑的 HintGraph 后，Schedule 模块会基于硬件特性对计算进行调度优化，生成多张表达切分及内存关系的 ImplGraph，为 Codegen 及 Auto Tiling 模块提供基础，支撑其生成高性能 Kernel 代码。
@@ -8,7 +10,7 @@
 
 循环合并是一种重要的循环变换技术，其核心作用是通过重构循环结构，减少内存访问次数、降低控制开销、提升数据局部性，并为后续优化铺路，最终在不改变计算结果的前提下提升程序执行效率。
 
-例如，假设有如下两层循环:
+例如，假设有如下两层循环：
 
 ```text
 for i in range(N):
@@ -151,7 +153,7 @@ reduce 类的切分较为复杂，实现上需要双切分：行方向上是 ele
 <img src="../../figures/schedule_reduce_split.png" alt="reduce 类算子切分" style="width: 45%; max-width: 800px;">
 </div>
 
-通过 TilingGroup 的合并规则:
+通过 TilingGroup 的合并规则：
 
 ```text
 ()(z0,z1)()  Merge  ()(z0)(z1)  =>  ()(z0)(z1)

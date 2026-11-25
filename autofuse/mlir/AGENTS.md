@@ -1,5 +1,7 @@
 # Ascend MLIR AGENT 调测介绍
 
+简体中文 | [English](./AGENTS_en.md)
+
 ## 1. 本地环境调测（CPU仿真）
 
 ### 1.1 MacOS 操作系统
@@ -23,7 +25,7 @@ bash scripts/test/run_autofuse_test.sh -u -s -m mlir -j 10
 ### 1.2 Ubuntu 操作系统
 
 编译方案：本地编译 LLVM + 本地安装 CANN Toolkit
-LLVM 构建路径通常为: `/opt/llvm`
+LLVM 构建路径通常为：`/opt/llvm`
 CANN Toolkit安装路径通常为：`${HOME}/Ascend`
 
 编译执行 MLIR UT/ST 命令：
@@ -41,7 +43,7 @@ bash scripts/test/run_autofuse_test.sh -u -s -m mlir -j 10
 
 建议使用 `npussh` 工具远程连接 CANNLab 提供的 NPU 环境，使用方式与原生的 `ssh` 一致。
 
-工具安装和使用方式:
+工具安装和使用方式：
 > Step1：在个人开发环境上，安装命令行工具：
 >
 > `npm install -g npussh`

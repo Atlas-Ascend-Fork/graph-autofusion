@@ -485,7 +485,7 @@ Status FusedGraphUnfolder::MergeOutputNodes(const af::ComputeGraphPtr &graph, af
     // Skip relinking when an ascbc node does not have a peer_in_data_anchor, which means that the data will be the
     // output in the ascgraph.
     const af::OutDataAnchorPtr &parent_out_anchor = asc_backend->GetOutDataAnchor(static_cast<int32_t>(index));
-    GE_CHECK_NOTNULL(parent_out_anchor, "Parent output anchor is null, output_node:[%s], index:[%d].",
+    GE_CHECK_NOTNULL(parent_out_anchor, " Parent output anchor is null, output_node:[%s], index:[%d].",
                      output_node->GetNamePtr(), static_cast<int32_t>(index));
     auto peer_in_anchor_in_parent = parent_out_anchor->GetPeerInDataAnchors();
 

@@ -1,5 +1,7 @@
 # SuperKernel 迁移设计
 
+简体中文 | [English](../../en/super_kernel/super_kernel_migration_design.md)
+
 ## 概览&目的
 
 本文分析 SuperKernel 与 AscendC 解耦方案，将 SuperKernel 实现从当下的 AscendC 仓、包迁移到 Graph-autofusion 。
@@ -31,7 +33,7 @@
 
 | 文件名 | 功能 | 新文件 |
 | ----- | --- | ----|
-| ascendc_super_kernel.py | SuperKernel 编译入口，包含参数解析、codegen 壳代码、编译 | super_kernel.py (入口由ascendc_super_kernel_plus变为compile) |
+| ascendc_super_kernel.py | SuperKernel 编译入口，包含参数解析、codegen 壳代码、编译 | super_kernel.py（入口由ascendc_super_kernel_plus变为compile） |
 | ascendc_super_operator_infos.py | SuperKernel 顶层数据结构 | super_kernel_op_infos.py |
 | ascendc_sub_super_kernel.py | 子kernel信息保存 | super_kernel_sub_op_infos.py |
 
@@ -73,7 +75,7 @@
 | ascendc_compile_base.gen_spk_kernel_call | 同上 |super_kernel_gen_entry_code.py|
 | ascendc_compile_base.split_spk_kernel_objs | 同上 |super_kernel_gen_entry_code.py |
 | ascendc_compile_base.super_kernel_gen_entry | 同上 |super_kernel_gen_entry_code.py|
-| ascendc_compile_base.gen_file_header | 同上 ps:生成双页表全局变量（代码实现仅支持v220，需考虑不同芯片版本的宏隔离，可参考ascendc_compile_gen_code.gen_global_isolation_macro）且只支持split_mode为1，双叶表才生效 |super_kernel_gen_entry_code.py|
+| ascendc_compile_base.gen_file_header | 同上 ps：生成双页表全局变量（代码实现仅支持v220，需考虑不同芯片版本的宏隔离，可参考ascendc_compile_gen_code.gen_global_isolation_macro）且只支持split_mode为1，双叶表才生效 |super_kernel_gen_entry_code.py|
 | ascendc_compile_base.gen_system_run_cfg | 同上 |super_kernel_gen_entry_code.py|
 | ascendc_compile_base.localize_symbol_of_sk | 链接SuperKernel所有二进制 |super_kernel_compile.py|
 | ascendc_compile_base.gen_super_kernel_compile_info | 生成SuperKernel的compile info |super_kernel_compile.py|

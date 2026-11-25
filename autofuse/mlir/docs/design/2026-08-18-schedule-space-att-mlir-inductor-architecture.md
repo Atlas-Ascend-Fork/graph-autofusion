@@ -1,5 +1,7 @@
 # Schedule 到 MLIR-Codegen 的 Bridge 组织形式、低耗时编译执行方案与 ATT 交互设计
 
+简体中文 | [English](./2026-08-18-schedule-space-att-mlir-inductor-architecture_en.md)
+
 > 状态：功能需求 1（`TilingFieldSchema`）、2（`AttSchemaAdapter`）、3（`StaticPlanSelector`）、4（动态/静态候选
 > 筛选策略）、6（结构 fingerprint）已实现并有 UT 覆盖；功能需求 5（编译驱动改直接调用 bisheng）未实现，暂不
 > 开发；"生产入口如何组装候选"（原功能需求 2）仍是开放依赖项；AFIR 的 `node_id`→`subgraph_id`、
@@ -242,8 +244,8 @@ device 端按 `tiling_key` 内部跳转（legacy `AppendFuncCall` 和 `GenKernel
   （`GenTilingImplAutoFuseV3` 里显式设置 `generator_config.gen_tiling_data = false`，即信任 Codegen 那份已经
   生成了同名 struct）。
 
-`att/gen_model_info/gen_model_info.cpp` 中有明确注释："ATT 必须与 Codegen 使用相同的 schedule result 路径,
-否则 raw 1D 节点按 1D 模型评分,但 Codegen 最终生成 kUBFuse 固定 2D 描述"——说明 ATT 对
+`att/gen_model_info/gen_model_info.cpp` 中有明确注释："ATT 必须与 Codegen 使用相同的 schedule result 路径，
+否则 raw 1D 节点会按 1D 模型评分，但 Codegen 最终生成 kUBFuse 固定 2D 描述。"——说明 ATT 对
 `FusedScheduledResult` 四层结构和 `cube_type`/`var_relations`/`score_func` 等字段是强耦合、且要求和
 Codegen 走同一条遍历路径的。这是"尽量不改 ATT"的具体依据：任何重构都不能让 ATT 和 Codegen 走上不同的
 遍历顺序或字段推导逻辑。

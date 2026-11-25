@@ -115,7 +115,7 @@ void MlirDebugResult(mlir::bridge::MlirCodegenStatus status) {
       status_name = "kSucceeded";
       break;
   }
-  GELOGI("MLIR Codegen Result：%s", status_name);
+  GELOGI("MLIR Codegen Result: %s", status_name);
 }
 #endif
 

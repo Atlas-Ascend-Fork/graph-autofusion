@@ -1,5 +1,7 @@
 # AscIR op 两平台 lowering 对照表
 
+简体中文 | [English](./ascir_op_lowering_matrix_en.md)
+
 > 能力参考 · 由 `tools/af-mlir-tools/scan_ascir_op_lowering_matrix.py` 生成，请勿手工编辑。
 
 ## 判据
@@ -26,7 +28,7 @@ mem-based = `NpuArch 2201`（v1，soc `2201`）；reg-based = `NpuArch 3510`（v
 
 | 范围 | D0 | D1 | D2 | D3 | 合计 |
 |---|---|---|---|---|---|
-| (全部) | 16 | 21 | 49 | 90 | 176 |
+| （全部） | 16 | 21 | 49 | 90 | 176 |
 | elementwise | 8 | 4 | 35 | 0 | 47 |
 | concat | 0 | 0 | 1 | 0 | 1 |
 | cube | 0 | 16 | 0 | 0 | 16 |

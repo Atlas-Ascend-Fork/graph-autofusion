@@ -7,8 +7,8 @@ For security reasons, it is not recommended to use administrator accounts such a
 ## File Permission Control
 
 - It is recommended that users set the running system umask value to 0027 or higher on the host (including the host machine) and in containers. This ensures that new folders have a default maximum permission of 750 and new files have a default maximum permission of 640.
-- It is recommended that users implement security measures such as permission control for sensitive content such as personal privacy data, business assets, source files, and various files saved during the development process. For example, for project installation directory permission control and input public data file permission control, see [A-File (Folder) Permission Control Recommended Maximum Values for Each Scenario](#A-File (Folder) Permission Control Recommended Maximum Values for Each Scenario).
-- Users need to implement permission control during installation and use. For file permission settings, see [A-File (Folder) Permission Control Recommended Maximum Values for Each Scenario](#A-File (Folder) Permission Control Recommended Maximum Values for Each Scenario).
+- It is recommended that users implement security measures such as permission control for sensitive content such as personal privacy data, business assets, source files, and various files saved during the development process. For example, for project installation directory permission control and input public data file permission control, see [A-File (Folder) Permission Control Recommended Maximum Values for Each Scenario](#a-file-folder-permission-control-recommended-maximum-values-for-each-scenario).
+- Users need to implement permission control during installation and use. For file permission settings, see [A-File (Folder) Permission Control Recommended Maximum Values for Each Scenario](#a-file-folder-permission-control-recommended-maximum-values-for-each-scenario).
 
 ## Build Security Statement
 
@@ -52,6 +52,6 @@ The public network addresses contained in this project code are as follows:
 | Maintenance upgrade file directory                  |   770 (rwxrwx---)    |
 | Business data files                      |   640 (rw-r-----)    |
 | Business data file directory                  |   750 (rwxr-x---)      |
-| Key components, private keys, certificates, ciphertext file directories    |  700 (rwx—----)      |
+| Key components, private keys, certificates, ciphertext file directories    |  700 (rwx------)      |
 | Key components, private keys, certificates, encrypted ciphertext        | 600 (rw-------)      |
 | Encryption/decryption interfaces, encryption/decryption scripts            |   500 (r-x------)        |

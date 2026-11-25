@@ -1,5 +1,7 @@
 # Contributing Guide
 
+English | [简体中文](./CONTRIBUTING.md)
+
 This project welcomes developers to experience and participate in contributions. Before participating in community contributions, see [cann-community](https://gitcode.com/cann/community) to understand the code of conduct, sign the CLA agreement, and understand the contribution process of the source code repository. This repository details the prerequisites for participating in CANN open source project contributions, including but not limited to:
 1. How to submit a PR
 2. Gitcode workflow

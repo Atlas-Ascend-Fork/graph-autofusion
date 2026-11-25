@@ -49,6 +49,7 @@
 
 ```text
 super_kernel/
+├── cmake                   # CMake 公共脚本与依赖逻辑
 ├── docs                   # 文档介绍
 ├── examples               # 示例脚本或 Notebook，演示典型用法
 ├── include                # SuperKernel 对外头文件

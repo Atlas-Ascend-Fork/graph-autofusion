@@ -7,7 +7,7 @@ English | [简体中文](../zh/precommit_guide.md)
 
 ## 1 Background
 
-This guide is mainly for guiding how to use the pre-commit capabilities deployed in the code repository locally (mainly including code formatting and OAT scanning capabilities).
+This guide mainly describes how to use the pre-commit capabilities deployed in the code repository locally (mainly including code formatting and OAT scanning capabilities).
 
 ## 2 Feature Overview
 

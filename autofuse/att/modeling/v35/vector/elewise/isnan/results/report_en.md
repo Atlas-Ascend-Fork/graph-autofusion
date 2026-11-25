@@ -1,5 +1,7 @@
 # IsNan Model Validation Report
 
+English | [简体中文](./report.md)
+
 > This report is based on measured data from [samples.csv](samples.csv) (5 cases, the
 > float32->bool main path). model_predict_cycles are derived from the formulas in
 > [design.md](../design_en.md); all 5 match the closed-form formulas.

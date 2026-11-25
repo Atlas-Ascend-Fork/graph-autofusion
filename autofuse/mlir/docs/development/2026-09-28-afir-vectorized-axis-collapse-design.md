@@ -1,5 +1,7 @@
 # 向量化轴分段统一：取消 Broadcast 的多轴打包——设计
 
+简体中文 | [English](./2026-09-28-afir-vectorized-axis-collapse-design_en.md)
+
 **日期**：2026-09-28
 **前序**：`2026-09-23-afir-broadcast-design.md`（L-7，常量源 `Duplicate` 一档已接通）
 **探针**：`scratchpad/brcprobe`（单文件 tikicpulib，插桩副本追踪原语）与 `scratchpad/copyslack`（P6），结论见「探针结论」一节
@@ -198,8 +200,8 @@ legacy 四轴内部就是这么写的（`broadcast.h:528` 起）。
 
 | 形状 | legacy | 统一分解 | 实测原语 |
 |---|---|---|---|
-| C1 `(1,B,1,B)→(A,B,A,B)`，A=3 B=8 | PASS | PASS | legacy: `MiddleDimWithCopy:Copy` + `FirstDim:Copy`；统一: `FirstDim:Copy` ×2 |
-| C2 `(A,1,A,1)→(A,B,A,B)`，A=8 B=3 | PASS | PASS | legacy: 原生 `<T,2,1>` + **`MiddleDim:Or`**；统一: 原生 `<T,2,1>` + `FirstDim:Copy` |
+| C1 `(1,B,1,B)→(A,B,A,B)`，A=3 B=8 | PASS | PASS | legacy: `MiddleDimWithCopy:Copy` + `FirstDim:Copy`；统一：`FirstDim:Copy` ×2 |
+| C2 `(A,1,A,1)→(A,B,A,B)`，A=8 B=3 | PASS | PASS | legacy: 原生 `<T,2,1>` + **`MiddleDim:Or`**；统一：原生 `<T,2,1>` + `FirstDim:Copy` |
 | C3 五段 `(M,1,N,1,K)→(M,B1,N,B2,K)`，2×3×4×2×8 | **ASSERT（无五轴重载）** | PASS | `FirstDim:Copy` ×2 |
 
 三条结论：
