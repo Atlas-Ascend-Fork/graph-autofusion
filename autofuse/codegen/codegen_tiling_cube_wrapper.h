@@ -1015,6 +1015,80 @@ bool BuildTilingContext(const TilingRequest &request, const CompileState &compil
   return run_tiling(tiling_holder.GetContext());
 }
 
+uint64_t CeilDivK(uint64_t value, uint64_t divisor) {
+  return value / divisor + (value % divisor != 0U);
+}
+
+struct StreamKSliceCost {
+  uint64_t rounds;
+  uint64_t loads;
+  uint64_t partial_tiles;
+};
+
+StreamKSliceCost GetStreamKSliceCost(uint64_t length, uint64_t k_l1, uint64_t split_base) {
+  // The device template merges the remainder into its final inner split.
+  const uint64_t rounds = std::max<uint64_t>(1U, length / split_base);
+  const uint64_t final_length = length - (rounds - 1U) * split_base;
+  return {rounds, (rounds - 1U) * CeilDivK(split_base, k_l1) + CeilDivK(final_length, k_l1),
+          (rounds - 1U) * (split_base % k_l1 != 0U) + (final_length % k_l1 != 0U)};
+}
+
+uint32_t SelectStreamKSlice(const MatMulV3BasicTilingData &tiling) {
+  const uint64_t k = tiling.k;
+  const uint64_t original = tiling.skSingleCoreK;
+  const uint64_t k_l1 = tiling.kL1;
+  const uint64_t split_base = tiling.splitSingleCoreKBase;
+  if (original == 0U || k_l1 == 0U || split_base == 0U || tiling.usedCoreNum < 2U || k <= original) {
+    return tiling.skSingleCoreK;
+  }
+  const uint64_t candidate = CeilDivK(original, k_l1) * k_l1;
+  const uint64_t slices = CeilDivK(k, original);
+  // Bound the extra work on the longest slice to 0.5% within the validated shape family.
+  if (candidate == original || candidate - original > original / 200U ||
+      candidate > std::numeric_limits<uint32_t>::max() || slices != tiling.usedCoreNum ||
+      CeilDivK(k, candidate) != slices) {
+    return tiling.skSingleCoreK;
+  }
+  const auto original_cost = GetStreamKSliceCost(original, k_l1, split_base);
+  const auto candidate_cost = GetStreamKSliceCost(candidate, k_l1, split_base);
+  const auto original_tail = GetStreamKSliceCost(k - (slices - 1U) * original, k_l1, split_base);
+  const auto candidate_tail = GetStreamKSliceCost(k - (slices - 1U) * candidate, k_l1, split_base);
+  // An aligned final inner split can add one round without adding any L1 loads.
+  if (candidate_cost.rounds - original_cost.rounds > original_cost.rounds / 200U) {
+    return tiling.skSingleCoreK;
+  }
+  const uint64_t old_max_loads = std::max(original_cost.loads, original_tail.loads);
+  const uint64_t new_max_loads = std::max(candidate_cost.loads, candidate_tail.loads);
+  const uint64_t old_partial = (slices - 1U) * original_cost.partial_tiles + original_tail.partial_tiles;
+  const uint64_t new_partial = (slices - 1U) * candidate_cost.partial_tiles + candidate_tail.partial_tiles;
+  // With transposed B, K is the row stride. Slice alignment alone does not align its rows.
+  if (new_max_loads < old_max_loads || (new_max_loads == old_max_loads && k % k_l1 == 0U &&
+                                        new_partial < old_partial)) {
+    return static_cast<uint32_t>(candidate);
+  }
+  return tiling.skSingleCoreK;
+}
+
+void AlignStreamKSlice(const TilingRequest &request, TilingResult &result) {
+  // Tensor API, non-transposed A, transposed B, SK_SPLIT_K, 1:2 aligned Fixpipe output.
+  constexpr int64_t kTensorSkSplitKTransposedBAlignedFixpipe = 0x7042;
+  if (request.is_batch || request.data_type != ge::DT_FLOAT || request.format != ge::FORMAT_ND ||
+      request.matmul_attrs.enable_hf32 || request.matmul_attrs.transpose_x1 || !request.matmul_attrs.transpose_x2 ||
+      result.tiling_key != kTensorSkSplitKTransposedBAlignedFixpipe) {
+    return;
+  }
+  MatMulV3BasicTilingData tiling = {};
+  if (!CopyExactTilingData(result, result.tiling_data.size(), tiling) || tiling.m != 1U || tiling.baseM == 0U ||
+      tiling.n == 0U || tiling.n > tiling.baseN || tiling.mmadParam != 0U) {
+    return;
+  }
+  const uint32_t selected = SelectStreamKSlice(tiling);
+  if (selected != tiling.skSingleCoreK) {
+    tiling.skSingleCoreK = selected;
+    std::memcpy(result.tiling_data.data(), &tiling, sizeof(tiling));
+  }
+}
+
 bool RunSharedCubeTiling(const TilingRequest &request, TilingResult &result) {
   const RuntimeTilingKey runtime_key = MakeRuntimeTilingKey(request);
   if (TryGetCachedTilingResult(runtime_key, &result)) {
@@ -1106,6 +1180,9 @@ bool RunSharedCubeTiling(const TilingRequest &request, TilingResult &result) {
           return false;
         }
         FillTilingResultFromContext(tiling_ctx, result);
+        if (tiling_ctx->GetDeterministicLevel() == 0) {
+          AlignStreamKSlice(request, result);
+        }
         return true;
       });
   if (!tiling_ok) {
