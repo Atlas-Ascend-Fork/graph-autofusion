@@ -27,6 +27,17 @@ class L2CacheHintManager {
                                     ascir::GmTensorSizes &global_tensor_sizes);
   static af::Status MarkInputsNeedSkipL2CacheHint(::ascir::FusedScheduledResult &fused_scheduled_result);
   static af::Status MarkInternal(af::AscGraph &impl_graph);
+  static af::Status MarkSingleBroadcastInlineSkip(const af::ComputeGraph &graph,
+                                                  ::ascir::FusedScheduledResult &fused_scheduled_result);
+  static bool IsSingleBroadcastAxisTimesTwo(const af::AscNodePtr &broadcast_node);
+  static af::Status CollectAnalysisNodes(const af::ComputeGraph &graph, std::vector<af::NodePtr> &analysis_nodes);
+  static af::Status FindSingleBroadcastNode(const std::vector<af::NodePtr> &analysis_nodes,
+                                            af::AscNodePtr &broadcast_node);
+  static af::Status ValidateBroadcastInputSize(const af::AscNodePtr &broadcast_node, int64_t &input_bytes,
+                                               int64_t &output_bytes);
+  static af::AscNodePtr ResolveBroadcastInputSource(const af::AscNodePtr &broadcast_node);
+  static af::Status MarkSkipHintOnDataNodes(::ascir::FusedScheduledResult &fused_scheduled_result, int64_t input_bytes,
+                                            int64_t output_bytes, int64_t l2_size);
 };
 }  // namespace optimize
 

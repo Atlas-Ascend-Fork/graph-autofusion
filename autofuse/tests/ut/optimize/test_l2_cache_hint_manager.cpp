@@ -22,6 +22,7 @@
 #include "ascgraph_info_complete.h"
 #include "common/l2_cache_hint_manager.h"
 #undef private
+#include "fusion/autofuse_attrs.h"
 #include "schedule_utils.h"
 #include "platform_context.h"
 
@@ -151,6 +152,35 @@ af::AscGraph MakeMultiDataSameIndexGraph(const std::string &name, int64_t size) 
   AscGraphInfoComplete::CompleteApiInfo(graph);
   return graph;
 }
+void SetTestPlatformL2Size(int64_t l2_size) {
+  ge::PlatformInfo info;
+  info.soc_ver = "2201";
+  info.aiv_num = 8;
+  info.ub_size = 256 * 1024;
+  info.l2_size = l2_size;
+  ge::PlatformContext::GetInstance().SetPlatformInfo(info);
+}
+
+// 单Broadcast插视图+expand图：Data为[2,1,rows]物理输入，Load视图[2,1,rows]广播成[2,2,rows]（fp32）
+af::AscGraph MakeSingleBroadcastGraph(const std::string &name, const std::vector<int64_t> &brc_shape, int64_t rows) {
+  const auto to_exprs = [](const std::vector<int64_t> &dims) {
+    std::vector<Expression> exprs;
+    for (const auto dim : dims) {
+      exprs.emplace_back(af::Symbol(dim));
+    }
+    return exprs;
+  };
+  auto graph = AscGraphBuilder(name)
+                   .Loops({2, 2, rows})
+                   .Data("data0", 0, to_exprs({2, 1, rows}), to_exprs({rows, rows, 1}), af::DT_FLOAT)
+                   .Load("load0", "data0", to_exprs({2, 1, rows}), to_exprs({rows, rows, 1}))
+                   .Broadcast("brc0", "load0", to_exprs(brc_shape))
+                   .Store("store0", "brc0")
+                   .Output("output0", "store0", 0, af::DT_FLOAT)
+                   .Build();
+  AscGraphInfoComplete::CompleteApiInfo(graph);
+  return graph;
+}
 }  // namespace
 
 TEST_F(SetL2CtrlTest, CalcTensorSizesBasic) {
@@ -215,4 +245,174 @@ TEST_F(SetL2CtrlTest, MarkSkipHintMultiDataSameIndex) {
   EXPECT_EQ(optimize::L2CacheHintManager::MarkInputsNeedSkipL2CacheHint(fused_result), af::SUCCESS);
   EXPECT_TRUE(GetDataSkipHint(fused_result, "data0"));
   EXPECT_TRUE(GetDataSkipHint(fused_result, "data1"));
+}
+
+// 单broadcast inline场景命中：输入[2,1,8388608]fp32=64MB恰为L2(128MB)的一半，
+// 输出[2,2,8388608]fp32=128MB等于L2，单广播轴1->2——打skip保留L2
+TEST_F(SetL2CtrlTest, MarkSingleBroadcastInlineSkipHit) {
+  constexpr int64_t kRows = 8388608L;
+  auto [hint_graph, fused_result] = BuildResult({MakeSingleBroadcastGraph("brc_g", {2, 2, kRows}, kRows)});
+  EXPECT_EQ(optimize::L2CacheHintManager::ParseGraph(*ToComputeGraph(hint_graph), fused_result), af::SUCCESS);
+  EXPECT_TRUE(GetDataSkipHint(fused_result, "data0"));
+}
+
+// inductor真实形态：外层ComputeGraph为Data→AscBackend(挂融合子图)→Output包装，
+// Broadcast位于子图内——穿透包装后同样命中豁免
+TEST_F(SetL2CtrlTest, MarkSingleBroadcastInlineSkipHitWithAscBackendWrapper) {
+  constexpr int64_t kRows = 8388608L;
+  auto [hint_graph, fused_result] = BuildResult({MakeSingleBroadcastGraph("inner_brc_g", {2, 2, kRows}, kRows)});
+
+  auto wrapper = std::make_shared<af::ComputeGraph>("wrapper_brc_g");
+  af::ascir_op::Data data0("data0");
+  auto data0_ir_attr = data0.attr.ir_attr->DownCastTo<af::AscDataIrAttrDef>();
+  data0_ir_attr->SetIndex(0);
+  auto data0_node = wrapper->AddNode(af::OpDescUtils::GetOpDescFromOperator(data0));
+
+  af::OpDescBuilder ascbc_builder("ascbc0", "AscBackend");
+  ascbc_builder.AddDynamicInput("x", 1);
+  ascbc_builder.AddDynamicOutput("y", 1);
+  auto ascbc_node = wrapper->AddNode(ascbc_builder.Build());
+  ascbc_node->SetOwnerComputeGraph(wrapper);
+  auto fuse_attrs = ascbc_node->GetOpDesc()->GetOrCreateAttrsGroup<af::AutoFuseAttrs>();
+  fuse_attrs->SetAscGraph(std::make_shared<af::AscGraph>(hint_graph));
+
+  af::ascir_op::Output output0("output0");
+  auto output0_ir_attr = output0.attr.ir_attr->DownCastTo<af::AscDataIrAttrDef>();
+  output0_ir_attr->SetIndex(0);
+  auto output0_node = wrapper->AddNode(af::OpDescUtils::GetOpDescFromOperator(output0));
+
+  af::GraphUtils::AddEdge(data0_node->GetOutDataAnchor(0), ascbc_node->GetInDataAnchor(0));
+  af::GraphUtils::AddEdge(ascbc_node->GetOutDataAnchor(0), output0_node->GetInDataAnchor(0));
+  wrapper->TopologicalSorting();
+
+  EXPECT_EQ(optimize::L2CacheHintManager::ParseGraph(*wrapper, fused_result), af::SUCCESS);
+  EXPECT_TRUE(GetDataSkipHint(fused_result, "data0"));
+}
+
+// 广播轴不是2（1->3）：不豁免，维持原逻辑
+TEST_F(SetL2CtrlTest, MarkSingleBroadcastInlineSkipAxisNotTwo) {
+  constexpr int64_t kRows = 8388608L;
+  auto [hint_graph, fused_result] = BuildResult({MakeSingleBroadcastGraph("brc_g3", {2, 3, kRows}, kRows)});
+  EXPECT_EQ(optimize::L2CacheHintManager::ParseGraph(*ToComputeGraph(hint_graph), fused_result), af::SUCCESS);
+  EXPECT_FALSE(GetDataSkipHint(fused_result, "data0"));
+}
+
+// 输出大小不等于L2：不豁免，维持原逻辑（small rows使输出<L2，输入亦非L2一半）
+TEST_F(SetL2CtrlTest, MarkSingleBroadcastInlineSkipOutputSizeMismatch) {
+  constexpr int64_t kRows = 4194304L;
+  auto [hint_graph, fused_result] = BuildResult({MakeSingleBroadcastGraph("brc_g4", {2, 2, kRows}, kRows)});
+  SetTestPlatformL2Size(1024);
+  EXPECT_EQ(optimize::L2CacheHintManager::ParseGraph(*ToComputeGraph(hint_graph), fused_result), af::SUCCESS);
+  EXPECT_FALSE(GetDataSkipHint(fused_result, "data0"));
+}
+
+// 图中无Broadcast节点：不豁免，维持原逻辑（输入>2MB不触原有小张量规则，隔离验证新增分支）
+TEST_F(SetL2CtrlTest, MarkSingleBroadcastInlineSkipNoBroadcast) {
+  auto [hint_graph, fused_result] = BuildResult({MakeStaticLoadStoreGraph("g0", 3 * 1024 * 1024, 0)});
+  SetTestPlatformL2Size(1024 * 1024);
+  EXPECT_EQ(optimize::L2CacheHintManager::ParseGraph(*ToComputeGraph(hint_graph), fused_result), af::SUCCESS);
+  EXPECT_FALSE(GetDataSkipHint(fused_result, "data0"));
+}
+
+// 插轴场景（unsqueeze+expand，2D输入→3D输出）：命中豁免，覆盖IsInsertedAxisTimesTwo分支
+TEST_F(SetL2CtrlTest, MarkSingleBroadcastInlineSkipHitInsertedAxis) {
+  constexpr int64_t kRows = 8388608L;
+  // 图：Data[2,rows] → Load[2,rows] → Broadcast→[2,2,rows]（插轴扩2）
+  const auto to_exprs = [](const std::vector<int64_t> &dims) {
+    std::vector<Expression> exprs;
+    for (const auto dim : dims) {
+      exprs.emplace_back(af::Symbol(dim));
+    }
+    return exprs;
+  };
+  auto graph = AscGraphBuilder("brc_insert_g")
+                   .Loops({2, 2, kRows})
+                   .Data("data0", 0, to_exprs({2, kRows}), to_exprs({kRows, 1}), af::DT_FLOAT)
+                   .Load("load0", "data0", to_exprs({2, kRows}), to_exprs({kRows, 1}))
+                   .Broadcast("brc0", "load0", to_exprs({2, 2, kRows}))
+                   .Store("store0", "brc0")
+                   .Output("output0", "store0", 0, af::DT_FLOAT)
+                   .Build();
+  AscGraphInfoComplete::CompleteApiInfo(graph);
+  auto [hint_graph, fused_result] = BuildResult({graph});
+  EXPECT_EQ(optimize::L2CacheHintManager::ParseGraph(*ToComputeGraph(hint_graph), fused_result), af::SUCCESS);
+  EXPECT_TRUE(GetDataSkipHint(fused_result, "data0"));
+}
+
+// 多Broadcast节点：不豁免，覆盖FindSingleBroadcastNode的多Broadcast拒绝分支
+TEST_F(SetL2CtrlTest, MarkSingleBroadcastInlineSkipMultipleBroadcast) {
+  constexpr int64_t kRows = 1024L;
+  const auto to_exprs = [](const std::vector<int64_t> &dims) {
+    std::vector<Expression> exprs;
+    for (const auto dim : dims) {
+      exprs.emplace_back(af::Symbol(dim));
+    }
+    return exprs;
+  };
+  auto graph = AscGraphBuilder("brc_multi_g")
+                   .Loops({2, 2, kRows})
+                   .Data("data0", 0, af::DT_FLOAT)
+                   .Load("load0", "data0")
+                   .Broadcast("brc0", "load0", to_exprs({2, 1, kRows}))
+                   .Broadcast("brc1", "brc0", to_exprs({2, 2, kRows}))
+                   .Store("store0", "brc1")
+                   .Output("output0", "store0", 0, af::DT_FLOAT)
+                   .Build();
+  AscGraphInfoComplete::CompleteApiInfo(graph);
+  auto [hint_graph, fused_result] = BuildResult({graph});
+  EXPECT_EQ(optimize::L2CacheHintManager::ParseGraph(*ToComputeGraph(hint_graph), fused_result), af::SUCCESS);
+  EXPECT_FALSE(GetDataSkipHint(fused_result, "data0"));
+}
+
+// 广播输入溯源失败（Load的上游不是Data而是另一个计算节点）：不豁免，覆盖ResolveBroadcastInputSource溯源失败分支
+TEST_F(SetL2CtrlTest, MarkSingleBroadcastInlineSkipNoDataTrace) {
+  constexpr int64_t kRows = 1024L;
+  const auto to_exprs = [](const std::vector<int64_t> &dims) {
+    std::vector<Expression> exprs;
+    for (const auto dim : dims) {
+      exprs.emplace_back(af::Symbol(dim));
+    }
+    return exprs;
+  };
+  // 图：Data → Load → Relu(非Data) → Broadcast → Store → Output
+  // 溯源在Relu处有两个前驱或到达非Data节点 → 失败
+  auto graph = AscGraphBuilder("brc_nodata_g")
+                   .Loops({2, 1, kRows})
+                   .Data("data0", 0, af::DT_FLOAT)
+                   .Load("load0", "data0")
+                   .Abs("abs0", "load0")
+                   .Broadcast("brc0", "abs0", to_exprs({2, 2, kRows}))
+                   .Store("store0", "brc0")
+                   .Output("output0", "store0", 0, af::DT_FLOAT)
+                   .Build();
+  AscGraphInfoComplete::CompleteApiInfo(graph);
+  auto [hint_graph, fused_result] = BuildResult({graph});
+  EXPECT_EQ(optimize::L2CacheHintManager::ParseGraph(*ToComputeGraph(hint_graph), fused_result), af::SUCCESS);
+  EXPECT_FALSE(GetDataSkipHint(fused_result, "data0"));
+}
+
+// 图中有非白名单节点（Relu在Broadcast同层）：不豁免，覆盖CollectAnalysisNodes白名单拒绝分支
+TEST_F(SetL2CtrlTest, MarkSingleBroadcastInlineSkipNonPureInnerNode) {
+  constexpr int64_t kRows = 1024L;
+  const auto to_exprs = [](const std::vector<int64_t> &dims) {
+    std::vector<Expression> exprs;
+    for (const auto dim : dims) {
+      exprs.emplace_back(af::Symbol(dim));
+    }
+    return exprs;
+  };
+  // 内层子图含Relu（非Data/Load/Store/Output/Broadcast）→ 白名单拒绝
+  auto graph = AscGraphBuilder("brc_nonpure_g")
+                   .Loops({2, 2, kRows})
+                   .Data("data0", 0, to_exprs({2, 1, kRows}), to_exprs({kRows, kRows, 1}), af::DT_FLOAT)
+                   .Load("load0", "data0", to_exprs({2, 1, kRows}), to_exprs({kRows, kRows, 1}))
+                   .Broadcast("brc0", "load0", to_exprs({2, 2, kRows}))
+                   .Abs("abs0", "brc0")
+                   .Store("store0", "abs0")
+                   .Output("output0", "store0", 0, af::DT_FLOAT)
+                   .Build();
+  AscGraphInfoComplete::CompleteApiInfo(graph);
+  auto [hint_graph, fused_result] = BuildResult({graph});
+  EXPECT_EQ(optimize::L2CacheHintManager::ParseGraph(*ToComputeGraph(hint_graph), fused_result), af::SUCCESS);
+  EXPECT_FALSE(GetDataSkipHint(fused_result, "data0"));
 }
