@@ -1375,9 +1375,6 @@ void LockDetector::SetNotifyNodesExpandNumForScope(SuperKernelScopeInfo &scope, 
   std::unordered_set<uint32_t> scopeStreams;
   // Collect notify nodes and stream information using the current deadlock-check candidate.
   for (const auto *node : scope.GetNodes()) {
-    if (node == nullptr) {
-      continue;
-    }
     if (node->GetNodeType() == SkNodeType::NODE_NOTIFY) {
       notifyNodes.push_back(const_cast<SuperKernelBaseNode *>(node));
     }
@@ -1399,9 +1396,6 @@ void LockDetector::SetNotifyNodesExpandNumForScope(SuperKernelScopeInfo &scope, 
 
 void LockDetector::ResetNotifyExpandNumForScope(SuperKernelScopeInfo &scope) {
   for (auto *node : scope.GetNodes()) {
-    if (node == nullptr) {
-      continue;
-    }
     if (node->GetNodeType() == SkNodeType::NODE_NOTIFY) {
       node->SetNotifyExpandVecNum(0);
       node->SetNotifyExpandCubeNum(0);

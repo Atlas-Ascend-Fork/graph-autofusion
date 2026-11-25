@@ -421,7 +421,9 @@ bool PerOpMaxCoreSplitPass::Run(std::vector<SuperKernelScopeInfo> &scopes) {
   SK_LOGI("[PerOpMaxCore] %s pass starting", GetName().c_str());
   scopes.clear();
 
-  if (LockDetector::GetDeviceCores() != ACL_SUCCESS) {
+  const auto ret = LockDetector::GetDeviceCores();
+  if (ret != ACL_SUCCESS) {
+    SK_LOGE("[PerOpMaxCore] Failed to get device core counts, ret=%d", ret);
     return false;
   }
   const int64_t maxDeviceCubeNum = LockDetector::GetDeviceCubeNum();
@@ -1448,7 +1450,9 @@ bool SingleScopeDeadlockRefinePass::Run(std::vector<SuperKernelScopeInfo> &scope
   size_t splitCount = 0;
 
   if (!scopes.empty()) {
-    if (LockDetector::GetDeviceCores() != ACL_SUCCESS) {
+    const auto ret = LockDetector::GetDeviceCores();
+    if (ret != ACL_SUCCESS) {
+      SK_LOGE("[SingleScopeDeadlockRefine] Failed to get device core counts, ret=%d", ret);
       scopes.clear();
       return false;
     }
@@ -1820,7 +1824,9 @@ bool ScheModeKernelSplitPass::Run(std::vector<SuperKernelScopeInfo> &scopes) {
   if (scopes.empty()) {
     return true;
   }
-  if (LockDetector::GetDeviceCores() != ACL_SUCCESS) {
+  const auto ret = LockDetector::GetDeviceCores();
+  if (ret != ACL_SUCCESS) {
+    SK_LOGE("[ScheModeSplit] Failed to get device core counts, ret=%d", ret);
     scopes.clear();
     return false;
   }
@@ -1927,7 +1933,9 @@ bool SuperKernelScopeSplitter::FinalizeScopeCoreInfo() {
     return true;
   }
 
-  if (LockDetector::GetDeviceCores() != ACL_SUCCESS) {
+  const auto ret = LockDetector::GetDeviceCores();
+  if (ret != ACL_SUCCESS) {
+    SK_LOGE("[ScopeCoreFinalize] Failed to get device core counts, ret=%d", ret);
     return false;
   }
   const int64_t maxDeviceCubeNum = LockDetector::GetDeviceCubeNum();
