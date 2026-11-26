@@ -67,6 +67,85 @@ void BuildCompactReduceAddGraph(af::AscGraph &graph, const af::Expression &reduc
   SetTwoDimNodeAttr(add, ge::DT_FLOAT, af::ComputeType::kComputeElewise, axes, {rows, cols}, {cols, One});
 }
 
+void BuildCompactReduceDivBroadcastGraph(af::AscGraph &graph) {
+  auto rows = af::Symbol(11);
+  auto cols = af::Symbol(512);
+  auto row_axis = graph.CreateAxis("row", rows);
+  auto col_axis = graph.CreateAxis("col", cols);
+  std::vector<af::AxisId> axes = {row_axis.id, col_axis.id};
+
+  af::ascir_op::Data data("data", graph);
+  data.y.dtype = ge::DT_FLOAT;
+  data.attr.api.type = af::ApiType::kAPITypeBuffer;
+  af::ascir_op::Load load("load");
+  load.x = data.y;
+  SetTwoDimNodeAttr(load, ge::DT_FLOAT, af::ComputeType::kComputeLoad, axes, {rows, cols}, {cols, One});
+  af::ascir_op::Sum sum("sum");
+  sum.x = load.y;
+  SetTwoDimNodeAttr(sum, ge::DT_FLOAT, af::ComputeType::kComputeReduce, axes, {rows, One}, {One, Zero});
+  af::ascir_op::Store sum_store("sum_store");
+  sum_store.x = sum.y;
+  SetTwoDimNodeAttr(sum_store, ge::DT_FLOAT, af::ComputeType::kComputeStore, axes, {rows, One}, {One, Zero});
+  af::ascir_op::Broadcast sum_broadcast("sum_broadcast");
+  sum_broadcast.x = sum.y;
+  SetTwoDimNodeAttr(sum_broadcast, ge::DT_FLOAT, af::ComputeType::kComputeBroadcast, axes, {rows, cols}, {cols, One});
+
+  af::ascir_op::Scalar scalar("scalar", graph);
+  scalar.ir_attr.SetValue("512.0");
+  scalar.y.dtype = ge::DT_FLOAT;
+  scalar.attr.api.type = af::ApiType::kAPITypeBuffer;
+  af::ascir_op::TrueDiv div("div");
+  div.x1 = sum.y;
+  div.x2 = scalar.y;
+  SetTwoDimNodeAttr(div, ge::DT_FLOAT, af::ComputeType::kComputeElewise, axes, {rows, One}, {One, Zero});
+  af::ascir_op::Load weight_load("weight_load");
+  weight_load.x = data.y;
+  SetTwoDimNodeAttr(weight_load, ge::DT_FLOAT, af::ComputeType::kComputeLoad, axes, {One, cols}, {Zero, One});
+  af::ascir_op::Broadcast broadcast5("broadcast5");
+  broadcast5.x = weight_load.y;
+  SetTwoDimNodeAttr(broadcast5, ge::DT_FLOAT, af::ComputeType::kComputeBroadcast, axes, {rows, cols}, {cols, One});
+  af::ascir_op::Mul mul("mul");
+  mul.x1 = div.y;
+  mul.x2 = broadcast5.y;
+  SetTwoDimNodeAttr(mul, ge::DT_FLOAT, af::ComputeType::kComputeElewise, axes, {rows, cols}, {cols, One});
+}
+
+void BuildCompactReduceBothInputsGraph(af::AscGraph &graph, bool scalar_first) {
+  auto rows = af::Symbol(11);
+  auto cols = af::Symbol(512);
+  auto row_axis = graph.CreateAxis("row", rows);
+  auto col_axis = graph.CreateAxis("col", cols);
+  std::vector<af::AxisId> axes = {row_axis.id, col_axis.id};
+
+  af::ascir_op::Data data("data", graph);
+  data.y.dtype = ge::DT_FLOAT;
+  data.attr.api.type = af::ApiType::kAPITypeBuffer;
+  af::ascir_op::Load load("load");
+  load.x = data.y;
+  SetTwoDimNodeAttr(load, ge::DT_FLOAT, af::ComputeType::kComputeLoad, axes, {rows, cols}, {cols, One});
+  af::ascir_op::Sum sum("sum");
+  sum.x = load.y;
+  SetTwoDimNodeAttr(sum, ge::DT_FLOAT, af::ComputeType::kComputeReduce, axes, {scalar_first ? One : rows, One},
+                    {One, Zero});
+  af::ascir_op::Max max("max");
+  max.x = load.y;
+  SetTwoDimNodeAttr(max, ge::DT_FLOAT, af::ComputeType::kComputeReduce, axes, {rows, One}, {One, Zero});
+  af::ascir_op::Add add("add");
+  add.x1 = sum.y;
+  add.x2 = max.y;
+  SetTwoDimNodeAttr(add, ge::DT_FLOAT, af::ComputeType::kComputeElewise, axes, {rows, One}, {One, Zero});
+  af::ascir_op::Load weight_load("weight_load");
+  weight_load.x = data.y;
+  SetTwoDimNodeAttr(weight_load, ge::DT_FLOAT, af::ComputeType::kComputeLoad, axes, {One, cols}, {Zero, One});
+  af::ascir_op::Broadcast broadcast("broadcast");
+  broadcast.x = weight_load.y;
+  SetTwoDimNodeAttr(broadcast, ge::DT_FLOAT, af::ComputeType::kComputeBroadcast, axes, {rows, cols}, {cols, One});
+  af::ascir_op::Mul mul("mul");
+  mul.x1 = add.y;
+  mul.x2 = broadcast.y;
+  SetTwoDimNodeAttr(mul, ge::DT_FLOAT, af::ComputeType::kComputeElewise, axes, {rows, cols}, {cols, One});
+}
+
 void ExpectCompactReduceBranch(const af::AscGraph &graph, const char *aligned_input) {
   std::vector<af::Expression> aligned_input_strides = {af::Symbol(24), One};
   std::vector<af::Expression> compact_output_strides = {One, Zero};
@@ -102,7 +181,7 @@ class VectorizedAlignmentUT : public testing::Test {
     }
     bool AccessFindCompactReduceInput(const af::AscNodePtr &node, af::InDataAnchorPtr &reduce_input,
                                       af::OutDataAnchorPtr &reduce_output) const {
-      return FindCompactReduceInput(node, reduce_input, reduce_output);
+      return FindCompactReduceInput(node, reduce_input, reduce_output, 0UL);
     }
     af::Status AccessEleWiseAlignment(const af::AscNodePtr &node) {
       return EleWiseAlignmentInferFunc(node);
@@ -1011,6 +1090,28 @@ TEST_F(VectorizedAlignmentUT, compact_reduce_pad_for_aligned_broadcast_add) {
   auto add_node = graph.FindNode("add");
   ASSERT_NE(add_node, nullptr);
   EXPECT_EQ(add_node->inputs[0].anchor.GetOwnerNodeBarePtr(), pad_node.get());
+  EXPECT_EQ(graph.FindNode("reduce_sum")->outputs[0].attr.vectorized_strides, (std::vector<af::Expression>{One, Zero}));
+  EXPECT_EQ(pad_node->inputs[0].attr.vectorized_strides, (std::vector<af::Expression>{One, Zero}));
+  EXPECT_EQ(pad_node->outputs[0].attr.vectorized_strides, (std::vector<af::Expression>{af::Symbol(8), Zero}));
+}
+
+TEST_F(VectorizedAlignmentUT, compact_reduce_preserved_when_broadcast_pulls_div_alignment) {
+  af::AscGraph graph("compact_reduce_broadcast_div_alignment");
+  BuildCompactReduceDivBroadcastGraph(graph);
+
+  ASSERT_EQ(AlignmentHandler::AlignVectorizedStrides(graph), af::SUCCESS);
+  const std::vector<af::Expression> compact = {One, Zero};
+  const std::vector<af::Expression> aligned = {af::Symbol(8), Zero};
+  EXPECT_EQ(graph.FindNode("sum")->outputs[0].attr.vectorized_strides, compact);
+  EXPECT_EQ(graph.FindNode("sum_store")->inputs[0].attr.vectorized_strides, compact);
+  EXPECT_EQ(graph.FindNode("sum_store")->outputs[0].attr.vectorized_strides, compact);
+  EXPECT_EQ(graph.FindNode("sum_broadcast")->inputs[0].attr.vectorized_strides, compact);
+  auto pad = graph.FindNode("sum_0_pad");
+  ASSERT_NE(pad, nullptr);
+  EXPECT_EQ(pad->inputs[0].attr.vectorized_strides, compact);
+  EXPECT_EQ(pad->outputs[0].attr.vectorized_strides, aligned);
+  EXPECT_EQ(graph.FindNode("div")->inputs[0].anchor.GetOwnerNodeBarePtr(), pad.get());
+  EXPECT_EQ(graph.FindNode("div")->outputs[0].attr.vectorized_strides, aligned);
 }
 
 TEST_F(VectorizedAlignmentUT, compact_reduce_pad_for_two_consumers_unique_name) {
@@ -1079,6 +1180,32 @@ TEST_F(VectorizedAlignmentUT, compact_reduce_pad_for_two_consumers_unique_name) 
     }
   }
   EXPECT_EQ(fingerprints.size(), 1U) << "same-source pads must share identical value fingerprint";
+}
+
+TEST_F(VectorizedAlignmentUT, compact_reduce_pad_for_both_inputs_pulled_by_downstream_broadcast) {
+  for (const bool scalar_first : {false, true}) {
+    SCOPED_TRACE(scalar_first);
+    af::AscGraph graph("compact_reduce_both_inputs");
+    BuildCompactReduceBothInputsGraph(graph, scalar_first);
+
+    ASSERT_EQ(AlignmentHandler::AlignVectorizedStrides(graph), af::SUCCESS);
+    const std::vector<af::Expression> compact = {One, Zero};
+    const std::vector<af::Expression> aligned = {af::Symbol(8), Zero};
+    EXPECT_EQ(graph.FindNode("sum")->outputs[0].attr.vectorized_strides,
+              (scalar_first ? std::vector<af::Expression>{Zero, Zero} : compact));
+    EXPECT_EQ(graph.FindNode("max")->outputs[0].attr.vectorized_strides, compact);
+    for (size_t i = 0U; i < 2U; ++i) {
+      const auto pad = std::dynamic_pointer_cast<af::AscNode>(graph.FindNode("add")->inputs[i].anchor.GetOwnerNode());
+      ASSERT_NE(pad, nullptr);
+      if (scalar_first && i == 0U) {
+        EXPECT_EQ(pad, graph.FindNode("sum"));
+        continue;
+      }
+      EXPECT_EQ(pad->GetType(), "Pad");
+      EXPECT_EQ(pad->inputs[0].attr.vectorized_strides, compact);
+      EXPECT_EQ(pad->outputs[0].attr.vectorized_strides, aligned);
+    }
+  }
 }
 
 TEST_F(VectorizedAlignmentUT, compact_reduce_pad_for_normalized_name_conflict) {
@@ -1200,6 +1327,7 @@ TEST_F(VectorizedAlignmentUT, non_aligned_broadcast_skips_compact_reduce_pad) {
   AlignmentStrategyShadow strategy;
   strategy.SetAlignmentType(graph.FindNode("sum"), AlignmentType::kNotAligned);
   strategy.SetAlignmentType(graph.FindNode("broadcast"), AlignmentType::kNotAligned);
+  strategy.SetAlignmentType(graph.FindNode("add"), AlignmentType::kNotAligned);
   af::InDataAnchorPtr reduce_input;
   af::OutDataAnchorPtr reduce_output;
   EXPECT_FALSE(strategy.AccessFindCompactReduceInput(graph.FindNode("add"), reduce_input, reduce_output));
@@ -1211,6 +1339,7 @@ TEST_F(VectorizedAlignmentUT, non_compact_sum_skips_compact_reduce_pad) {
   AlignmentStrategyShadow strategy;
   strategy.SetAlignmentType(graph.FindNode("sum"), AlignmentType::kNotAligned);
   strategy.SetAlignmentType(graph.FindNode("broadcast"), AlignmentType::kAligned);
+  strategy.SetAlignmentType(graph.FindNode("add"), AlignmentType::kAligned);
   af::InDataAnchorPtr reduce_input;
   af::OutDataAnchorPtr reduce_output;
   EXPECT_FALSE(strategy.AccessFindCompactReduceInput(graph.FindNode("add"), reduce_input, reduce_output));
