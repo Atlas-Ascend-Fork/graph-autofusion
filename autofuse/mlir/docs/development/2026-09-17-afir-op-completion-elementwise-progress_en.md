@@ -1,5 +1,7 @@
 # Elementwise Completion Progress
 
+English | [简体中文](./2026-09-17-afir-op-completion-elementwise-progress.md)
+
 > English companion summary, not a full translation. The [Chinese source](2026-09-17-afir-op-completion-elementwise-progress.md)
 > retains the detailed design, tables, commands, dated evidence and open decisions.
 > Historical results below are source records, not newly executed validation.

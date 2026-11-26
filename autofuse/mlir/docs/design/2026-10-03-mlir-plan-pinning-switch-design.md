@@ -1,5 +1,7 @@
 # MLIR 钉 plan / 钉 template 的总闸
 
+简体中文 | [English](./2026-10-03-mlir-plan-pinning-switch-design_en.md)
+
 > **历史方案，已移除（2026-10-22 核对）**：下文的 `AF_MLIR_PINNED_PLAN_ID`、
 > `AF_MLIR_PINNED_TEMPLATE_ID` 和 `AF_MLIR_ENABLE_PLAN_PINNING` 已无生产代码读点，不能再用于复现。
 > 当前使用 `AUTOFUSE_DFX_FLAGS="--force_schedule_result=N;--force_tiling_case=M"`，不需要 MLIR 总闸。
@@ -452,7 +454,7 @@ cmake --build /workspace/build --target check-e2e-cpu -j 8
 
 ## 验收标准
 
-1. 新增 UT `PlanPinningIsOffByDefaultAndRejectsPinsWhenOff` 覆盖 T1、T3、T4、T5、T2(末段)。
+1. 新增 UT `PlanPinningIsOffByDefaultAndRejectsPinsWhenOff` 覆盖 T1、T3、T4、T5、T2（末段）。
    — **已完成**（2026-10-02）。
 2. 三条既有钉选 UT 补上显式开闸，其中 `PinnedMissingPlanOrInvalidValueFails` 的假绿被消除。
    — **已完成**。

@@ -15,7 +15,7 @@ import os
 import shutil
 import re
 from asc_op_compile_base.common.platform.platform_info import get_soc_spec
-from tbe.tikcpp import (
+from asc_op_compile_base.asc_op_compiler import (
     compile_op,
     get_code_channel,
     OpInfo,
@@ -24,8 +24,11 @@ from tbe.tikcpp import (
     TilingKeyConfig,
     CustomizedConfig,
 )
-from tbe.tikcpp.compile_op import CommonUtility, AscendCLogLevel
-from tbe.common.buildcfg import get_current_build_config
+from asc_op_compile_base.asc_op_compiler.compile_op import (
+    CommonUtility,
+    AscendCLogLevel,
+)
+from asc_op_compile_base.common.buildcfg import get_current_build_config
 
 
 def camel_to_snake(camel_str):

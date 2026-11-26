@@ -522,6 +522,43 @@ TEST_F(ReduceShapeValidationTest, PreservesNonReducedLengthsWithOrWithoutSchedul
   }
 }
 
+TEST_F(ReduceShapeValidationTest, AllowsReductionOfZeroStrideBroadcastAxis) {
+  reduce_->attr.sched.axis = {a_, r_};
+  reduce_->inputs[0].attr.repeats = {af::ops::One, af::Symbol(1000)};
+  reduce_->inputs[0].attr.strides = {af::ops::Zero, af::ops::Zero};
+  reduce_->outputs[0].attr.repeats = {af::ops::One, af::ops::One};
+  reduce_->outputs[0].attr.strides = {af::ops::Zero, af::ops::Zero};
+  EXPECT_EQ(optimize::ValidateScheduleGraph(graph_), af::SUCCESS) << optimize::GetScheduleValidationError();
+
+  reduce_->outputs[0].attr.repeats = {af::ops::One, af::Symbol(2)};
+  EXPECT_EQ(optimize::ValidateScheduleGraph(graph_), af::FAILED);
+  EXPECT_NE(optimize::GetScheduleValidationError().find("axis=" + std::to_string(r_)), std::string::npos);
+}
+
+TEST_F(ReduceShapeValidationTest, AllowsSingletonReductionWithNonzeroOutputStride) {
+  reduce_->inputs[0].attr.repeats = {af::Symbol(4), af::Symbol(1000)};
+  reduce_->inputs[0].attr.strides = {af::Symbol(1000), af::ops::One};
+  reduce_->outputs[0].attr.strides = {af::ops::One, af::ops::One};
+  reduce_->outputs[0].attr.repeats = {af::Symbol(4), af::ops::One};
+  EXPECT_EQ(optimize::ValidateScheduleGraph(graph_), af::SUCCESS) << optimize::GetScheduleValidationError();
+
+  reduce_->outputs[0].attr.repeats = {af::Symbol(4), af::Symbol(2)};
+  EXPECT_EQ(optimize::ValidateScheduleGraph(graph_), af::FAILED);
+  EXPECT_NE(optimize::GetScheduleValidationError().find("axis=" + std::to_string(r_)), std::string::npos);
+}
+
+TEST_F(ReduceShapeValidationTest, DoesNotInferReductionFromUnitOutputAlone) {
+  reduce_->inputs[0].attr.repeats = {af::ops::One, af::ops::One};
+  reduce_->inputs[0].attr.strides = {af::ops::Zero, af::ops::Zero};
+  reduce_->outputs[0].attr.repeats = {af::ops::One, af::ops::One};
+  reduce_->outputs[0].attr.strides = {af::ops::Zero, af::ops::Zero};
+  EXPECT_EQ(optimize::ValidateScheduleGraph(graph_), af::SUCCESS);
+
+  reduce_->outputs[0].attr.repeats = {af::ops::One, af::Symbol(2)};
+  EXPECT_EQ(optimize::ValidateScheduleGraph(graph_), af::FAILED);
+  EXPECT_NE(optimize::GetScheduleValidationError().find("expected=1"), std::string::npos);
+}
+
 TEST_F(ReduceShapeValidationTest, AllowsReorderedAxesAndDefersAddedAxes) {
   const auto other = graph_.CreateAxis("other", af::Symbol(8)).id;
   // 归约轴可以在输出 view 中重排；新增轴无法从输入解释时保留未知，交后续阶段确认。

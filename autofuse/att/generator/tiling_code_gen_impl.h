@@ -132,7 +132,7 @@ class TilingCodeGenImpl {
   void GenPGONormalizeBlockDim(const FusedGraphNamespaceMap &namespace_map);
   void GenGetScoreFuncs(const size_t asc_graph_id, const AscGraphNamepspaceMap &namespace_map);
   af::Status GenPGOGetTilingForAll();
-  void GenGetScoreFuncsCalling(const size_t asc_graph_id, const AscGraphNamepspaceMap &namespace_map);
+  bool GenGetScoreFuncsCalling(const size_t asc_graph_id, const AscGraphNamepspaceMap &namespace_map);
   // 生成sche group的cache初始化部分
   void GenCacheInit();
   // 组级GetTiling调用的cache实参：命中复用map传共享缓存；未命中的组被调方无cache形参，返回空
@@ -162,10 +162,8 @@ class TilingCodeGenImpl {
                            const std::vector<std::pair<size_t, size_t>> &serialized_edges,
                            const std::vector<std::string> &groups_block_num,
                            const std::vector<std::string> &assign_max_block_num);
-  void GenGetMaxScoreIndex(const AscGraphNamepspaceMap &namespace_map);
-
-  void GenScheduleResultGetTilingCalling(const std::string &index, const std::string &ident = "");
-  af::Status GenGetAllSchedulesResults(const AscGraphNamepspaceMap &namespace_map);
+  af::Status GenForcedScheduleResult(size_t result_count, const std::string &segment_arg);
+  af::Status GenGetAllSchedulesResults(const AscGraphNamepspaceMap &namespace_map, bool has_scores);
   af::Status GenPGOCollectWorkspaceSizes(size_t asc_graph_id, size_t impl_graph_id);
   void GenPGOUpdateTilingInfo(const size_t asc_graph_id, const size_t impl_graph_id,
                               const std::map<size_t, std::pair<std::string, std::string>> &graph_info,

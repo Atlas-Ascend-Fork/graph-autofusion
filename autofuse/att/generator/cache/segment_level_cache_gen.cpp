@@ -148,6 +148,7 @@ af::Status SegmentLevelCacheGen::GenSegmentCacheTypes(ge::CodePrinter &code_prin
   code_printer.AddLine("// 分段缓存上下文：命中条目副本 + 全量搜索成功时逐group收集的选中tag(保存用)");
   code_printer.AddLine("struct SegmentCacheContext {");
   code_printer.AddLine("  bool hit{false};");
+  code_printer.AddLine("  bool allow_save{true};");
   code_printer.AddLine("  uint32_t key{0U};");
   code_printer.AddLine("  SegmentCacheEntry entry{};");
   code_printer.AddLine("  bool selected_is_sub_case[" + std::to_string(group_slot_num) + "]{};");

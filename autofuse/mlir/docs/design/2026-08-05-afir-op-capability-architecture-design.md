@@ -1,5 +1,7 @@
 # AFIR/AscendC Op Capability 架构设计
 
+简体中文 | [English](./2026-08-05-afir-op-capability-architecture-design_en.md)
+
 > 状态：Capability 基础设施 D0～D2 已完成；`afir.add` 已有纵向 lowering 样例。canonical AFIR Attr/Bridge/MemoryAllocate 集成属于
 > 2026-08-13 AFIR 方言重构，本文件不宣称该集成已经完成；完整源码生成、CANN 编译和设备 E2E 仍需单独验收。
 > 日期：2026-08-05
@@ -1155,7 +1157,7 @@ AscendC 执行属性校验、`afir.add -> ascendc.add_l2` 正式 conversion 和�
   测试、性能和兼容性。影响集中在 Autofuse MLIR target/capability/backend 和内置 Profile 生成。
 - [x] 编码红线：已检查输入索引、整数/资源、ABI/API、图改写确定性、runtime 生命周期、日志和全局对象约束。
 - [x] 测试设计：已覆盖 Target Profile、注册/query、pass/lowering、负向、多编译任务和确定性；三类能力的 provider/query fixture 已覆盖，CANN 源码和设备 E2E 仍待补充。
-- [x] 性能评估：Target Profile 每次编译加载一次，查询为 O(1) 索引加 O(候选数量 × (operand 数量 + rank))；
+- [x] 性能评估：Target Profile 每次编译加载一次，查询为 O(1) 索引加 O（候选数量 ×（operand 数量 + rank））；
   第一阶段不使用跨 pass cache 或逐 Op runtime 查询。
 - [x] 贡献规范：本需求属于新内部架构，实施前应关联 Requirement Issue；commit message 使用
   `<type>: <简短描述>`。

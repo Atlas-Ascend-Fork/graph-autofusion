@@ -1114,10 +1114,10 @@ static Status SyncViewsAfterExpandDims(ascir::ImplGraph &owner_graph, const std:
     for (const auto output_attr : node->outputs()) {
       output_attr->attr.axis = new_axis_ids;
       GE_ASSERT_TRUE(output_attr->attr.strides.size() == old_axis_ids.size(),
-                     "Expand dims for degenerated all reduce failed node:%s, Strides mismatches with reduce.",
+                     "Expand dims for degenerated all reduce failed node:%s, Strides mismatch with reduce.",
                      node->GetNamePtr());
       GE_ASSERT_TRUE(output_attr->attr.repeats.size() == old_axis_ids.size(),
-                     "Expand dims for degenerated all reduce failed node:%s, Repeats mismatches with reduce.",
+                     "Expand dims for degenerated all reduce failed node:%s, Repeats mismatch with reduce.",
                      node->GetNamePtr());
       if (output_attr->attr.strides[0UL] == 0) {
         output_attr->attr.strides.insert(output_attr->attr.strides.begin(), One);

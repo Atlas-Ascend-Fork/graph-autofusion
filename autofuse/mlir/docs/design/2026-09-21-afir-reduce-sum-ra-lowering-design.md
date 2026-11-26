@@ -1,5 +1,7 @@
 # AFIR ReduceSum RA 下降设计
 
+简体中文 | [English](./2026-09-21-afir-reduce-sum-ra-lowering-design_en.md)
+
 > 状态：已实施；RA、RCore 两阶段及设备数值链路已验证。下文 S4 未完成条目为 2026-09 历史记录。
 > 2026-10-22 核对：Workspace 与 tiling_key 命名阻塞已解除；AR/RA RCore 已完成 NPU 回归。
 > 历史探针命令即使改用 ATT DFX，也需重新确认当前 shape 的候选编号。
@@ -504,7 +506,7 @@ count）改名 `resultSpan`，语义从「A 的元素数」改成「A 槽位在 
 按 `materializeScheduledLocalSpan` 同一套公式物化：
 
     resultSpan = A_inner_actual + Σ_outer (actual - 1) × stride
-    stride(第 i 根 A 轴) = align(A_inner_nominal) × Π_{j>i, j<内} A_j_nominal
+    stride（第 i 根 A 轴） = align(A_inner_nominal) × Π_{j>i, j<内} A_j_nominal
 
 跨度里夹着的补白槽位会跟着被累加 / 被 scale 成垃圾值，但它们最终不 Store 回 GM——这与
 `load_sum_store_ra_32x17` 守的是同一条性质。跨度上界是缓冲 nominal 行距之积，对齐后不越界。

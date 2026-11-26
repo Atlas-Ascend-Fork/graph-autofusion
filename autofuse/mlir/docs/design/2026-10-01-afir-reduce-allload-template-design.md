@@ -1,5 +1,7 @@
 # AFIR reduce AllLoad 模板设计
 
+简体中文 | [English](./2026-10-01-afir-reduce-allload-template-design_en.md)
+
 > **接口迁移说明（2026-10-22）**：正文提及的 `AF_MLIR_PINNED_*` / `AF_MLIR_ENABLE_PLAN_PINNING` 是历史接口，现已移除；当前使用 ATT `AUTOFUSE_DFX_FLAGS` 的 `--force_schedule_result` / `--force_tiling_case`。候选编号须核对当前 shape 的 schedule dump。
 
 > 状态：已实施（待评审）
@@ -130,7 +132,7 @@ AllLoad 在 AFIR 上的签名由三个互相独立的特征共同确定，缺一
 ## 适用域：哪些图会产生 AllLoad 候选
 
 `CanFullLoadReduceFuse`（`reduce_schedule_case_generator.cpp:863`）要求图里**每个** reduce
-都满足两个谓词之一（`kMaxFullLoadAxisSize = 3`，同文件 :33）：
+都满足两个谓词之一（`kMaxFullLoadAxisSize = 3`，同文件 `:33`）：
 
 | 谓词 | 条件 | 直观含义 |
 |---|---|---|
@@ -381,7 +383,7 @@ reduce 候选的常用手法（本文 2.3 的探针就是这么做的），所�
 - 测试入口照 `af-mlir-test-invocation`：`ctest --test-dir <build>/autofuse/mlir` 与
   `cmake --build <build> --target check-lit`。
 - 桩：CPU E2E 用 `MlirE2eCpuTilingStub` + `tikicpulib`，与既有 reduce 用例一致，无新桩。
-- 覆盖目标：AllLoad × {AR, RA} × {对齐, A 尾块, R 尾块, 大 R} 四维形状组合取五点；IR 层
+- 覆盖目标：AllLoad × {AR, RA} × {对齐，A 尾块，R 尾块，大 R} 四维形状组合取五点；IR 层
   形态由 lit 独立钉住，不依赖 plan 下标。
 
 ### 可移植性

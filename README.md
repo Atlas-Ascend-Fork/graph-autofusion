@@ -12,7 +12,7 @@
 ## 🚀概述
 
 Graph-autofusion 是一个面向昇腾（Ascend）芯片的轻量级、解耦式组件集合，旨在通过各种融合相关技术，加速模型执行。
-目前已开源 SuperKernel 组件和 Autofuse 组件，未来将持续开放更多融合相关模块。
+目前已开源 SuperKernel 组件、Autofuse 组件、Multistream 多流规划组件和模型特化（model_specialization）组件，未来将持续开放更多融合相关模块。
 
 组件特点：
 
@@ -58,6 +58,8 @@ graph-autofusion/
 │   ├── env_install                           # 环境安装文档
 │   ├── figures                               # 文档图片资源
 │   └── guidelines                            # 开发规范文档
+├── model_specialization                      # 模型特化组件，特化 kernel、源代码与测试均在该子目录中
+├── multistream                                # Multistream 多流规划组件，多流规划源代码、测试、文档均在该子目录中
 ├── scripts                                   # 构建、环境安装和测试脚本
 │   ├── env_install                           # 环境安装脚本
 │   ├── package                               # 打包脚本

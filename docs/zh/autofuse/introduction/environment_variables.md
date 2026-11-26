@@ -76,6 +76,7 @@ export AUTOFUSE_FLAGS="--enable_autofuse=true;--autofuse_enable_pass=reduce,conc
 | `--autofuse_pgo_step_max` | GE 路径 | 设置 PGO 剪枝算法步长。取值为 `2`～`1024` 范围内的 2 的幂，默认值为 `16`。仅在 `--autofuse_pgo_algo=pruning` 生效；非法值恢复为默认值。 |
 | `--autofuse_pgo_topn` | GE 路径 | 设置参与 PGO 静态调优的候选解数量。取值为 `0` 或任意正整数，默认值为 `5`，`0` 表示选择全部候选解。需要配合 `--autofuse_enable_pgo=true` 使用；非法值恢复为默认值。 |
 | `--skip_node_names_cfg` | GE 路径 | 设置需要跳过融合的算子名称或算子类型。取值为有效 `.ini` 配置文件路径。配置文件中的名称或类型分别写在 `[ByNodeName]` 或 `[ByNodeType]` 段中，每个条目单独占一行；非法内容会导致该配置项不生效。 |
+| `--mlir_codegen_config` | GE 路径、Inductor 路径 | 选择融合算子代码生成的 MLIR 编排路径。取值为 `none`（默认，MLIR 路径关闭，使用既有代码生成）、`mlir`（MLIR 生成失败时整体报错）或 `fallback`（MLIR 优先，失败时回退既有代码生成并记录告警日志）；非法取值会导致融合算子代码生成直接失败。Cube 融合不在该路径范围内。该选项为试验特性，行为以对应版本实现为准。 |
 
 示例：
 

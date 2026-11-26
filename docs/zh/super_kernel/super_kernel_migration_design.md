@@ -1,5 +1,7 @@
 # SuperKernel 迁移设计
 
+简体中文 | [English](../../en/super_kernel/super_kernel_migration_design.md)
+
 ## 概览&目的
 
 本文分析 SuperKernel 与 AscendC 解耦方案，将 SuperKernel 实现从当下的 AscendC 仓、包迁移到 Graph-autofusion 。

@@ -1,5 +1,7 @@
 # autofuse Codegen 模块 MLIR 化迁移设计
 
+简体中文 | [English](./2026-06-25-codegen-mlir-migration-design_en.md)
+
 > **2026-10-22 状态更新**：生产 MLIR Codegen 路由、AFIR→AscendC、legacy/MLIR 对照入口已落地，
 > 开关为 `AF_ENABLE_MLIR_CODEGEN`；ATT/Schedule 完整迁移和 legacy 退役仍是长期目标。
 > 以下旧日期的状态及代码盘点是历史基线，不能据此判断生产链路尚未接入。当前流程见
@@ -250,15 +252,15 @@ CV fusion stage 划分和 reduce 尾块补全。这些职责中有一部分本�
 | 纯翻译：ApiCall 子类 Generate 拼 ascendc 调用、GlobalTensorInit、TPipe alloc、tiling_data struct、tiling_key 分支、顶层组装 | `api_call/*`、`codegen_kernel.cpp` GlobalTensorInit/TensorAlloc、`codegen_tiling_data.cpp`、`codegen_tiling.cpp`、`codegen.cpp` | **`linalg-to-ascendc`**（compute→ascendc op、data_move→ascendc op、建 Pipe/Queue/TBuf，`lib/Conversion/LinalgToAscendC/`）+ **`CannTranslation`**（末端翻译：GlobalTensorInit→`emitSupportedMixAicGlobalTensorSetup`@1697、TPipe alloc→`<<"TPipe pipe;"`@2006、顶层组装→`extern "C" __global__`@1999）+ **`ascendc-pack-tiling-data`**（tiling_data PyStruct 物化） | ✅ 已实现 | 保留为 codegen 本职 |
 | 图规范化/校验 | `codegen.cpp:101` `EnrichScheduledResultAscirParams`（调用 `:465`）、`codegen_graph_check.cpp:235` `CheckGraphValidity`（`codegen_kernel.cpp:1844` 仅调用点） | **`auto-fuse-isolate-kernel-outputs`**（输出隔离规范化，`IsolateKernelOutputs.cpp:31-87`）+ **`auto-fuse-verify-tiling-info-schema`**（schema↔IR 校验，`VerifyTilingInfoSchemaPass.cpp:27-160`） | ✅ 已实现（无单一等价，分散承担） | Stage 0拎出为独立步骤 S0 |
 | 调度上下文物化（IO/workspace + 轴/管静态状态） | 内联于 `ParseGraph:1926-2040`（**无 `MaterializeTilerAndTPipe` 函数，待抽取**；IO 解析 `:1845-1918`） | **`afir-symbolize-shapes`**（铸造轴符号 + extent 表达式 → `afir.dim_symbols`/`symbolic_shapes`/`iter_extents`，`AFIRSymbolizeShapes.cpp:66-417`）+ **`afir-symbolic-dim-cse`** | ✅ 已实现 | Stage 0显式化为独立步骤 S1 |
-| tiling 派生（`is_split_b`/`actual_size`/`tail_size`/`loop_size`/`axis_size`） | `AddAxisSplitBAttr:476`(`is_split_b:479`)、`GenAxisSizeNew:692`、`GenInnerLoopSizeAndActualSize:726`(写 actual_sizes `:741`)、`codegen_kernel_loop.cpp` `GenerateLoop:602`(写 `:653`)/`ActualSizeDefine:804`(写 `:818`) | **`auto-fuse-tile-fuse`** 内 `TilePlanGen`(枚举+选优)+`TilePlanBuild`(物化)+`SliceComputer`(tail 切片)，决策结构 `TilePlan{TileLevel×AxisRole}`（注意：mlir-af 用 `XBLOCK`/`M_INNER`/`K_INNER` 系命名，非 dev-nyh 的 `is_split_b` 系） | ✅ 已实现 | Stage 0显式化为独立步骤 S3 |
+| tiling 派生（`is_split_b`/`actual_size`/`tail_size`/`loop_size`/`axis_size`） | `AddAxisSplitBAttr:476`(`is_split_b:479`)、`GenAxisSizeNew:692`、`GenInnerLoopSizeAndActualSize:726`（写 actual_sizes `:741`）、`codegen_kernel_loop.cpp` `GenerateLoop:602`（写 `:653`）/`ActualSizeDefine:804`（写 `:818`） | **`auto-fuse-tile-fuse`** 内 `TilePlanGen`（枚举+选优）+`TilePlanBuild`（物化）+`SliceComputer`（tail 切片），决策结构 `TilePlan{TileLevel×AxisRole}`（注意：mlir-af 用 `XBLOCK`/`M_INNER`/`K_INNER` 系命名，非 dev-nyh 的 `is_split_b` 系） | ✅ 已实现 | Stage 0显式化为独立步骤 S3 |
 | 循环结构化（`ConstructFromNodes`/`LoopAxisDistance`） | `codegen_kernel_loop.cpp:242-368,825-866` | **`auto-fuse-tile-fuse`** 内 `LoopNestBuilder`（按 Outer→BCast-Full→Inner 建 scf.for 嵌套 + tail peel + parallel 标注，不复用 `linalg::tileUsingForOp`，`LoopNestBuilder.cpp:13-131`） | ✅ 已实现 | Stage 0显式化为独立步骤 S2 |
 | 缓存决策复算（`IsNodeSplitB`/`IsReduceDoubleTile`/`GenerateEnCacheCondition`） | `codegen_kernel_loop.cpp:179-210,423-439,736-800` | **无独立 pass**：简化为 `auto-fuse-insert-tile-buffers` 对 GM 输出 linalg.generic 固定提升 GM→VECIN/VECOUT + 共享 VECOUT 启发式（`InsertTileBuffers.cpp:134-308`） | ❌ 未实现条件决策 | Stage 0显式化为独立步骤 S4；**无法照 mlir-af 对照，自行设计** |
 | 多核分解（`BlockOutterAxisDefine`/`CalcFromAxis`） | `CalcFromAxis:747`、`BlockOutterAxisDefine:775/795`（调用 `:2096`） | **`ascendc-parallelize`**（把 `ascendc.parallel` 标注的外层 scf.for 转 `get_block_idx`+`arith.muli`+越界 scf.if 守卫，`AscendCParallelizePass.cpp:148-170`；block_dim 推导在 `TilePlanGen` 的 `blockDimExpr`） | ⚠️ 简化版（每层只做一维 block_idx×step，AF 的 bind_block+多轴更复杂） | Stage 0显式化为独立步骤 S5 |
 | CV fusion Stage 划分（`GetLifecycleEdge`/`InitApiCallContext`） | `codegen_kernel_loop.cpp:212-240` | **`auto-fuse-restore-matmul`**（还原 matmul 命名 op，`RestoreMatmul.cpp:27-62`）+ **`auto-fuse-tile-fuse`** 内 `CubeEmitter`（CubeKind::MatmulVecFuse 单 kernel 三级 tile+unit 标注，`CubeEmitter.cpp:104-312`）。mlir-af **不做 Stage1/Stage2 划分** | ❌ 未实现 stage 划分 | Stage 0显式化为独立步骤 S6；**无法照 mlir-af 对照，自行设计** |
 | reduce Mean 尾块 Muls 补全 | `codegen_kernel_loop.cpp:666-705` | **无**（mlir-af 只 `reduce_sum`，`ComputeReduce.cpp:605`，无 mean 尾块 ×recip） | ❌ 未实现 | Stage 0归入 S7 lowering 语义补全；**无法照 mlir-af 对照，自行设计** |
 | reduce 三模板（kCommon/kAllLoad/kRCore） | reduce 发射相关 | 枚举/选取/stamp 在 **`auto-fuse-tile-fuse`**(TilePlanGen，`afir.reduce_template` attr)；Common emit 在 **`linalg-to-ascendc`**(ComputeReduce)；RCore 二段式 combine 在 **`ascendc-rcore-combine`** | ⚠️ 部分（Common 完成；FullLoad ∞-scored 未编；RCore 仅末端 combine） | Stage 0标注本属 S3/S7，留意 FullLoad/RCore 未完成需自行补全 |
-| `tiling_key` 编号 + tiling_data 字段名（隐式契约） | tiling_key 编号 `AppendFuncCall:3182-3197`(计数器初始化 `:2331/:2365`)、字段命名 `codegen_tiling_data.cpp:108-141`(`TILING_DATA_FIELD_DEF_T`/`common_tiling_fileds`) | **`auto-fuse-tile-fuse`**(TilePlanGen 生成 `auto_fuse.tiling_infos` schema v2) + **`auto-fuse-verify-tiling-info-schema`** + **`ascendc-pack-tiling-data`**。mlir-af **已移除 `tiling_key`** | ❌ mlir-af 已废弃该概念 | Stage 0 抽 `TilingKeyScheme`+`TilingDataFieldNamer` 共享层（本项目保留 `tiling_key`，行为等价优先） |
-| 末端 finalize/flatten/signature | codegen 顶层组装内 | **`ascendc-finalize-kernel`**(func 定型为 aicore global void + 消除 affine)、**`ascendc-flatten-gm-ptr`**(GM 访问归一化为 flat 1D ptr+offset)、**`canonicalize-cann-signature`**(规整 AscendC kernel 签名 + 计算输入计数元数据)，均在 `lib/Conversion/AscendCPrepareForEmit/` | ✅ 已实现 | codegen 本职，迁移时对应到这些 pass |
+| `tiling_key` 编号 + tiling_data 字段名（隐式契约） | tiling_key 编号 `AppendFuncCall:3182-3197`（计数器初始化 `:2331/:2365`）、字段命名 `codegen_tiling_data.cpp:108-141`(`TILING_DATA_FIELD_DEF_T`/`common_tiling_fileds`) | **`auto-fuse-tile-fuse`**（TilePlanGen 生成 `auto_fuse.tiling_infos` schema v2） + **`auto-fuse-verify-tiling-info-schema`** + **`ascendc-pack-tiling-data`**。mlir-af **已移除 `tiling_key`** | ❌ mlir-af 已废弃该概念 | Stage 0 抽 `TilingKeyScheme`+`TilingDataFieldNamer` 共享层（本项目保留 `tiling_key`，行为等价优先） |
+| 末端 finalize/flatten/signature | codegen 顶层组装内 | **`ascendc-finalize-kernel`**（func 定型为 aicore global void + 消除 affine）、**`ascendc-flatten-gm-ptr`**（GM 访问归一化为 flat 1D ptr+offset）、**`canonicalize-cann-signature`**（规整 AscendC kernel 签名 + 计算输入计数元数据），均在 `lib/Conversion/AscendCPrepareForEmit/` | ✅ 已实现 | codegen 本职，迁移时对应到这些 pass |
 | 上游已显式、codegen 只读（`exec_condition`/`reuse_id`/`alloc_type`/`cube_type`/`sched.axis`/`axis.type`） | codegen 各处只读 | 上游（mlir-af 侧对应 schedule 前 pipeline `auto-fuse`） | 不适用 | 本次不动，标注本属上游 |
 
 结论分为三点：
@@ -448,7 +450,7 @@ FusedScheduledResult (冻结, 不改上游)
 
 **子任务**：
 1. **属性 schema 设计**：定义 `codegen.*` 属性/类型（tablegen）：
-   - `codegen.axis`：`logicalAxisId`、`type`(Block/Tile Outer/Inner/Merged)、`size`(Expression 串)、`align`、`from`、`split_pair`。
+   - `codegen.axis`：`logicalAxisId`、`type`(Block/Tile Outer/Inner/Merged)、`size`（Expression 串）、`align`、`from`、`split_pair`。
    - `codegen.tiling_case`：x/y/r/n group 的轴 id。
    - `codegen.queue`/`codegen.buf`：复用 `emitasc` 的 TQue/TBuf 类型，附 reuse_chain 属性。
    - `codegen.cv_stage`：CV 融合阶段（Stage1/Stage2）。
@@ -468,7 +470,7 @@ FusedScheduledResult (冻结, 不改上游)
 
 **算子族清单**：
 - **`codegen/api_call/` 目录内 ApiCall 族**：reduce、concat、gather、transpose、datacopy(Load/Store)、broadcast 其余形态、以及 `ascir/reg_func` 注册的 elewise 全部 op。
-- **cube/CV（不在 api_call 目录）**：走 `codegen_kernel.cpp GenCube*`(`:2466` 起) + `codegen_tiling.cpp` + `codegen_tiling_cube_wrapper.h`(45KB) 的**独立 kernel 组装路径**，不属 ApiCall 族体系。迁移时需单独设计其 op 构造/组装，不能套用 ApiCall 子类模板。
+- **cube/CV（不在 api_call 目录）**：走 `codegen_kernel.cpp GenCube*`（`:2466` 起） + `codegen_tiling.cpp` + `codegen_tiling_cube_wrapper.h`(45KB) 的**独立 kernel 组装路径**，不属 ApiCall 族体系。迁移时需单独设计其 op 构造/组装，不能套用 ApiCall 子类模板。
 
 **子任务（每族同构）**：
 1. 该族 `ApiCall` 子类 → `ascendc` op 构造 + 必要 `codegen.*` 属性。

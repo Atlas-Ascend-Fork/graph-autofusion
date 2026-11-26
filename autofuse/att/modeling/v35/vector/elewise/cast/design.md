@@ -1,5 +1,7 @@
 # Cast（CastExtend）V2 性能模型
 
+简体中文 | [English](./design_en.md)
+
 ## 适用范围
 
 - 面向 v35 形态（V2）ASCIR `Cast` 节点，对应 regbase API `CastExtend`；`Ceil2Int` 等 API 复用同一模型。
@@ -61,7 +63,7 @@
 | int32→float16（两段） | Load×rt(0) + Store×rt(1) + Cast(int32→fp32)×rt(2) + Cast(fp32→fp16)×rt(1) | 5 | (25+4·rt)·cc |
 | float32→bool | Load×rt(0) + Store×rt(1) + Duplicate×1(1) + And×rt + Adds×rt(2) + Or×rt + Not×rt + Vshrs×rt | 8 | (29+7·rt)·cc |
 | int64→float32（B64 收窄） | Load×rt(0) + Store×rt(1) + Cast×rt(2) + Duplicate×rt(1) + DeInterleave×rt(1) | 8 | (28+5·rt)·cc |
-| int64→float16（B64 transfer） | Load×rt(0) + Store×rt(1) + Duplicate×1(1) + MaskPack×rt(0，u32 无表项) + DeInterleave×rt(1) + Cast(in→fp32)×rt(2) + Cast(fp32→fp16)×rt(1) | 8 | (29+5·rt)·cc |
+| int64→float16（B64 transfer） | Load×rt(0) + Store×rt(1) + Duplicate×1(1) + MaskPack×rt（0，u32 无表项） + DeInterleave×rt(1) + Cast(in→fp32)×rt(2) + Cast(fp32→fp16)×rt(1) | 8 | (29+5·rt)·cc |
 | B4 / B8 特殊分支 | 见 `AddB4CastPerf` / `AddB8SpecificCastPerf` | - | 未覆盖 |
 
 ## MicroAPI 计数

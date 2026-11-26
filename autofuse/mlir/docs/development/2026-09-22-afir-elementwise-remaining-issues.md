@@ -1,5 +1,7 @@
 # AFIR Op 补齐（elementwise 切片）：遗留问题清单
 
+简体中文 | [English](./2026-09-22-afir-elementwise-remaining-issues_en.md)
+
 > 2026-09-22 · 进行中 · 上游：[elementwise 切片开发方案](../design/2026-09-17-afir-op-completion-elementwise-slice-design.md)、
 > [进度与剩余任务](2026-09-17-afir-op-completion-elementwise-progress.md)
 >
@@ -185,7 +187,7 @@
 
 - **先澄清一件事**：`Identity` 是 `TransferPlanKind` 的一个取值，指「op 上没有 `sched`
   属性、或者 `buildScheduledPlan` 失败，且 indexing map 是 identity / 缺省」的那条路
-  （[Analysis/TransferPlan.cpp:174](../../dialect/AFIR/Analysis/TransferPlan.cpp:174)）。
+  （[Analysis/TransferPlan.cpp:174](../../dialect/AFIR/Analysis/TransferPlan.cpp#L174)）。
   **生产路径走的是 `ScheduledContiguous`，那一档对 rank 没有任何限制**；下面说的只是
   未调度那条路。
 - **现象**：`Identity` 计划下，二元与三元 capability 要求所有 tile `rank == 1`
@@ -193,7 +195,7 @@
   [TernaryElementwise.cpp](../../conversion/AFIRToAscendC/Implementations/TernaryElementwise.cpp)），
   这是**有意的**（`afir-to-ascendc-binary-l2-invalid.mlir` 里有一条名为
   `unsupported_add_rank` 的负例——但见下，那条负例其实是假的）。
-  **一元路径没有这一条**：[UnaryElementwise.cpp:174](../../conversion/AFIRToAscendC/Implementations/UnaryElementwise.cpp:174)
+  **一元路径没有这一条**：[UnaryElementwise.cpp:174](../../conversion/AFIRToAscendC/Implementations/UnaryElementwise.cpp#L174)
   拿到 plan 只判了 `failed()` 就把它丢了。
 - **失败形态**：`afir.abs` 收一块 `2x8xf16` 会被判成 supported 并下降，发出去的 count 是
   `GetSize()`（全部元素数）；同一份形状的 `afir.add` 当场报 unsupported。三条路号称同构，
@@ -352,7 +354,7 @@
   一个 `Scalar` 节点的图它不管，图原样到 MLIR，ODS 当场拒收
   （`operand #0 must be Tensor or MemRef of ... but got 'f32'`）。
 - **计划里有两处是错的，记下来**：
-  1. **`is_scalar_latter` 不在这一条的范围内。** [binary_api_call.cpp:76](../../../codegen/api_call/elewise/binary_api_call.cpp:76)
+  1. **`is_scalar_latter` 不在这一条的范围内。** [binary_api_call.cpp:76](../../../../codegen/api_call/elewise/binary_api_call.cpp#L76)
      只对 `Div` / `Sub` / `DivExtend` / `SubExtend` 发它，其余走 `else` 分支、发的是
      **不带模板实参**的 `Adds(y, x1, (T)scalar, count)`。8 个 swap op 全在 `else` 里。
   2. **8 个 swap op 全是可交换的**（add / mul / maximum / minimum / eq / ne /
@@ -407,7 +409,7 @@
    [TilingStub.cpp](../../test/e2e/cpu/support/TilingStub.cpp)，它的 `CodegenTiling`
    **无条件 `return false`**。所以任何回落到 legacy tiling 的图都会报
    `codegen_tiling.cpp:872`——那是 harness 的属性，与 `Scalar`、与 ATT 都无关。
-2. **时序反了。** [codegen.cpp:399](../../../codegen/codegen.cpp:399)：`GenerateForInductor`
+2. **时序反了。** [codegen.cpp:399](../../../../codegen/codegen.cpp#L399)：`GenerateForInductor`
    第一件事就是 `RunMlirCodegen`，只有它返回 `kNotSupported` 才走到 tiling。所以真实链条
    是「MLIR 路径先谢绝，才落到那个桩上」，不是「tiling 比 bridge 早」。
 3. **原先给的复现命令自带这个故障**：手工跑 generator，既没有 `AF_ENABLE_MLIR_CODEGEN=1`
@@ -615,7 +617,7 @@
   用。它在 `autofuse/v35/` 与 `autofuse/ascir/` 下，有自己的直接用例
   （`tests/ut/ascir/reg_func/test_reg_func_masked_fill.cpp`），而 `mlir-test.sh` 跑不到那套。
   换句话说它是另一个仓区、另一套验证，不属于本条的边界。
-- **第二半（断言接不住）**：[BridgeOperationRegistryTest.cpp:92](../../test/ut/bridge/BridgeOperationRegistryTest.cpp:92)
+- **第二半（断言接不住）**：[BridgeOperationRegistryTest.cpp:92](../../test/ut/bridge/BridgeOperationRegistryTest.cpp#L92)
   的 `BufferFormSetIsCoveredByAscendCImplementations` 查的是
   `registry.containsSourceOp(sourceOp)`——**只要任意一侧注册了就算通过**。于是：
   - `Broadcast`（两侧都没有）被抓住了，必须写进显式豁免名单，豁免名单本身还有反向断言；
@@ -773,7 +775,7 @@ lit `afir-scalar-input-kernel-arg.mlir`、bridge UT 两条、conversion UT 四�
 
 **先说结论：这不是忘了加，放行是有意的；漏的是没人写下来的那半边。**
 
-- `headersMatchFamily`（[ElementwiseApiFamily.h:158](../../conversion/AFIRToAscendC/Implementations/ElementwiseApiFamily.h:158)）
+- `headersMatchFamily`（[ElementwiseApiFamily.h:158](../../conversion/AFIRToAscendC/Implementations/ElementwiseApiFamily.h#L158)）
   在扩展头与前导头**两个列表都空**时无条件返回 true，不看 family。这个分支从最早的
   `headerMatchesFamily` 就在，注释写着「空名字（标准调用、无前导）对任何家族都成立」
   ——它是为了让 `abs.tensor`（`RegBased` + 标准 `AscendC::Abs`）这类过得去，**必需**。
@@ -806,7 +808,7 @@ lit `afir-scalar-input-kernel-arg.mlir`、bridge UT 两条、conversion UT 四�
 
 - **形状**：分配侧与预留侧分在两个目录，两边没有共享断言——与 `AGENTS.md` 3.1 记的那条
   NPU 0x507035 越界同一类。今天两边的数相等，靠的是两边**各自**实现了同一条
-  「按 (值, dtype) 去重」的规则：
+  「按（值，dtype）去重」的规则：
   - ATT：`common_utils.cpp` 的 `GetApiExtractDupSet` / `api_extract_dup_map`
     （`{LogicalNot → {1, half}}`、`{Rsqrt → {1, float}}`），按**节点类型**查，进
     `tuning_space_->builtin_tmp_buffer`，再由 `buf_occupy_expr.cpp:128` 算进 UB 占用；

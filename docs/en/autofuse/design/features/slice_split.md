@@ -1,5 +1,7 @@
 # Slice/Split/StridedSlice/SplitV(D) Automatic Fusion Operators — Comprehensive Technical Document
 
+English | [简体中文](../../../../zh/autofuse/design/features/slice_split.md)
+
 
 ---
 

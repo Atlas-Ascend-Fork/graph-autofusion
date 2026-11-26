@@ -1,5 +1,7 @@
 # AFIR VectorFunc Implementation
 
+English | [简体中文](./2026-10-18-afir-vector-func-implementation-design.md)
+
 > English companion summary, not a full translation. The [Chinese source](2026-10-18-afir-vector-func-implementation-design.md)
 > retains the detailed design, milestones, measurements, commands and dated evidence.
 > Historical results below are source records, not newly executed validation.

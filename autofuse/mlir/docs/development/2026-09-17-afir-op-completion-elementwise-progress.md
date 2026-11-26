@@ -1,5 +1,7 @@
 # AFIR Op 补齐（elementwise 切片）：进度与剩余任务
 
+简体中文 | [English](./2026-09-17-afir-op-completion-elementwise-progress_en.md)
+
 方案在 [AFIR Op 补齐：elementwise 切片开发方案](../design/2026-09-17-afir-op-completion-elementwise-slice-design.md)。
 本文不重复方案，只记三件事：**做到哪了**、**下一步做什么**、**哪些地方不能照方案直接往下走**。
 新 session 从这里起步，需要判据和取舍的来由时再回方案查。
@@ -1127,7 +1129,7 @@ declaration matches」。`gelu` / `sign` 那一轮（`4b2f2588`）删的就是�
 没写下来。
 
 **三、结果 dtype 那条规则有两个读点，写成了一个函数。** `ResultElementType` 加第三档
-`SameOrF32ForI32`（没有改成 (输入, 结果) 对表——那要动全部 47 个注册点），而 ODS 那边的
+`SameOrF32ForI32`（没有改成（输入，结果）对表——那要动全部 47 个注册点），而 ODS 那边的
 `logicalResultElementType` 也要说同一件事。两处各写一遍的话错法是静默的：一边推出 f32、
 另一边只认「目的地与输入同 dtype」，op 建得出来但永远选不出 implementation。所以规则
 落在 `afir::elementwise::trueDivResultElementType` 一个函数里，两处都调它——与 shape
@@ -1301,7 +1303,7 @@ destination），但两种形态共用同一个方法，为能推的那一半声
 
 另外四条现场：
 
-- **(输入, 输出) 对表有两张，不是一张。** mem 侧 36 对、reg 侧 43 对（legacy 那张 44
+- **（输入，输出）对表有两张，不是一张。** mem 侧 36 对、reg 侧 43 对（legacy 那张 44
   对里的 `{f32, bool}` 不建模），两边互有对方没有的行——mem 独有 i4 那一族 3 对，
   reg 独有 i8 / i64 那两族 10 对。**三个读点**（ODS 的 `verify()` 查并集 46 对、两个
   implementation 各查自己那一半）共用 `Ops/Cast.cpp` 里的同一个查表，与
@@ -1361,7 +1363,7 @@ ATT 不会给这个字段）、`CanonicalGroupKey` 的 `exclusiveMemberOrdinal` 
 三个决定值得单记：
 
 - **认领标记的取值是那个常量本身**（`FloatAttr`，类型就是这块张量的元素类型），所以一条
-  属性同时说清「值是几」与「什么 dtype」，去重查的就是它。另立一张 (值, dtype) 的表是
+  属性同时说清「值是几」与「什么 dtype」，去重查的就是它。另立一张（值，dtype）的表是
   第二个真源。
 - **位置是入口块的 `ascendc.pipe` 之后；函数里没有 pipe 就先建一个。** 后一支不是防御
   性代码，是 lit 用例的常态：只喂 `!ascendc.local_tensor` 参数的那些函数里
@@ -1589,7 +1591,7 @@ tmp_buffers` 里也只有一项。那块预先填好 1 的张量在图上根本�
 **codegen** 里凭一张按节点类型查的静态表现造的：
 
 - `common_utils.cpp` 的 `GetApiExtractDupSet` / `api_extract_dup_map`：
-  `{Rsqrt -> {1, float}}`、`{LogicalNot -> {1, half}}`，**按 (值, dtype) 去重**；
+  `{Rsqrt -> {1, float}}`、`{LogicalNot -> {1, half}}`，**按（值，dtype）去重**；
 - `codegen_kernel.cpp` 的 `GenDuplicateBufAlloc`：每个去重后的 pair 造一个 32 字节的
   `TBuf` + 一条 `Duplicate`，名字是 `local_blk_tensor_of_<dtype>_<value>`，
   **整个 kernel 共用一份**；
@@ -1598,7 +1600,7 @@ tmp_buffers` 里也只有一项。那块预先填好 1 的张量在图上根本�
   这一层只要照同一个口径造出来就对得上。一个 op 一块会超预算，而超出去的症状是运行期
   UB 越界，不是编译报错。
 
-于是真正要补的机制是「lowering 能在 kernel 序言里造一块按 (值, dtype) 共用的常量」，
+于是真正要补的机制是「lowering 能在 kernel 序言里造一块按（值，dtype）共用的常量」，
 落点是 `conversion/AFIRToAscendC/Implementations/ConstBlockTensor.{h,cpp}`
 （**约 100 行，没有新 pass、没有新 AFIR op、没有 ODS 改动**）。它与 tmp buffer 的区别
 一句话说得清：tmp buffer 是调度分配的、未初始化的草稿纸，尺寸来自 ATT 的聚合；这块是
@@ -1787,7 +1789,7 @@ C4 负例换 `afir.sum` 已做；覆盖矩阵重跑无漂移；编译耗时已�
 | ~~Eq / Ne / Lt / Le / Gt / Ge~~ | ~~两条：① 多一套调用形态，`<T, CMPMODE>` vs `<T, dim, CMPMODE>`，`dim` 由 tile 轴结构推出，运行时参数带 second-to-last stride，当前「连续 tile + 元素个数」表达不了；② 两个扩展头（偏差 8）~~——**① 里的两件不成立**：second-to-last stride 只有 `dim == 2` 读得到，这条路只发连续形态；brace-init 数组 `Cast` 那一轮做掉了 | **已接通**（四个 def、24 个 implementation，真正新的只有「同一个 `CMPMODE` 两侧落在不同的位置」），见上「比较族：已接通」。② 随前置 A 一起解掉了 |
 | LogicalAnd / LogicalOr | 本身干净（两侧都是包装，名字与 tmp 需求不同），原本只是等二元路径改造——**E2.5 已经解掉**（偏差 9） | **可以直接排进 E6**，没有别的阻塞 |
 | ~~Axpy~~ | 家族判据说不出「两侧共用同一个扩展包装」（矩阵 tier D1，elementwise 里 5 个）；另有二元 + 属性实参 + tmp 的发射形状 | **已接通**（`ApiFamily::Shared`），见上「Axpy：已接通（tier D1 第一个）」 |
-| ~~TrueDiv~~ | 结果 dtype 是**一张 (输入, 输出) 对表**，不是输入的函数：mem 侧 `{f16→f16, f32→f32, **i32→f32**}`，reg 侧 `{f16→f16, f32→f32, bf16→bf16}`。`ResultElementType` 那根轴原先的两个取值（`Same` / `Uint8Logical`）都说不出 i32→f32 这一行 | **已接通**（`ResultElementType::SameOrF32ForI32`，mem 侧新建一个 def、reg 侧复用 `DivExtendRegBaseOp`），见上「TrueDiv：已接通」 |
+| ~~TrueDiv~~ | 结果 dtype 是**一张（输入，输出）对表**，不是输入的函数：mem 侧 `{f16→f16, f32→f32, **i32→f32**}`，reg 侧 `{f16→f16, f32→f32, bf16→bf16}`。`ResultElementType` 那根轴原先的两个取值（`Same` / `Uint8Logical`）都说不出 i32→f32 这一行 | **已接通**（`ResultElementType::SameOrF32ForI32`，mem 侧新建一个 def、reg 侧复用 `DivExtendRegBaseOp`），见上「TrueDiv：已接通」 |
 | ~~Pow~~ | ~~两侧供给都缺、两侧都要 tmp、`reg_scalar = any` 撞 L-4~~ | **已接通**（两个 def + 换基类，与 `Remainder` 逐字同形，没有新机制），见上「Pow：已接通」。标量形态 2026-09-24 接通，用的是**同一个 def**（同名重载），见下「标量形态的三种发射规则」 |
 | ~~Cast~~ | ~~两侧供给都缺、ODS 不同基、bridge 表里唯一的 `Tensor` 行~~。**「裸名 `Cast`」那句是错的**：mem 侧发的是 `CastExtend`，矩阵那一列是注册名不是发出去的名字 | **已接通**，但不是「两个 def + 换基类」——还要 brace-init 数组 emitter 与 ODS 基类拆档，见上「Cast：已接通」 |
 
@@ -1928,7 +1930,7 @@ C4 负例换 `afir.sum` 已做；覆盖矩阵重跑无漂移；编译耗时已�
 | ~~L-2~~ **已修** | ~~`isSetMask` 一律打成 `0`~~ 根因是**两个缺省极性相反**：`UnitAttr` 不写 = `false`，AscendC 声明上是 `= true`。改 `VecScalarL2Op` 的缺省为 `DefaultValuedAttr<BoolAttr, "true">` | 上「已知覆盖空洞」第 0 条（含当初两处定性错误）+ 清单 L-2 | ~~**要在 NPU 上查**~~ **不用上机**：CPU 模拟器编的是同一份 `dav_c220` 头，把形状放大到一趟算多于一个 repeat 就红。已补 `load_add_scalar_store_128x23x5` |
 | L-3 **半解** | 第一支（`materializeOperandTiles` 的 `ScheduledContiguous` 标量分支）已被 `load_add_scalar_store` 走到；**第二支（`getBufferizedElementwiseEffects` 里标量不挂 `Read` effect）仍然没有人钉**，已实测删掉它 lit 与 UT 全绿 | 上「已知覆盖空洞」第 1、2 条 | 第二支要直接在 UT 里断言 effect 列表 |
 | L-4 | **标量只表达得出「在第二个操作数」**。矩阵上 8 个 op 的标量格是 `2nd+swap(2nd)`，交换之后那半张格子 MLIR 整个没有 | 下「L-4：swap 方向的标量」 | 8 个 op 的标量覆盖补齐；`RhsForm` 那根轴换掉之后，`registerScalarBinary` 那几行也要跟着重写 |
-| L-5 | 常量 block 的 32 字节 **ATT 预留、MLIR 分配**，两边各自实现同一条「按 (值, dtype) 去重」的规则，**没有共享断言**。今天两边的数相等，靠的是两边都只认 `{1, float}` / `{1, half}` 这两对 | 下「L-5：常量 block 的预留与分配分在两个目录」 | 加一块常量不再要同时改两个目录，也不会再有「MLIR 多分配了一块而 ATT 不知道」这种只在运行期露出来的失败 |
+| L-5 | 常量 block 的 32 字节 **ATT 预留、MLIR 分配**，两边各自实现同一条「按（值，dtype）去重」的规则，**没有共享断言**。今天两边的数相等，靠的是两边都只认 `{1, float}` / `{1, half}` 这两对 | 下「L-5：常量 block 的预留与分配分在两个目录」 | 加一块常量不再要同时改两个目录，也不会再有「MLIR 多分配了一块而 ATT 不知道」这种只在运行期露出来的失败 |
 
 ~~L-1 与 L-2 互不相干~~ **L-1 已确认不存在**，所以 L-3 不再等任何东西，L-2 也不再有
 「先做哪个」的问题。L-4、L-5 与其余各条都不相干。

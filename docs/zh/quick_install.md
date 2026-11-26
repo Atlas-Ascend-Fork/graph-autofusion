@@ -1,5 +1,7 @@
 # 环境部署
 
+简体中文 | [English](../en/quick_install.md)
+
 ## 1. 环境准备
 
 本项目支持源码编译，在源码编译前，需要确保已经安装CANN软件（Toolkit开发套件包和ops包（可选）），若运行样例，还需要安装NPU驱动和固件。
@@ -98,7 +100,7 @@
   | `-it` | `-i`（交互式）和 `-t`（分配伪终端）的组合参数。 | 必选 |
   | `-u root` | 以 root（管理员）身份进入容器。 | 建议 |
   | `--privileged=true` | 开启容器最高特权模式。 | 建议 |
-  | `swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:...` | 指定要运行的Docker镜像。 | 必选，请确保此镜像名和标签（tag）与你通过`docker pull`拉取的镜像完全一致。 |
+  | `swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:...` | 指定要运行的Docker镜像。 | 必选，请确保此镜像名和标签（tag）与您通过`docker pull`拉取的镜像完全一致。 |
   | `bash` | 容器启动后立即执行的命令。 | 必选 |
 
   > [!NOTE]说明

@@ -4,7 +4,7 @@
 
 ## 简介
 
-AutoFuse是基于Ascend C的自动融合框架，支持自动融合范围识别、自动算子代码生成、Auto Tiling优化、动态shape及混合精度等特性；在算法网络中，由于存在大量的Vector计算，各个Vector计算之间会产生大量的内存搬运，导致Memory Bound问题。而AutoFuse通过自动将多个算子融合为一个算子，减少网络中的算子数量和内存搬运，从而缓解了Memory Bound问题，释放昇腾算力，提升模型的执行性能。
+Autofuse是基于Ascend C的自动融合框架，支持自动融合范围识别、自动算子代码生成、Auto Tiling优化、动态shape及混合精度等特性；在算法网络中，由于存在大量的Vector计算，各个Vector计算之间会产生大量的内存搬运，导致Memory Bound问题。而Autofuse通过自动将多个算子融合为一个算子，减少网络中的算子数量和内存搬运，从而缓解了Memory Bound问题，释放昇腾算力，提升模型的执行性能。
 
 详细介绍，请参考《[Autofuse自动融合](https://www.hiascend.com/document/detail/zh/canncommercial/850/graph/autofuse)》
 
@@ -211,7 +211,7 @@ Host 编译会复用已有 PCH，缓存未命中时尝试创建。PCH 缓存目�
 
 详细的Profiling性能分析工具的使用方法，可参见[Profiling性能分析工具指南](https://hiascend.com/document/redirect/CannCommunityToolProfiling)。
 
-需要注意的是，不是模型里所有的算子都能被融合，对于在 Inductor 层未被 lowering 的算子，最后仍然以单算子形式存在。融合提升比，等于 (融合前所有算子耗时-融合后所有算子耗时)/融合前所有算子耗时。更进一步的，可以观察融合算子相比于单算子的 aiv_mte2_time（输入搬运耗时）和 aiv_mte3_time（输出搬运耗时）的提升情况。
+需要注意的是，不是模型里所有的算子都能被融合，对于在 Inductor 层未被 lowering 的算子，最后仍然以单算子形式存在。融合提升比，等于（融合前所有算子耗时-融合后所有算子耗时）/融合前所有算子耗时。更进一步的，可以观察融合算子相比于单算子的 aiv_mte2_time（输入搬运耗时）和 aiv_mte3_time（输出搬运耗时）的提升情况。
 
 对于精度的分析，详细的精度调试工具的使用方法，可参见[精度调试工具指南](https://hiascend.com/document/redirect/CannCommunityToolAccucacy)。
 

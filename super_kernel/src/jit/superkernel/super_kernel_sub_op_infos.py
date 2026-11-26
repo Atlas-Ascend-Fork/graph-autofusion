@@ -686,7 +686,9 @@ kernelType == {SuperKernelKernelType.KERNEL_TYPE_MIX_AIC_1_0.value}) {{
         if self.early_start_set_flag or self.early_start_wait_flag:
             CommonUtility().ascendc_raise_python_err(
                 ERR_CODE,
-                (f"{self.kernel_name} is dynamic op, do not support early start"),
+                (
+                    f"{self.kernel_name} is a dynamic op and does not support early start"
+                ),
             )
         # for hard sync of dynamic op
         self.set_early_start_complement_blocks("ASCEND_IS_AIV", "true")

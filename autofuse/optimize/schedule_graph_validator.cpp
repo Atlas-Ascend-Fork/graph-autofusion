@@ -133,6 +133,12 @@ af::Status ValidateNodeAxisContract(af::AscNode &node, const std::unordered_set<
 af::Status ValidateReduceAxis(af::AscNode &node, const af::AscTensorAttr &input, const af::AscTensorAttr &output,
                               size_t input_index, size_t output_index) {
   const auto axis = output.axis[output_index];
+  const auto repeat_is_one = af::SymbolicUtils::StaticCheckEq(output.repeats[output_index], af::sym::kSymbolOne);
+  const auto repeat_same = af::SymbolicUtils::StaticCheckEq(input.repeats[input_index], output.repeats[output_index]);
+  // 长度明确变为 1 时，输出在该轴上只有下标 0，stride 不影响寻址。
+  if (repeat_is_one == af::TriBool::kTrue && repeat_same == af::TriBool::kFalse) {
+    return af::SUCCESS;
+  }
   const auto output_is_zero = af::SymbolicUtils::StaticCheckEq(output.strides[output_index], af::sym::kSymbolZero);
   const auto same_stride = af::SymbolicUtils::StaticCheckEq(input.strides[input_index], output.strides[output_index]);
   const auto input_is_one = af::SymbolicUtils::StaticCheckEq(input.repeats[input_index], af::sym::kSymbolOne);
@@ -144,9 +150,7 @@ af::Status ValidateReduceAxis(af::AscNode &node, const af::AscTensorAttr &input,
   if (output_is_reduced || degenerate_reduce || legacy_reduced) {
     // 归约轴的输出长度存在多种合法表示：1、0（旧表示）或保留输入长度。
     // 只有三者都无法静态匹配时才判定为错误，符号值和未知关系一律放行。
-    const auto repeat_is_one = af::SymbolicUtils::StaticCheckEq(output.repeats[output_index], af::sym::kSymbolOne);
     const auto repeat_is_zero = af::SymbolicUtils::StaticCheckEq(output.repeats[output_index], af::sym::kSymbolZero);
-    const auto repeat_same = af::SymbolicUtils::StaticCheckEq(output.repeats[output_index], input.repeats[input_index]);
     if (repeat_is_one == af::TriBool::kFalse && repeat_is_zero == af::TriBool::kFalse &&
         repeat_same == af::TriBool::kFalse) {
       std::ostringstream detail;
@@ -163,8 +167,7 @@ af::Status ValidateReduceAxis(af::AscNode &node, const af::AscTensorAttr &input,
   if (may_reduce) {
     return af::SUCCESS;
   }
-  if (af::SymbolicUtils::StaticCheckEq(input.repeats[input_index], output.repeats[output_index]) ==
-      af::TriBool::kFalse) {
+  if (repeat_same == af::TriBool::kFalse) {
     std::ostringstream detail;
     detail << "non-reduced axis length changed: axis=" << axis << " position=" << output_index
            << " input[0].repeats=" << input.repeats[input_index].Str().get()

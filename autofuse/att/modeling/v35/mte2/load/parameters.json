@@ -1,0 +1,101 @@
+{
+  "platform": "A5",
+  "model_family": "v35",
+  "api": "LoadApi",
+  "direction": "GM(src) -> UB(dst)",
+  "unit": {
+    "cycle": "cycle",
+    "bytes": "Byte",
+    "core_count": "block_dim",
+    "stride": "DataCopy stride count"
+  },
+  "source": {
+    "implementation": [
+      "autofuse/v35/att/api_perf_register/perf_param_v2.cpp",
+      "autofuse/v35/att/api_perf_register/ascir_api_perf_v2.cpp",
+      "autofuse/att/gen_model_info/api_perf_register/utils/api_perf_utils.cpp",
+      "autofuse/v35/att/api_perf_register/ascendc_api_perf/data_move_api_perf_v2.cpp"
+    ],
+    "collection_repo": "mte2_mte3_perf_analysis:",
+    "data": [
+      "mte2_mte3_perf_analysis:A5/MTE2/2_Data/1_BlockCount/",
+      "mte2_mte3_perf_analysis:A5/MTE2/2_Data/2_ApiCount/",
+      "mte2_mte3_perf_analysis:A5/MTE2/2_Data/3_UnAlign/",
+      "mte2_mte3_perf_analysis:A5/MTE2/2_Data/4_UnStride/"
+    ]
+  },
+  "formula": {
+    "load_store": "D / (a + b / block_dim) + h + hl * (256 - (h + 512 / (a + b / block_dim)))",
+    "stride": "k * block_count * min(gm_stride * data_type_size, u)",
+    "load_perf": "selected_load_store + selected_stride",
+    "pipe_head": "1174.3 when maximum Load blocklen >= 256B; otherwise 775.0",
+    "selection": "blocklen > 256B selects Load; otherwise LoadSmallBlk; block_dim == 1 selects the corresponding SingleCore entry"
+  },
+  "parameters": {
+    "Load": {
+      "model_type": "LoadStoreFunc",
+      "dtype_parameters": {
+        "int64toint64": {"a": 11.8292, "b": 6.6155, "h": 160, "hl": 0, "data_type_size": 8},
+        "float16tofloat16": {"a": 11.8292, "b": 6.6155, "h": 160, "hl": 0, "data_type_size": 2},
+        "float32tofloat32": {"a": 11.8292, "b": 6.6155, "h": 160, "hl": 0, "data_type_size": 4},
+        "uint8touint8": {"a": 11.8292, "b": 6.6155, "h": 160, "hl": 0, "data_type_size": 1},
+        "bfloat16tobfloat16": {"a": 11.8292, "b": 6.6155, "h": 160, "hl": 0, "data_type_size": 2}
+      }
+    },
+    "LoadSmallBlk": {
+      "model_type": "LoadStoreFunc",
+      "dtype_parameters": {
+        "int64toint64": {"a": 13.1355, "b": 6.4088, "h": 160, "hl": 0, "data_type_size": 8},
+        "float16tofloat16": {"a": 13.1355, "b": 6.4088, "h": 160, "hl": 0, "data_type_size": 2},
+        "float32tofloat32": {"a": 13.1355, "b": 6.4088, "h": 160, "hl": 0, "data_type_size": 4},
+        "uint8touint8": {"a": 13.1355, "b": 6.4088, "h": 160, "hl": 0, "data_type_size": 1},
+        "bfloat16tobfloat16": {"a": 13.1355, "b": 6.4088, "h": 160, "hl": 0, "data_type_size": 2}
+      }
+    },
+    "LoadSingleCore": {
+      "model_type": "LoadStoreFunc",
+      "dtype_parameters": {
+        "int64toint64": {"a": 23.052, "b": 0, "h": 160, "hl": 0, "data_type_size": 8},
+        "float16tofloat16": {"a": 23.052, "b": 0, "h": 160, "hl": 0, "data_type_size": 2},
+        "float32tofloat32": {"a": 23.052, "b": 0, "h": 160, "hl": 0, "data_type_size": 4},
+        "uint8touint8": {"a": 23.052, "b": 0, "h": 160, "hl": 0, "data_type_size": 1},
+        "bfloat16tobfloat16": {"a": 23.052, "b": 0, "h": 160, "hl": 0, "data_type_size": 2}
+      }
+    },
+    "LoadSmallBlkSingleCore": {
+      "model_type": "LoadStoreFunc",
+      "dtype_parameters": {
+        "int64toint64": {"a": 13.1355, "b": 6.4088, "h": 160, "hl": 0, "data_type_size": 8},
+        "float16tofloat16": {"a": 13.1355, "b": 6.4088, "h": 160, "hl": 0, "data_type_size": 2},
+        "float32tofloat32": {"a": 13.1355, "b": 6.4088, "h": 160, "hl": 0, "data_type_size": 4},
+        "uint8touint8": {"a": 13.1355, "b": 6.4088, "h": 160, "hl": 0, "data_type_size": 1},
+        "bfloat16tobfloat16": {"a": 13.1355, "b": 6.4088, "h": 160, "hl": 0, "data_type_size": 2}
+      }
+    },
+    "LoadStride": {
+      "model_type": "LoadStoreStrideV2Func",
+      "k": 0.005,
+      "u": 4096.0,
+      "penalty_coeff": 0.0,
+      "applies_to": "all supported dtype pairs"
+    },
+    "LoadStrideSingleCore": {
+      "model_type": "LoadStoreStrideV2Func",
+      "k": 0.005,
+      "u": 4096.0,
+      "penalty_coeff": 0.0,
+      "applies_to": "all supported dtype pairs"
+    },
+    "pipe_head": {
+      "threshold_B": 256,
+      "normal_cost": 1174.3,
+      "small_cost": 775.0,
+      "selection": "maximum Load blocklen"
+    }
+  },
+  "coverage": {
+    "core_num": "1-64 in A5 evidence",
+    "shape_B": "8-262144 in A5 evidence",
+    "stages": ["1_BlockCount", "2_ApiCount", "3_UnAlign", "4_GmStride", "5_UbStride"]
+  }
+}

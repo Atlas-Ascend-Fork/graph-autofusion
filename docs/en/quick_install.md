@@ -1,5 +1,7 @@
 # Environment Deployment
 
+English | [简体中文](../zh/quick_install.md)
+
 ## 1. Environment Preparation
 
 This project supports source code compilation. Before source code compilation, you need to ensure that CANN software (Toolkit development suite package and ops package (optional)) has been installed. If running samples, you also need to install NPU driver and firmware.

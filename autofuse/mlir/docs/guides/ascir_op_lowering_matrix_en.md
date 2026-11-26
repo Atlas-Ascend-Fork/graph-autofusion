@@ -1,5 +1,7 @@
 # AscIR Lowering Matrix
 
+English | [简体中文](./ascir_op_lowering_matrix.md)
+
 > English companion summary, not a full translation. The [Chinese source](ascir_op_lowering_matrix.md)
 > retains the detailed design, tables, commands, dated evidence and open decisions.
 > Historical results below are source records, not newly executed validation.

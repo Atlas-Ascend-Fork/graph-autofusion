@@ -2255,9 +2255,10 @@ graphStatus ComputeGraphImpl::DoTopologicalSorting(const ConstComputeGraphPtr &c
     for (auto &node : node_vec) {
       (void)itered_nodes_set.insert(node.get());
     }
-    REPORT_INNER_ERR_MSG("E18888", "Failed to do topo sorting total %zu, iterated %zu, exist closed loop in graph:%s",
+    REPORT_INNER_ERR_MSG("E18888",
+                         "Failed to do topo sorting total %zu, iterated %zu, a closed loop exists in graph:%s",
                          GetDirectNodesSize(), node_vec.size(), name_.c_str());
-    GELOGW("[Check][Param] Failed to do topo sorting total %zu, iterated %zu, exist closed loop in graph.",
+    GELOGW("[Check][Param] Failed to do topo sorting total %zu, iterated %zu, a closed loop exists in graph.",
            GetDirectNodesSize(), node_vec.size());
     for (auto &node : nodes_) {
       if (itered_nodes_set.count(node.get()) == 0UL) {

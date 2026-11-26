@@ -1,5 +1,7 @@
 # Autofuse MLIR 开发指导
 
+简体中文 | [English](./README_en.md)
+
 | 文档说明    | 文档路径  |
 |-------------|-----------|
 | 整体架构    | [docs/README.md](docs/README.md) |
@@ -7,7 +9,7 @@
 
 ## 说明
 
-先跑轻量检查，确认 LLVM 依赖路径解析逻辑本身没问题:
+先跑轻量检查，确认 LLVM 依赖路径解析逻辑本身没问题：
 
 ```bash
 bash autofuse/mlir/scripts/check_llvm_dependency_resolution.sh
@@ -15,7 +17,7 @@ bash autofuse/mlir/scripts/check_llvm_dependency_resolution.sh
 
 真实编译执行分两种方案，任选其一。
 
-## 方案一: Docker（推荐 macOS/Windows）
+## 方案一：Docker（推荐 macOS/Windows）
 
 ### Step1: 拉取预编译好的 LLVM 镜像
 
@@ -64,7 +66,7 @@ bash autofuse/mlir/scripts/enter_dev_container.sh -- bash scripts/test/run_autof
 ### Step4: 在 CLion 中配置 Docker
 [CLion Docker Toolchain 配置指南](docs/guides/clion_docker_toolchain.md)。
 
-## 方案二: 本地编译（Linux 本机/远端）
+## 方案二：本地编译（Linux 本机/远端）
 
 ### Step1: 编译 LLVM/MLIR
 > 建议使用一下脚本克隆并编译 LLVM/MLIR（可自行修改脚本中的具体编译选项、参数等），否则会有接口形式不兼容问题
@@ -84,7 +86,7 @@ AF_LLVM_INSTALL_PREFIX=/opt/llvm
 bash autofuse/mlir/scripts/build_llvm.sh "${LLVM_SOURCE_DIR}"
 ```
 
-### Step2: 安装 CANN Toolkit包（下载路径见方案一的Step2）:
+### Step2: 安装 CANN Toolkit包（下载路径见方案一的Step2）：
 
 ```bash
 chmod +x Ascend-cann-toolkit_<version>_linux-<arch>.run

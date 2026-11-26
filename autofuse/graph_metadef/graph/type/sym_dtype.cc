@@ -404,7 +404,7 @@ void SymDtype::BindAllowedOrderedDtypes(const OrderedTensorTypeList &types) {
 PromotionSymDtypeExpression::PromotionSymDtypeExpression(const std::vector<SymDtype *> &syms) : syms_(syms) {}
 
 graphStatus PromotionSymDtypeExpression::Eval(const OpDesc &op, TypeOrTypes &type_or_types) const {
-  GE_WARN_ASSERT(syms_.size() > 1U, "Trying eval promotion sym with %zu syms", syms_.size());
+  GE_WARN_ASSERT(syms_.size() > 1U, "Trying to eval promotion sym with %zu syms", syms_.size());
 
   GE_WARN_ASSERT_GRAPH_SUCCESS(syms_[0]->Eval(op, type_or_types));
   GELOGI("Promoting start with %s from sym %s", type_or_types.DebugString().c_str(), syms_[0]->DebugString().c_str());

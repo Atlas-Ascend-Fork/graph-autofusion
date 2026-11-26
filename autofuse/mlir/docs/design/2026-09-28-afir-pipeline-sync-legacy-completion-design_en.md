@@ -1,5 +1,7 @@
 # MLIR Pipeline Synchronization Completion
 
+English | [简体中文](./2026-09-28-afir-pipeline-sync-legacy-completion-design.md)
+
 > English companion summary, not a full translation. The [Chinese source](2026-09-28-afir-pipeline-sync-legacy-completion-design.md)
 > retains the detailed design, tables, commands, dated evidence and open decisions.
 > Historical results below are source records, not newly executed validation.

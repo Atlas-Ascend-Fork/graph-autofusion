@@ -1,5 +1,7 @@
 # IsNan 模型验证报告
 
+简体中文 | [English](./report_en.md)
+
 > 本报告基于 [samples.csv](samples.csv) 的实测数据（5 条，float32→bool 主路径）。
 > model_predict_cycles 按 [design.md](../design.md) 公式推导，5 条全部与闭式公式一致。
 > 误差定义：`error = (predict - measured) / measured * 100%`，正值表示高估。
@@ -18,7 +20,7 @@
 
 ### 用例明细
 
-| input→output | outer_loop | cal_count | rt | 预测 (cycles) | 实测 (cycles) | 误差 | 单块折算 (模型 6) |
+| input→output | outer_loop | cal_count | rt | 预测 (cycles) | 实测 (cycles) | 误差 | 单块折算（模型 6） |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | float32→bool | 100 | 64 | 1 | 5200 | 5561.70 | -6.50% | 9.62 |
 | float32→bool | 100 | 128 | 2 | 5800 | 5615.12 | +3.29% | 5.08 |

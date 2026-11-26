@@ -27,7 +27,10 @@
 
 #include "autofuse_tiling_data.h"
 
-#if !defined(IL_CASE_STORE) && !defined(IL_CASE_MIXED)
+#if defined(IL_USER_EMBEDDING_SUM_SIMD)
+extern "C" int64_t AutofuseTiling(int64_t rows, int64_t index_stride, AutofuseTilingData *, uint64_t *, uint32_t *,
+                                  uint32_t, uint32_t);
+#elif !defined(IL_CASE_STORE) && !defined(IL_CASE_MIXED)
 struct ResLimit;
 extern "C" int64_t AutofuseTiling(AutofuseTilingData *, uint64_t *, uint32_t *, uint32_t, uint32_t);
 extern "C" int64_t AutofuseTilingWithConfig(const char *, AutofuseTilingData *, uint64_t *, uint32_t *, ResLimit *,
@@ -126,7 +129,7 @@ struct KernelData {
   std::vector<DataType> expected;
 };
 
-#if !defined(IL_CASE_STORE) && !defined(IL_CASE_MIXED)
+#if !defined(IL_CASE_STORE) && !defined(IL_CASE_MIXED) && !defined(IL_USER_EMBEDDING_SUM_SIMD)
 struct KernelTiling {
   explicit KernelTiling(uint32_t core_num = 48U) : workspace(nullptr, GmFree) {
     EXPECT_EQ(AutofuseTiling(&data, &workspace_size, &block_dim, core_num, 192U * 1024U), 0);

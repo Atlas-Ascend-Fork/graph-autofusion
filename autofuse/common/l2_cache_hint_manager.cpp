@@ -26,6 +26,10 @@ using namespace af::ops;
 namespace {
 constexpr char const kAscBackendType[] = "AscBackend";
 constexpr char const kSkipL2CacheHintAttr[] = "_skip_l2_cache_hint";
+// 单广播轴扩成2 / 广播前的轴尺寸为1 / L2减半校验的除数
+constexpr int64_t kBroadcastFactor = 2;
+constexpr int64_t kPreBroadcastDimSize = 1;
+constexpr int64_t kHalfL2Divider = 2;
 
 std::string ExprToStr(const af::Expression &expr) {
   if (!expr.IsValid()) {
@@ -51,6 +55,16 @@ bool IsSmallTensor(const af::AscNodePtr &node) {
     GELOGD("IsSmallTensor node[%s] output_size[%lld bytes] <= 2MB.", node->GetNamePtr(), output_size_value);
   }
   return is_small;
+}
+
+// 计算tensor attr的物理字节数(repeats连乘×dtype)，可静态求值时返回true
+bool CalcAttrSizeBytes(const af::AscTensorAttr &attr, int64_t &size_bytes) {
+  af::Expression size_expr = af::sym::kSymbolOne;
+  for (const auto &repeat : attr.repeats) {
+    size_expr = size_expr * repeat;
+  }
+  size_expr = size_expr * af::Symbol(static_cast<int64_t>(ge::GetSizeByDataType(attr.dtype)));
+  return size_expr.IsConstExpr() && size_expr.GetConstValue(size_bytes);
 }
 
 bool NeedSkipL2CacheHint(const af::AscNodePtr &node) {
@@ -330,6 +344,7 @@ af::Status L2CacheHintManager::ParseGraph(const af::ComputeGraph &graph,
       return af::SUCCESS;
     }
   }
+  GE_ASSERT_SUCCESS(MarkSingleBroadcastInlineSkip(graph, fused_scheduled_result));
   GE_ASSERT_SUCCESS(MarkInputsNeedSkipL2CacheHint(fused_scheduled_result));
   return af::SUCCESS;
 }
@@ -428,6 +443,307 @@ af::Status L2CacheHintManager::MarkInputsNeedSkipL2CacheHint(::ascir::FusedSched
       for (auto &schedule_group : scheduled_result.schedule_groups) {
         for (auto &impl_graph : schedule_group.impl_graphs) {
           GE_ASSERT_SUCCESS(MarkInternal(impl_graph));
+        }
+      }
+    }
+  }
+  return af::SUCCESS;
+}
+
+// 同维场景：恰一位 1->2，其余轴全等
+bool IsSameDimSingleAxisTimesTwo(const std::vector<af::Expression> &input_repeats,
+                                 const std::vector<af::Expression> &output_repeats) {
+  size_t diff_count = 0UL;
+  for (size_t i = 0UL; i < output_repeats.size(); ++i) {
+    if (ascgen_utils::ExpressEq(input_repeats[i], output_repeats[i])) {
+      continue;
+    }
+    ++diff_count;
+    int64_t input_dim = 0;
+    int64_t output_dim = 0;
+    if (diff_count > 1UL || !input_repeats[i].IsConstExpr() || !input_repeats[i].GetConstValue(input_dim) ||
+        !output_repeats[i].IsConstExpr() || !output_repeats[i].GetConstValue(output_dim) ||
+        input_dim != kPreBroadcastDimSize || output_dim != kBroadcastFactor) {
+      return false;
+    }
+  }
+  return diff_count == 1UL;
+}
+
+// 插轴场景：删除输出某根常量2轴后与输入序列一致
+bool IsInsertedAxisTimesTwo(const std::vector<af::Expression> &input_repeats,
+                            const std::vector<af::Expression> &output_repeats) {
+  for (size_t erased = 0UL; erased < output_repeats.size(); ++erased) {
+    int64_t erased_dim = 0;
+    if (!output_repeats[erased].IsConstExpr() || !output_repeats[erased].GetConstValue(erased_dim) ||
+        erased_dim != kBroadcastFactor) {
+      continue;
+    }
+    bool matched = true;
+    size_t input_idx = 0UL;
+    for (size_t output_idx = 0UL; output_idx < output_repeats.size(); ++output_idx) {
+      if (output_idx == erased) {
+        continue;
+      }
+      if (input_idx >= input_repeats.size() ||
+          !ascgen_utils::ExpressEq(input_repeats[input_idx], output_repeats[output_idx])) {
+        matched = false;
+        break;
+      }
+      ++input_idx;
+    }
+    if (matched && input_idx == input_repeats.size()) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// 判定Broadcast节点是否只含一根广播轴且广播成2：
+// 同维场景恰一位 1->2；插轴(unsqueeze+expand)场景删除输出的某根常量2轴后与输入序列一致。
+// 任一环节缺失按"不满足"处理，不升级为错误。
+bool L2CacheHintManager::IsSingleBroadcastAxisTimesTwo(const af::AscNodePtr &broadcast_node) {
+  if (broadcast_node == nullptr || broadcast_node->outputs().empty()) {
+    return false;
+  }
+  const auto in_anchor = broadcast_node->GetInDataAnchor(0);
+  if (in_anchor == nullptr || in_anchor->GetPeerOutAnchor() == nullptr) {
+    return false;
+  }
+  const auto peer_out_anchor = in_anchor->GetPeerOutAnchor();
+  const auto src_node = std::dynamic_pointer_cast<af::AscNode>(peer_out_anchor->GetOwnerNode());
+  if (src_node == nullptr || src_node->outputs().empty() ||
+      static_cast<size_t>(peer_out_anchor->GetIdx()) >= src_node->outputs().size()) {
+    return false;
+  }
+  const auto &input_repeats = src_node->outputs[peer_out_anchor->GetIdx()].attr.repeats;
+  const auto &output_repeats = broadcast_node->outputs[0].attr.repeats;
+  if (input_repeats.empty() || output_repeats.empty()) {
+    return false;
+  }
+  if (input_repeats.size() == output_repeats.size()) {
+    return IsSameDimSingleAxisTimesTwo(input_repeats, output_repeats);
+  }
+  if (output_repeats.size() == input_repeats.size() + 1UL) {
+    return IsInsertedAxisTimesTwo(input_repeats, output_repeats);
+  }
+  return false;
+}
+
+// 单broadcast inline融合场景豁免：单输入单输出、图中恰一个Broadcast节点、其输入物理大小恰为
+// L2的一半且输出恰为L2大小、只有一根广播轴并广播成2。此时输入整体驻留L2(半容量)，广播复读
+// 可被L2捕获，禁用输入L2反而损失复读命中；给输入Data节点打_skip_l2_cache_hint跳过
+// SetL2CacheHint(DISABLE)代码生成，保留L2。
+af::Status L2CacheHintManager::MarkSingleBroadcastInlineSkip(const af::ComputeGraph &graph,
+                                                             ::ascir::FusedScheduledResult &fused_scheduled_result) {
+  const auto &sizes = fused_scheduled_result.gm_tensor_sizes;
+  if (sizes.input_sizes.size() != 1UL || sizes.output_sizes.size() != 1UL) {
+    GELOGD("L2Ctrl single broadcast skip rejected: input_sizes[%zu] or output_sizes[%zu] is not 1.",
+           sizes.input_sizes.size(), sizes.output_sizes.size());
+    return af::SUCCESS;
+  }
+  std::vector<af::NodePtr> analysis_nodes;
+  GE_ASSERT_SUCCESS(CollectAnalysisNodes(graph, analysis_nodes));
+  af::AscNodePtr broadcast_node = nullptr;
+  GE_ASSERT_SUCCESS(FindSingleBroadcastNode(analysis_nodes, broadcast_node));
+  if (broadcast_node == nullptr) {
+    return af::SUCCESS;
+  }
+  int64_t input_bytes = 0;
+  int64_t output_bytes = 0;
+  GE_ASSERT_SUCCESS(ValidateBroadcastInputSize(broadcast_node, input_bytes, output_bytes));
+  if (input_bytes <= 0) {
+    return af::SUCCESS;
+  }
+  int64_t l2_size = 0;
+  GE_ASSERT_SUCCESS(GetL2Size(l2_size));
+  MarkSkipHintOnDataNodes(fused_scheduled_result, input_bytes, output_bytes, l2_size);
+  return af::SUCCESS;
+}
+
+// 识别分析图层级并收集分析节点：inductor路径穿透AscBackend取融合子图，GE在线直接取本图
+af::Status L2CacheHintManager::CollectAnalysisNodes(const af::ComputeGraph &graph,
+                                                    std::vector<af::NodePtr> &analysis_nodes) {
+  bool has_outer_broadcast = false;
+  af::NodePtr asc_backend_node = nullptr;
+  for (const auto &node : graph.GetAllNodes()) {
+    if (node->GetType() == kAscBackendType) {
+      if (asc_backend_node != nullptr) {
+        GELOGD("L2Ctrl single broadcast skip rejected: multiple AscBackend nodes.");
+        return af::SUCCESS;
+      }
+      asc_backend_node = node;
+      continue;
+    }
+    if (af::ops::IsOps<af::ascir_op::Broadcast>(node)) {
+      has_outer_broadcast = true;
+      continue;
+    }
+    if (!af::ops::IsOps<af::ascir_op::Data>(node) && !af::ops::IsOps<af::ascir_op::Load>(node) &&
+        !af::ops::IsOps<af::ascir_op::Store>(node) && !af::ops::IsOps<af::ascir_op::Output>(node)) {
+      GELOGD("L2Ctrl single broadcast skip rejected: non-pure node[%s, %s].", node->GetNamePtr(), node->GetTypePtr());
+      return af::SUCCESS;
+    }
+  }
+  if (asc_backend_node != nullptr) {
+    if (has_outer_broadcast) {
+      GELOGD("L2Ctrl single broadcast skip rejected: mixed outer Broadcast with AscBackend.");
+      return af::SUCCESS;
+    }
+    const auto op_desc = asc_backend_node->GetOpDesc();
+    GE_CHECK_NOTNULL(op_desc);
+    const auto fuse_attr = op_desc->GetAttrsGroup<af::AutoFuseAttrs>();
+    if (fuse_attr == nullptr || fuse_attr->GetAscGraph() == nullptr) {
+      GELOGD("L2Ctrl single broadcast skip rejected: AscBackend node[%s] has no AscGraph.",
+             asc_backend_node->GetNamePtr());
+      return af::SUCCESS;
+    }
+    for (const auto &inner_node : fuse_attr->GetAscGraph()->GetAllNodes()) {
+      analysis_nodes.push_back(inner_node);
+    }
+    return af::SUCCESS;
+  }
+  for (const auto &outer_node : graph.GetAllNodes()) {
+    analysis_nodes.push_back(outer_node);
+  }
+  return af::SUCCESS;
+}
+
+// 节点数快速否决+白名单校验+定位唯一Broadcast节点
+af::Status L2CacheHintManager::FindSingleBroadcastNode(const std::vector<af::NodePtr> &analysis_nodes,
+                                                       af::AscNodePtr &broadcast_node) {
+  constexpr size_t kMaxPureBroadcastGraphNodes = 5UL;
+  if (analysis_nodes.size() > kMaxPureBroadcastGraphNodes) {
+    GELOGD("L2Ctrl single broadcast skip rejected: node count[%zu] exceeds %zu.", analysis_nodes.size(),
+           kMaxPureBroadcastGraphNodes);
+    return af::SUCCESS;
+  }
+  broadcast_node = nullptr;
+  for (const auto &node : analysis_nodes) {
+    if (af::ops::IsOps<af::ascir_op::Broadcast>(node)) {
+      if (broadcast_node != nullptr) {
+        GELOGD("L2Ctrl single broadcast skip rejected: multiple Broadcast nodes.");
+        return af::SUCCESS;
+      }
+      broadcast_node = std::dynamic_pointer_cast<af::AscNode>(node);
+      continue;
+    }
+    if (!af::ops::IsOps<af::ascir_op::Data>(node) && !af::ops::IsOps<af::ascir_op::Load>(node) &&
+        !af::ops::IsOps<af::ascir_op::Store>(node) && !af::ops::IsOps<af::ascir_op::Output>(node)) {
+      GELOGD("L2Ctrl single broadcast skip rejected: non-pure node[%s, %s].", node->GetNamePtr(), node->GetTypePtr());
+      return af::SUCCESS;
+    }
+  }
+  if (broadcast_node == nullptr) {
+    GELOGD("L2Ctrl single broadcast skip rejected: no Broadcast node.");
+    return af::SUCCESS;
+  }
+  if (!IsSingleBroadcastAxisTimesTwo(broadcast_node)) {
+    GELOGD("L2Ctrl single broadcast skip rejected: broadcast node[%s] is not single axis times two.",
+           broadcast_node->GetNamePtr());
+    broadcast_node = nullptr;
+    return af::SUCCESS;
+  }
+  return af::SUCCESS;
+}
+
+// 解析Broadcast输入的锚点链并溯源到Data节点；不可溯源返回nullptr
+af::AscNodePtr L2CacheHintManager::ResolveBroadcastInputSource(const af::AscNodePtr &broadcast_node) {
+  if (broadcast_node == nullptr || broadcast_node->outputs().empty()) {
+    GELOGD("L2Ctrl single broadcast skip rejected: invalid broadcast node.");
+    return nullptr;
+  }
+  const auto in_anchor = broadcast_node->GetInDataAnchor(0);
+  if (in_anchor == nullptr || in_anchor->GetPeerOutAnchor() == nullptr) {
+    GELOGD("L2Ctrl single broadcast skip rejected: broadcast node[%s] has null anchor.", broadcast_node->GetNamePtr());
+    return nullptr;
+  }
+  const auto peer_out_anchor = in_anchor->GetPeerOutAnchor();
+  const auto src_node = std::dynamic_pointer_cast<af::AscNode>(peer_out_anchor->GetOwnerNode());
+  if (src_node == nullptr || src_node->outputs().empty() ||
+      static_cast<size_t>(peer_out_anchor->GetIdx()) >= src_node->outputs().size()) {
+    GELOGD("L2Ctrl single broadcast skip rejected: invalid source node of broadcast node[%s].",
+           broadcast_node->GetNamePtr());
+    return nullptr;
+  }
+  // 溯源校验：Broadcast输入沿单输入链上溯到达Data节点（图输入）
+  af::AscNodePtr cursor = src_node;
+  while ((cursor != nullptr) && !af::ops::IsOps<af::ascir_op::Data>(cursor)) {
+    const auto &predecessors = cursor->GetInDataNodes();
+    if (predecessors.size() != 1UL) {
+      cursor = nullptr;
+      break;
+    }
+    cursor = std::dynamic_pointer_cast<af::AscNode>(predecessors.at(0UL));
+  }
+  if (cursor == nullptr) {
+    GELOGD("L2Ctrl single broadcast skip rejected: broadcast input of node[%s] does not trace to Data.",
+           broadcast_node->GetNamePtr());
+    return nullptr;
+  }
+  return src_node;
+}
+
+// 校验广播输入/输出物理大小：输入==L2/2、输出==L2
+af::Status L2CacheHintManager::ValidateBroadcastInputSize(const af::AscNodePtr &broadcast_node, int64_t &input_bytes,
+                                                          int64_t &output_bytes) {
+  input_bytes = 0;
+  output_bytes = 0;
+  const auto src_node = ResolveBroadcastInputSource(broadcast_node);
+  if (src_node == nullptr) {
+    return af::SUCCESS;
+  }
+  const auto in_anchor = broadcast_node->GetInDataAnchor(0);
+  const auto peer_out_anchor = in_anchor->GetPeerOutAnchor();
+  int64_t l2_size = 0;
+  GE_ASSERT_SUCCESS(GetL2Size(l2_size));
+  if (l2_size <= 0 || l2_size % kHalfL2Divider != 0) {
+    GELOGD("L2Ctrl single broadcast skip rejected: invalid l2_size[%lld].", l2_size);
+    return af::SUCCESS;
+  }
+  if (!CalcAttrSizeBytes(src_node->outputs[peer_out_anchor->GetIdx()].attr, input_bytes) ||
+      !CalcAttrSizeBytes(broadcast_node->outputs[0].attr, output_bytes) || input_bytes * kBroadcastFactor != l2_size ||
+      output_bytes != l2_size) {
+    GELOGD(
+        "L2Ctrl single broadcast skip rejected: size mismatch, input_bytes[%lld], output_bytes[%lld], "
+        "l2_size[%lld].",
+        input_bytes, output_bytes, l2_size);
+    input_bytes = 0;
+    output_bytes = 0;
+    return af::SUCCESS;
+  }
+  return af::SUCCESS;
+}
+
+// 给单个节点打_skip_l2_cache_hint标记（仅Data类型）
+static void MarkDataNodeIfData(const af::NodePtr &node, int64_t input_bytes, int64_t output_bytes, int64_t l2_size) {
+  if (!af::ops::IsOps<af::ascir_op::Data>(node)) {
+    return;
+  }
+  (void)af::AttrUtils::SetBool(node->GetOpDesc(), kSkipL2CacheHintAttr, true);
+  GELOGI(
+      "L2Ctrl single broadcast inline scene, keep L2 cache for input[%s], input_bytes[%lld], "
+      "output_bytes[%lld], l2_size[%lld].",
+      node->GetNamePtr(), input_bytes, output_bytes, l2_size);
+}
+
+// 给单个impl graph内所有Data节点打标记
+static af::Status MarkDataNodesInGraph(const af::AscGraph &impl_graph, int64_t input_bytes, int64_t output_bytes,
+                                       int64_t l2_size) {
+  for (const auto &node : impl_graph.GetAllNodes()) {
+    MarkDataNodeIfData(node, input_bytes, output_bytes, l2_size);
+  }
+  return af::SUCCESS;
+}
+
+// 给所有impl graph的Data节点打_skip_l2_cache_hint标记
+af::Status L2CacheHintManager::MarkSkipHintOnDataNodes(::ascir::FusedScheduledResult &fused_scheduled_result,
+                                                       int64_t input_bytes, int64_t output_bytes, int64_t l2_size) {
+  for (const auto &scheduled_results : fused_scheduled_result.node_idx_to_scheduled_results) {
+    for (const auto &scheduled_result : scheduled_results) {
+      for (const auto &schedule_group : scheduled_result.schedule_groups) {
+        for (const auto &impl_graph : schedule_group.impl_graphs) {
+          (void)MarkDataNodesInGraph(impl_graph, input_bytes, output_bytes, l2_size);
         }
       }
     }

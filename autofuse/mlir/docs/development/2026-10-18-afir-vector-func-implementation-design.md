@@ -1,5 +1,7 @@
 # 简介
 
+简体中文 | [English](./2026-10-18-afir-vector-func-implementation-design_en.md)
+
 ## 目的
 
 把 A5（reg-base）调度在 buffer 分配阶段做的二次融合——`VectorFunc`——在 MLIR 这条
@@ -599,7 +601,7 @@ CPU 模拟器上两种形态数值都对，ccec（dav-c310）上两种形态都�
      「支持」。17 格里跨 dtype 的那几格都是「先 cast 到宽的、算完再 cast 回去」，所以这一条
      不挡它们。
 
-   **`Reg::Cast` 的 `trait` 这张表**（(输入, 输出) -> `api_regbase/utils.h` 里那个具名
+   **`Reg::Cast` 的 `trait` 这张表**（（输入，输出）-> `api_regbase/utils.h` 里那个具名
    `constexpr CastTrait`）逐行抄自 legacy 的 `micro_cast_api_call.cpp:18`，常量的**定义**
    仍然只有一份（`utils_reg_base.h` 被 `ascendc.cast_reg` 声明为扩展头内联进 kernel），
    复制的只是「挑哪一个」。**表外的 dtype 对报能力不足，不回落到 `cast_trait_none`**：

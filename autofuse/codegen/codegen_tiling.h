@@ -307,7 +307,8 @@ class TilingLib {
   std::string GenPgoTilingSearchPGO(const ::ascir::FusedScheduledResult &fused_schedule_result,
                                     codegen::PgoShapeStringStream &pgo_shape_dim, const std::string &tiling,
                                     bool is_inductor_scene, const std::string &core_num) const;
-  void GenPgoTilingKeySearch(const ::ascir::FusedScheduledResult &fused_schedule_result, std::stringstream &ss) const;
+  void GenPgoTilingKeySearch(const ::ascir::FusedScheduledResult &fused_schedule_result, std::stringstream &ss,
+                             bool is_inductor_scene) const;
 
   std::string GenPgoTilingSearch(const ::ascir::FusedScheduledResult &fused_schedule_result,
                                  codegen::PgoShapeStringStream &pgo_shape_dim, const std::string &tiling) const;

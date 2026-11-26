@@ -4,9 +4,9 @@ English | [简体中文](./README.md)
 
 ## Introduction
 
-AutoFuse is an automatic fusion framework based on Ascend C. It supports automatic fusion scope identification, automatic operator code generation, Auto Tiling optimization, dynamic shape, mixed precision, and other features. In algorithm networks, a large number of Vector computations may cause substantial memory transfers between Vector computations, resulting in Memory Bound issues. AutoFuse automatically fuses multiple operators into a single operator, reducing the number of operators and memory transfers in the network. This alleviates Memory Bound issues, unleashes Ascend computing power, and improves model execution performance.
+Autofuse is an automatic fusion framework based on Ascend C. It supports automatic fusion scope identification, automatic operator code generation, Auto Tiling optimization, dynamic shape, mixed precision, and other features. In algorithm networks, a large number of Vector computations may cause substantial memory transfers between Vector computations, resulting in Memory Bound issues. Autofuse automatically fuses multiple operators into a single operator, reducing the number of operators and memory transfers in the network. This alleviates Memory Bound issues, unleashes Ascend computing power, and improves model execution performance.
 
-For details, refer to [AutoFuse Automatic Fusion](https://www.hiascend.com/document/detail/zh/canncommercial/850/graph/autofuse).
+For details, refer to [Autofuse Automatic Fusion](https://www.hiascend.com/document/detail/zh/canncommercial/850/graph/autofuse).
 
 ## Autofuse Directory Structure
 
@@ -39,9 +39,9 @@ Refer to [Build Instructions](../docs/en/build.md).
 
 ## On-Device Verification Guide
 
-Users who want to experience the functionality and performance of AutoFuse on Ascend devices can first refer to [Quick Installation](../docs/en/quick_install.md) to prepare the environment. Both developers without Ascend devices and developers who already have Ascend devices can quickly set up the environment. On this basis, follow the previous [Build and Installation](../docs/en/build.md) instructions to incrementally install the CANN package compiled from the graph-autofusion repository.
+Users who want to experience the functionality and performance of Autofuse on Ascend devices can first refer to [Quick Installation](../docs/en/quick_install.md) to prepare the environment. Both developers without Ascend devices and developers who already have Ascend devices can quickly set up the environment. On this basis, follow the previous [Build and Installation](../docs/en/build.md) instructions to incrementally install the CANN package compiled from the graph-autofusion repository.
 
-AutoFuse currently provides sample use cases for both PyTorch and TensorFlow, with support for additional frameworks planned in the future. Refer to the corresponding documentation based on your actual use case to set up the environment and run the samples:
+Autofuse currently provides sample use cases for both PyTorch and TensorFlow, with support for additional frameworks planned in the future. Refer to the corresponding documentation based on your actual use case to set up the environment and run the samples:
 
 - [PyTorch Scenario Use Cases](./examples/pytorch/README_en.md)
 - [TensorFlow Scenario Use Cases](./examples/tensorflow/README_en.md)
@@ -58,7 +58,7 @@ pip3 install pyyaml
 pip3 install setuptools
 ```
 
-To use a `torch_npu Daily` environment that matches the AutoFuse AscendC backend, install `torch_npu` with the repository's [PyTorch environment setup script](../scripts/env_install/pytorch/setup_torch_npu_daily.sh). Installing `torch_npu` directly from PyPI is not recommended.
+To use a `torch_npu Daily` environment that matches the Autofuse AscendC backend, install `torch_npu` with the repository's [PyTorch environment setup script](../scripts/env_install/pytorch/setup_torch_npu_daily.sh). Installing `torch_npu` directly from PyPI is not recommended.
 
 Run the following command from the Graph-AutoFusion repository root:
 
@@ -167,13 +167,13 @@ It significantly reduces launch performance. Do not use it in production deploym
 
 #### Optional: AUTOFUSE_DFX_FLAGS
 
-This AutoFuse diagnostic environment variable dumps the internal fusion graph for each automatically fused operator. You can open the `.pbtxt` files with netron.app to inspect them.
+This Autofuse diagnostic environment variable dumps the internal fusion graph for each automatically fused operator. You can open the `.pbtxt` files with netron.app to inspect them.
 
 ```bash
 export AUTOFUSE_DFX_FLAGS="--codegen_compile_debug=true;--debug_dir=/path-to-dump/"
 ```
 
-The AutoFuse backend writes each fused operator's graph to the specified dump directory.
+The Autofuse backend writes each fused operator's graph to the specified dump directory.
 
 Compilation performance diagnostics are controlled by `codegen_compile_debug=true`. For example:
 
@@ -211,9 +211,9 @@ Not all operators in a model can be fused. Operators that are not lowered at the
 
 For numerical accuracy analysis, see the [Accuracy Debugging Tool Guide](https://hiascend.com/document/redirect/CannCommunityToolAccucacy).
 
-### Enable AutoFuse in Larger Networks
+### Enable Autofuse in Larger Networks
 
-You do not need to import `inductor_npu_ext` separately to enable AutoFuse in a network. Specify the AscendC backend in `torch.compile`:
+You do not need to import `inductor_npu_ext` separately to enable Autofuse in a network. Specify the AscendC backend in `torch.compile`:
 
 ```python
 model = torch.compile(

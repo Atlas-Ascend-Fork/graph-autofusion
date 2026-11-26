@@ -58,7 +58,7 @@ af::Status ApplyGraphPassMixed(af::AscGraph &graph, const std::vector<af::AscNod
 // 多 gather 水平融合候选生成（并存竞标制）：全部形态在调度期并存生成、进同一竞争
 // 池交 CalcScore 竞标——L1/L4 共模板候选（SIMD×2 + SIMT×1，SIMT 内部按寄存器压力
 // 模型定型 L2/L3/L4）+ L5 混模板候选（异构选择时产出，同构跳过）+ L6 SK 分段桥接
-// 候选（打分恒 0 的终态兜底，仅当其余候选均被否决或垫底时胜出）。统一打分为成员偏好
+// 候选（打分为 0，可参与 ATT 性能比较）。统一打分为成员偏好
 // 满足模型（GenerateGroupScoreFunc），同一套组聚合输入对全部形态可比；tiling 期
 // 资源失败的兜底由 SK 在场结构性成立（单 gather 四候选并存机制的组路径推广）。
 af::Status GenerateGroupCandidates(ascir::HintGraph &graph, const IndirectLoadGroup &group,

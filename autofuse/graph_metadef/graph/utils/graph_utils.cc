@@ -2900,7 +2900,7 @@ GE_FUNC_DEV_VISIBILITY GE_FUNC_HOST_VISIBILITY graphStatus GraphUtils::RelinkGra
 
   auto it = all_nodes.find(node->GetName() + suffix);
   if (it == all_nodes.end()) {
-    REPORT_INNER_ERR_MSG("E18888", "all_nodes not contain node:%s.", node->GetName().c_str());
+    REPORT_INNER_ERR_MSG("E18888", "all_nodes does not contain node:%s.", node->GetName().c_str());
     GELOGE(af::GRAPH_FAILED, "[Check][Param] node[%s] not found", node->GetName().c_str());
     return af::GRAPH_FAILED;
   }

@@ -1,5 +1,7 @@
 # MLIR Plan Pinning
 
+English | [简体中文](./2026-10-03-mlir-plan-pinning-switch-design.md)
+
 > English companion summary, not a full translation. The [Chinese source](2026-10-03-mlir-plan-pinning-switch-design.md)
 > retains the detailed design, tables, commands, dated evidence and open decisions.
 > Historical results below are source records, not newly executed validation.

@@ -3,6 +3,7 @@
 归档 `load`、`nddma` 等搬入路径模型。
 
 - [NDDMA 建模与 ad-hoc 工具](../../../../tools/modeling/v35/nddma/README.md)：Round1–5 数据采集、拟合、预测和验证。
+- [Load（GM2UB）模型归档](load/README.md)：A5 基础模型采集设计、实现参数及后续标定分支。
 
 ## 待补充
 

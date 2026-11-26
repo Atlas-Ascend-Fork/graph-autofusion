@@ -1,5 +1,7 @@
 # Transpose Generalization Test Design (P1–P5, Legacy-Scenario Alignment)
 
+English | [简体中文](./2026-10-29-afir-transpose-generalization-test-design.md)
+
 > English companion summary, not a full translation. The [Chinese source](2026-10-29-afir-transpose-generalization-test-design.md)
 > retains the detailed design, tables, commands, dated evidence and open decisions.
 > Historical results below are source records, not newly executed validation.

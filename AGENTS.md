@@ -4,7 +4,7 @@
 
 ## 项目概述
 
-Graph-autofusion 是面向昇腾（Ascend）芯片的融合加速组件集合，当前包含 SuperKernel 和 Autofuse 两个主要组件。项目通过 SuperKernel、自动融合、ASCIR/AscendC codegen 等能力减少任务调度和数据搬运开销。
+Graph-autofusion 是面向昇腾（Ascend）芯片的融合加速组件集合，当前包含 SuperKernel、Autofuse、Multistream（多流规划）和 model_specialization（模型特化）等主要组件。项目通过 SuperKernel、自动融合、ASCIR/AscendC codegen 等能力减少任务调度和数据搬运开销。
 
 ### 关键目录
 
@@ -12,6 +12,8 @@ Graph-autofusion 是面向昇腾（Ascend）芯片的融合加速组件集合，
 |------|------|
 | `super_kernel/` | SuperKernel 组件源码、Python/C++ 测试、设备端验证用例 |
 | `autofuse/` | Autofuse 自动融合组件源码、优化 pass、codegen、测试框架 |
+| `multistream/` | Multistream 纯 Python 多流规划组件 |
+| `model_specialization/` | 模型特化组件（特化 kernel、源码与测试） |
 | `cmake/` | CMake 公共脚本、依赖和打包逻辑 |
 | `scripts/` | 构建、测试、OAT 检查等脚本 |
 | `docs/` | 构建、设计、规范和组件说明文档 |

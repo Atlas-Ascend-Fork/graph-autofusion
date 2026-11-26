@@ -1,5 +1,7 @@
 # MLIR 流水线同步场景补全设计
 
+简体中文 | [English](./2026-09-28-afir-pipeline-sync-legacy-completion-design_en.md)
+
 - 日期：2026-09-28（2026-09-29 随 origin/af-mlir `84a9a00a` 重新核对全部代码锚点）
 - 状态：已实现（2026-10-09，实现记录见文末；lit 全量通过，UT/E2E 见验证记录）
 - 组件：Autofuse / MLIR（`autofuse/mlir/`）
@@ -491,7 +493,7 @@ python3 autofuse/mlir/test/e2e/npu/load_store_direct.py     # 新增：S1 纯搬
    新增负向夹具 `afir_pipeline_sync_workspace_readback_across_nests.mlir`。
 9. **S4 收敛为每 pipe 末读者 + 成员视图归并（低）**：初版对全部前序读者逐个建边
    （方向安全的超集），与本设计「按末读者 pipe 插入」不符且放大事件槽冲突面。改为
-   按 (存储, 读者 pipe) 记末读者、写者只与各 pipe 末读者建边；存储归并键停在
+   按（存储，读者 pipe）记末读者、写者只与各 pipe 末读者建边；存储归并键停在
    **成员字节视图（SubIndex）粒度**——物化规范链 `ReinterpretCast(SubIndex(
    TBufGetTensor(tbuf), offset))` 追过 ReinterpretCast 即停，同成员命中、同 TBuf 不同
    offset 的不相交成员（含同 buffer_id 不同 reuseId 的复用组）不误并（本就无需 WAR

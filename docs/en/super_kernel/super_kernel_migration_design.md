@@ -1,5 +1,7 @@
 # SuperKernel Migration Design
 
+English | [简体中文](../../zh/super_kernel/super_kernel_migration_design.md)
+
 ## Overview & Purpose
 
 This document analyzes the SuperKernel and AscendC decoupling solution, migrating SuperKernel implementation from the current AscendC repository and package to Graph-autofusion.

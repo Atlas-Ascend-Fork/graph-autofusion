@@ -1,5 +1,7 @@
 # Inductor 生产入口接入 MLIR Codegen 与 bisheng 编译执行链路设计
 
+简体中文 | [English](./2026-08-26-inductor-mlir-codegen-launch-pipeline-design_en.md)
+
 - 状态：已实现（完整 NPU/E2E 验收按第 10 节执行）
 - 作者：niuyuhu
 - 关联分支：af-mlir
@@ -461,7 +463,7 @@ CodegenResult { tiling_data = ⑥ 聚合 PyStructType 经 `mlir::afir::emitTilin
 
 ### 7.2 关键技术/算法
 
-- 无新增算法。核心技术点是"`AggregateArgumentLayout` → AutofuseLaunch 形参列表"的确定性映射：按 `KernelArgumentIdentity.kind` 分组（`Input`/`Output`/`Workspace`），组内按 `index` 升序排列，`tiling_arg_index` 直接定位末位 tiling 结构体形参，不需要字符串前缀解析（`getArgumentKey`/`autofuse.argument_name` 方案已随 `0e9f0486` 废弃，见 1.4 术语表）。该映射是 O(实参数量) 的一次分组 + 排序，不存在遍历顺序不确定性风险（呼应编码红线 Graph-autofusion 规则 5）。
+- 无新增算法。核心技术点是“`AggregateArgumentLayout` → AutofuseLaunch 形参列表”的确定性映射：按 `KernelArgumentIdentity.kind` 分组（`Input`/`Output`/`Workspace`），组内按 `index` 升序排列，`tiling_arg_index` 直接定位末位 tiling 结构体形参，不需要字符串前缀解析（`getArgumentKey`/`autofuse.argument_name` 方案已随 `0e9f0486` 废弃，见 1.4 术语表）。该映射是 O(实参数量) 的一次分组 + 排序，不存在遍历顺序不确定性风险（呼应编码红线 Graph-autofusion 规则 5）。
 
 ### 7.3 流程设计
 

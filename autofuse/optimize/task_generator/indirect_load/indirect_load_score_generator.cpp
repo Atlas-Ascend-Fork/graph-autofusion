@@ -318,7 +318,7 @@ std::string EmitUnifiedScoreFunc(const GroupCandidateForm form, const std::vecto
     }
   }
   // 不可物化成员从分子分母同时剔除（N = 可评估成员数，非整候选回退——避免
-  // 方向性偏差）；全部不可评估（N==0）才恒 0 分由候选序破平局。注意：结构代价项
+  // 方向性偏差）；全部不可评估（N==0）时统一给 0 分，由 ATT 比较性能估值。注意：结构代价项
   // （SIMT L4 相位数 / mixed 少数派）按**全组物理成员数** stats.member_count 判定，
   // 不随剔除缩减——L4 的 N+1 相位/barrier ×N 是物理代价（与打分可评估性无关），
   // mixed 少数派是生成期模板选择分裂（同样是物理事实）；打分侧（SIMD UB）的
@@ -343,7 +343,7 @@ std::string EmitUnifiedScoreFunc(const GroupCandidateForm form, const std::vecto
         all_const && member.slice_bytes.GetConstValue(slice_bytes) && member.lookup_extent.GetConstValue(lookup_extent);
   }
   if (materialized.empty()) {
-    // N==0：双方 0 分，由候选序破平局。
+    // N==0：双方 0 分，由 ATT 比较性能估值。
     GELOGI("[ScoreFunc] unified graph[%s] members=%zu evaluable=0 runtime=0", candidate_graph.GetName().c_str(),
            members.size());
     return "int32_t CalcScore(const AutofuseTilingData &tiling_data) {\n"
@@ -573,7 +573,7 @@ std::string EmitStructuralFallbackScoreFunc(const GroupCandidateForm form, const
 // shape 无关）：SIMD → AND(can_use_simd_embedding)；SIMT/MIXED → AND(embedding_like)。
 // can_use_simd_embedding ⟹ embedding_like，探测保证 SIMD 侧偏好选择仅发生于
 // can_use_simd_embedding 成员——满足率 N/N 的 2 分仅授予 embedding 性能分裂；dense 组
-// 无偏好依据，0 分按候选序兜底。结构合法性由探测逐成员校验，此处不二次门控。
+// 无偏好依据，0 分参与 ATT 性能比较。结构合法性由探测逐成员校验，此处不二次门控。
 std::string GenerateGroupScoreFunc(const GroupCandidateForm form, const TemplateCase &template_case,
                                    const GroupAccessStats &stats, const af::AscNodePtr &candidate_node,
                                    const af::AscGraph &candidate_graph, const bool simt_unfused,

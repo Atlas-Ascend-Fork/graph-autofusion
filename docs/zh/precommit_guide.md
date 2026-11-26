@@ -19,7 +19,7 @@
 
 ### 3.1 pre-commit安装步骤
 
-步骤 1: 安装 pre-commit 框架
+步骤 1：安装 pre-commit 框架
 
 ```bash
 # 使用 pip（推荐）
@@ -32,7 +32,7 @@ pre-commit --version
 
 **Windows 用户**： 确保已安装 Python 和 pip。
 
-步骤 2: 进入项目目录
+步骤 2：进入项目目录
 
 ```bash
 cd /path/to/your/project
@@ -41,14 +41,14 @@ cd /path/to/your/project
 cd d:\complianceRepo\CANN
 ```
 
-步骤 3: 安装 Git Hooks
+步骤 3：安装 Git Hooks
 
 ```bash
 # 在项目根目录运行
 pre-commit install
 ```
 
-步骤 4: 验证安装（可选）
+步骤 4：验证安装（可选）
 
 ```bash
 # 测试 hook（不会真正提交）
@@ -482,7 +482,7 @@ pre-commit run oat-check
 
 **解决方案**：
 
-**方法 1: 手动打包**
+**方法 1：手动打包**
 ```bash
 cd ../tools_oat
 mvn clean package -DskipTests
@@ -490,7 +490,7 @@ mvn clean package -DskipTests
 # 查看输出，应该看到 BUILD SUCCESS
 ```
 
-**方法 2: 配置阿里云镜像（国内网络）**
+**方法 2：配置阿里云镜像（国内网络）**
 ```bash
 mkdir -p ~/.m2
 cat > ~/.m2/settings.xml <<'EOF'
@@ -511,7 +511,7 @@ cd ../tools_oat
 mvn clean package -DskipTests
 ```
 
-**方法 3: 从团队获取 JAR**
+**方法 3：从团队获取 JAR**
 ```bash
 # 如果团队已有编译好的 JAR，直接复制
 # 将 JAR 文件复制到 ../tools_oat/target/ 目录

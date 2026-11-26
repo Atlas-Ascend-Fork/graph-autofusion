@@ -1,5 +1,7 @@
 # AFIR Broadcast Integration
 
+English | [简体中文](./2026-09-23-afir-broadcast-design.md)
+
 > English companion summary, not a full translation. The [Chinese source](2026-09-23-afir-broadcast-design.md)
 > retains the detailed design, tables, commands, dated evidence and open decisions.
 > Historical results below are source records, not newly executed validation.

@@ -1,0 +1,171 @@
+{
+  "platform": "A3",
+  "model_family": "v1",
+  "applicable_implementation": "v1",
+  "api": "LoadApi",
+  "direction": "GM(src) -> UB(dst)",
+  "unit": {
+    "cycle": "cycle",
+    "bytes": "Byte",
+    "core_count": "block_dim",
+    "stride": "DataCopy stride count"
+  },
+  "source": {
+    "implementation": [
+      "autofuse/att/gen_model_info/api_perf_register/v1/perf_param_v1.cpp",
+      "autofuse/att/gen_model_info/api_perf_register/v1/ascendc_api_perf_v1.cpp",
+      "autofuse/att/gen_model_info/api_perf_register/utils/api_perf_utils.cpp"
+    ],
+    "collection_repo": "mte2_mte3_perf_analysis:",
+    "data": [
+      "mte2_mte3_perf_analysis:A3/mte2_gm2ub_continuous/profiling_data/",
+      "mte2_mte3_perf_analysis:A3/mte2_gm2ub_uncontinuous/profiling_data/",
+      "mte2_mte3_perf_analysis:A3/scripts/"
+    ],
+    "measurement_note": "A3 CSV contains aiv_mte2_cycles but no aiv_mte2_ratio column"
+  },
+  "formula": {
+    "load_store": "D / (a + b / block_dim) + h + hl * (256 - (h + 512 / (a + b / block_dim)))",
+    "stride": "k * block_count * (gm_stride % 256); block_count is the product of input_dims excluding the last axis",
+    "load_ub_stride": "load_store with D replaced by (D / blocklen_B) * 512; no additional stride cost",
+    "load_perf": "Load + LoadStride when D >= 25000B; otherwise LoadUbStride when blocklen_B < 32 and ub_stride > 0; otherwise LoadSmallBlk + LoadStride",
+    "pipe_head": "32.72 * block_dim + 1575.03 when maximum Load input data size >= 25000B; otherwise 15.89 * block_dim + 882.09",
+    "selection": "D is total input data size in bytes; dynamic conditions use conditional expressions; no SingleCore entries"
+  },
+  "parameters": {
+    "Load": {
+      "model_type": "LoadStoreFunc",
+      "dtype_parameters": {
+        "int64toint64": {"a": 9.9074, "b": 15.896, "h": 27.01, "hl": 0, "data_type_size": 8},
+        "float16tofloat16": {"a": 9.9074, "b": 15.896, "h": 27.01, "hl": 0, "data_type_size": 2},
+        "float32tofloat32": {"a": 9.9074, "b": 15.896, "h": 27.01, "hl": 0, "data_type_size": 4},
+        "uint8touint8": {"a": 9.9074, "b": 15.896, "h": 27.01, "hl": 0, "data_type_size": 1},
+        "bfloat16tobfloat16": {"a": 9.9074, "b": 15.896, "h": 27.01, "hl": 0, "data_type_size": 2}
+      }
+    },
+    "LoadSmallBlk": {
+      "model_type": "LoadStoreFunc",
+      "dtype_parameters": {
+        "int64toint64": {"a": 7.9052, "b": 7.31, "h": 27.01, "hl": 0, "data_type_size": 8},
+        "float16tofloat16": {"a": 7.9052, "b": 7.31, "h": 27.01, "hl": 0, "data_type_size": 2},
+        "float32tofloat32": {"a": 7.9052, "b": 7.31, "h": 27.01, "hl": 0, "data_type_size": 4},
+        "uint8touint8": {"a": 7.9052, "b": 7.31, "h": 27.01, "hl": 0, "data_type_size": 1},
+        "bfloat16tobfloat16": {"a": 7.9052, "b": 7.31, "h": 27.01, "hl": 0, "data_type_size": 2}
+      }
+    },
+    "LoadUbStride": {
+      "model_type": "LoadUbStride",
+      "dtype_parameters": {
+        "int64toint64": {"a": 7.9052, "b": 7.31, "h": 27.01, "hl": 0, "data_type_size": 8},
+        "float16tofloat16": {"a": 7.9052, "b": 7.31, "h": 27.01, "hl": 0, "data_type_size": 2},
+        "float32tofloat32": {"a": 7.9052, "b": 7.31, "h": 27.01, "hl": 0, "data_type_size": 4},
+        "uint8touint8": {"a": 7.9052, "b": 7.31, "h": 27.01, "hl": 0, "data_type_size": 1},
+        "bfloat16tobfloat16": {"a": 7.9052, "b": 7.31, "h": 27.01, "hl": 0, "data_type_size": 2}
+      }
+    },
+    "LoadStride": {
+      "model_type": "LoadStoreStrideFunc",
+      "dtype_parameters": {
+        "int64toint64": {"k": 0.07},
+        "float16tofloat16": {"k": 0.07},
+        "float32tofloat32": {"k": 0.07},
+        "uint8touint8": {"k": 0.07},
+        "bfloat16tobfloat16": {"k": 0.07}
+      }
+    },
+    "pipe_head": {
+      "threshold_B": 25000,
+      "normal_k": 32.72,
+      "normal_b": 1575.03,
+      "small_k": 15.89,
+      "small_b": 882.09,
+      "selection": "maximum Load input data size in bytes; normal when >= threshold_B; cost = k * block_dim + b"
+    }
+  },
+  "v35_snapshot": {
+    "applicable_implementation": "v35 only",
+    "parameter_snapshot": "Original archive cites v35 implementation parameters; not the current V1 parameter table",
+    "source": {
+      "implementation": [
+        "autofuse/v35/att/api_perf_register/perf_param_v2.cpp",
+        "autofuse/v35/att/api_perf_register/ascir_api_perf_v2.cpp",
+        "autofuse/att/gen_model_info/api_perf_register/utils/api_perf_utils.cpp",
+        "autofuse/v35/att/api_perf_register/ascendc_api_perf/data_move_api_perf_v2.cpp"
+      ]
+    },
+    "formula": {
+      "load_store": "D / (a + b / block_dim) + h + hl * (256 - (h + 512 / (a + b / block_dim)))",
+      "stride": "k * block_count * min(gm_stride * data_type_size, u)",
+      "load_perf": "selected_load_store + selected_stride",
+      "pipe_head": "1174.3 when maximum Load blocklen >= 256B; otherwise 775.0",
+      "selection": "blocklen > 256B selects Load; otherwise LoadSmallBlk; block_dim == 1 selects the corresponding SingleCore entry"
+    },
+    "parameters": {
+      "Load": {
+        "model_type": "LoadStoreFunc",
+        "dtype_parameters": {
+          "int64toint64": {"a": 11.8292, "b": 6.6155, "h": 160, "hl": 0, "data_type_size": 8},
+          "float16tofloat16": {"a": 11.8292, "b": 6.6155, "h": 160, "hl": 0, "data_type_size": 2},
+          "float32tofloat32": {"a": 11.8292, "b": 6.6155, "h": 160, "hl": 0, "data_type_size": 4},
+          "uint8touint8": {"a": 11.8292, "b": 6.6155, "h": 160, "hl": 0, "data_type_size": 1},
+          "bfloat16tobfloat16": {"a": 11.8292, "b": 6.6155, "h": 160, "hl": 0, "data_type_size": 2}
+        }
+      },
+      "LoadSmallBlk": {
+        "model_type": "LoadStoreFunc",
+        "dtype_parameters": {
+          "int64toint64": {"a": 13.1355, "b": 6.4088, "h": 160, "hl": 0, "data_type_size": 8},
+          "float16tofloat16": {"a": 13.1355, "b": 6.4088, "h": 160, "hl": 0, "data_type_size": 2},
+          "float32tofloat32": {"a": 13.1355, "b": 6.4088, "h": 160, "hl": 0, "data_type_size": 4},
+          "uint8touint8": {"a": 13.1355, "b": 6.4088, "h": 160, "hl": 0, "data_type_size": 1},
+          "bfloat16tobfloat16": {"a": 13.1355, "b": 6.4088, "h": 160, "hl": 0, "data_type_size": 2}
+        }
+      },
+      "LoadSingleCore": {
+        "model_type": "LoadStoreFunc",
+        "dtype_parameters": {
+          "int64toint64": {"a": 23.052, "b": 0, "h": 160, "hl": 0, "data_type_size": 8},
+          "float16tofloat16": {"a": 23.052, "b": 0, "h": 160, "hl": 0, "data_type_size": 2},
+          "float32tofloat32": {"a": 23.052, "b": 0, "h": 160, "hl": 0, "data_type_size": 4},
+          "uint8touint8": {"a": 23.052, "b": 0, "h": 160, "hl": 0, "data_type_size": 1},
+          "bfloat16tobfloat16": {"a": 23.052, "b": 0, "h": 160, "hl": 0, "data_type_size": 2}
+        }
+      },
+      "LoadSmallBlkSingleCore": {
+        "model_type": "LoadStoreFunc",
+        "dtype_parameters": {
+          "int64toint64": {"a": 13.1355, "b": 6.4088, "h": 160, "hl": 0, "data_type_size": 8},
+          "float16tofloat16": {"a": 13.1355, "b": 6.4088, "h": 160, "hl": 0, "data_type_size": 2},
+          "float32tofloat32": {"a": 13.1355, "b": 6.4088, "h": 160, "hl": 0, "data_type_size": 4},
+          "uint8touint8": {"a": 13.1355, "b": 6.4088, "h": 160, "hl": 0, "data_type_size": 1},
+          "bfloat16tobfloat16": {"a": 13.1355, "b": 6.4088, "h": 160, "hl": 0, "data_type_size": 2}
+        }
+      },
+      "LoadStride": {
+        "model_type": "LoadStoreStrideV2Func",
+        "k": 0.005,
+        "u": 4096.0,
+        "penalty_coeff": 0.0,
+        "applies_to": "all supported dtype pairs"
+      },
+      "LoadStrideSingleCore": {
+        "model_type": "LoadStoreStrideV2Func",
+        "k": 0.005,
+        "u": 4096.0,
+        "penalty_coeff": 0.0,
+        "applies_to": "all supported dtype pairs"
+      },
+      "pipe_head": {
+        "threshold_B": 256,
+        "normal_cost": 1174.3,
+        "small_cost": 775.0,
+        "selection": "maximum Load blocklen"
+      }
+    }
+  },
+  "coverage": {
+    "core_num": "1-48 in A3 evidence",
+    "shape_B": "32-196608 in A3 evidence",
+    "stages": ["continuous", "headcost", "uncontinuous"]
+  }
+}

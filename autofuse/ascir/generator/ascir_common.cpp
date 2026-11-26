@@ -234,7 +234,7 @@ Status ValidateShapeConsistencyWithOutput(const AscNode &node, size_t output_id,
 
 Status ValidateShapeConsistencyWithSingleOutput(const AscNode &node, const BroadcastCapability &broadcast_capability) {
   AscNodeOutputs node_outputs = node.outputs;
-  GE_ASSERT_TRUE(node_outputs().size() == 1U, "Node %s[%s]: output tensor size is not equal with 1", node.GetTypePtr(),
+  GE_ASSERT_TRUE(node_outputs().size() == 1U, "Node %s[%s]: output tensor size is not equal to 1", node.GetTypePtr(),
                  node.GetNamePtr());
   return ValidateShapeConsistencyWithOutput(node, 0U, broadcast_capability);
 }

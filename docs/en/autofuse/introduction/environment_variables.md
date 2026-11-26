@@ -72,6 +72,7 @@ export AUTOFUSE_FLAGS="--enable_autofuse=true;--autofuse_enable_pass=reduce,conc
 | `--autofuse_pgo_step_max` | GE path | Sets the PGO pruning step. Accepts a power of 2 from `2` to `1024`; default: `16`. effective only when `--autofuse_pgo_algo=pruning`; invalid values fall back to the default. |
 | `--autofuse_pgo_topn` | GE path | Sets the number of candidates for static PGO tuning. Accepts `0` or a positive integer; default: `5`; `0` selects all candidates. requires `--autofuse_enable_pgo=true`; invalid values fall back to the default. |
 | `--skip_node_names_cfg` | GE path | Specifies operator names or types to skip during fusion. Accepts a valid `.ini` configuration path. entries must be placed one per line under `[ByNodeName]` or `[ByNodeType]`; invalid content makes this option ineffective. |
+| `--mlir_codegen_config` | GE path, Inductor path | Selects the MLIR orchestration path for fused-op code generation. Accepts `none` (default: the MLIR path is disabled and existing code generation is used), `mlir` (fail outright when MLIR generation fails), or `fallback` (MLIR first; on failure, fall back to existing code generation and record a warning log); an invalid value causes fused-op code generation to fail directly. Cube fusion is not covered by this path. This option is experimental and its behavior is subject to the implementation of the corresponding version. |
 
 Example:
 

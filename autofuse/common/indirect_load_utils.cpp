@@ -897,9 +897,12 @@ af::Status CollectSimtLoweringBackwardNodes(const af::AscNodePtr &root, const af
     // Nddma 无论是否带 SIMT direct-GM 角色，本质都是 GM 搬运节点，标量求值器不能展开其内部：
     // 复合 Norm 普通调度侧输入经 NddmaTemplate 合并 Load→Broadcast 后即为无角色的队列搬运
     // Nddma，越过它会走到 Data 图输入端子。Data 按定义无生产者，同样是合法的 walk 终止边界。
+    // IndexExpr 是无输入的运行期标量表达式（动态 shape 归一化链的除数等），值由 ir_attr.expr
+    // 在求值器内直接求值，与 Scalar 同属 walk 终止边界。
     if (IsSimtDirectGmBoundary(current) || af::ops::IsOps<af::ascir_op::Nddma>(current) ||
         af::ops::IsOps<af::ascir_op::Data>(current) || af::ops::IsOps<af::ascir_op::Scalar>(current) ||
-        af::ops::IsOps<af::ascir_op::ScalarData>(current) || af::ops::IsOps<af::ascir_op::Arange>(current)) {
+        af::ops::IsOps<af::ascir_op::ScalarData>(current) || af::ops::IsOps<af::ascir_op::Arange>(current) ||
+        af::ops::IsOps<af::ascir_op::IndexExpr>(current)) {
       continue;
     }
     GE_ASSERT_TRUE(current->inputs.Size() > 0UL, "IndirectLoad SIMT node[%s] has no input.", current->GetNamePtr());
@@ -1025,9 +1028,11 @@ af::Status CollectSimtIndexChainStoreBuilds(const NodePath &graph_nodes, const a
 }
 
 af::Status ValidateSimtLoweringNode(const af::AscNodePtr &node) {
+  // IndexExpr 无输入，值来自 ir_attr.expr 的运行期标量求值，无需 scalar evaluator 角色展开。
   if (IsSimtDirectGmBoundary(node) || af::ops::IsOps<af::ascir_op::Scalar>(node) ||
       af::ops::IsOps<af::ascir_op::ScalarData>(node) || af::ops::IsOps<af::ascir_op::Arange>(node) ||
-      af::ops::IsOps<af::ascir_op::Store>(node) || af::ops::IsOps<af::ascir_op::Transpose>(node)) {
+      af::ops::IsOps<af::ascir_op::IndexExpr>(node) || af::ops::IsOps<af::ascir_op::Store>(node) ||
+      af::ops::IsOps<af::ascir_op::Transpose>(node)) {
     return af::SUCCESS;
   }
   const auto role = GetTemplateRole(node);
