@@ -198,7 +198,7 @@ Status BinaryApiCall::BrcInlineGenerate(const TPipe &tpipe, const std::vector<as
      << tpipe.tiler.TensorVectorizedOffset(current_axis, x1) << "], " << x2 << "["
      << tpipe.tiler.TensorVectorizedOffset(current_axis, x2) << "], " << tpipe.tiler.ActualSize(meger_shape[0]) << ", "
      << tpipe.tiler.ActualSize(meger_shape[1]) << ", " << static_cast<int>(input_idx_2_brc_inline[0] == 0) << ", "
-     << static_cast<int>(input_idx_2_brc_inline[1] == 0) << ", " << tpipe.tiler.ActualSize(v_strides) << ", &"
+     << static_cast<int>(input_idx_2_brc_inline[1] == 0) << ", " << tpipe.tiler.Size(v_strides) << ", &"
      << GetAscendApiName(this->api_name_) << "<" << dtype_name << ", false>);" << std::endl;
   result = ss.str();
   return af::SUCCESS;
