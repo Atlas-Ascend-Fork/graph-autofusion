@@ -292,6 +292,25 @@ class AscendC_ScalarBinaryExtendOpBase<string mnemonic, string apiName, list<str
 def AscendC_SubsOp : AscendC_ScalarBinaryExtendOpBase<"subs", "Subs", ["scalar_sub.h"]>;
 def AscendC_DivsOp : AscendC_ScalarBinaryExtendOpBase<"divs", "Divs", ["scalar_div.h"]>;
 
+// ui16 / ui32 的标量形态不走连续 LocalTensor 接口（三张 SupportType 表都不收），走 fork 的 reg 侧
+// 包装 `AddsExtend` / `MaxsExtend` / `MinsExtend`（`api_regbase/scalar_add.h` 等三个头，登记键是
+// `*_reg_base.h`）：包装里是一段 `MicroAPI::` 循环，接法与 `FloorDivExtend` 相同。三个算子都可
+// 交换、都不收 tmp buffer，所以实参就是 `(dst, src, scalar, count)`，没有 `IS_SCALAR_LATTER` 那一位。
+class AscendC_ScalarExtendRegBaseOpBase<string mnemonic, string apiName, string header>
+    : VecScalarOp<mnemonic, apiName, [ApiExtensionOpInterface]> {
+  let description = "Call the Autofuse " # apiName # " reg-based scalar wrapper (" # header # ")";
+  let arguments = (ins AscendC_LocalTensor:$dst, AscendC_LocalTensor:$src, AnyType:$scalar,
+                       AnyType:$calCount);
+  let extraClassDeclaration =
+      extraClassDeclarationBase # ApiExtensionHeader<[header]>.decl # SrcTensorsFromSrc<>.decl;
+}
+def AscendC_AddsExtendRegBaseOp
+    : AscendC_ScalarExtendRegBaseOpBase<"adds_extend_reg_base", "AddsExtend", "scalar_add_reg_base.h">;
+def AscendC_MaxsExtendRegBaseOp
+    : AscendC_ScalarExtendRegBaseOpBase<"maxs_extend_reg_base", "MaxsExtend", "scalar_maximum_reg_base.h">;
+def AscendC_MinsExtendRegBaseOp
+    : AscendC_ScalarExtendRegBaseOpBase<"mins_extend_reg_base", "MinsExtend", "scalar_minimum_reg_base.h">;
+
 // `TrueDivExtends` 与上面两个差一个模板实参：它的 `dst` 与 `src` 可以是两种 dtype
 // （i32 输入 → f32 输出），两个都写在模板位上，所以 emitter 那边是另一条 body。
 // 两个扩展头与次序的理由见下面 `AscendC_TrueDivExtendOp`——标量这条正是那条注释里说

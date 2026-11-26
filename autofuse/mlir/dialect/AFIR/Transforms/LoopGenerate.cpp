@@ -172,10 +172,11 @@ class FunctionLoopGenerator {
   // ——MLIR 的 dominance 校验当场拒收（`operand #N does not dominate this use`）。
   //
   // 种子是「操作数的定义方不是调度出去的 Op」，不是「操作数是 `memref.alloc`」：
-  // `memref.alloc` 只是其中最常见的一类，`Scalar` / `IndexExpr` 建出来的 `arith.constant`
-  // 是同样的东西。它们由 bridge 按 AscGraph 的节点次序就地建，节点排在第一个搬运之后时
-  // 就会落在循环后面；legacy 把这一类统一物化在 kernel 顶部（`AppendConstTensorInit` 跑在
-  // `root_loop.Generate` 之前），这里的提升就是同一件事在 MLIR 这一侧的落点。
+  // `memref.alloc` 只是其中最常见的一类，`Scalar` / `IndexExpr` 建出来的常量（`arith.constant`，
+  // 带符号性的整数是 `afir.scalar`）是同样的东西。它们由 bridge 按 AscGraph 的节点次序就地建，
+  // 节点排在第一个搬运之后时就会落在循环后面；legacy 把这一类统一物化在 kernel 顶部
+  // （`AppendConstTensorInit` 跑在 `root_loop.Generate` 之前），这里的提升就是同一件事在 MLIR
+  // 这一侧的落点。
   //
   // 调度出去的 Op 自己不在种子里——它们由循环树安排位置，跨作用域的情况由
   // `validateLoopTreeValueScopes` 判。
@@ -228,8 +229,11 @@ class FunctionLoopGenerator {
   // `afir.symbolic_eval` 是由它们算出来的那一层（`memref.alloc(%n)` 的动态范围就取自
   // 这里）。两者既不能当插入点——那会把 `arith.muli` 排在它依赖的值之前——也不进循环树：
   // 它们没有 `afir.sched` 可言，位置由「谁都要用它」决定，不由调度决定。
+  //
+  // `afir.scalar` 是字面量，同样没有 `afir.sched`：bridge 按节点次序就地建，排在首个被调度
+  // 算子之后的由 `hoistLoopInvariantSetup` 提上去，与 `arith.constant` 那些标量同一处理。
   static bool isSizePrologueOperation(Operation &op) {
-    return isa<afir::TilingParamOp, afir::SymbolicEvalOp>(op);
+    return isa<afir::TilingParamOp, afir::SymbolicEvalOp, afir::ScalarOp>(op);
   }
 
   static Operation *findFirstAfirOperation(Block &block) {

@@ -362,7 +362,10 @@ Operation *CanonicalFunctionMemoryAllocator::firstAfirOperation() {
   for (Operation &operation : func.front()) {
     // `afir.tiling_param` 不算：它是函数里所有运行期尺寸的根，物化出来的东西全都要
     // 排在它之后。把它当锚点等于让资源插在自己依赖的值之前。
-    if (isAfirOperation(&operation) && !isa<afir::TilingParamOp>(operation)) {
+    //
+    // `afir.scalar` 也不算：字面量不消费任何物化出来的资源，锚点要与它还建成
+    // `arith.constant`（不是 AFIR op）时是同一个算子。
+    if (isAfirOperation(&operation) && !isa<afir::TilingParamOp, afir::ScalarOp>(operation)) {
       return &operation;
     }
   }

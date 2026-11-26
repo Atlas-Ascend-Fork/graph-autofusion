@@ -258,9 +258,9 @@ constexpr KnownNarrowerRow kKnownNarrower[] = {
     {"le.tensor_scalar", kF16 | kF32 | kI32, kF16 | kF32 | kI32 | kI64, "i64 标量包装仅支持 EQ/NE"},
     {"gt.tensor_scalar", kF16 | kF32 | kI32, kF16 | kF32 | kI32 | kI64, "i64 标量包装仅支持 EQ/NE"},
     {"ge.tensor_scalar", kF16 | kF32 | kI32, kF16 | kF32 | kI32 | kI64, "i64 标量包装仅支持 EQ/NE"},
-    {"floor_div.tensor.extend_reg_base", kF16 | kF32 | kI16 | kI32 | kUI16 | kUI32 | kUI64,
+    {"floor_div.tensor.extend_reg_base", kF16 | kF32 | kI16 | kI32 | kUI16 | kUI32 | kUI64 | kI64,
      kF16 | kF32 | kI16 | kI32 | kUI8 | kUI16 | kI64 | kI8 | kUI32 | kUI64,
-     "i64 SIMT 包装未处理 INT64_MIN / -1；i8 / ui8 在 FloorDivExtend 分派里没有对应分支"
+     "i8 / ui8 在 FloorDivExtend 分派里没有对应分支"
      "（int16/int32、uint16/32/64、half/float 三支之外），实例化后静默空算。"
      "ui8 为存量问题，本波钉住"},
     {"add.tensor_tensor.reg_base", kUI8 | kUI16 | kBF16 | kI64 | kI8 | kUI32 | kUI64,
@@ -268,19 +268,31 @@ constexpr KnownNarrowerRow kKnownNarrower[] = {
      "拆行记账（非能力缺口）：交集位由 Any 主行收，reg 行 dtype 互斥只收交集外位；该形态无能力缺口"},
     {"add.tensor_scalar.reg_base", kUI8 | kBF16 | kI64 | kI8 | kUI64,
      kF16 | kF32 | kI16 | kI32 | kUI8 | kUI16 | kBF16 | kI64 | kI8 | kUI32 | kUI64,
-     "能力缺口：Adds 无 ui16/ui32（kernel_operator_vec_binary_scalar_impl.h:252）；交集位由 Any 主行收（拆行记账）"},
+     "拆行记账：LocalTensor Adds 不收 ui16/ui32，由 extend_reg_base 行收；交集位由 Any 主行收"},
     {"maximum.tensor_tensor.reg_base", kUI8 | kUI16 | kBF16 | kI64 | kI8 | kUI32 | kUI64,
      kF16 | kF32 | kI16 | kI32 | kUI8 | kUI16 | kBF16 | kI64 | kI8 | kUI32 | kUI64,
      "拆行记账（非能力缺口）：交集位由 Any 主行收，reg 行 dtype 互斥只收交集外位；该形态无能力缺口"},
     {"maximum.tensor_scalar.reg_base", kUI8 | kBF16 | kI64 | kI8 | kUI64,
      kF16 | kF32 | kI16 | kI32 | kUI8 | kUI16 | kBF16 | kI64 | kI8 | kUI32 | kUI64,
-     "能力缺口：Maxs 无 ui16/ui32（kernel_operator_vec_binary_scalar_impl.h:348）；交集位由 Any 主行收（拆行记账）"},
+     "拆行记账：LocalTensor Maxs 不收 ui16/ui32，由 extend_reg_base 行收；交集位由 Any 主行收"},
     {"minimum.tensor_tensor.reg_base", kUI8 | kUI16 | kBF16 | kI64 | kI8 | kUI32 | kUI64,
      kF16 | kF32 | kI16 | kI32 | kUI8 | kUI16 | kBF16 | kI64 | kI8 | kUI32 | kUI64,
      "拆行记账（非能力缺口）：交集位由 Any 主行收，reg 行 dtype 互斥只收交集外位；该形态无能力缺口"},
     {"minimum.tensor_scalar.reg_base", kUI8 | kBF16 | kI64 | kI8 | kUI64,
      kF16 | kF32 | kI16 | kI32 | kUI8 | kUI16 | kBF16 | kI64 | kI8 | kUI32 | kUI64,
-     "能力缺口：Mins 无 ui16/ui32（kernel_operator_vec_binary_scalar_impl.h:390）；交集位由 Any 主行收（拆行记账）"},
+     "拆行记账：LocalTensor Mins 不收 ui16/ui32，由 extend_reg_base 行收；交集位由 Any 主行收"},
+    {"add.tensor_scalar.extend_reg_base", kUI16 | kUI32,
+     kF16 | kF32 | kI16 | kI32 | kUI8 | kUI16 | kBF16 | kI64 | kI8 | kUI32 | kUI64,
+     "拆行记账（非能力缺口）：只收 ui16/ui32，走 reg 侧包装 `AddsExtend`（寄存器标量接口 `MicroAPI::Adds` "
+     "的循环）；其余类型由另外两行 tensor_scalar 收"},
+    {"maximum.tensor_scalar.extend_reg_base", kUI16 | kUI32,
+     kF16 | kF32 | kI16 | kI32 | kUI8 | kUI16 | kBF16 | kI64 | kI8 | kUI32 | kUI64,
+     "拆行记账（非能力缺口）：只收 ui16/ui32，走 reg 侧包装 `MaxsExtend`（寄存器标量接口 `MicroAPI::Maxs` "
+     "的循环）；其余类型由另外两行 tensor_scalar 收"},
+    {"minimum.tensor_scalar.extend_reg_base", kUI16 | kUI32,
+     kF16 | kF32 | kI16 | kI32 | kUI8 | kUI16 | kBF16 | kI64 | kI8 | kUI32 | kUI64,
+     "拆行记账（非能力缺口）：只收 ui16/ui32，走 reg 侧包装 `MinsExtend`（寄存器标量接口 `MicroAPI::Mins` "
+     "的循环）；其余类型由另外两行 tensor_scalar 收"},
     {"mul.tensor_tensor.reg_base", kBF16 | kI64 | kUI32 | kUI64,
      kF16 | kF32 | kI16 | kI32 | kUI8 | kBF16 | kI64 | kI8 | kUI32 | kUI64,
      "能力缺口：连续 Mul 无 8 位分支（kernel_operator_vec_binary_continuous_impl.h）；f16/f32/i16/i32 为拆行记账位，由 "
@@ -676,15 +688,11 @@ constexpr FormCoverageGap kFormCoverageGaps[] = {
      "连续 Mul 无 8 位分支（kernel_operator_vec_binary_continuous_impl.h 的 MulImpl）"},
     {"afir.mul", "reg", "scalar", kUI8 | kI8 | kUI32,
      "Muls 无 8 位与 ui32（kernel_operator_vec_binary_scalar_impl.h:306）"},
-    {"afir.add", "reg", "scalar", kUI16 | kUI32, "Adds 无 ui16/ui32（scalar_impl:252）"},
-    {"afir.maximum", "reg", "scalar", kUI16 | kUI32, "Maxs 无 ui16/ui32（scalar_impl:348）"},
-    {"afir.minimum", "reg", "scalar", kUI16 | kUI32, "Mins 无 ui16/ui32（scalar_impl:390）"},
     // ---- 包装 / 调用形态缺口 ----
     {"afir.fma", "reg", "tensor", kI16 | kUI8 | kBF16 | kI8,
      "AscendC::Fma 仅 half/float（adv_api/math/fma.h static_assert）；legacy 走 GetConversionDtype "
      "先 cast 再调，AFIR 无输入转换机制"},
-    {"afir.floor_div", "reg", "tensor", kUI8 | kI8 | kI64,
-     "FloorDivExtend 分派无 uint8/int8 分支；i64 SIMT 未处理 INT64_MIN/-1"},
+    {"afir.floor_div", "reg", "tensor", kUI8 | kI8, "FloorDivExtend 分派无 uint8/int8 分支"},
     {"afir.broadcast", "mem", "scalar", kI64 | kI8 | kUI64,
      "i64/ui64 是四参带 tmp 尾参调用、i8 走 duplicate.h 重载，三参 duplicate 档发不出；"
      "segmented 档只收 tile 源"},

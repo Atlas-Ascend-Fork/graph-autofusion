@@ -250,3 +250,6 @@ add_custom_target(check-e2e-cpu-nonreduce-addressing DEPENDS
 add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/elementwise_local_view" cases/elementwise_local_view)
 
 add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/binary_brc_inline_reg_base" cases/binary_brc_inline_reg_base)
+add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_unsigned_scalar_arithmetic_reg_base_store" cases/load_unsigned_scalar_arithmetic_reg_base_store)
+
+add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_floor_div_i64_reg_base_store" cases/load_floor_div_i64_reg_base_store)

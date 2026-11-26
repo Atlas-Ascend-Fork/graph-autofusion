@@ -43,6 +43,7 @@ add_mlir_library(AFIRToAscendC
   Implementations/Reduce.cpp
   Implementations/ReducePadding.cpp
   Implementations/ReduceGeometry.cpp
+  Implementations/ScalarLiteral.cpp
   Implementations/Synchronization.cpp
   Implementations/TernaryElementwise.cpp
   Implementations/TilingParam.cpp

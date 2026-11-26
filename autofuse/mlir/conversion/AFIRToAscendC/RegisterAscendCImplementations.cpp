@@ -18,6 +18,7 @@
 #include "conversion/AFIRToAscendC/Implementations/Pad.h"
 #include "conversion/AFIRToAscendC/Implementations/RemovePad.h"
 #include "conversion/AFIRToAscendC/Implementations/Reduce.h"
+#include "conversion/AFIRToAscendC/Implementations/ScalarLiteral.h"
 #include "conversion/AFIRToAscendC/Implementations/Synchronization.h"
 #include "conversion/AFIRToAscendC/Implementations/TernaryElementwise.h"
 #include "conversion/AFIRToAscendC/Implementations/TilingParam.h"
@@ -42,6 +43,7 @@ constexpr Registrar kCapabilityRegistrars[] = {
     registerPadImplementations,
     registerRemovePadImplementations,
     registerReduceImplementations,
+    registerScalarLiteralImplementations,
     registerSynchronizationImplementations,
     registerTernaryElementwiseImplementations,
     registerTilingParamImplementations,

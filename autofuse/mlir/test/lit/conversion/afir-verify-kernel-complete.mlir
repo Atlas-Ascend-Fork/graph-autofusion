@@ -78,6 +78,20 @@ module {
 
 // -----
 
+// 正向：标量字面量。带符号性的整数（ui16 / ui32）`arith.constant` 表达不了，bridge 为它们
+// 建的是方言自己的 `afir.scalar`——函数体里不出现后端方言，C3 才成立。它没有 `afir.sched`，
+// 也没有存储，所以四条判据在这里都不该报，本段没有任何 expected-error。
+module {
+  func.func private @scalar_literal() attributes {
+    afir.function_role = #afir.function_role<kernel_body>
+  } {
+    %k = afir.scalar {value = 1 : ui32} : ui32
+    return
+  }
+}
+
+// -----
+
 #in = #afir.tensor_desc<axis = [0], role = <input>>
 #cp = #afir.tensor_desc<axis = [0], role = <compute>>
 #out = #afir.tensor_desc<axis = [0], role = <output>>

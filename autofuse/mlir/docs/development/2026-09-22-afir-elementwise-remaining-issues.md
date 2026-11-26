@@ -1211,9 +1211,9 @@ lit `afir-scalar-input-kernel-arg.mlir`、bridge UT 两条、conversion UT 四�
 | 组合 | 原因 | 补齐路径 |
 |---|---|---|
 | Mul 的 i8/ui8（tensor）、i8/ui8/ui32（scalar） | 连续 `Mul` / `Muls` 无对应 SupportType（`kernel_operator_vec_binary_*.h`） | 建 `MulExtendRegBaseOp` 包装（照 Sub 先例）或等 CANN 扩类型域 |
-| Adds / Maxs / Mins 的 ui16/ui32（标量） | 同上三张 static_assert 表 | 同上，或标量形态走 micro/SIMT 路（需查 legacy 标量实际发射） |
+| ~~Adds / Maxs / Mins 的 ui16/ui32（标量）~~ | 同上三张 static_assert 表 | **已接入（2026-11-25）**：标量形态改走 reg 侧包装 `AddsExtend` / `MaxsExtend` / `MinsExtend`（`api_regbase/scalar_add.h` 等三个头，循环里调寄存器标量接口 `MicroAPI::Adds` / `Maxs` / `Mins`），实现名 `*.tensor_scalar.extend_reg_base` |
 | Fma 的 i8/i16/ui8/bf16 | `AscendC::Fma` 仅 half/float；legacy 先 `GetConversionDtype` cast 再调 | elementwise 建输入 cast 机制 |
-| FloorDiv 的 i8/ui8/i64 | 包装分派无 int8/uint8 分支；i64 SIMT 未处理 INT64_MIN/-1 | 改包装加分支 / i64 溢出处理（需评审） |
+| FloorDiv 的 i8/ui8 | 包装分派无 int8/uint8 分支 | 改包装加分支。i64 已接入（2026-11-25）：与 legacy 发同一个 `FloorDivExtend`，`INT64_MIN / -1` 的溢出保护与 legacy 一样未做 |
 | Broadcast duplicate 档的 i8（两侧）、mem 侧 ui64/i64 | `duplicate.h` 1 字节重载未接线；mem 四参尾参形态未建 | `DuplicateI8Op` 照 `DuplicateU8Op` 先例；方言补带 tmp 尾参形态 |
 | Transpose mem 侧 i32/ui32、reg 侧 i64 | v1 布局与公式错位（legacy 生产同错）；Gather 无 8 字节 | 布局/公式口径对齐（独立 bug 修复） |
 

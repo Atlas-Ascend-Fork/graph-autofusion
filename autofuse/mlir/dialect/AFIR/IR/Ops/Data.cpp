@@ -428,7 +428,23 @@ void getBufferFormEffects(Operation *op, SmallVectorImpl<MemoryEffect> &effects)
 }  // namespace
 
 LogicalResult ScalarOp::verify() {
-  return verifyNullaryOp(getOperation());
+  // 操作数与结果的个数不用在这里查：ODS 生成的 `ZeroOperands` / `OneResult` 已经查了
+  // （`ConstantLike` 对这两个特征有 static_assert）。这里只钉一件事——
+  // 字面量的类型就是结果的元素类型：buffer 形态是结果自己，tensor 形态是结果的元素类型。
+  // 对不上时下降出来的常量会带着另一种 dtype 被使用点读走。
+  Type resultType = getResult().getType();
+  Type elementType = isa<ShapedType>(resultType) ? cast<ShapedType>(resultType).getElementType() : resultType;
+  if (cast<TypedAttr>(getValue()).getType() != elementType) {
+    return emitOpError("value attribute type must match the result element type");
+  }
+  return success();
+}
+
+// 字面量折叠成它自己的属性：`ConstantLike` 要求这一条，下游（归约缓存依赖分析）要的是按特征
+// 认出字面量。AFIR 方言没有实现 `materializeConstant`，所以折叠器只会拿它合并重复的字面量
+// （`--cse` 下两个同值同类型的 `afir.scalar` 并成一个），不会把别的 op 的结果换成新的常量 op。
+OpFoldResult ScalarOp::fold(FoldAdaptor) {
+  return getValue();
 }
 LogicalResult IndexExprOp::verify() {
   return verifyNullaryOp(getOperation());
