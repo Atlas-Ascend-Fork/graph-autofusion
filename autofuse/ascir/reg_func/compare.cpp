@@ -16,10 +16,12 @@ Expression GetCompareNormalNoLoopTmpSize(const AscNode &node, const std::vector<
   auto node_inputs = node.inputs;
   uint8_t typeSize = node_inputs[0].attr.dtype == ge::DataType::DT_FLOAT16 ? 2 : 4;
   EXPECT_SYMBOL_NE(Symbol(typeSize), Symbol(0));
+  // 对齐 compare_v2.h CompareNormalNoLoop 的 tmp 布局：select_out 是 half 张量，从 compare_out 末尾 32B
+  // 对齐处起始；每个 select repeat 写 8 个 block(256B)，字节数是 SetSize 元素数(128 * repeat)的 2 倍。
   Expression compare_out_size = Symbol(256 / 8 / typeSize) * node_inputs[0].attr.repeats[axis_ids[0]];
   Expression select_out_size =
-      Symbol(128) * ((node_inputs[0].attr.repeats[axis_ids[0]] * Symbol(2) + Symbol(typeSize - 1)) / Symbol(typeSize));
-  return compare_out_size + select_out_size;
+      Symbol(256) * ((node_inputs[0].attr.repeats[axis_ids[0]] * Symbol(2) + Symbol(typeSize - 1)) / Symbol(typeSize));
+  return sym::Align(compare_out_size, 32) + select_out_size;  // 32字节对齐
 }
 
 std::vector<std::unique_ptr<TmpBufDesc>> GetCompareNormalTmpSize(const AscNode &node, const std::string &mode) {

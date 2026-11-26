@@ -100,7 +100,7 @@ TEST_F(CalcCompareTmpSizeTest, CalcGeTmpSize_ShouldReturnCorrectSize_WhenNodelsV
   node->inputs[0].attr.vectorized_strides = {s1, Symbol(1)};
   std::vector<std::unique_ptr<af::TmpBufDesc>> result = CalcGeTmpSize(*node);
   af::Expression compareNormalTmpSize =
-      af::Symbol(8) * s0 + af::Symbol(128) * ((s0 * af::Symbol(2) + af::Symbol(3)) / af::Symbol(4));
+      sym::Align(af::Symbol(8) * s0, 32) + af::Symbol(256) * ((s0 * af::Symbol(2) + af::Symbol(3)) / af::Symbol(4));
   ASSERT_EQ(result.size(), 1);
   ASSERT_EQ(result[0]->size, sym::Min(sym::Max(af::Symbol(288) * s1, compareNormalTmpSize), MAX_TMP_BUFFER_SIZE));
   ASSERT_EQ(result[0]->life_time_axis_id, -1);
@@ -168,7 +168,7 @@ TEST_F(CalcCompareTmpSizeTest, CalcEqTmpSize_ShouldReturnCorrectSize_WhenNodelsV
   node->inputs[0].attr.vectorized_strides = {s1, Symbol(1)};
   std::vector<std::unique_ptr<af::TmpBufDesc>> result = CalcEqTmpSize(*node);
   af::Expression compareNormalTmpSize =
-      af::Symbol(8) * s0 + af::Symbol(128) * ((s0 * af::Symbol(2) + af::Symbol(3)) / af::Symbol(4));
+      sym::Align(af::Symbol(8) * s0, 32) + af::Symbol(256) * ((s0 * af::Symbol(2) + af::Symbol(3)) / af::Symbol(4));
   ASSERT_EQ(result.size(), 1);
   ASSERT_EQ(result[0]->size, sym::Min(sym::Max(af::Symbol(288) * s1, compareNormalTmpSize), MAX_TMP_BUFFER_SIZE));
   ASSERT_EQ(result[0]->life_time_axis_id, -1);
@@ -236,7 +236,7 @@ TEST_F(CalcCompareTmpSizeTest, CalcNeTmpSize_ShouldReturnCorrectSize_WhenNodelsV
   node->inputs[0].attr.vectorized_strides = {s1, Symbol(1)};
   std::vector<std::unique_ptr<af::TmpBufDesc>> result = CalcNeTmpSize(*node);
   af::Expression compareNormalTmpSize =
-      af::Symbol(8) * s0 + af::Symbol(128) * ((s0 * af::Symbol(2) + af::Symbol(3)) / af::Symbol(4));
+      sym::Align(af::Symbol(8) * s0, 32) + af::Symbol(256) * ((s0 * af::Symbol(2) + af::Symbol(3)) / af::Symbol(4));
   ASSERT_EQ(result.size(), 1);
   ASSERT_EQ(result[0]->size, sym::Min(sym::Max(af::Symbol(288) * s1, compareNormalTmpSize), MAX_TMP_BUFFER_SIZE));
   ASSERT_EQ(result[0]->life_time_axis_id, -1);
@@ -304,7 +304,7 @@ TEST_F(CalcCompareTmpSizeTest, CalcGtTmpSize_ShouldReturnCorrectSize_WhenNodelsV
   node->inputs[0].attr.vectorized_strides = {s1, Symbol(1)};
   std::vector<std::unique_ptr<af::TmpBufDesc>> result = CalcGtTmpSize(*node);
   af::Expression compareNormalTmpSize =
-      af::Symbol(8) * s0 + af::Symbol(128) * ((s0 * af::Symbol(2) + af::Symbol(3)) / af::Symbol(4));
+      sym::Align(af::Symbol(8) * s0, 32) + af::Symbol(256) * ((s0 * af::Symbol(2) + af::Symbol(3)) / af::Symbol(4));
   ASSERT_EQ(result.size(), 1);
   ASSERT_EQ(result[0]->size, sym::Min(sym::Max(af::Symbol(288) * s1, compareNormalTmpSize), MAX_TMP_BUFFER_SIZE));
   ASSERT_EQ(result[0]->life_time_axis_id, -1);
@@ -372,7 +372,7 @@ TEST_F(CalcCompareTmpSizeTest, CalcLeTmpSize_ShouldReturnCorrectSize_WhenNodelsV
   node->inputs[0].attr.vectorized_strides = {s1, Symbol(1)};
   std::vector<std::unique_ptr<af::TmpBufDesc>> result = CalcLeTmpSize(*node);
   af::Expression compareNormalTmpSize =
-      af::Symbol(8) * s0 + af::Symbol(128) * ((s0 * af::Symbol(2) + af::Symbol(3)) / af::Symbol(4));
+      sym::Align(af::Symbol(8) * s0, 32) + af::Symbol(256) * ((s0 * af::Symbol(2) + af::Symbol(3)) / af::Symbol(4));
   ASSERT_EQ(result.size(), 1);
   ASSERT_EQ(result[0]->size, sym::Min(sym::Max(af::Symbol(288) * s1, compareNormalTmpSize), MAX_TMP_BUFFER_SIZE));
   ASSERT_EQ(result[0]->life_time_axis_id, -1);
@@ -440,7 +440,7 @@ TEST_F(CalcCompareTmpSizeTest, CalcLtTmpSize_ShouldReturnCorrectSize_WhenNodelsV
   node->inputs[0].attr.vectorized_strides = {s1, Symbol(1)};
   std::vector<std::unique_ptr<af::TmpBufDesc>> result = CalcLtTmpSize(*node);
   af::Expression compareNormalTmpSize =
-      af::Symbol(8) * s0 + af::Symbol(128) * ((s0 * af::Symbol(2) + af::Symbol(3)) / af::Symbol(4));
+      sym::Align(af::Symbol(8) * s0, 32) + af::Symbol(256) * ((s0 * af::Symbol(2) + af::Symbol(3)) / af::Symbol(4));
   ASSERT_EQ(result.size(), 1);
   ASSERT_EQ(result[0]->size, sym::Min(sym::Max(af::Symbol(288) * s1, compareNormalTmpSize), MAX_TMP_BUFFER_SIZE));
   ASSERT_EQ(result[0]->life_time_axis_id, -1);
@@ -508,7 +508,7 @@ TEST_F(CalcCompareTmpSizeTest, CalcFloat16LtTmpSize_ShouldReturnCorrectSize_When
   node->inputs[0].attr.vectorized_strides = {s1, Symbol(1)};
   std::vector<std::unique_ptr<af::TmpBufDesc>> result = CalcLtTmpSize(*node);
   af::Expression compareNormalTmpSize =
-      af::Symbol(16) * s0 + af::Symbol(128) * ((s0 * af::Symbol(2) + af::Symbol(1)) / af::Symbol(2));
+      sym::Align(af::Symbol(16) * s0, 32) + af::Symbol(256) * ((s0 * af::Symbol(2) + af::Symbol(1)) / af::Symbol(2));
   ASSERT_EQ(result.size(), 1);
   ASSERT_EQ(result[0]->size, sym::Min(sym::Max(af::Symbol(288) * s1, compareNormalTmpSize), MAX_TMP_BUFFER_SIZE));
   ASSERT_EQ(result[0]->life_time_axis_id, -1);
