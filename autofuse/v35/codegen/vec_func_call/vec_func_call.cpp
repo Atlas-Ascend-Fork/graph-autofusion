@@ -42,6 +42,37 @@ std::vector<ge::Expression> GetVfOutputDims(const VectorizedAxisLoopMergeStatus 
   return output_dims;
 }
 
+// 生产者输出被重定向时（如 IndirectLoad post-Reduce 改写 ApiCall 输出 id），子图 boundary
+// Load 记录的边快照 id 与签名/实参解析到的最终 id 不同源，函数体会引用无写入也无声明的
+// 旧 buffer。按边序构建 {边快照 id → 最终 id} 映射，将函数体 Load 与签名对齐；映射未命中时
+// 输出告警，便于发现映射假设失效。
+Status RewriteBoundaryLoadToResolvedInputs(const af::AscNodePtr &node, const std::vector<const ApiTensor *> &inputs,
+                                           const VFLoop &root_loop) {
+  std::map<ascir::TensorId, ascir::TensorId> boundary_rewrite_map;
+  if (node != nullptr) {
+    const auto edge_tensors = node->inputs();
+    const size_t input_count = std::min(edge_tensors.size(), inputs.size());
+    for (size_t index = 0UL; index < input_count; index++) {
+      if (edge_tensors[index] == nullptr || inputs[index] == nullptr) {
+        continue;
+      }
+      const ascir::TensorId edge_tensor_id = edge_tensors[index]->attr.mem.tensor_id;
+      if (edge_tensor_id != inputs[index]->id) {
+        boundary_rewrite_map.emplace(edge_tensor_id, inputs[index]->id);
+      }
+    }
+  }
+  std::set<ascir::TensorId> matched_ids;
+  GE_ASSERT_SUCCESS(root_loop.RewriteBoundaryLoadInputs(boundary_rewrite_map, matched_ids));
+  for (const auto &rewrite : boundary_rewrite_map) {
+    if (matched_ids.find(rewrite.first) == matched_ids.end()) {
+      GELOGW("VF boundary Load rewrite miss: no Load input references edge tensor id[%ld], target id[%ld]",
+             rewrite.first, rewrite.second);
+    }
+  }
+  return af::SUCCESS;
+}
+
 void ParamPostProcess(std::stringstream &ss) {
   if (ss.str().length() < kCommaSpaceLength) {
     return;
@@ -642,6 +673,7 @@ Status VfCall::GenerateFuncDefinition(const TPipe &tpipe, const Tiler &tiler, st
   // 收集输入输出信息，由于GenInnerLoopSizeAndActualSize函数中会刷新tiler对象中的actual_sizes字段,
   // 导致生成函数签名和函数调用时，获取到的size信息不一致，因此生成函数签名和函数调用时均需要调用合轴函数
   GE_ASSERT_SUCCESS(ParseInputOutputInfo(tpipe));
+  GE_ASSERT_SUCCESS(RewriteBoundaryLoadToResolvedInputs(node, inputs, root_loop_));
 
   // 处理合轴信息，生成函数体时，需要知道子图内的合轴状态
   VectorizedAxisLoopMergeStatus merge_info;
