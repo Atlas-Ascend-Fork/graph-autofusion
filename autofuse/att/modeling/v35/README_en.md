@@ -33,6 +33,8 @@ Each category README describes its modeling methods. Shared archive conventions 
 
 Collection and fitting code lives in [Autofuse modeling tools](../../../tools/modeling/README.md). See [GetOpHeadCost](common/op_head_cost/design.md) for the shared overhead model.
 
+See the [MTE3 Store archive](mte3/store/README_en.md) for the original A5 calibration and the small contiguous Store extension. The A3 archive is under [V1 Store](../v1/mte3/store/README_en.md).
+
 ## Model Archives
 
 Add the following files to each model directory as needed:

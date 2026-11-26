@@ -1,18 +1,19 @@
 # ATT performance model archive
 
-Archive model designs, descriptors and compact validation evidence by model family: [V1](v1/README_en.md) documents the current archive status; [v35](v35/README_en.md) contains existing calibrated models and [the calibration design](v35/design_en.md). `V2` is the v35 registration key, not a third platform family.
+Archive model designs, descriptors and compact validation evidence by model family: [V1](v1/README_en.md) contains the A3 Load and Store archives; [v35](v35/README_en.md) contains the A5 Store archive, existing calibrated models and [the calibration design](v35/design_en.md). `V2` is the v35 registration key, not a third platform family.
 
 ```text
 modeling/
 ├── README.md / README_en.md
 ├── v1/
 │   ├── README.md / README_en.md
-│   └── mte2/load/          # A3 evidence and original parameter snapshot
+│   ├── mte2/load/           # A3 evidence and original parameter snapshot
+│   └── mte3/store/          # A3 evidence and historical v35 parameter snapshot
 └── v35/
     ├── design.md / design_en.md
     ├── common/op_head_cost/
     ├── mte2/{load,nddma}/
-    ├── mte3/store/
+    ├── mte3/store/          # A5
     └── vector/
 ```
 

@@ -1,0 +1,5 @@
+stage,case,corenum,blockcount,shape_B,stride,entry,data,analysis,purpose
+continuous,large_scale_512B_192KB,1–48（缺9/43）,1,512–196608（步长512）,0,A3/scripts/mte3_analysis.ipynb,A3/mte3_ub2gm_continuous/,notebook复算,逐核T与截距
+continuous,small_scale_512B,1–48,1,512,0,A3/scripts/mte3_analysis.ipynb,A3/mte3_ub2gm_continuous/,A3/scripts/mte3_analysis.ipynb,最小尺寸点；均值256–614；32–512B未归档
+headcost,tilenum_sweep,1,—,—,—,A3/scripts/mte3_analysis.ipynb,A3/mte3_ub2gm_continuous/mte3_headcost_test.csv,A3/scripts/mte3_analysis.ipynb,每tile固定开销；tilenum 2–642
+uncontinuous,src_stride_sweep,1,102400/blocklen,102400,1–30（blocklen 8–384）,A3/scripts/mte3_analysis.ipynb,A3/mte3_ub2gm_uncontinuous/,A3/scripts/mte3_analysis.ipynb,src侧stride增量

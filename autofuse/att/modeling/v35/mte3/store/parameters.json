@@ -1,0 +1,42 @@
+{
+  "platform": "a5",
+  "model_family": "v35",
+  "parameter_implementation": "v35",
+  "parameter_status": "historical_base_model_snapshot",
+  "archive_revision": "cdc88a04740e1ca6988eabaa05f8920c1c017b29",
+  "archive_note": "保留原始基础模型参数及实现行号；当前 StoreSmallPayload 增补适用域和参数见 design.md",
+  "api": "Store",
+  "unit": "cycle_per_core_per_call",
+  "source": {
+    "summary_doc": "A5/MTE3/5_Summary/初版建模分析_20261021.md",
+    "fit_file": "A5/MTE3/4_Analyse/1_BlockDim/combine/256KB/fit_parameters.csv",
+    "fit_method": "aiv_mte3_cycles = aiv_total_cycles * aiv_mte3_ratio / corenum",
+    "data": ["A5/MTE3/2_Data/1_BlockDim/", "A5/MTE3/2_Data/2_ApiCount/", "A5/MTE3/2_Data/3_UnAlign/", "A5/MTE3/2_Data/4_UnStride/GM_stride/", "A5/MTE3/2_Data/4_UnStride/UB_stride/", "A5/MTE3_model_min/1_Script/configs/cases.csv", "DV100Lite/MTE3/"],
+    "data_date_range": "2025-08/09 主标定；2026-10/11 复核"
+  },
+  "formula": {
+    "large": "S / (11.774 + 10.265 / CoreNum) + 160",
+    "small": "沿用 Store 连续公式",
+    "multiple": "(S / (11.774 + 10.265 / CoreNum) + 160) * ApiCount + 571",
+    "stride_gm": "k * BlockCount * min(Stride * dtype_size, u)",
+    "stride_ub": null
+  },
+  "parameters": {
+    "large_scale": {"h": 160, "H": 571, "T": {"a": 11.774, "b": 10.265, "R2": 0.9945, "form": "T = a + b / CoreNum"}, "per_core": {"1": {"T": 22.039}, "16": {"T": 12.4155625}, "32": {"T": 12.09478125}, "48": {"T": 11.987854166666665}, "64": {"T": 11.934390625}}},
+    "small_scale": {"threshold_B": 256, "active_model": "Store 连续公式", "h": 160, "H": 571},
+    "blockcount": {"active_model": "BlockCount 通过 S 和 stride 项进入公式，不是独立带宽参数"},
+    "unalign": {"hl": 0, "active_model": "不增加非对齐惩罚"},
+    "gm_stride": {"dtype": "uint8", "k": 0.0049922306718019, "u": 4096, "penalty_coeff": 0.0, "form": "k * BlockCount * min(Stride * dtype_size, u)"},
+    "ub_stride": null,
+    "cross_chip": {"active_model": "所有活动平台使用 Store 表；230 规范覆盖为锁频 dev2 且 CoreNum<=32"}
+  },
+  "implementation_diff": [
+    {"item": "pipe head", "archive": "H=571", "impl": "kMte3PipeHeadCost=571.0f", "verdict": "一致", "evidence": "../../../../../v35/att/api_perf_register/perf_param_v2.cpp@cdc88a04:20"},
+    {"item": "Store", "archive": "h=160；T=10.265/N+11.774；hl=0", "impl": "h=160,a=11.774,b=10.265,hl=0", "verdict": "一致", "evidence": "../../../../../v35/att/api_perf_register/perf_param_v2.cpp@cdc88a04:1014"},
+    {"item": "StoreStride", "archive": "uint8 k=0.0049922306718019,u=4096", "impl": "uint8 k=0.0049922306718019,u=4096,penalty_coeff=0", "verdict": "一致", "evidence": "../../../../../v35/att/api_perf_register/perf_param_v2.cpp@cdc88a04:1024"},
+    {"item": "stride calculation", "archive": "dtype-aware min(stride*dtype_size,4096)", "impl": "LoadStoreStrideV2Func", "verdict": "一致", "evidence": "../../../../../att/gen_model_info/api_perf_register/utils/api_perf_utils.cpp@cdc88a04:291"},
+    {"item": "StorePerf", "archive": "normal plus stride", "impl": "StorePerf combines both terms", "verdict": "一致", "evidence": "../../../../../v35/att/api_perf_register/ascendc_api_perf/data_move_api_perf_v2.cpp@cdc88a04:334"},
+    {"item": "block length", "archive": "GM non-contiguous small blocks follow implementation handling", "impl": "ExpandMTE3BlockLen", "verdict": "一致", "evidence": "../../../../../v35/att/api_perf_register/ascendc_api_perf/data_move_api_perf_v2.cpp@cdc88a04:404"}
+  ],
+  "open_items": ["补充小尺度和非对齐覆盖用例", "保持 H=731-160 的残差定义", "重复 UB stride 覆盖测试但不新增 Store 参数", "继续以锁频 dev2、CoreNum<=32 作为 230 基准"]
+}

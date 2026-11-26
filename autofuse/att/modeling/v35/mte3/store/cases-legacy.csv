@@ -1,0 +1,11 @@
+stage,case,corenum,blockcount,shape_B,stride,entry,data,analysis,purpose
+1_BlockDim,aligned_sweep,1/16/32/48/64,1,8–262144（32B对齐）,0,A5/MTE3/1_Script,A5/MTE3/2_Data/1_BlockDim/,A5/MTE3/4_Analyse/1_BlockDim/combine/256KB/fit_parameters.csv,大尺度T与截距731
+1_BlockDim,small_scale_c,1/16/32/48/64,1,8–512,0,A5/MTE3/1_Script,A5/MTE3/2_Data/1_BlockDim/,A5/MTE3/4_Analyse/1_BlockDim/combine/512B/fit_parameters.csv,小尺度常数C(core)；≥256B归入大尺度
+1_BlockDim,blockcount_check,1/16/32/48,20/40/60/80,同上,0,A5/MTE3/1_Script,A5/MTE3/2_Data/1_BlockCount/,A5/MTE3/4_Analyse/2_BlockCount/,验证BlockCount无需独立参数；64核仅bc=80
+2_ApiCount,apicount_small,1/8/16/32/48/64,1,512/1024,0,A5/MTE3/1_Script,A5/MTE3/2_Data/2_ApiCount/,A5/MTE3/4_Analyse/2_ApiCount/,h分离（只用≤1KB）
+2_ApiCount,apicount_large,1/8/16/24/32/40/48/56/64,1,10240/262144,0,A5/MTE3/1_Script,A5/MTE3/2_Data/2_ApiCount/,A5/MTE3/4_Analyse/2_ApiCount/,大尺寸不可用的方法局限证据
+3_UnAlign,unalign_sweep,1/16/32/48/64,20/40/60/80,10500–261380（非32B对齐）,0,A5/MTE3/1_Script,A5/MTE3/2_Data/3_UnAlign/,A5/MTE3/4_Analyse/3_UnAlign/,大尺度一致；小尺度无数据
+4_GmStride,gm_stride_sweep,1/64,100/200/400/800/1600/3200（+6400@1c）,102400,0;8;…;256;512;…;4096,A5/MTE3/1_Script,A5/MTE3/2_Data/4_UnStride/GM_stride/,A5/MTE3/4_Analyse/5_Stride/GM_stride/GMToUB_fit_results.csv,GM侧k
+5_UbStride,ub_stride_sweep,1/8/16/64,2…512,2048,0–8,A5/MTE3/1_Script,A5/MTE3/2_Data/4_UnStride/UB_stride/,A5/MTE3/4_Analyse/5_Stride/UB_stride/,UB侧不可标定并记录边界
+repro_156,cross_chip_156,1/16/32/48/64,1/16/128/512,512–262144,0–4096,A5/MTE3_model_min/1_Script,A5/MTE3_model_min/1_Script/configs/cases.csv,results/156_ascend950/20261021_min/report.md,137例8组复核
+repro_230,cross_chip_230,1/16/32（+48/64仅作废对照）,1/16/128/512,512–262144,0–4096,DV100Lite/MTE3/1_Script,results/230_ascend350_dev2/20261104_dev2/,results/230_ascend350_dev2/20261105_max32/report.md,129例dev2与111例max32；dev0作废
