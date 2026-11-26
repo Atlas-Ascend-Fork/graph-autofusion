@@ -448,10 +448,15 @@ af::Status AnalyzeInputPath(const af::AscNodePtr &indirect_load, size_t input_id
                    ascgen_utils::indirect_load::IndirectLoadLayoutKind::kStrided,
                    physical_attr.repeats};
   } else {
+    // 转置稠密+零步长广播轴的混合布局仅对 SIMT 放行：SIMT 直读 GM 按 strides 寻址
+    // （置换视图片 kStrided 寻址既有支持），零步长轴等价于重复读同一物理元素；SIMD 的
+    // UB staging 与 SK workspace 的 store 段按行主序批量搬运，不接受该混合布局。
+    // 既有"单调+零步长"容忍分支（allow_non_overlapping_zero_stride）语义不变，SK 照旧。
     GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::ClassifyIndirectLoadLayout(
         view, plan.layout,
         (template_id == ascir::TemplateId::kIndirectLoadSimt || template_id == ascir::TemplateId::kIndirectLoadSK) &&
-            has_broadcast));
+            has_broadcast,
+        template_id == ascir::TemplateId::kIndirectLoadSimt && has_broadcast));
     if (template_id == ascir::TemplateId::kIndirectLoadSK && has_broadcast &&
         plan.layout.kind == ascgen_utils::indirect_load::IndirectLoadLayoutKind::kStrided) {
       plan.layout.physical_repeats = physical_attr.repeats;

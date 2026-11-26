@@ -545,7 +545,8 @@ af::Status AnalyzeIndirectLoadAccess(const af::AscNodePtr &node, const TemplateL
 af::Status SetImplementation(const af::AscNodePtr &node, Implementation implementation);
 af::Status GetImplementation(const af::AscNodePtr &node, Implementation &implementation);
 af::Status ClassifyIndirectLoadLayout(const LogicalTensorView &logical, IndirectLoadTensorLayout &layout,
-                                      bool allow_non_overlapping_zero_stride = false);
+                                      bool allow_non_overlapping_zero_stride = false,
+                                      bool allow_transposed_zero_stride_broadcast = false);
 af::Status ValidateIndirectLoadOutputLayout(const LogicalTensorView &output);
 // 判断 load 的物理视图是否与输出逻辑视图覆盖同一 dense 连续区域（语义等价）：
 // 1) load 视图各有效轴（size!=1 且 stride!=0）的 stride 满足后缀乘积连续性；

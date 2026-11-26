@@ -10,6 +10,7 @@
 #include "ascendc_ir/ascendc_ir_core/ascendc_ir.h"
 #include "ascendc_ir/ascendc_ir_check.h"
 #include "graph/expression/const_values.h"
+#include "graph/symbolizer/symbolic_utils.h"
 #include "utils/axis_utils.h"
 namespace af {
 namespace {
@@ -289,14 +290,29 @@ View AxisUtils::MergeView(const View &src_view, const int64_t merged_axis_id, co
   GE_ASSERT_EQ(axis_ids.size(), repeats.size());
   GE_ASSERT_EQ(axis_ids.size(), strides.size());
   Expression merge_repeat = sym::kSymbolOne;
+  // repeats==1 的退化轴（如零步长广播轴）索引恒 0，不贡献物理位置，merged stride 取
+  // 组内最后一个非退化轴的 stride：在组内连续（退化轴跳过后相邻有效轴满足
+  // stride_i == repeat_{i+1} * stride_{i+1}）时 pos == i_merge * stride_last_effective，
+  // 与取原"组内最后轴"在末轴非退化时一致；末轴退化时原实现取 0 会破坏物理位置。
+  // 组内全退化时索引恒 0，任意 stride 的位置贡献均为 0，回退取最后轴 stride。
+  Expression effective_stride;
+  bool has_effective_stride = false;
   for (uint32_t axis_index = 0U; axis_index < axis_ids.size(); axis_index++) {
     if (original_set.find(axis_ids[axis_index]) != original_set.end()) {
       merge_repeat = merge_repeat * repeats[axis_index];
       merge_axis_set.emplace(axis_ids[axis_index]);
+      if (SymbolicUtils::StaticCheckEq(repeats[axis_index], sym::kSymbolOne) != TriBool::kTrue) {
+        effective_stride = strides[axis_index];
+        has_effective_stride = true;
+      }
       if (merge_axis_set.size() == original_set.size()) {
         new_axis_ids.push_back(merged_axis_id);
         new_repeat.push_back(merge_repeat);
-        new_strides.push_back(strides[axis_index]);
+        if (has_effective_stride) {
+          new_strides.push_back(effective_stride);
+        } else {
+          new_strides.push_back(strides[axis_index]);
+        }
       }
     } else {
       new_axis_ids.push_back(axis_ids[axis_index]);

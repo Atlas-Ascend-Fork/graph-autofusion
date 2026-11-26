@@ -119,7 +119,12 @@ bool TryClassifyDynamicShapeLayout(const LogicalTensorView &logical, IndirectLoa
 // 链按 stride 值唯一吸收：歧义只会出现在重叠视图（链必断，正确拒绝）；退化轴
 // （size==1）单元素，任意位置入链。stride 互质的混洗（如 [2,3] strides=[3,2]）
 // 每维跨步、不在倍数链内，维持拒绝。
-bool TryClassifyTransposedDenseLayout(const LogicalTensorView &logical, IndirectLoadTensorLayout &layout) {
+// 转置稠密（倍数链）证明：非退化轴 strides 构成完整倍数链即非重叠；退化轴（size==1）
+// 单元素扫尾。零步长广播轴（size>1, stride==0）物理上单元素重复读，非重叠，仅在调用方
+// 允许（SIMT 直读 GM，无 UB 批量搬运假设）时同样扫尾并置 physical_repeats[dim]=1；
+// SIMD staging 与 SK workspace 的 store 段按行主序批量搬运，不允许时该轴无法入链、证明失败。
+bool TryClassifyTransposedDenseLayout(const LogicalTensorView &logical, IndirectLoadTensorLayout &layout,
+                                      bool allow_zero_stride_broadcast) {
   const size_t rank = logical.sizes.size();
   std::vector<bool> used(rank, false);
   af::Expression expected = af::sym::kSymbolOne;
@@ -142,10 +147,22 @@ bool TryClassifyTransposedDenseLayout(const LogicalTensorView &logical, Indirect
     }
   }
   for (size_t dim = 0UL; dim < rank; ++dim) {
-    if (used[dim] || af::SymbolicUtils::StaticCheckEq(logical.sizes[dim], af::ops::One) != af::TriBool::kTrue) {
+    if (used[dim]) {
       continue;
     }
-    used[dim] = true;  // 退化轴（size==1）单元素，任意正 stride 均非重叠。
+    if (af::SymbolicUtils::StaticCheckEq(logical.sizes[dim], af::ops::One) == af::TriBool::kTrue) {
+      used[dim] = true;  // 退化轴（size==1）单元素，任意正 stride 均非重叠。
+      continue;
+    }
+    // 零步长广播轴：与单调路径零步长维同语义（物理单元素重复读）。单调循环从内向外
+    // 处理，可能在轮到更外侧零步长轴之前已提前进入本证明，因此此处必须显式置
+    // physical_repeats（与 ClassifyIndirectLoadLayout 的零步长维处理幂等一致）。
+    if (allow_zero_stride_broadcast &&
+        af::SymbolicUtils::StaticCheckEq(logical.strides[dim], af::sym::kSymbolZero) == af::TriBool::kTrue) {
+      used[dim] = true;
+      layout.physical_repeats[dim] = af::sym::kSymbolOne;
+      continue;
+    }
   }
   if (!std::all_of(used.begin(), used.end(), [](bool dim_used) { return dim_used; })) {
     return false;
@@ -1832,7 +1849,8 @@ bool IsDenseEquivalentView(const LogicalTensorView &load_view, const LogicalTens
 }
 
 af::Status ClassifyIndirectLoadLayout(const LogicalTensorView &logical, IndirectLoadTensorLayout &layout,
-                                      bool allow_non_overlapping_zero_stride) {
+                                      bool allow_non_overlapping_zero_stride,
+                                      bool allow_transposed_zero_stride_broadcast) {
   GE_ASSERT_TRUE(IsValidLogicalTensorView(logical), "IndirectLoad input layout rank is invalid.");
   static_cast<LogicalTensorView &>(layout) = logical;
   layout.kind = IndirectLoadLayoutKind::kUnsupported;
@@ -1857,7 +1875,7 @@ af::Status ClassifyIndirectLoadLayout(const LogicalTensorView &logical, Indirect
     }
     if (af::SymbolicUtils::StaticCheckLt(logical.strides[dim], physical_span) != af::TriBool::kFalse) {
       // 行主序单调性证明失败，尝试按转置稠密（倍数链）证明非重叠；证不出维持 kUnsupported。
-      static_cast<void>(TryClassifyTransposedDenseLayout(logical, layout));
+      static_cast<void>(TryClassifyTransposedDenseLayout(logical, layout, allow_transposed_zero_stride_broadcast));
       return af::SUCCESS;
     }
     has_physical_gap =

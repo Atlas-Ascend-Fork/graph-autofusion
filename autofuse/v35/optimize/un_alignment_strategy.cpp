@@ -71,6 +71,133 @@ af::Status NormalizeStoreSingletonStrides(const af::AscNodePtr &node) {
   }
   return af::SUCCESS;
 }
+
+// 紧凑连续布局静态校验：向量化轴规模自洽、dtype 有效、尾轴 stride==1 且 repeat>1、次内维
+// stride==尾轴 repeat（紧凑连续）且行距静态非 32B 对齐；校验通过时输出 dtype 字节数与尾轴 stride。
+bool IsCompactUnalignedRowStride(const af::AscTensorAttr &attr, int64_t &dtype_size, af::Expression &tail_stride) {
+  const auto vec_stride_size = attr.vectorized_strides.size();
+  if (vec_stride_size < 2UL || attr.vectorized_axis.size() != vec_stride_size ||
+      attr.axis.size() != attr.repeats.size()) {
+    return false;
+  }
+  dtype_size = static_cast<int64_t>(af::GetSizeByDataType(attr.dtype));
+  if (dtype_size <= 0) {
+    return false;
+  }
+  tail_stride = attr.vectorized_strides[vec_stride_size - 1UL];
+  if (af::SymbolicUtils::StaticCheckEq(tail_stride, af::sym::kSymbolOne) != af::TriBool::kTrue) {
+    return false;
+  }
+  auto tail_axis_iter = std::find(attr.axis.begin(), attr.axis.end(), attr.vectorized_axis[vec_stride_size - 1UL]);
+  if (tail_axis_iter == attr.axis.end()) {
+    return false;
+  }
+  const auto tail_axis_index = static_cast<size_t>(std::distance(attr.axis.begin(), tail_axis_iter));
+  const auto &tail_repeat = attr.repeats[tail_axis_index];
+  if (af::SymbolicUtils::StaticCheckEq(tail_repeat, af::sym::kSymbolOne) == af::TriBool::kTrue) {
+    return false;
+  }
+  const auto &penultimate_stride = attr.vectorized_strides[vec_stride_size - 2UL];
+  if (af::SymbolicUtils::StaticCheckEq(penultimate_stride, af::sym::Mul(tail_repeat, tail_stride)) !=
+      af::TriBool::kTrue) {
+    return false;
+  }
+  return IsStaticUnalignedStride(penultimate_stride, dtype_size);
+}
+
+// 对单个 tensor 的向量化 stride 做 32B 行距垫整：紧凑连续布局（见 IsCompactUnalignedRowStride）
+// 且次内维行距静态非 32B 对齐时，自尾侧重建——次内维垫整到 32B/dtype 对齐粒度，外层轴按垫整后
+// 行距逐层累积，广播零 stride 轴保持不变；非紧凑跳变（batch/slice 间隙）或符号无法静态判定时
+// 保持原样。返回是否发生垫整。
+bool PadCompactVectorizedRowStrides(af::AscTensorAttr &attr) {
+  int64_t dtype_size = 0;
+  af::Expression tail_stride;
+  if (!IsCompactUnalignedRowStride(attr, dtype_size, tail_stride)) {
+    return false;
+  }
+  const auto vec_stride_size = attr.vectorized_strides.size();
+  std::vector<af::Expression> padded_strides = attr.vectorized_strides;
+  af::Expression size_product = tail_stride;
+  af::Expression orig_product = tail_stride;
+  const auto align_factor = kAlignBytes / static_cast<uint32_t>(dtype_size);
+  for (int64_t index = static_cast<int64_t>(vec_stride_size) - 1; index >= 0; --index) {
+    auto &stride = padded_strides.at(static_cast<size_t>(index));
+    if (af::SymbolicUtils::StaticCheckEq(stride, af::sym::kSymbolZero) == af::TriBool::kTrue) {
+      continue;
+    }
+    auto axis_iter = std::find(attr.axis.begin(), attr.axis.end(), attr.vectorized_axis[static_cast<size_t>(index)]);
+    if (axis_iter == attr.axis.end()) {
+      return false;
+    }
+    const auto axis_index = static_cast<size_t>(std::distance(attr.axis.begin(), axis_iter));
+    const auto &repeat = attr.repeats[axis_index];
+    if (index == static_cast<int64_t>(vec_stride_size) - 1) {
+      stride = size_product;
+      size_product = af::sym::Mul(size_product, repeat);
+    } else if (index == static_cast<int64_t>(vec_stride_size) - 2) {
+      stride = af::sym::Align(size_product, align_factor);
+      size_product = af::sym::Mul(stride, repeat);
+    } else {
+      // 外层轴仅当原 stride 为原始布局的内层累计跨距（紧致连续）或其对齐形式时，才可按垫整后
+      // 跨距重写（垫整后行距已对齐，跨距乘积天然对齐，两种形式的重写值数值一致）。
+      const bool dense = af::SymbolicUtils::StaticCheckEq(stride, orig_product) == af::TriBool::kTrue;
+      const bool aligned_dense =
+          af::SymbolicUtils::StaticCheckEq(stride, af::sym::Align(orig_product, align_factor)) == af::TriBool::kTrue;
+      if (!dense && !aligned_dense) {
+        return false;
+      }
+      stride = size_product;
+      size_product = af::sym::Mul(size_product, repeat);
+    }
+    orig_product = af::sym::Mul(orig_product, repeat);
+  }
+  attr.vectorized_strides = padded_strides;
+  return true;
+}
+
+// IndirectLoad SIMT 后置 Reduce 链行距垫整：kSimtOp 角色 value 写 UB local target 后由后置
+// Reduce 消费，模板 Store 与 Reduce 按 SizeAlign(inner, 32/sizeof(dtype)) 的对齐行距读写；
+// 而尾轴 reduce 的对齐推导（Reduce 输出尾轴 stride==0 判 kNotAligned）沿链回传后生成紧凑
+// vectorized_strides，buffer size 与 tiling 预算按紧凑 span 计算，行数 > 1 时 Store/Reduce
+// 读写越过 buffer 末端。链上成员（IL 输出至 Reduce 输入的各 tensor）统一垫整到同一对齐行距。
+void PadSimtPostReduceChainRowStrides(af::AscGraph &graph) {
+  for (const auto &node : graph.GetAllNodes()) {
+    const auto indirect_load = std::dynamic_pointer_cast<af::AscNode>(node);
+    if (indirect_load == nullptr || !af::ops::IsOps<af::ascir_op::IndirectLoad>(indirect_load) ||
+        ascgen_utils::indirect_load::GetTemplateRole(indirect_load) !=
+            ascgen_utils::indirect_load::TemplateRole::kSimtOp) {
+      continue;
+    }
+    const auto reduce = ascgen_utils::indirect_load::GetPostReduceConsumer(indirect_load);
+    if (reduce == nullptr) {
+      // 非后置 Reduce 形态没有行对齐写回契约，保持紧凑布局
+      continue;
+    }
+    std::vector<af::AscNodePtr> pending{indirect_load};
+    std::set<af::Node *> visited;
+    for (size_t index = 0UL; index < pending.size(); ++index) {
+      const auto &chain_node = pending[index];
+      if (chain_node == nullptr || !visited.insert(chain_node.get()).second) {
+        continue;
+      }
+      for (const auto &output : chain_node->outputs()) {
+        if (output != nullptr) {
+          (void)PadCompactVectorizedRowStrides(output->attr);
+        }
+      }
+      // Reduce 输出视图无紧凑行形态，天然不满足垫整判据；不越过 Reduce 继续传播
+      if (chain_node.get() == reduce.get()) {
+        continue;
+      }
+      for (const auto &next : chain_node->GetOutDataNodes()) {
+        const auto next_node = std::dynamic_pointer_cast<af::AscNode>(next);
+        if (next_node != nullptr) {
+          pending.emplace_back(next_node);
+        }
+      }
+    }
+  }
+}
 }  // namespace
 AlignmentType UnAlignmentStrategy::GetDefaultAlignmentType() {
   return AlignmentType::kNotAligned;
@@ -447,82 +574,7 @@ Status PadNddmaOutputVectorizedStrides(const af::AscGraph &graph) {
         af::ops::IsOps<af::ascir_op::Workspace>(node) || node->outputs().empty()) {
       continue;
     }
-    auto &output_attr = node->outputs[0].attr;
-    const auto vec_stride_size = output_attr.vectorized_strides.size();
-    if (vec_stride_size < 2UL || output_attr.vectorized_axis.size() != vec_stride_size ||
-        output_attr.axis.size() != output_attr.repeats.size()) {
-      continue;
-    }
-    const auto dtype_size = static_cast<int64_t>(af::GetSizeByDataType(output_attr.dtype));
-    if (dtype_size <= 0) {
-      continue;
-    }
-    const auto &tail_stride = output_attr.vectorized_strides[vec_stride_size - 1UL];
-    if (af::SymbolicUtils::StaticCheckEq(tail_stride, af::sym::kSymbolOne) != af::TriBool::kTrue) {
-      continue;
-    }
-    auto tail_axis_iter =
-        std::find(output_attr.axis.begin(), output_attr.axis.end(), output_attr.vectorized_axis[vec_stride_size - 1UL]);
-    if (tail_axis_iter == output_attr.axis.end()) {
-      continue;
-    }
-    const auto tail_axis_index = std::distance(output_attr.axis.begin(), tail_axis_iter);
-    const auto &tail_repeat = output_attr.repeats[tail_axis_index];
-    if (af::SymbolicUtils::StaticCheckEq(tail_repeat, af::sym::kSymbolOne) == af::TriBool::kTrue) {
-      continue;
-    }
-    const auto &penultimate_stride = output_attr.vectorized_strides[vec_stride_size - 2UL];
-    if (af::SymbolicUtils::StaticCheckEq(penultimate_stride, af::sym::Mul(tail_repeat, tail_stride)) !=
-        af::TriBool::kTrue) {
-      continue;
-    }
-    if (!IsStaticUnalignedStride(penultimate_stride, dtype_size)) {
-      continue;
-    }
-    std::vector<af::Expression> padded_strides = output_attr.vectorized_strides;
-    af::Expression size_product = tail_stride;
-    af::Expression orig_product = tail_stride;
-    const auto align_factor = kAlignBytes / static_cast<uint32_t>(dtype_size);
-    bool valid = true;
-    for (int64_t index = static_cast<int64_t>(vec_stride_size) - 1; index >= 0; --index) {
-      auto &stride = padded_strides.at(static_cast<size_t>(index));
-      if (af::SymbolicUtils::StaticCheckEq(stride, af::sym::kSymbolZero) == af::TriBool::kTrue) {
-        continue;
-      }
-      auto axis_iter = std::find(output_attr.axis.begin(), output_attr.axis.end(),
-                                 output_attr.vectorized_axis[static_cast<size_t>(index)]);
-      if (axis_iter == output_attr.axis.end()) {
-        valid = false;
-        break;
-      }
-      const auto axis_index = std::distance(output_attr.axis.begin(), axis_iter);
-      const auto &repeat = output_attr.repeats[axis_index];
-      if (index == static_cast<int64_t>(vec_stride_size) - 1) {
-        stride = size_product;
-        size_product = af::sym::Mul(size_product, repeat);
-      } else if (index == static_cast<int64_t>(vec_stride_size) - 2) {
-        stride = af::sym::Align(size_product, align_factor);
-        size_product = af::sym::Mul(stride, repeat);
-      } else {
-        // 外层轴仅当原 stride 为原始布局的内层累计跨距（紧致连续）或其对齐形式时，才可按垫整后
-        // 跨距重写（垫整后行距已对齐，跨距乘积天然对齐，两种形式的重写值数值一致）；非稠密跳变
-        // （batch/slice 间隙）或符号无法静态判定时放弃该节点垫整，保持原样。
-        const bool dense = af::SymbolicUtils::StaticCheckEq(stride, orig_product) == af::TriBool::kTrue;
-        const bool aligned_dense =
-            af::SymbolicUtils::StaticCheckEq(stride, af::sym::Align(orig_product, align_factor)) == af::TriBool::kTrue;
-        if (!dense && !aligned_dense) {
-          valid = false;
-          break;
-        }
-        stride = size_product;
-        size_product = af::sym::Mul(size_product, repeat);
-      }
-      orig_product = af::sym::Mul(orig_product, repeat);
-    }
-    if (!valid) {
-      continue;
-    }
-    output_attr.vectorized_strides = padded_strides;
+    (void)PadCompactVectorizedRowStrides(node->outputs[0].attr);
   }
   return af::SUCCESS;
 }
@@ -791,6 +843,8 @@ Status UnAlignmentStrategy::ModifyIndirectLoadVectorizedStrides(ascir::ImplGraph
       }
     }
   }
+  // SIMT 后置 Reduce 链的 Store/Reduce 按对齐行距读写 UB local target，链上成员需同步垫整
+  PadSimtPostReduceChainRowStrides(impl_graph);
   // Only the direct IL->Store boundary inherits the transposed/NDDMA layout.
   // Other IL stores (for example, stores after elementwise or reduce nodes) use
   // their own layout and must not be normalized here.

@@ -1629,6 +1629,47 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, ClassifiesMixedZeroStrideAndPhysical
   EXPECT_EQ(layout.physical_repeats, view.sizes);
 }
 
+// 转置稠密 + 尾轴广播（如 index_select 源为转置视图再 expand）：仅 allow_transposed_
+// zero_stride_broadcast=true（SIMT）时按倍数链 + 零步长扫尾判 strided，
+// 广播轴 physical_repeats 置 1。纯转置回归由既有
+// ClassifiesTransposedDenseLayoutAsStrided 覆盖（含重叠/互质反例）。
+TEST(IndirectLoadScheduleCaseGeneratorTest, ClassifiesTransposedZeroStrideBroadcastLayoutForSimt) {
+  const ascgen_utils::indirect_load::LogicalTensorView view = {
+      {0, 1, 2, 3},
+      {af::Symbol(2), af::Symbol(3), af::Symbol(4), af::Symbol(5)},
+      {af::Symbol(12), af::Symbol(1), af::Symbol(3), af::Symbol(0)}};
+  ascgen_utils::indirect_load::IndirectLoadTensorLayout layout;
+  ASSERT_EQ(ascgen_utils::indirect_load::ClassifyIndirectLoadLayout(view, layout, false, true), af::SUCCESS);
+  EXPECT_EQ(layout.kind, ascgen_utils::indirect_load::IndirectLoadLayoutKind::kStrided);
+  EXPECT_EQ(layout.physical_repeats,
+            (std::vector<af::Expression>{af::Symbol(2), af::Symbol(3), af::Symbol(4), af::Symbol(1)}));
+}
+
+// 同布局在默认（SIMD）与既有容忍分支（SK 的 allow_non_overlapping_zero_stride）下
+// 均维持 kUnsupported：SIMD staging 与 SK workspace store 依赖行主序批量搬运。
+TEST(IndirectLoadScheduleCaseGeneratorTest, RejectsTransposedZeroStrideBroadcastLayoutWithoutSimtFlag) {
+  const ascgen_utils::indirect_load::LogicalTensorView view = {
+      {0, 1, 2, 3},
+      {af::Symbol(2), af::Symbol(3), af::Symbol(4), af::Symbol(5)},
+      {af::Symbol(12), af::Symbol(1), af::Symbol(3), af::Symbol(0)}};
+  ascgen_utils::indirect_load::IndirectLoadTensorLayout layout;
+  ASSERT_EQ(ascgen_utils::indirect_load::ClassifyIndirectLoadLayout(view, layout), af::SUCCESS);
+  EXPECT_EQ(layout.kind, ascgen_utils::indirect_load::IndirectLoadLayoutKind::kUnsupported);
+  ASSERT_EQ(ascgen_utils::indirect_load::ClassifyIndirectLoadLayout(view, layout, true), af::SUCCESS);
+  EXPECT_EQ(layout.kind, ascgen_utils::indirect_load::IndirectLoadLayoutKind::kUnsupported);
+}
+
+// 倍数链断裂的转置 + 广播：即使 SIMT 放行标志打开也无法证明非重叠，维持 kUnsupported。
+TEST(IndirectLoadScheduleCaseGeneratorTest, RejectsTransposedZeroStrideBroadcastLayoutWithBrokenChain) {
+  const ascgen_utils::indirect_load::LogicalTensorView view = {
+      {0, 1, 2, 3},
+      {af::Symbol(2), af::Symbol(3), af::Symbol(4), af::Symbol(5)},
+      {af::Symbol(13), af::Symbol(1), af::Symbol(3), af::Symbol(0)}};
+  ascgen_utils::indirect_load::IndirectLoadTensorLayout layout;
+  ASSERT_EQ(ascgen_utils::indirect_load::ClassifyIndirectLoadLayout(view, layout, false, true), af::SUCCESS);
+  EXPECT_EQ(layout.kind, ascgen_utils::indirect_load::IndirectLoadLayoutKind::kUnsupported);
+}
+
 TEST(IndirectLoadScheduleCaseGeneratorTest, RejectsInvalidLogicalLayout) {
   ascgen_utils::indirect_load::IndirectLoadTensorLayout layout;
   const ascgen_utils::indirect_load::LogicalTensorView rank_mismatch = {
