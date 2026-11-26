@@ -15,10 +15,12 @@ import math
 import tempfile
 import argparse
 import time
-from typing import List
-from autofuse import ascendc_compile
 import re
-import tbe.common.utils.log as logger
+from typing import List
+
+import asc_op_compile_base.common.utils.log as logger
+
+from autofuse import ascendc_compile
 
 
 def _log_warning(message, *args):

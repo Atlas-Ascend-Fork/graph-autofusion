@@ -83,12 +83,14 @@ class FakeCFunc(object):
 @pytest.fixture(scope="module")
 def asc_codegen_compile_module():
     """Fixture to load asc_codegen_compile module with mocked dependencies"""
-    stub_module("tbe")
-    stub_module("tbe.common")
-    stub_module("tbe.common.buildcfg", get_current_build_config=lambda: {})
-    stub_module("tbe.common.utils")
+    stub_module("asc_op_compile_base")
+    stub_module("asc_op_compile_base.common")
     stub_module(
-        "tbe.common.utils.log",
+        "asc_op_compile_base.common.buildcfg", get_current_build_config=lambda: {}
+    )
+    stub_module("asc_op_compile_base.common.utils")
+    stub_module(
+        "asc_op_compile_base.common.utils.log",
         info=DummyLogger.info,
         error=DummyLogger.error,
         warning=DummyLogger.warning,
@@ -96,7 +98,7 @@ def asc_codegen_compile_module():
 
     # Mock do_op_tiling to return Conv2D tiling result
     stub_module(
-        "tbe.common.utils.op_tiling",
+        "asc_op_compile_base.asc_op_compiler.op_tiling",
         do_op_tiling=lambda *args, **kwargs: {
             "tiling_data": {},
             "tiling_key": 12345,
@@ -105,13 +107,13 @@ def asc_codegen_compile_module():
     )
 
     stub_module(
-        "tbe.common.context",
+        "asc_op_compile_base.common.context",
         get_context=lambda: SimpleNamespace(get_compile_info=lambda: {}),
     )
 
-    stub_module("tbe.tikcpp")
+    stub_module("asc_op_compile_base.asc_op_compiler")
     stub_module(
-        "tbe.tikcpp.compile_op",
+        "asc_op_compile_base.asc_op_compiler.compile_op",
         CommonUtility=SimpleNamespace(print_compile_log=lambda *args, **kwargs: None),
         AscendCLogLevel=SimpleNamespace(
             LOG_ERROR="error", LOG_DEBUG="debug", LOG_WARNING="warning", LOG_INFO="info"
@@ -126,15 +128,13 @@ def asc_codegen_compile_module():
             self.file_content = None
 
     stub_module(
-        "tbe.tikcpp.get_op_tiling",
+        "asc_op_compile_base.asc_op_compiler.get_op_tiling",
         TilingInfo=MockTilingInfo,
         _change_param_name_to_name=lambda *args, **kwargs: None,
         gen_static_shape_v2=lambda *args, **kwargs: "mock_tiling_content",
     )
-    sys.modules["tbe.tikcpp"].OpInfo = object
+    sys.modules["asc_op_compile_base.asc_op_compiler"].OpInfo = object
 
-    stub_module("asc_op_compile_base")
-    stub_module("asc_op_compile_base.common")
     stub_module("asc_op_compile_base.common.platform")
     stub_module(
         "asc_op_compile_base.common.platform.platform_info",
@@ -477,6 +477,77 @@ class TestGenerateCmakeLists:
             assert "ops_nn/ascendc/mat_mul_v3" in content
 
 
+class TestAscGraphCompileImplConvKwargs:
+    """conv2d 图编译入口必须把 is_conv 传递给 ascbc_kernel_compile（act_conv 头路径选择依赖它）"""
+
+    @staticmethod
+    def test_conv_graph_compile_passes_is_conv_to_ascbc(
+        asc_codegen_compile_module, tmpdir, monkeypatch
+    ):
+        module = asc_codegen_compile_module
+        monkeypatch.delenv("AUTOFUSE_DFX_FLAGS", raising=False)
+        captured = {}
+
+        def fake_kernel_compile(*args, **kwargs):
+            captured.update(kwargs)
+            return ("kernel.o", "kernel.json")
+
+        class FakeScheduleResults:
+            @staticmethod
+            def get_name():
+                return "conv_graph"
+
+            @staticmethod
+            def get_input_num():
+                return 1
+
+            @staticmethod
+            def get_output_num():
+                return 1
+
+            @staticmethod
+            def is_cube_type():
+                return True
+
+            @staticmethod
+            def is_conv_type():
+                return True
+
+            @staticmethod
+            def get_cube_attributes():
+                return None
+
+        # tiling_func_srcs 含 static shape 声明，驱动 impl 走 cube 静态 conv 分支
+        monkeypatch.setattr(
+            module,
+            "generate_device_and_host_code",
+            lambda **kwargs: (
+                "",
+                {"t": "bool AutofuseIsStaticShape() { return true; }"},
+            ),
+        )
+        monkeypatch.setattr(module, "is_cross_compile", lambda params: False)
+        monkeypatch.setattr(
+            module, "ascbc_conv_kernel_tiling_pro", lambda *a, **k: None
+        )
+        monkeypatch.setattr(module, "static_shape_compile", lambda **k: None)
+        monkeypatch.setattr(module, "timestamp_set", lambda *a, **k: None)
+        monkeypatch.setattr(module, "asc_graph_compile_post", lambda *a, **k: None)
+        monkeypatch.setattr(module, "ascbc_kernel_compile", fake_kernel_compile)
+
+        params = {
+            "schedule_results": FakeScheduleResults,
+            "vector_core_num": None,
+            "impl_mode": None,
+        }
+        module._asc_graph_compile_impl(
+            ("conv_kernel0",), temp_dir=str(tmpdir), params=params
+        )
+
+        assert captured.get("is_cube") is True
+        assert captured.get("is_conv") is True
+
+
 class TestStaticShapeCompileHasattrCheck:
     """Test the hasattr check in static_shape_compile"""
 
@@ -686,9 +757,13 @@ class TestStaticShapeCompileHasattrCheck:
                     "device_id": "0",
                 }.get(key)
 
-        context_module = sys.modules["tbe.common.context"]
-        monkeypatch.setattr(context_module, "__path__", [], raising=False)
-        stub_module("tbe.common.context.op_context", get_context=lambda: MockContext())
+        # get_codegen_compile_context 直接使用模块顶层 get_context，
+        # monkeypatch 编译器模块属性以匹配生产调用路径
+        monkeypatch.setattr(
+            asc_codegen_compile_module,
+            "get_context",
+            lambda: MockContext(),
+        )
         stub_module("autofuse.compile_adapter", get_debug_flag=lambda: False)
         monkeypatch.setattr(
             asc_codegen_compile_module,

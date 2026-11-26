@@ -11,6 +11,8 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
+__version__ = "2.0.0"
+
 import os
 import subprocess
 import shutil
@@ -22,22 +24,25 @@ import fcntl
 from collections import namedtuple
 from contextlib import contextmanager
 
-from tbe.common.buildcfg import get_current_build_config
-from tbe.tikcpp.compile_op import CommonUtility, AscendCLogLevel
+from asc_op_compile_base.common.buildcfg import get_current_build_config
+from asc_op_compile_base.asc_op_compiler.compile_op import (
+    CommonUtility,
+    AscendCLogLevel,
+)
 from asc_op_compile_base.common.platform.platform_info import get_soc_spec
-import tbe.common.utils.log as logger
+import asc_op_compile_base.common.utils.log as logger
+from asc_op_compile_base.asc_op_compiler.get_op_tiling import (
+    TilingInfo,
+    _change_param_name_to_name,
+    gen_static_shape_v2,
+)
+from asc_op_compile_base.asc_op_compiler.op_tiling import do_op_tiling
+from asc_op_compile_base.common.context import get_context
 
 # Python3 lib pyautofuse.so
 from .pyautofuse import Schedule, CodeGen, ascir
 from .ascbc_kernel_compile import ascbc_kernel_compile, camel_to_snake
 from .compile_adapter import TILING_HEADER_FILES, get_pgo_env_flag, get_pgo_topn
-from tbe.tikcpp.get_op_tiling import (
-    TilingInfo,
-    _change_param_name_to_name,
-    gen_static_shape_v2,
-)
-from tbe.common.utils.op_tiling import do_op_tiling
-from tbe.common.context import get_context
 
 
 def _log_warning(message, *args):
@@ -689,9 +694,7 @@ def cv_core_limit_context(context, aic_num, aiv_num):
 
 
 def get_codegen_compile_context():
-    import tbe.common.context.op_context as op_context
-
-    context = op_context.get_context()
+    context = get_context()
     op_info = context.get_op_info()
     vector_core_num = context.get_addition("_op_vectorcore_num")
     return CodegenCompileContext(
