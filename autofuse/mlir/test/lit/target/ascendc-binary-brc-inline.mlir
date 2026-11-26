@@ -54,6 +54,36 @@ module {
           i8, i8, index
     return
   }
+  func.func @max_row_broadcast(%dst: !ascendc.local_tensor<?xf32>, %src0: !ascendc.local_tensor<?xf32>,
+                               %src1: !ascendc.local_tensor<?xf32>, %shape0: index, %shape1: index,
+                               %isInput0BlockBrc: i8, %isInput1BlockBrc: i8, %firstAxisVStride: index)
+      attributes {ascendc.aicore} {
+    ascendc.binary_brc_inline %dst, %src0, %src1, %shape0, %shape1, %isInput0BlockBrc, %isInput1BlockBrc,
+        %firstAxisVStride {wrappedApiName = "Max"}
+        : !ascendc.local_tensor<?xf32>, !ascendc.local_tensor<?xf32>, !ascendc.local_tensor<?xf32>, index, index,
+          i8, i8, index
+    return
+  }
+  func.func @sub_row_broadcast(%dst: !ascendc.local_tensor<?xf32>, %src0: !ascendc.local_tensor<?xf32>,
+                               %src1: !ascendc.local_tensor<?xf32>, %shape0: index, %shape1: index,
+                               %isInput0BlockBrc: i8, %isInput1BlockBrc: i8, %firstAxisVStride: index)
+      attributes {ascendc.aicore} {
+    ascendc.binary_brc_inline %dst, %src0, %src1, %shape0, %shape1, %isInput0BlockBrc, %isInput1BlockBrc,
+        %firstAxisVStride {wrappedApiName = "Sub"}
+        : !ascendc.local_tensor<?xf32>, !ascendc.local_tensor<?xf32>, !ascendc.local_tensor<?xf32>, index, index,
+          i8, i8, index
+    return
+  }
+  func.func @div_row_broadcast(%dst: !ascendc.local_tensor<?xf32>, %src0: !ascendc.local_tensor<?xf32>,
+                               %src1: !ascendc.local_tensor<?xf32>, %shape0: index, %shape1: index,
+                               %isInput0BlockBrc: i8, %isInput1BlockBrc: i8, %firstAxisVStride: index)
+      attributes {ascendc.aicore} {
+    ascendc.binary_brc_inline %dst, %src0, %src1, %shape0, %shape1, %isInput0BlockBrc, %isInput1BlockBrc,
+        %firstAxisVStride {wrappedApiName = "Div"}
+        : !ascendc.local_tensor<?xf32>, !ascendc.local_tensor<?xf32>, !ascendc.local_tensor<?xf32>, index, index,
+          i8, i8, index
+    return
+  }
 }
 
 // IR-LABEL: func.func @add_row_broadcast
@@ -82,3 +112,24 @@ module {
 // CPP-LABEL: void min_row_broadcast
 // CPP: BinaryBrcInlineApiWithTwoVectorizedAxisV2<float>(
 // CPP-SAME: &AscendC::Min<float, false>)
+
+// IR-LABEL: func.func @max_row_broadcast
+// IR: ascendc.binary_brc_inline
+// IR-SAME: wrappedApiName = "Max"
+// CPP-LABEL: void max_row_broadcast
+// CPP: BinaryBrcInlineApiWithTwoVectorizedAxisV2<float>(
+// CPP-SAME: &AscendC::Max<float, false>)
+
+// IR-LABEL: func.func @sub_row_broadcast
+// IR: ascendc.binary_brc_inline
+// IR-SAME: wrappedApiName = "Sub"
+// CPP-LABEL: void sub_row_broadcast
+// CPP: BinaryBrcInlineApiWithTwoVectorizedAxisV2<float>(
+// CPP-SAME: &AscendC::Sub<float, false>)
+
+// IR-LABEL: func.func @div_row_broadcast
+// IR: ascendc.binary_brc_inline
+// IR-SAME: wrappedApiName = "Div"
+// CPP-LABEL: void div_row_broadcast
+// CPP: BinaryBrcInlineApiWithTwoVectorizedAxisV2<float>(
+// CPP-SAME: &AscendC::Div<float, false>)

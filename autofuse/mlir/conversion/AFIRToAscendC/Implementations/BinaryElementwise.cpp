@@ -1123,6 +1123,7 @@ struct BinaryBrcInlineMapping {
   ApiFamily family = ApiFamily::MemBased;
   ResultElementRule resultElementType = ResultElementRule::Same;
   uint32_t elementTypes = kArithmeticElementTypes;
+  bool needsTmpBuffer = false;
   ascend::ExecutionSpec executionSpec{ascend::ProcessorType::AICore, ascend::AICoreUnit::Vector,
                                       ascend::ExecutionModel::SIMD, ascend::InstructionForm::MemoryBased};
 };
@@ -1155,6 +1156,9 @@ class BinaryBrcInlineCapabilityProvider final : public ascend::instruction::Capa
     if (!areElementTypesSupported(mapping_->resultElementType, mapping_->elementTypes, types->lhs.getElementType(),
                                   types->rhsElement, types->destination.getElementType())) {
       return CapabilitySupport::unsupported(CapabilityReason::UnsupportedType);
+    }
+    if (std::optional<CapabilitySupport> tmpBuffer = elementwise::checkTmpBuffer(operation, mapping_->needsTmpBuffer)) {
+      return *tmpBuffer;
     }
     if (!elementwise::matchBroadcastInlineOperands(operation)) {
       return CapabilitySupport::unsupported(CapabilityReason::UnsupportedShape);
@@ -1232,12 +1236,14 @@ class BinaryBrcInlineConversionPattern final : public OpConversionPattern<Source
 
 // `wrappedApiName` 是被包装的 AscendC API 名称，由 `TargetOp::getAPIName()` 提供；
 // `id` 是 implementation 的注册名。二者独立，emitter 无需维护 AFIR 到 API 名称的映射。
-template <typename SourceOp>
+template <typename SourceOp, TmpBufferUse Tmp = TmpBufferUse::None>
 LogicalResult registerBinaryBrcInline(ImplementationRegistry &registry, llvm::StringRef id,
-                                      llvm::StringRef wrappedApiName) {
+                                      llvm::StringRef wrappedApiName, uint32_t elementTypes = kArithmeticElementTypes) {
+  BinaryBrcInlineMapping mapping;
+  mapping.elementTypes = elementTypes;
+  mapping.needsTmpBuffer = schedulerGivesTmpBuffer(Tmp);
   return registry.registerImplementation<SourceOp, BinaryBrcInlineMapping, BinaryBrcInlineCapabilityProvider>(
-      ascend::instruction::ImplementationKind::AscendC, ascend::instruction::ImplementationId{id.str()},
-      BinaryBrcInlineMapping{},
+      ascend::instruction::ImplementationKind::AscendC, ascend::instruction::ImplementationId{id.str()}, mapping,
       [wrappedApiName = wrappedApiName.str()](RewritePatternSet &patterns, const PatternBuildContext &context,
                                               const ImplementationKey &key,
                                               std::shared_ptr<const BinaryBrcInlineMapping> mapping) {
@@ -1279,13 +1285,15 @@ LogicalResult registerArithmeticBinaryImplementations(ImplementationRegistry &re
 
   // 内联广播（brc_inline，第三批，设计见
   // docs/development/2026-11-10-afir-broadcast-inline-design.md）：`afir.add` /
-  // `afir.mul` / `afir.minimum` 的行广播 implementation，只在两个输入满足 `(1, A) op (B, A)` 这个行广播
+  // `afir.mul` / `afir.minimum` / `afir.maximum` 的行广播 implementation，只在两个输入满足
+  // `(1, A) op (B, A)` 这个行广播
   // 形态时命中，与上面那两个 tensor-tensor implementation 的判据互斥（后者要求两个输入
   // 同形）。只接 mem 侧——`brc_inline_api.h` 没有对等的寄存器包装（设计文档「开工前三条
   // 实测结论」第三条）。
   if (failed(registerBinaryBrcInline<AddOp>(registry, "add.row_broadcast_inline", "Add")) ||
       failed(registerBinaryBrcInline<MulOp>(registry, "mul.row_broadcast_inline", "Mul")) ||
-      failed(registerBinaryBrcInline<MinimumOp>(registry, "minimum.row_broadcast_inline", "Min"))) {
+      failed(registerBinaryBrcInline<MinimumOp>(registry, "minimum.row_broadcast_inline", "Min")) ||
+      failed(registerBinaryBrcInline<MaximumOp>(registry, "maximum.row_broadcast_inline", "Max"))) {
     return failure();
   }
 
@@ -1405,6 +1413,14 @@ LogicalResult registerSubDivImplementations(ImplementationRegistry &registry) {
           registry, "div.tensor_tensor", ApiFamily::MemBased, kF16 | kF32)) ||
       failed(registerBinary<DivOp, ascendc::DivExtendRegBaseOp>(registry, "div.tensor_tensor.extend_reg_base",
                                                                 ApiFamily::RegBased, kF16 | kF32))) {
+    return failure();
+  }
+
+  // 与 legacy 的内联广播 API 一致；Div 只接受浮点类型，不能沿用 Sub 的整数集合。
+  // 两者保留调度分配的 tmp 契约，但内联广播 wrapper 不使用它。
+  if (failed(registerBinaryBrcInline<SubOp, TmpBufferUse::Unused>(registry, "sub.row_broadcast_inline", "Sub")) ||
+      failed(registerBinaryBrcInline<DivOp, TmpBufferUse::Unused>(registry, "div.row_broadcast_inline", "Div",
+                                                                  kF16 | kF32))) {
     return failure();
   }
 
