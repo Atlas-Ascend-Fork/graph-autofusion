@@ -6383,7 +6383,7 @@ Status Kernel::GenerateVecFuncOfCVFusion(std::stringstream &result, bool vector_
     result << "stage_size1 = KernelUtils::Max(tmpTilingData.nL0 / " << vec_num << ", 16) * basen_align;" << std::endl;
     if (is_dynamic && is_inductor) {
       result << "#ifdef INDUCTOR_CONST_TILING_DATA" << std::endl;
-      result << "const uint32_t stage_size_name = kConstTilingData.tiling_data.STAGE_SIZE_NAME;" << std::endl;
+      result << "const uint32_t stage_size_name = GET_CV_STAGE_SIZE(kConstTilingData.tiling_data);" << std::endl;
       result << "#else" << std::endl;
       result << "const uint32_t stage_size_name = params.stage_size_name;" << std::endl;
       result << "#endif" << std::endl;
@@ -6394,7 +6394,7 @@ Status Kernel::GenerateVecFuncOfCVFusion(std::stringstream &result, bool vector_
       } else {
         result << "AutofuseTilingData autofuse_tiling_size;" << std::endl;
       }
-      result << "const uint32_t stage_size_name = autofuse_tiling_size.STAGE_SIZE_NAME;" << std::endl;
+      result << "const uint32_t stage_size_name = GET_CV_STAGE_SIZE(autofuse_tiling_size);" << std::endl;
     }
     result << "const int32_t compute_size = stage_size_name > 144 ? stage_size_name : 144;" << std::endl;
     result << "int32_t stage_size = compute_size;" << std::endl;
@@ -6408,7 +6408,7 @@ Status Kernel::GenerateVecFuncOfCVFusion(std::stringstream &result, bool vector_
       result << "const AutofuseTilingData& autofuse_tiling_size = kConstTilingData.tiling_data;" << std::endl;
       result << "const uint32_t stage_size_name = "
              << (tpipe.cv_output_broadcast ? "kConstTilingData.stage_size_name"
-                                           : "autofuse_tiling_size.STAGE_SIZE_NAME")
+                                           : "GET_CV_STAGE_SIZE(autofuse_tiling_size)")
              << ";" << std::endl;
       result << "const int32_t basen_basem_align = kConstTilingData.cube_ub_stage_size * sizeof(" << dtype_name << ");"
              << std::endl;
@@ -6451,7 +6451,7 @@ Status Kernel::GenerateVecFuncOfCVFusion(std::stringstream &result, bool vector_
       } else {
         result << "AutofuseTilingData autofuse_tiling_size;" << std::endl;
         result << "const uint32_t stage_size_name = " << (tpipe.cv_m_broadcast ? tpipe.cv_m_size_expr + " * " : "")
-               << "autofuse_tiling_size.STAGE_SIZE_NAME;" << std::endl;
+               << "GET_CV_STAGE_SIZE(autofuse_tiling_size);" << std::endl;
         result << "stage_size_type = static_cast<int64_t>(stage_size_name / basen_align);" << std::endl;
       }
       result << "#endif" << std::endl;

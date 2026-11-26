@@ -944,22 +944,40 @@ class TestAutofuseLoadAbsStore:
         hint_graph = self.construct_graph()
         tiling_def, host_tiling, op_kernel = fuser.autofuse_backend(hint_graph)
 
-    def test_autofuse_backend_runtime_error_does_not_return_partial_result(self):
+    @pytest.mark.parametrize("entry", ["autofuse_backend", "codegen", "codegen_bin"])
+    @pytest.mark.parametrize(
+        "symbol,message",
+        [
+            ("CodegenTiling", "pyautofuse runtime error test"),
+            ("CodegenTilingOutOfRange", "pyautofuse out of range test"),
+        ],
+    )
+    def test_codegen_exceptions_do_not_return_partial_result(
+        self, entry, symbol, message
+    ):
         assert RUNTIME_ERROR_TILING_LIB.is_file(), (
             f"missing runtime error tiling library: {RUNTIME_ERROR_TILING_LIB}"
         )
         options = AutofuserOptions(
             tiling_lib_path=str(RUNTIME_ERROR_TILING_LIB),
-            tiling_lib_codegen_symbol="CodegenTiling",
+            tiling_lib_codegen_symbol=symbol,
         )
         fuser = Autofuser(options)
 
         hint_graph = self.construct_graph()
+        graph = (
+            hint_graph if entry == "autofuse_backend" else fuser.schedule(hint_graph)
+        )
+        expected = (
+            rf"^Codegen generate kernel failed: {message}$"
+            if entry == "autofuse_backend"
+            else "Codegen generate kernel failed or abort"
+        )
         with pytest.raises(
-            RuntimeError,
-            match=r"^Codegen generate kernel failed: pyautofuse runtime error test$",
+            RuntimeError if entry == "autofuse_backend" else TypeError,
+            match=expected,
         ):
-            fuser.autofuse_backend(hint_graph)
+            getattr(fuser, entry)(graph)
 
 
 def configure_concrete_op(op, axis, size):

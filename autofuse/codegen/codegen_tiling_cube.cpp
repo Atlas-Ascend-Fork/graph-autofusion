@@ -89,6 +89,42 @@ void AppendCvUbFusionStageSizeName(const ascir::FusedScheduledResult &fused_sche
   ss << "}" << std::endl;
 }
 
+void AppendCvUbStageSizeCase(const af::AscGraph &graph, const std::string &field, uint32_t case_id,
+                             std::stringstream &ss) {
+  std::string full_m;
+  for (const auto &node : graph.GetAllNodes()) {
+    if (ascir::IsCvMBroadcast(*node)) {
+      full_m = ascir::GetCvBroadcastShape(*node)[0].Str().get();
+      break;
+    }
+  }
+  std::string stage_size;
+  for (const auto &axis : graph.GetAllAxis()) {
+    if (axis->type == ascir::Axis::kAxisTypeTileInner) {
+      stage_size = GenCvStageSizeExpr(axis->size, field);
+    }
+  }
+  ss << "    case " << case_id << "U: return ";
+  if (stage_size.empty()) {
+    ss << "0U;\n";
+  } else if (!full_m.empty()) {
+    ss << "([](uint64_t elements) { return elements <= UINT32_MAX ? static_cast<uint32_t>(elements) : 0U; })("
+       << "static_cast<uint64_t>(" << full_m << ") * " << stage_size << ");\n";
+  } else {
+    ss << stage_size << ";\n";
+  }
+}
+
+void AppendCvUbGroupStageSizeCases(const ascir::ScheduleGroup &group, const std::string &field, uint32_t &case_id,
+                                   std::stringstream &ss) {
+  for (const auto &graph : group.impl_graphs) {
+    if (ascgen_utils::IsCubeType(graph)) {
+      continue;
+    }
+    AppendCvUbStageSizeCase(graph, field, case_id++, ss);
+  }
+}
+
 }  // namespace
 
 void TilingLib::AppendCvUbStageSizeSelection(const ascir::FusedScheduledResult &fused_schedule_result,
@@ -98,6 +134,7 @@ void TilingLib::AppendCvUbStageSizeSelection(const ascir::FusedScheduledResult &
     return;
   }
   ss << "static inline uint32_t GetCvUbStageSize(const AutofuseTilingData &data, uint32_t selected_case) {\n";
+  ss << "  (void)data;\n";
   ss << "  switch (selected_case) {\n";
   uint32_t case_id = 0U;
   for (size_t node_id = 0U; node_id < fused_schedule_result.node_idx_to_scheduled_results.size(); ++node_id) {
@@ -112,33 +149,7 @@ void TilingLib::AppendCvUbStageSizeSelection(const ascir::FusedScheduledResult &
                                       ? "data"
                                       : "data.graph" + std::to_string(node_id) + "_result" + std::to_string(result_id) +
                                             "_g" + std::to_string(group_id) + "_tiling_data";
-        for (const auto &graph : groups[group_id].impl_graphs) {
-          if (ascgen_utils::IsCubeType(graph)) {
-            continue;
-          }
-          std::string full_m;
-          for (const auto &node : graph.GetAllNodes()) {
-            if (ascir::IsCvMBroadcast(*node)) {
-              full_m = ascir::GetCvBroadcastShape(*node)[0].Str().get();
-              break;
-            }
-          }
-          std::string stage_axis_name;
-          for (const auto &axis : graph.GetAllAxis()) {
-            if (axis->type == ascir::Axis::kAxisTypeTileInner) {
-              stage_axis_name = axis->name;
-            }
-          }
-          ss << "    case " << case_id++ << "U: return ";
-          if (stage_axis_name.empty()) {
-            ss << "0U;\n";
-          } else if (!full_m.empty()) {
-            ss << "([](uint64_t elements) { return elements <= UINT32_MAX ? static_cast<uint32_t>(elements) : 0U; })("
-               << "static_cast<uint64_t>(" << full_m << ") * " << field << ".get_" << stage_axis_name << "_size());\n";
-          } else {
-            ss << field << ".get_" << stage_axis_name << "_size();\n";
-          }
-        }
+        AppendCvUbGroupStageSizeCases(groups[group_id], field, case_id, ss);
       }
     }
   }

@@ -18,6 +18,34 @@
 #include "common_utils.h"
 
 namespace codegen {
+std::string GenCvStageSizeExpr(const af::Expression &size, const std::string &tiling_data) {
+  // Match ProcessSingleGroup/ProcessMultiGroup: constants are not serialized.
+  if (size.IsConstExpr()) {
+    return af::SymbolicUtils::AsNumerDenomToString(size);
+  }
+  return tiling_data + "." + size.Str().get();
+}
+
+// Preserve the existing first-inner (Inductor) / last-inner (GE) selection.
+void AppendCvStageSizeAccessor(const af::AscGraph &graph, bool first_inner, std::stringstream &ss) {
+  af::Expression stage_size = af::Symbol(0);
+  for (const auto &axis : graph.GetAllAxis()) {
+    if (axis->type == ascir::Axis::kAxisTypeTileInner) {
+      stage_size = axis->size;
+      if (first_inner) {
+        break;
+      }
+    }
+  }
+  ss << "#define GET_CV_STAGE_SIZE(tiling_data) ";
+  if (stage_size.IsConstExpr()) {
+    // Keep the argument used even when the budget is folded to a constant.
+    ss << "(static_cast<void>(tiling_data), " << GenCvStageSizeExpr(stage_size, "") << ")\n";
+  } else {
+    ss << GenCvStageSizeExpr(stage_size, "(tiling_data)") << "\n";
+  }
+}
+
 ge::AscNodePtr GetBmmInputView(const ge::AscNodePtr &node) {
   if (node == nullptr || node->GetType() != "BatchMatMul" || node->GetInDataNodesSize() != 2U) {
     return nullptr;

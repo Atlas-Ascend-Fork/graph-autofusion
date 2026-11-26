@@ -19,6 +19,7 @@
 #include "common_utils.h"
 #include "utils/api_call_factory.h"
 #include "elewise/unary_api_call.h"
+#include "elewise/unary_api_tmp_call.h"
 #include "elewise/binary_api_call.h"
 #include "utils/api_call_utils.h"
 
@@ -43,6 +44,27 @@ codegen::Tensor MakeCvPointwiseTensor(af::AscGraph &graph, int64_t id) {
   tensor.attr.vectorized_strides = {af::Symbol("n"), One};
   std::string dtype = "float";
   return codegen::Tensor(tensor, dtype);
+}
+void CheckCvUnaryTmpIntermediateLayouts(TPipe &tpipe, const UnaryApiTmpCall &call,
+                                        const std::vector<af::AxisId> &current_axis, const codegen::Tensor &input,
+                                        codegen::Tensor &output) {
+  std::string result;
+  // An epilogue intermediate uses its own dtype-aligned row pitch, not the Cube row pitch.
+  tpipe.cube_output_tensor_id = -1;
+  ASSERT_EQ(call.Generate(tpipe, current_axis, {input}, {output}, result), af::SUCCESS);
+  EXPECT_EQ(result.find("t->"), std::string::npos);
+  EXPECT_NE(result.find("local_0[cv_row * ConvertToUint32(" + GenBlockAlignNExpr(input, "curAivN") + ")]"),
+            std::string::npos);
+  EXPECT_EQ(result.find("ConvertToUint32(curAlignN)"), std::string::npos);
+
+  // The same emitter serves dtype-changing unary APIs: retain separate physical row pitches.
+  output.dtype = DT_INT16;
+  ASSERT_EQ(call.Generate(tpipe, current_axis, {input}, {output}, result), af::SUCCESS);
+  EXPECT_NE(result.find("local_1[cv_row * ConvertToUint32(" + GenBlockAlignNExpr(output, "curAivN") + ")]"),
+            std::string::npos);
+  EXPECT_NE(result.find("local_0[cv_row * ConvertToUint32(" + GenBlockAlignNExpr(input, "curAivN") + ")]"),
+            std::string::npos);
+  EXPECT_EQ(result.find("curAivM * curAivN"), std::string::npos);
 }
 }  // namespace
 
@@ -81,6 +103,57 @@ TEST(CodegenKernel, CvUbPointwiseFlatCallRetainsPaddingFallback) {
   EXPECT_EQ(result, "Abs(local_2[0], local_0[0], local_0_actual_size);\n");
   ASSERT_EQ(binary.Generate(tpipe, {}, {input, rhs}, {output}, result), af::SUCCESS);
   EXPECT_EQ(result, "Sub(local_2[0], local_0[0], local_1[0], local_0_actual_size);\n");
+}
+
+TEST(CodegenKernel, CvUnaryTmpCallUsesStageRowLayout) {
+  af::AscGraph graph("test_graph");
+  Data data("x", graph);
+  auto m = graph.CreateAxis("a0", af::Symbol(64));
+  auto n = graph.CreateSizeVar("a1t_size");
+  auto n_axis = graph.CreateAxis("a1t", n);
+  auto input = MakeCvPointwiseTensor(graph, 0);
+  auto output = MakeCvPointwiseTensor(graph, 1);
+  input.axis = output.axis = {m.id, n_axis.id};
+  input.vectorized_axis = output.vectorized_axis = input.axis;
+  input.vectorized_strides = output.vectorized_strides = {n, One};
+  Tiler tiler("AutofuseTilingData", "t");
+  ASSERT_EQ(tiler.AddAxis(m), af::SUCCESS);
+  ASSERT_EQ(tiler.AddAxis(n_axis), af::SUCCESS);
+  tiler.AddSizeVar(af::SizeVar(n));
+  TPipe tpipe("tpipe", tiler);
+  UnaryApiTmpCall call("SigmoidExtend");
+  call.tmp_buf_id[-1L] = 0;
+  std::string result;
+  const std::vector<af::AxisId> current_axis = {m.id};
+  const auto generate = [&]() { return call.Generate(tpipe, current_axis, {input}, {output}, result); };
+
+  // A symbolic physical stride reproduces the generic pointer reference in the reported failure.
+  ASSERT_EQ(generate(), af::SUCCESS);
+  EXPECT_NE(result.find("t->a1t_size"), std::string::npos);
+  EXPECT_EQ(result.find("cv_row"), std::string::npos);
+  const auto generic_result = result;
+
+  tpipe.cv_fusion_type = ::ascir::CubeTemplateType::kUBFuse;
+  tpipe.cube_output_tensor_id = input.id;
+  ASSERT_EQ(generate(), af::SUCCESS);
+  EXPECT_EQ(result.find("t->"), std::string::npos);
+  EXPECT_NE(result.find("local_0[cv_row * ConvertToUint32(curAlignN)]"), std::string::npos);
+  EXPECT_NE(result.find("tmp_buf_0, ConvertToUint32(curAivN)"), std::string::npos);
+  EXPECT_NE(result.find("tmp_buf_0, ConvertToUint32(curAivM * curAivN)"), std::string::npos);
+  EXPECT_NE(result.find("curAivM * " + GenBlockAlignNExpr(output, "curAivN")), std::string::npos);
+
+  CheckCvUnaryTmpIntermediateLayouts(tpipe, call, current_axis, input, output);
+
+  // Stage-based CV generation must work even when the TPipe template type is not set to UBFuse.
+  tpipe.cv_fusion_type = ::ascir::CubeTemplateType::kDefault;
+  call.api_call_context.stage = ComputeStage::kCVFuseStage1;
+  ASSERT_EQ(generate(), af::SUCCESS);
+  EXPECT_EQ(result.find("t->"), std::string::npos);
+  EXPECT_NE(result.find("for (uint32_t cv_row"), std::string::npos);
+  output.dtype = DT_FLOAT;
+  call.api_call_context.stage = ComputeStage::kDefault;
+  ASSERT_EQ(generate(), af::SUCCESS);
+  EXPECT_EQ(result, generic_result);
 }
 
 TEST(CodegenKernel, CvUbPointwiseFlatCallRejectsUnsupportedViewsAndAliasing) {
