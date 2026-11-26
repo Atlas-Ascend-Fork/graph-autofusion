@@ -436,7 +436,17 @@ af::Status ApplyGraphPassGroup(af::AscGraph &graph, const IndirectLoadGroup &gro
         return af::SUCCESS;
       }
     }
-    GE_ASSERT_SUCCESS(NormalizeSimtAxesForGroupTemplate(graph, members, group_post_reduce, is_candidate_legal));
+    // [结构型 UB 归并的轴布局] 结构判定已确定该组不可能走寄存器归并（链不可标量折叠 /
+    // 无 Store / 空链）且无共享 Reduce 时，输出链只能由普通向量代码在 tile 循环内消费：
+    // 取 boundary=rank-1（outer=行/批、inner=最内轴），与边界化单 gather 同形态，避免整空间
+    // 布局导致调用被提升、输出链脱离循环。其它形态（L2 结构候选、有 Reduce 的组）不变。
+    const size_t group_output_rank = members.front()->outputs()[0]->attr.axis.size();
+    // 判据不含 forward_node_count：空链组（value 直出 Store）同样按逐 tile 布局发射，
+    // 与有链组统一，Store 由普通调度发射，行为正确且无需特判。
+    const bool l3_no_reduce_layout =
+        !merge_info.l2_structural && (group_post_reduce == nullptr) && (group_output_rank > 1UL);
+    GE_ASSERT_SUCCESS(NormalizeSimtAxesForGroupTemplate(graph, members, group_post_reduce, is_candidate_legal,
+                                                        l3_no_reduce_layout ? (group_output_rank - 1UL) : 0UL));
     if (!is_candidate_legal) {
       return af::SUCCESS;
     }
@@ -445,8 +455,10 @@ af::Status ApplyGraphPassGroup(af::AscGraph &graph, const IndirectLoadGroup &gro
     // 下游视图与模板轴系失配（Reduce 对齐推断读到不在本张量轴列表里的轴 id）。成员 value
     // tensor 的视图播种（actual_size 的直接来源）同位补齐——单 gather 靠输出重定向的 id
     // 绑定隐式完成，组路径必须显式播种。无共享 Reduce 的组保持原行为。
-    if (group_post_reduce != nullptr) {
-      GE_ASSERT_SUCCESS(SeedPostReduceInputVectorizedView(members.front(), group_post_reduce));
+    if (group_post_reduce != nullptr || l3_no_reduce_layout) {
+      if (group_post_reduce != nullptr) {
+        GE_ASSERT_SUCCESS(SeedPostReduceInputVectorizedView(members.front(), group_post_reduce));
+      }
       GE_ASSERT_SUCCESS(SeedGroupMemberValueVectorizedViews(members, is_candidate_legal));
       if (!is_candidate_legal) {
         return af::SUCCESS;

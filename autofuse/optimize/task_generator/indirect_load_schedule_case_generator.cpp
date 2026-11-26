@@ -273,13 +273,24 @@ bool TryRedirectSkCandidateToSimt(af::AscGraph &graph, const af::AscNodePtr &ind
   const bool window_redirect = !suppress_sk_redirect && indirect_load_detail::IsSkWindowUbInfeasible(indirect_load);
   const bool dynamic_tail_redirect =
       !suppress_sk_redirect && indirect_load_detail::IsSkRedirectRequiredForDynamicTail(graph, indirect_load);
-  if (!(window_redirect || dynamic_tail_redirect) || !IsNormRegionDag(indirect_load)) {
+  // [SK-segmented SIMT for R-before-gather-axis] Layouts whose post-Reduce axis precedes the gather
+  // axis cannot fuse the reduce into a non-SK row window, so whole-graph SIMD/SIMT candidates stay
+  // gated and the SK partition remains the semantic vehicle. This trigger turns such graphs into
+  // the segmented form (SK partition kept + SIMT-executed gather segment with its native SIMT
+  // tiling) so it can compete with the plain SK candidate instead of degrading to single-core SK
+  // windows (measured 2113us vs no_af 34us, ratio 0.016 on the SliceEmbeddingReduce workload).
+  const bool rbg_redirect = !suppress_sk_redirect && HasReduceBeforeGatherAxis(indirect_load);
+  if (!(window_redirect || dynamic_tail_redirect || rbg_redirect) || !IsNormRegionDag(indirect_load)) {
     return false;
   }
-  if (!indirect_load_detail::IsSimtUbInfeasible(graph, indirect_load) && has_live_candidate && !dynamic_tail_redirect) {
+  // The UB fallback preference only applies to the legacy window/dynamic-tail triggers; the
+  // R-before-gather-axis segmented form is a target candidate, not a fallback, and registers
+  // unconditionally (it competes with the separately registered plain SK candidate).
+  if (!rbg_redirect && !indirect_load_detail::IsSimtUbInfeasible(graph, indirect_load) && has_live_candidate &&
+      !dynamic_tail_redirect) {
     return false;
   }
-  GELOGI("[IndirectLoad] SK candidate redirects IL to SIMT (window exceeds UB), node[%s].",
+  GELOGI("[IndirectLoad] SK candidate redirects IL to SIMT (window exceeds UB or R-before-gather-axis), node[%s].",
          indirect_load->GetNamePtr());
   dynamic_tail_fired = dynamic_tail_redirect;
   // 先 Norm 边界化再 output 边界：闭包按 IL 下游数据流计算，output 边界插入后
@@ -578,6 +589,52 @@ Status IndirectLoadScheduleCaseGenerator::Generate(ascir::HintGraph &graph, std:
              static_cast<int32_t>(template_id), indirect_load->GetNamePtr());
       continue;
     }
+    // [SK-segmented SIMT for R-before-gather-axis] For these layouts the SK partition stays the
+    // semantic vehicle (the reduce is bridged through workspace segments), and the gather segment
+    // may execute with the SIMT template under its native tiling. Register the segmented variant
+    // first; the plain SK candidate below (registered with the redirect suppressed) remains as the
+    // scoring fallback. Both share the same partition semantics.
+    if (template_id == ascir::TemplateId::kIndirectLoadSK && HasReduceBeforeGatherAxis(indirect_load)) {
+      ascir::ImplGraph segmented_graph(graph.GetName().c_str());
+      GE_ASSERT_TRUE(segmented_graph.CopyFrom(graph), "Failed to copy graph [%s] for segmented candidate.",
+                     graph.GetName().c_str());
+      const af::AscNodePtr segmented_il = segmented_graph.FindNode(indirect_load_name.c_str());
+      GE_ASSERT_NOTNULL(segmented_il, "Failed to find copied IndirectLoad node[%s] for segmented candidate.",
+                        indirect_load_name.c_str());
+      GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::SetImplementation(segmented_il, template_case.implementation));
+      // Keep the original Softmax pattern for the redirected form: segmented tiling cuts R and a
+      // normalized SoftmaxAR full-load form cannot be statically verified (same policy as the
+      // window/dynamic-tail redirect keep-pattern guard), so no normalization is applied here.
+      bool segmented_legal = false;
+      GE_ASSERT_SUCCESS(ApplyGraphPass(segmented_graph, segmented_il, template_id, segmented_legal, !graphs.empty(),
+                                       nullptr, /*suppress_sk_redirect=*/false));
+      // [SK段SIMT化·注册守卫] ApplyGraphPass 在重定向未触发时（如 !IsNormRegionDag）
+      // 会静默回落 ApplySkGraphPass，副本实为普通 SK 图而 segmented_legal 仍为 true。
+      // 注册前必须确认重定向真实发生（模板已切为 SIMT 且带 SK 分段标记），否则该图
+      // 会以 SIMT 计分身份与下方普通 SK 候选重复注册，且其未规范化的 Softmax 副本
+      // 可能因平票按发射序胜出，绕过普通 SK 依赖的规范化产物。
+      const bool segmented_redirect_fired =
+          segmented_legal && ascir::GetTemplateIdOrDefault(*segmented_il) == ascir::TemplateId::kIndirectLoadSimt &&
+          ascir::IsSkSegmentedSimt(*segmented_il);
+      if (segmented_redirect_fired) {
+        ascgen_utils::indirect_load::IndirectLoadAccessInfo segmented_access_info;
+        GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::GetIndirectLoadAccessInfo(segmented_il, segmented_access_info));
+        graphs.emplace_back(std::move(segmented_graph));
+        score_functions.emplace_back(GenerateScoreFunc(
+            TemplateCase{ascir::TemplateId::kIndirectLoadSimt, ascgen_utils::indirect_load::Implementation::kDefault},
+            segmented_access_info, segmented_il, graphs.back(), /*simd_lowers_to_strided=*/false));
+        GELOGI("[IndirectLoad] Add SK-segmented SIMT schedule candidate for node[%s] (R-before-gather-axis).",
+               indirect_load->GetNamePtr());
+      } else if (segmented_legal) {
+        GELOGW(
+            "[IndirectLoad] SK->SIMT redirect did not fire for node[%s] (not a NormRegionDag?); skip the"
+            " segmented candidate, plain SK fallback remains.",
+            indirect_load->GetNamePtr());
+      } else {
+        GELOGW("[IndirectLoad] SK-segmented SIMT candidate rejected for node[%s]; plain SK fallback remains.",
+               indirect_load->GetNamePtr());
+      }
+    }
     ascir::ImplGraph candidate_graph(graph.GetName().c_str());
     GE_ASSERT_TRUE(candidate_graph.CopyFrom(graph), "Failed to copy graph [%s].", graph.GetName().c_str());
     af::AscNodePtr candidate_indirect_load = candidate_graph.FindNode(indirect_load_name.c_str());
@@ -598,8 +655,14 @@ Status IndirectLoadScheduleCaseGenerator::Generate(ascir::HintGraph &graph, std:
     // [SK段SIMT化·动态shape] 动态尾轴的 SK 候选同样不规范化：规范化 Softmax 的
     // SoftmaxAR 全载形态对符号 R 不可静态验证（真机大 R 下 tiling 必败），重定向后的
     // 分段形态才能兜底；见 IsSkRedirectRequiredForDynamicTail。
+    // 保留 Pattern 的前提是"本候选确实会走重定向"：R>G 布局的普通 SK 候选固定抑制
+    // 重定向（段化候选已单独注册），按普通 SK 执行需要规范化产物（与动态尾轴回退
+    // 分支的显式规范化同语义），不得沿用保留策略，否则 rbg ∩ 动态尾轴时该候选既不
+    // 重定向也不规范化。
+    const bool suppress_sk_redirect_for_plain_candidate =
+        template_id == ascir::TemplateId::kIndirectLoadSK && HasReduceBeforeGatherAxis(indirect_load);
     const bool keep_softmax_pattern_for_sk_redirect =
-        template_id == ascir::TemplateId::kIndirectLoadSK &&
+        template_id == ascir::TemplateId::kIndirectLoadSK && !suppress_sk_redirect_for_plain_candidate &&
         (indirect_load_detail::IsSkWindowUbInfeasible(candidate_indirect_load) ||
          indirect_load_detail::IsSkRedirectRequiredForDynamicTail(candidate_graph, candidate_indirect_load));
     if (!keep_softmax_pattern_for_sk_redirect) {
@@ -615,7 +678,8 @@ Status IndirectLoadScheduleCaseGenerator::Generate(ascir::HintGraph &graph, std:
     bool is_candidate_legal = false;
     bool sk_dynamic_redirect_rejected = false;
     GE_ASSERT_SUCCESS(ApplyGraphPass(candidate_graph, candidate_indirect_load, template_id, is_candidate_legal,
-                                     !graphs.empty(), &sk_dynamic_redirect_rejected));
+                                     !graphs.empty(), &sk_dynamic_redirect_rejected,
+                                     suppress_sk_redirect_for_plain_candidate));
     if (!is_candidate_legal && sk_dynamic_redirect_rejected) {
       // [动态重定向回退] 分段候选被布局/metadata 校验拒绝时，基于原图重新生成常规
       // SK 全载候选：保持改动前的编译下限（小 R launch 期 tiling 可行，大 R 运行期
