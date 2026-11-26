@@ -471,7 +471,7 @@ constexpr char kWorkspaceStubGraph[] = R"cpp(
   return true;
   }
   namespace AscGraph0 {
-  bool GetTiling(AutofuseTilingData &data, int, void *) {
+  bool GetPgoTilingSeed(AutofuseTilingData &data) {
     data.workspace3 = 96;
     data.workspace4 = 32;
     return true;

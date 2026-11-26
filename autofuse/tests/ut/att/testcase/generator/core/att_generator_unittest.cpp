@@ -1623,7 +1623,7 @@ TEST(GeneratorUT, TilingCodeGenImplConstruct) {
   config.force_schedule_result = 0L;
   MockHighPerfTilingCodeGenImpl impl("test", config, tiling_model_info, score_funcs, true);
   EXPECT_EQ(config.force_template_op_name, "test");
-  impl.GenGetAllSchedulesResults({});
+  impl.GenGetAllSchedulesResults({}, false);
   EXPECT_EQ(impl.tiling_func_.GetOutputStr().empty(), true);
 }
 
@@ -1849,6 +1849,7 @@ TEST(GeneratorUT, RootGetTilingFailuresUseWarningLogOnlyForPGOPath) {
   genImpl.tiling_func_.Reset();
   EXPECT_EQ(genImpl.GenPGOFusedScheduleResultsGetTilingDefine(namespace_map), af::SUCCESS);
   tiling_func_output = genImpl.tiling_func_.GetOutputStr();
+  EXPECT_NE(tiling_func_output.find("AscGraph0::GetPgoTilingSeed(tilingTmp)"), std::string::npos);
   EXPECT_NE(tiling_func_output.find("OP_LOGW(OP_NAME, \"Failed to get tiling of AscGraph0.\");"), std::string::npos);
   EXPECT_EQ(tiling_func_output.find("OP_LOGE(OP_NAME, \"Failed to get tiling of AscGraph0.\");"), std::string::npos);
 }
@@ -2032,6 +2033,33 @@ TEST(GeneratorUT, GetResultSummaryFailureUsesWarningLogForPGOPath) {
   EXPECT_EQ(tiling_func_output.find("OP_LOGE(OP_NAME, \"GetTiling Failed.\");"), std::string::npos);
 }
 
+TEST(GeneratorUT, SegmentCacheChecksNegativeScheduleResultScoreBeforeSolving) {
+  TilingCodeGenConfig config;
+  TilingModelInfo tiling_model_info(1);
+  ScoreFuncs score_funcs;
+  score_funcs[kModelInfoLevel::K_SCHEDULE_RESULT_LEVEL][0][1] =
+      "int32_t CalcScore(const AutofuseTilingData &tiling_data) { (void)tiling_data; return -1; }";
+  MockHighPerfTilingCodeGenImpl gen_impl("test", config, tiling_model_info, score_funcs, false);
+  gen_impl.config_.enable_tiling_segment_cache = true;
+  std::map<size_t, std::map<size_t, std::pair<std::string, std::string>>> namespace_map{{0, {}}, {1, {}}};
+
+  ASSERT_EQ(gen_impl.GenGetTilingForAllSchedulesResults(0, namespace_map), af::SUCCESS);
+  const auto output = gen_impl.tiling_func_.GetOutputStr();
+  const auto check = output.find(
+      "if (segment_result == 1U && AscGraph0ScheduleResult1::CalcScore(tiling_data) == -1) {\n"
+      "      return false;");
+  ASSERT_NE(check, std::string::npos);
+  const auto solve = output.find("kScheduleResultFunctions[segment_result]");
+  ASSERT_NE(solve, std::string::npos);
+  EXPECT_LT(check, solve);
+  EXPECT_EQ(output.find("segment_result == 0U &&"), std::string::npos);
+  const auto last_bucket = output.find("if (scores[index] != -1) { continue; }");
+  ASSERT_NE(last_bucket, std::string::npos);
+  const auto disable_save = output.find("segment_ctx->allow_save = false");
+  ASSERT_NE(disable_save, std::string::npos);
+  EXPECT_LT(disable_save, last_bucket);
+}
+
 TEST(GeneratorUT, PGOGetAllSchedulesResultsDoesNotPushGraphTilingTmpOutsideScheduleResult) {
   TilingCodeGenConfig config;
   config.tiling_data_type_name = "AutofuseTilingData";
@@ -2041,6 +2069,8 @@ TEST(GeneratorUT, PGOGetAllSchedulesResultsDoesNotPushGraphTilingTmpOutsideSched
   ModelInfo info;
   tiling_model_info.push_back(info);
   ScoreFuncs score_funcs;
+  score_funcs[kModelInfoLevel::K_SCHEDULE_RESULT_LEVEL][0][1] =
+      "int32_t CalcScore(const AutofuseTilingData &tiling_data) { (void)tiling_data; return -1; }";
   MockHighPerfTilingCodeGenImpl genImpl("test", config, tiling_model_info, score_funcs, false);
   std::map<size_t, std::map<size_t, std::pair<std::string, std::string>>> namespace_map;
   namespace_map[0] = {};
@@ -2051,6 +2081,7 @@ TEST(GeneratorUT, PGOGetAllSchedulesResultsDoesNotPushGraphTilingTmpOutsideSched
   const std::string tiling_func_output = genImpl.tiling_func_.GetOutputStr();
   EXPECT_NE(tiling_func_output.find("kScheduleResultFunctions[index](ori_block_dim, -1, tilingTmp,"),
             std::string::npos);
+  EXPECT_EQ(tiling_func_output.find("CalcScore"), std::string::npos);
   EXPECT_NE(tiling_func_output.find("cur_perf = DBL_MAX;"), std::string::npos);
   EXPECT_NE(tiling_func_output.find("continue;"), std::string::npos);
   EXPECT_EQ(tiling_func_output.find("tiling_perf.tiling_data = tilingTmp;"), std::string::npos);
@@ -2059,6 +2090,13 @@ TEST(GeneratorUT, PGOGetAllSchedulesResultsDoesNotPushGraphTilingTmpOutsideSched
   EXPECT_EQ(tiling_func_output.find("*tilingData = tilingTmp;"), std::string::npos);
   EXPECT_NE(tiling_func_output.find("bool has_valid_tiling = false;"), std::string::npos);
   EXPECT_NE(tiling_func_output.find("has_valid_tiling = true;"), std::string::npos);
+
+  genImpl.tiling_func_.Reset();
+  genImpl.GenPGOByCoreNumGetAllSchedulesResults(0, namespace_map, {});
+  const std::string core_search = genImpl.tiling_func_.GetOutputStr();
+  EXPECT_NE(core_search.find("index < 2"), std::string::npos);
+  EXPECT_NE(core_search.find("kScheduleResultFunctionsPGOByCoreNum[index]"), std::string::npos);
+  EXPECT_EQ(core_search.find("CalcScore"), std::string::npos);
 }
 
 TEST(GeneratorUT, PGOCallbacksUseUint64WorkspaceSize) {

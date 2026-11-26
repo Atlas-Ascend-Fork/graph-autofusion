@@ -6921,8 +6921,12 @@ TEST_F(TestCodegenTiling, AppendsDefaultCandidateWhenPgoMissesDefault) {
   EXPECT_NE(tiling_impl.find("if (!default_repr.empty() && !found_default_candidate) {"), std::string::npos);
   EXPECT_NE(tiling_impl.find("default_solution.tiling_data = default_tiling;"), std::string::npos);
   EXPECT_NE(tiling_impl.find("default_solution.is_default = true;"), std::string::npos);
-  EXPECT_NE(tiling_impl.find("if (!found_default_candidate) {"), std::string::npos);
+  EXPECT_NE(tiling_impl.find("if (!default_repr.empty() && !found_default_candidate) {\n"
+                             "    if (response.error_message.empty()) {"),
+            std::string::npos);
   EXPECT_NE(tiling_impl.find("default topn candidate not found"), std::string::npos);
+  EXPECT_EQ(tiling_impl.find("response.error_message = \"GetTiling failed for default topn config\""),
+            std::string::npos);
 }
 
 // Task 1 Step 2: multi-group semantic annotations — must match TF PGO real implementation
@@ -7330,6 +7334,134 @@ void AssertCommonPgoLoaderLifetime(const std::string &source) {
 TEST_F(TestCodegenTiling, GenerateForPgoShouldProtectDsoLifetime) {
   auto fused_schedule_result = this->GenBasicFusedScheduleResult({af::Symbol(64), af::Symbol(128)});
   AssertCommonPgoLoaderLifetime(GenerateForPgo(fused_schedule_result, "/tmp"));
+}
+
+namespace {
+constexpr char kPgoSearchStubs[] = R"(
+#include <algorithm>
+#include <cassert>
+#include <cfloat>
+#include <cstdint>
+#include <fstream>
+#include <utility>
+#include <vector>
+#define OP_LOGE(...)
+#define OP_LOGW(...)
+#define OP_LOGI(...)
+#define OP_LOGD(...)
+
+struct AutofuseTilingData {
+  uint32_t block_dim;
+  uint64_t workspace;
+  uint32_t get_block_dim() const { return block_dim; }
+  void set_block_dim(uint32_t value) { block_dim = value; }
+};
+struct AutofuseTilingDataPerf {
+  AutofuseTilingData tiling_data;
+  double best_perf{DBL_MAX};
+};
+struct PgoTensorArgs {};
+using ProfilingCallback = long (*)(PgoTensorArgs *, void *, uint64_t, AutofuseTilingData *, double *);
+using ProfilingBatchCallback = long (*)(PgoTensorArgs *, void *, uint64_t, std::vector<AutofuseTilingDataPerf> *);
+struct ResLimit { uint32_t aiv_num{24}; uint64_t ub_size{4096}; };
+struct PgoConfig {
+  static PgoConfig &Instance() { static PgoConfig config; return config; }
+  int pgo_algorithm{0};
+  bool need_change_solver_run{false};
+  int pgo_threshold_index{0};
+  int pgo_threshold_list_size{1};
+  ProfilingCallback single_callback{nullptr};
+  ProfilingBatchCallback batch_callback{nullptr};
+};
+ResLimit GetResLimit(const ResLimit *) { return {}; }
+bool GetWorkspaceSize(const AutofuseTilingData &tiling, uint64_t &workspace) {
+  workspace = tiling.workspace;
+  return true;
+}
+bool CheckedWorkspaceAdd(uint64_t lhs, uint64_t rhs, uint64_t &out) {
+  return !__builtin_add_overflow(lhs, rhs, &out);
+}
+int AutofuseTiling(AutofuseTilingData *, uint64_t *, uint32_t *, uint32_t, uint64_t) { return -1; }
+AutofuseTilingDataPerf saved_winner{};
+void PgoSaveTilingKey(const AutofuseTilingData &tiling, double perf, std::ofstream &) {
+  saved_winner = {tiling, perf};
+}
+void SavePGOSearchTilingData(char *, std::vector<AutofuseTilingDataPerf> &) {}
+std::vector<AutofuseTilingDataPerf> NormalizePgoMeasuredCandidates(std::vector<AutofuseTilingDataPerf> raw) {
+  return raw;
+}
+namespace optiling {
+bool IsEqual(double lhs, double rhs) { return lhs == rhs; }
+bool PGOSearchTilingKey(std::vector<AutofuseTilingDataPerf> &candidates, AutofuseTilingData &, int32_t,
+                       AutofuseTilingData *, PgoTensorArgs *, void *, uint64_t workspace, double &best_perf) {
+  assert(workspace == 0);
+  best_perf = 3.0;
+  candidates = {{{10, 2048}, 3.0}, {{7, 512}, 3.0}};
+  return true;
+}
+bool PGOByCoreNumSearchTilingKey(std::vector<AutofuseTilingDataPerf> &candidates, AutofuseTilingData *, uint32_t) {
+  candidates = {{{10, 2048}, DBL_MAX}, {{7, 512}, DBL_MAX}};
+  return true;
+}
+}
+)";
+
+constexpr char kPgoSearchChecks[] = R"(
+int main() {
+  constexpr uint64_t kWorkspaceReserve = 16ULL * 1024ULL * 1024ULL;
+  auto &config = PgoConfig::Instance();
+  config.batch_callback = +[](PgoTensorArgs *, void *stream, uint64_t workspace,
+                              std::vector<AutofuseTilingDataPerf> *profiles) -> long {
+    auto &state = *static_cast<std::pair<bool, int> *>(stream);
+    ++state.second;
+    assert(workspace == 2048 + kWorkspaceReserve);
+    if (state.first) {
+      profiles->at(0).best_perf = 5.0;
+      profiles->at(1).best_perf = 3.0;
+    }
+    return 0;
+  };
+
+  char config_path[] = "/dev/null";
+  AutofuseTilingData tiling{24, 0};
+  uint64_t workspace = 123;
+  uint32_t block_dim = 99;
+  assert(PgoTilingSearchPGO(nullptr, config_path, &tiling, &workspace, &block_dim) == 0);
+  assert(tiling.get_block_dim() == 7 && block_dim == 7);
+  assert(workspace == 512 + kWorkspaceReserve);
+  assert(saved_winner.tiling_data.get_block_dim() == 7 && saved_winner.tiling_data.workspace == 512);
+  assert(saved_winner.best_perf == 3.0);
+
+  config.pgo_algorithm = 1;
+  std::pair<bool, int> state{false, 0};
+  config.pgo_threshold_list_size = 0;
+  saved_winner = {};
+  assert(PgoTilingSearchByCoreNum(nullptr, config_path, &tiling, &workspace, &block_dim,
+                                   nullptr, nullptr, &state) == -1);
+  assert(state.second == 0 && saved_winner.tiling_data.get_block_dim() == 0);
+  config.pgo_threshold_list_size = 1;
+  assert(PgoTilingSearchByCoreNum(nullptr, config_path, &tiling, &workspace, &block_dim,
+                                   nullptr, nullptr, &state) == -1);
+  assert(state.second == 1 && saved_winner.tiling_data.get_block_dim() == 0);
+
+  state.first = true;
+  assert(PgoTilingSearchByCoreNum(nullptr, config_path, &tiling, &workspace, &block_dim,
+                                   nullptr, nullptr, &state) == 0);
+  assert(state.second == 2 && tiling.get_block_dim() == 7 && block_dim == 7);
+  assert(workspace == 512 + kWorkspaceReserve);
+  assert(saved_winner.tiling_data.get_block_dim() == 7 && saved_winner.tiling_data.workspace == 512);
+  assert(saved_winner.best_perf == 3.0);
+}
+)";
+}  // namespace
+
+TEST_F(TestCodegenTiling, PgoSearchPublishesWinnerResourcesOnlyWithValidMeasurement) {
+  auto schedule = GenMultiGroupFusedScheduleResult();
+  codegen::PgoShapeStringStream shape;
+  const auto type = "AutofuseTilingData";
+  ASSERT_TRUE(CompileAndRunCode(std::string(kPgoSearchStubs) + GenSavePGOConfigTilingDataFunc() +
+                                GenPgoTilingSearchByCoreNum(schedule, shape, type, false, "0") +
+                                GenPgoTilingSearchPGO(schedule, shape, type, false, "0") + kPgoSearchChecks));
 }
 
 TEST_F(TestCodegenTiling, GenerateForPgoShouldLoadFindBestTilingKeyOnlyWhenSupported) {

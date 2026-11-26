@@ -249,21 +249,6 @@ inline std::string GetScheduleResultPrefix(const size_t asc_graph_id, const size
   return "AscGraph" + std::to_string(asc_graph_id) + "ScheduleResult" + std::to_string(result_id);
 }
 
-inline bool NeedGenScoreFunc(const ScoreFuncs &score_funcs) {
-  // asc graph
-  for (const auto &single_level_score_funcs : score_funcs) {
-    // impl graph
-    for (const auto &asc_graph_score_func : single_level_score_funcs.second) {
-      for (const auto &impl_graph_score_func : asc_graph_score_func.second) {
-        if (!impl_graph_score_func.second.empty()) {
-          return true;
-        }
-      }
-    }
-  }
-  return false;
-}
-
 inline std::string GenPGOScheduleGroupDoTiling(const std::string &hardware_param,
                                                const std::string &schedule_result_prefix) {
   return schedule_result_prefix + "::PGOSearchTilingKey(tiling_data_list_tmp, " + hardware_param + "_tiling_data, " +
@@ -5294,13 +5279,12 @@ void TilingCodeGenImpl::GenGetScoreFuncs(
     const std::map<size_t, std::map<size_t, std::pair<std::string, std::string>>> &namespace_map) {
   auto &schedule_results_score_func = score_funcs_[kModelInfoLevel::K_SCHEDULE_RESULT_LEVEL][asc_graph_id];
   for (size_t i = 0UL; i < namespace_map.size(); i++) {
-    tiling_func_.AddLine("namespace " + GetScheduleResultPrefix(asc_graph_id, i) + " {");
-    auto &score_func = schedule_results_score_func[i];
+    auto score_func = schedule_results_score_func[i];
     if (score_func.empty()) {
-      score_func =
-          "int32_t CalcScore(" + config_.tiling_data_type_name + " &tiling_data) { (void)tiling_data; return 0;}";
-    } else if (score_func.find(ascgen_utils::kGroupTilingDataPlaceholder) != std::string::npos) {
-      // [双通道·结果级组绑定] 结果级打分（跨 schedule result 竞标：scores[] → max_index）
+      continue;
+    }
+    if (score_func.find(ascgen_utils::kGroupTilingDataPlaceholder) != std::string::npos) {
+      // [双通道·结果级组绑定] 结果级打分（跨 schedule result 竞标：scores[] → max_score）
       // 与 per-model 通道共用同一套占位符替换规则：
       //  - uniq_group：tiling_data 本身就是组 tiling data，没有 graphX_resultY_gZ 子结构；
       //  - 单 group：用该 group 的 item_prefix 绑定子结构；
@@ -5333,91 +5317,96 @@ void TilingCodeGenImpl::GenGetScoreFuncs(
         score_func.insert(brace_pos + 1, " (void)tiling_data;");
       }
     }
-    tiling_func_.AddLine(schedule_results_score_func[i]);
+    tiling_func_.AddLine("namespace " + GetScheduleResultPrefix(asc_graph_id, i) + " {");
+    tiling_func_.AddLine(score_func);
     tiling_func_.AddLine("}");
   }
 }
 
-void TilingCodeGenImpl::GenGetScoreFuncsCalling(
+bool TilingCodeGenImpl::GenGetScoreFuncsCalling(
     const size_t asc_graph_id,
     const std::map<size_t, std::map<size_t, std::pair<std::string, std::string>>> &namespace_map) {
-  tiling_func_.AddLine("  int32_t scores[" + std::to_string(namespace_map.size()) + "]{};");
+  const auto &result_scores = score_funcs_[kModelInfoLevel::K_SCHEDULE_RESULT_LEVEL][asc_graph_id];
+  const std::string result_count = std::to_string(namespace_map.size());
+  bool has_scores = false;
   for (size_t i = 0UL; i < namespace_map.size(); i++) {
+    const auto score = result_scores.find(i);
+    if (score == result_scores.cend() || score->second.empty()) {
+      continue;
+    }
+    if (!has_scores) {
+      tiling_func_.AddLine("  int32_t scores[" + result_count + "]{};");
+      has_scores = true;
+    }
     tiling_func_.AddLine("  scores[" + std::to_string(i) + "] = " + GetScheduleResultPrefix(asc_graph_id, i) +
                          "::CalcScore(tiling_data);");
-    // [ScoreFunc 诊断] 跨 schedule result 打分逐个可见（此前只有被执行的 result 才有 score is）。
-    tiling_func_.AddLine("  OP_LOGI(OP_NAME, \"[ScoreFunc] result[" + std::to_string(i) + "] score=%d\", scores[" +
-                         std::to_string(i) + "]);");
   }
+  if (has_scores) {
+    for (size_t i = 0UL; i < namespace_map.size(); ++i) {
+      tiling_func_.AddLine("  OP_LOGI(OP_NAME, \"[ScoreFunc] result[" + std::to_string(i) + "] score=%d\", scores[" +
+                           std::to_string(i) + "]);");
+    }
+  }
+  return has_scores;
 }
 
-void TilingCodeGenImpl::GenGetMaxScoreIndex(const AscGraphNamepspaceMap &namespace_map) {
-  tiling_func_.AddLine("  int32_t max_index = 0L;");
-  if (namespace_map.size() > 1) {
-    tiling_func_.AddLine("   for (int32_t index = 1; index < " + std::to_string(namespace_map.size()) + "; index++) {");
-    tiling_func_.AddLine("    if (scores[index] > scores[max_index]) {");
-    tiling_func_.AddLine("      max_index = index;");
-    tiling_func_.AddLine("    }");
-    tiling_func_.AddLine("  }");
-  }
-  // [ScoreFunc 诊断] max_index 及其分数（严格 >，平票保留下标最小）。
-  tiling_func_.AddLine("  OP_LOGI(OP_NAME, \"[ScoreFunc] max_index=%d score=%d\", max_index, scores[max_index]);");
-}
-
-void TilingCodeGenImpl::GenScheduleResultGetTilingCalling(const std::string &index, const std::string &ident) {
-  const std::string segment_arg = config_.enable_tiling_segment_cache ? ", segment_ctx" : "";
-  tiling_func_.AddLine(ident + "  if (kScheduleResultFunctions[" + index +
-                       "](ori_block_dim, tiling_case_id, tiling_data, cur_perf, best_perf, "
-                       "cur_block_dim" +
-                       segment_arg + ")) {");
-  tiling_func_.AddLine(ident + "    auto res = GetResultSummary(best_perf, tiling_data);");
-  GenDurationEndCode(TilingFuncDurationType::TILING_FUNC_DURATION_TOTAL, ident + "    ");
-  GenDurationPrintCode(ident + "    ");
-  GenDurationClearCode(ident + "    ");
-  tiling_func_.AddLine(ident + "    return res;");
-  tiling_func_.AddLine(ident + "  }");
-}
-
-af::Status TilingCodeGenImpl::GenGetAllSchedulesResults(const AscGraphNamepspaceMap &namespace_map) {
-  std::string chosen_index =
-      (config_.force_schedule_result < 0) ? "max_index" : std::to_string(config_.force_schedule_result);
-  const std::string segment_arg = config_.enable_tiling_segment_cache ? ", segment_ctx" : "";
-  if (NeedGenScoreFunc(score_funcs_)) {
-    GenScheduleResultGetTilingCalling(chosen_index);
-  } else if (!namespace_map.empty()) {
-    // [ScoreFunc 诊断] 没有任何打分函数 → 退化为"遍历全部 result 按 perf 选"。
-    // 注意：namespace_map 为空（无 schedule result）时不输出任何代码，保持函数产物为空。
-    tiling_func_.AddLine(
-        "  OP_LOGW(OP_NAME, \"[ScoreFunc] no score func emitted; fall back to perf over all results\");");
-  }
-  if (config_.force_schedule_result >= 0) {
-    GELOGI("Force schedule result %ld for op %s", config_.force_schedule_result, config_.tiling_data_type_name.c_str());
-    GE_ASSERT_TRUE(config_.force_schedule_result < static_cast<int32_t>(namespace_map.size()),
-                   "Force schedule "
-                   "result[%ld] should be less than result size[%zu]",
-                   config_.force_schedule_result, namespace_map.size());
-    tiling_func_.AddLine("  auto got_result = kScheduleResultFunctions[" + chosen_index +
-                         "](ori_block_dim, tiling_case_id, tiling_data, cur_perf, "
-                         "best_perf, cur_block_dim" +
-                         segment_arg + ");");
-    tiling_func_.AddLine("  if (!got_result) {");
-    tiling_func_.AddLine("    OP_LOGW(OP_NAME, \"Schedule result" + std::to_string(config_.force_schedule_result) +
-                         " cannot be found for op\");");
-    tiling_func_.AddLine("    return false;");
-    tiling_func_.AddLine("  }");
-    return af::SUCCESS;
-  }
-  tiling_func_.AddLine("  for (int32_t index = 0; index < " + std::to_string(namespace_map.size()) + "; index++) {");
-  if (NeedGenScoreFunc(score_funcs_)) {
-    tiling_func_.AddLine("    if (max_index == index) {");
-    tiling_func_.AddLine("      continue;");
-    tiling_func_.AddLine("    }");
-  }
-  tiling_func_.AddLine(
-      "    (void)kScheduleResultFunctions[index](ori_block_dim, tiling_case_id, tiling_data, cur_perf, "
-      "best_perf, cur_block_dim" +
-      segment_arg + ");");
+af::Status TilingCodeGenImpl::GenForcedScheduleResult(size_t result_count, const std::string &segment_arg) {
+  GELOGI("Force schedule result %ld for op %s", config_.force_schedule_result, config_.tiling_data_type_name.c_str());
+  GE_ASSERT_TRUE(config_.force_schedule_result < static_cast<int32_t>(result_count),
+                 "Force schedule "
+                 "result[%ld] should be less than result size[%zu]",
+                 config_.force_schedule_result, result_count);
+  const std::string chosen_index = std::to_string(config_.force_schedule_result);
+  tiling_func_.AddLine("  auto got_result = kScheduleResultFunctions[" + chosen_index +
+                       "](ori_block_dim, tiling_case_id, tiling_data, cur_perf, "
+                       "best_perf, cur_block_dim" +
+                       segment_arg + ");");
+  tiling_func_.AddLine("  if (!got_result) {");
+  tiling_func_.AddLine("    OP_LOGW(OP_NAME, \"Schedule result" + chosen_index + " cannot be found for op\");");
+  tiling_func_.AddLine("    return false;");
   tiling_func_.AddLine("  }");
+  return af::SUCCESS;
+}
+
+af::Status TilingCodeGenImpl::GenGetAllSchedulesResults(const AscGraphNamepspaceMap &namespace_map, bool has_scores) {
+  const std::string segment_arg = config_.enable_tiling_segment_cache ? ", segment_ctx" : "";
+  if (config_.force_schedule_result >= 0) {
+    return GenForcedScheduleResult(namespace_map.size(), segment_arg);
+  }
+  const std::string result_count = std::to_string(namespace_map.size());
+  const auto gen_tiling_loop = [&](const std::string &indent, const std::string &skip_condition) {
+    tiling_func_.AddLine(indent + "for (int32_t index = 0; index < " + result_count + "; ++index) {");
+    if (!skip_condition.empty()) {
+      tiling_func_.AddLine(indent + "  if (" + skip_condition + ") { continue; }");
+    }
+    tiling_func_.AddLine(indent +
+                         "  (void)kScheduleResultFunctions[index](ori_block_dim, tiling_case_id, "
+                         "tiling_data, cur_perf, best_perf, cur_block_dim" +
+                         segment_arg + ");");
+    tiling_func_.AddLine(indent + "}");
+  };
+  if (has_scores) {
+    tiling_func_.AddLine("  const int32_t max_score = *std::max_element(scores, scores + " + result_count + ");");
+    tiling_func_.AddLine("  if (max_score > 0) {");
+    gen_tiling_loop("    ", "scores[index] != max_score");
+    tiling_func_.AddLine("  }");
+    tiling_func_.AddLine("  if (IsEqual(best_perf, -1)) {");
+    gen_tiling_loop("    ", "scores[index] == -1 || (max_score > 0 && scores[index] == max_score)");
+    tiling_func_.AddLine("  }");
+    tiling_func_.AddLine("  if (IsEqual(best_perf, -1)) {");
+    if (config_.enable_tiling_segment_cache) {
+      // Recheck the higher-priority candidates for each shape in this segment.
+      tiling_func_.AddLine("    if (segment_ctx != nullptr) { segment_ctx->allow_save = false; }");
+    }
+    gen_tiling_loop("    ", "scores[index] != -1");
+    tiling_func_.AddLine("  }");
+  } else {
+    if (!namespace_map.empty()) {
+      tiling_func_.AddLine(
+          "  OP_LOGD(OP_NAME, \"[ScoreFunc] no score func emitted; fall back to perf over all results\");");
+    }
+    gen_tiling_loop("  ", "");
+  }
   return af::SUCCESS;
 }
 
@@ -5610,8 +5599,8 @@ af::Status TilingCodeGenImpl::GenFusedScheduleResultsGetTilingCoreDefine(const F
     tiling_func_.AddLine("  }");
   }
   if (need_segment_cache) {
-    // 分段缓存首填保存：本次实际执行了全量搜索（未命中或回退）且成功
-    tiling_func_.AddLine("  if (ret && tiling_case_id == -1 && !segment_ctx.hit) {");
+    // 分段缓存首填保存：全量搜索成功且没有依赖 -1 分兜底结果。
+    tiling_func_.AddLine("  if (ret && tiling_case_id == -1 && !segment_ctx.hit && segment_ctx.allow_save) {");
     tiling_func_.AddLine("    SegmentCacheEntry segment_new_entry{};");
     tiling_func_.AddLine("    segment_new_entry.valid = true;");
     size_t asc_graph_index = 0UL;
@@ -5773,16 +5762,10 @@ af::Status TilingCodeGenImpl::GenPGOFusedScheduleResultsGetTilingDefine(const Fu
   tiling_func_.AddLine("  AutofuseTilingData tilingTmp;");
   tiling_func_.AddLine("  tilingTmp = tiling_data;");
 
-  // Rebuild size aggregation base by calling each AscGraph::GetTiling to populate workspace values
-  // This is the critical fix to ensure each subgraph's workspace values are included in tilingTmp
-  std::string segment_null_args;
-  if (config_.enable_tiling_segment_cache) {
-    segment_null_args = ", nullptr";
-  }
+  // Seed workspace sizes for every graph without applying runtime schedule scores.
   for (const auto &asc_graph_namespace_map : namespace_map) {
     const std::string &asc_graph_namespace = "AscGraph" + std::to_string(asc_graph_namespace_map.first);
-    tiling_func_.AddLine("  if (!" + asc_graph_namespace + "::GetTiling(tilingTmp, -1, nullptr" + segment_null_args +
-                         ")) {");
+    tiling_func_.AddLine("  if (!" + asc_graph_namespace + "::GetPgoTilingSeed(tilingTmp)) {");
     tiling_func_.AddLine("    OP_LOGW(OP_NAME, \"Failed to rebuild size base for " + asc_graph_namespace + ".\");");
     tiling_func_.AddLine("    return false;");
     tiling_func_.AddLine("  }");
@@ -5918,6 +5901,16 @@ af::Status TilingCodeGenImpl::GenGetTilingForAllSchedulesResults(const uint32_t 
         "      ATT_SEGMENT_CACHE_LOGW(OP_NAME, \"[Segment Cache] cached result %u out of range.\", segment_result);");
     tiling_func_.AddLine("      return false;");
     tiling_func_.AddLine("    }");
+    const auto &result_scores = score_funcs_[kModelInfoLevel::K_SCHEDULE_RESULT_LEVEL][asc_graph_id];
+    for (const auto &[result_id, score] : result_scores) {
+      if (score.empty() || result_id >= asc_graph_map.size()) {
+        continue;
+      }
+      tiling_func_.AddLine("    if (segment_result == " + std::to_string(result_id) + "U && " +
+                           GetScheduleResultPrefix(asc_graph_id, result_id) + "::CalcScore(tiling_data) == -1) {");
+      tiling_func_.AddLine("      return false;");
+      tiling_func_.AddLine("    }");
+    }
     tiling_func_.AddLine(
         "    const bool segment_got_result = kScheduleResultFunctions[segment_result](ori_block_dim, "
         "tiling_case_id, tiling_data, cur_perf, best_perf, cur_block_dim, segment_ctx);");
@@ -5934,11 +5927,8 @@ af::Status TilingCodeGenImpl::GenGetTilingForAllSchedulesResults(const uint32_t 
     tiling_func_.AddLine("    return segment_result_ok;");
     tiling_func_.AddLine("  }");
   }
-  if (NeedGenScoreFunc(score_funcs_)) {
-    GenGetScoreFuncsCalling(asc_graph_id, asc_graph_map);
-    GenGetMaxScoreIndex(asc_graph_map);
-  }
-  GE_ASSERT_SUCCESS(GenGetAllSchedulesResults(asc_graph_map));
+  const bool has_scores = config_.force_schedule_result < 0 && GenGetScoreFuncsCalling(asc_graph_id, asc_graph_map);
+  GE_ASSERT_SUCCESS(GenGetAllSchedulesResults(asc_graph_map, has_scores));
   tiling_func_.AddLine("  const bool result = GetResultSummary(best_perf, tiling_data);");
   GE_ASSERT_SUCCESS(GenDurationEndCode(TilingFuncDurationType::TILING_FUNC_DURATION_TOTAL, "  "), "Generate end code!");
   GE_ASSERT_SUCCESS(GenDurationPrintCode("  "), "Generate print code failed.");
@@ -5958,9 +5948,7 @@ af::Status TilingCodeGenImpl::GenGetTilingForScheduleResult() {
     size_t asc_graph_id = asc_graph_map_iter.first;
     tiling_func_.AddLine("namespace AscGraph" + std::to_string(asc_graph_id) + " {");
 
-    if (NeedGenScoreFunc(score_funcs_)) {
-      GenGetScoreFuncs(asc_graph_id, asc_graph_map);
-    }
+    GenGetScoreFuncs(asc_graph_id, asc_graph_map);
     GE_ASSERT_SUCCESS(GenGetResultSummary(asc_graph_id),
                       "Gen GetResultSummary failed, asc_graph_id = %zu, tiling data name = %s.", asc_graph_id,
                       config_.tiling_data_type_name.c_str());
@@ -5998,6 +5986,15 @@ af::Status TilingCodeGenImpl::GenPGOGetTilingForAll() {
     auto &asc_graph_map = asc_graph_map_iter.second;
     size_t asc_graph_id = asc_graph_map_iter.first;
     tiling_func_.AddLine("namespace AscGraph" + std::to_string(asc_graph_id) + " {");
+    tiling_func_.AddLine("static bool GetPgoTilingSeed(" + config_.tiling_data_type_name + " &tiling_data) {");
+    GE_ASSERT_SUCCESS(GenGetTilingForAllInitLines());
+    const std::string segment_null_arg = config_.enable_tiling_segment_cache ? ", nullptr" : "";
+    tiling_func_.AddLine("  for (const auto &solve_result : kScheduleResultFunctions) {");
+    tiling_func_.AddLine("    (void)solve_result(ori_block_dim, -1, tiling_data, cur_perf, best_perf, cur_block_dim" +
+                         segment_null_arg + ");");
+    tiling_func_.AddLine("  }");
+    tiling_func_.AddLine("  return !IsEqual(best_perf, -1);");
+    tiling_func_.AddLine("}");
     for (const auto &graph_info : asc_graph_map) {
       GE_ASSERT_SUCCESS(GenPGOGetScheduleResult(asc_graph_id, graph_info.first, graph_info.second, hardware_map));
     }

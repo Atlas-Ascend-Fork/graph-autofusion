@@ -802,7 +802,6 @@ void TilingLib::GenTopnDefaultTiling(std::stringstream &ss, const std::string &t
   }
   ss << "  } else {" << std::endl;
   ss << "    OP_LOGW(OP_NAME, \"GetTiling failed for default topn config.\");" << std::endl;
-  ss << "    response.error_message = \"GetTiling failed for default topn config\";" << std::endl;
   ss << "  }" << std::endl;
 }
 
@@ -826,7 +825,7 @@ void TilingLib::GenTopnSearchAndFinalChecks(std::stringstream &ss, const std::st
     GenTopnSearchTilingSetup(ss, tiling, fused_schedule_result);
     GenTopnCollectCandidates(ss, tiling, use_att_codegen);
   }
-  ss << "  if (!found_default_candidate) {" << std::endl;
+  ss << "  if (!default_repr.empty() && !found_default_candidate) {" << std::endl;
   ss << "    if (response.error_message.empty()) {" << std::endl;
   GenTopnSetFailureMessage(ss, "      ", "default topn candidate not found");
   ss << "    }" << std::endl;
