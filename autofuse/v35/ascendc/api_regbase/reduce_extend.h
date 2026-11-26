@@ -47,7 +47,8 @@ __aicore__ inline void ReduceSumExtend(const LocalTensor<T> &dst, const LocalTen
   LocalTensor<uint8_t> sharedTmpBuffer;
   bool ans = PopStackBuffer<uint8_t, TPosition::LCM>(sharedTmpBuffer);
   ASCENDC_ASSERT((ans), {
-    KERNEL_LOG(KERNEL_ERROR, "PopStackBuffer failed to allocate tmpBuffer for ReduceSumExtend, ret=%d", ans);
+    KERNEL_LOG(KERNEL_ERROR, "PopStackBuffer failed to allocate tmpBuffer for ReduceSumExtend, ret=%d",
+               static_cast<int32_t>(ans));
   });
   ReduceSumExtend<T, pattern, isReuseSource>(dst, src, sharedTmpBuffer, srcShape, srcInnerPad);
 }
@@ -69,7 +70,8 @@ __aicore__ inline void ReduceMeanExtend(const LocalTensor<T> &dst, const LocalTe
   LocalTensor<uint8_t> sharedTmpBuffer;
   bool ans = PopStackBuffer<uint8_t, TPosition::LCM>(sharedTmpBuffer);
   ASCENDC_ASSERT((ans), {
-    KERNEL_LOG(KERNEL_ERROR, "PopStackBuffer failed to allocate tmpBuffer for ReduceMeanExtend, ret=%d", ans);
+    KERNEL_LOG(KERNEL_ERROR, "PopStackBuffer failed to allocate tmpBuffer for ReduceMeanExtend, ret=%d",
+               static_cast<int32_t>(ans));
   });
   ReduceMeanExtend<T, pattern, isReuseSource>(dst, src, sharedTmpBuffer, srcShape, srcInnerPad);
 }

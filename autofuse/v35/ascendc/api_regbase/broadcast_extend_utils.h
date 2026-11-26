@@ -90,8 +90,8 @@ __aicore__ inline void DstShapeCheck(const uint32_t *dstShape, uint32_t dim) {
 __aicore__ inline void ShapeCheck(uint32_t *tillingShape, const uint32_t *shape, uint32_t rank) {
   for (uint16_t i = 0; i < rank; ++i) {
     ASCENDC_ASSERT((shape[i] == tillingShape[i]), {
-      KERNEL_LOG(KERNEL_ERROR, "Tiling shape should be equal to shape, shape[%u]=%u, tillingShape[%u]=%u", i, shape[i],
-                 i, tillingShape[i]);
+      KERNEL_LOG(KERNEL_ERROR, "Tiling shape should be equal to shape, tillingShape[%u]=%u, shape[%u]=%u", i,
+                 tillingShape[i], i, shape[i]);
     });
   }
 }

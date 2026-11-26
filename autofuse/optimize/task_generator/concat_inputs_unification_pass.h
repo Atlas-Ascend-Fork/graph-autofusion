@@ -33,6 +33,7 @@ class ConcatInputUnificationPass {
   static af::Status GetQueInputIndices(const af::AscNodePtr &concat_node, std::set<int32_t> &input_indices_need_copy);
   static bool IsSrcColSizeAlignedToB4(const af::AscNodePtr &concat_node, size_t concat_dim, int32_t dtype_size);
   static bool IsSrcColSizeOverLimit(const af::AscNodePtr &concat_node, size_t concat_dim, int32_t dtype_size);
+  static void LogSrcColSizeOverLimit(const af::AscNodePtr &concat_node, size_t concat_dim, int32_t dtype_size);
   static af::Status CollectSharedInputs(const af::AscNodePtr &concat_node, std::set<int32_t> &input_indices_need_copy);
 };
 

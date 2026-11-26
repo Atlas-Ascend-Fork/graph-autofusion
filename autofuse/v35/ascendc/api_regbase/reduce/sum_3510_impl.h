@@ -80,8 +80,8 @@ __aicore__ inline void SumCheckParams(const LocalTensor<T> &dstTensor, const Loc
     KERNEL_LOG(KERNEL_ERROR, "The value of n must be in [1, inner], got n=%u, inner=%u", sumParams.n, sumParams.inner);
   });
   ASCENDC_ASSERT((sumParams.inner * sizeof(T) % sumInnerAlignLen == 0), {
-    KERNEL_LOG(KERNEL_ERROR, "The value of inner * sizeof(T) must be an integer multiple of 32, got %u",
-               sumParams.inner * (uint32_t)sizeof(T));
+    KERNEL_LOG(KERNEL_ERROR, "The value of inner * sizeof(T) must be an integer multiple of %u, got %u",
+               sumInnerAlignLen, sumParams.inner * static_cast<uint32_t>(sizeof(T)));
   });
 }
 

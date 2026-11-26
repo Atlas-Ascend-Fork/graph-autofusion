@@ -116,8 +116,8 @@ __aicore__ inline void MeanCheckParams(const LocalTensor<T> &dstTensor, const Lo
                meanParams.inner);
   });
   ASCENDC_ASSERT((meanParams.inner * sizeof(T) % meanInnerAlignLen == 0), {
-    KERNEL_LOG(KERNEL_ERROR, "The value of inner * sizeof(T) must be an integer multiple of 32, got %u",
-               meanParams.inner * (uint32_t)sizeof(T));
+    KERNEL_LOG(KERNEL_ERROR, "The value of inner * sizeof(T) must be an integer multiple of %u, got %u",
+               meanInnerAlignLen, meanParams.inner * static_cast<uint32_t>(sizeof(T)));
   });
 }
 

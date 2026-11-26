@@ -62,7 +62,7 @@ bool ConcatInputUnificationPass::CanOptimize(const af::AscNodePtr &concat_node, 
   const auto dtype_size = ge::GetSizeByDataType(concat_node->outputs[0].attr.dtype);
   GE_WARN_ASSERT(dtype_size > 0, "unsupported output data type");
   if (IsSrcColSizeOverLimit(concat_node, concat_dim, dtype_size)) {
-    GELOGI("dst col size over limit (max 128 bytes), cannot optimize");
+    LogSrcColSizeOverLimit(concat_node, concat_dim, dtype_size);
     return false;
   }
 
@@ -198,6 +198,19 @@ bool ConcatInputUnificationPass::IsSrcColSizeOverLimit(const af::AscNodePtr &con
   constexpr int64_t kSrcColSizeLimit = (256 / 2);
   GELOGI("dst_col_size = %ld", src_col_size);
   return (src_col_size * dtype_size) > kSrcColSizeLimit;
+}
+
+void ConcatInputUnificationPass::LogSrcColSizeOverLimit(const af::AscNodePtr &concat_node, const size_t concat_dim,
+                                                        const int32_t dtype_size) {
+  const auto src_col_size_expr = GetColSize(concat_node->inputs[0], concat_dim);
+  int64_t src_col_size = -1;
+  if (!src_col_size_expr.IsConstExpr() || !src_col_size_expr.GetConstValue(src_col_size)) {
+    GELOGI("dst col size is not a const expression over the limit, cannot optimize");
+    return;
+  }
+  constexpr int64_t kSrcColSizeLimit = (256 / 2);
+  GELOGI("dst col size = %ld, dst col bytes = %ld over limit %ld, cannot optimize", src_col_size,
+         src_col_size * static_cast<int64_t>(dtype_size), kSrcColSizeLimit);
 }
 
 af::Status ConcatInputUnificationPass::CollectSharedInputs(const af::AscNodePtr &concat_node,

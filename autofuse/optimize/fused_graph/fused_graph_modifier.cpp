@@ -43,8 +43,8 @@ Status FusedGraphModifier::InitAscbcOutAnchorAttr(
           GE_ASSERT_NOTNULL(node_attr->ir_attr);
           int64_t ir_idx = -1;
           (void)node_attr->ir_attr->GetAttrValue("index", ir_idx);
-          GE_ASSERT_TRUE(ir_idx >= 0, "Get invalid ir_index [%lld] from node :[%s], expect >= 0.",
-                         static_cast<long long>(ir_idx), op_desc->GetNamePtr());
+          GE_ASSERT_TRUE(ir_idx >= 0, "Get invalid ir_index:[%ld] from node:[%s], expect >= 0.", ir_idx,
+                         op_desc->GetNamePtr());
           nodes_to_out_anchor_idx_to_attr[node][out_anchor->GetIdx()].linked_output_ir_idx = ir_idx;
         }
       }
@@ -115,8 +115,8 @@ Status FusedGraphModifier::ProcessDataNodes(const af::AscNodePtr &sub_data_node,
     GE_ASSERT_NOTNULL(node_attr->ir_attr);
     int64_t ir_idx = -1;
     (void)node_attr->ir_attr->GetAttrValue("index", ir_idx);
-    GE_ASSERT_TRUE(ir_idx >= 0, "Get invalid ir_index [%lld] from node :[%s], expect >= 0.",
-                   static_cast<long long>(ir_idx), op_desc->GetNamePtr());
+    GE_ASSERT_TRUE(ir_idx >= 0, "Get invalid ir_index:[%ld] from node:[%s], expect >= 0.", ir_idx,
+                   op_desc->GetNamePtr());
     auto ir_attr = sub_data_node->attr.ir_attr->DownCastTo<af::AscDataIrAttrDef>();
     (void)ir_attr->SetIndex(ir_idx);
     return af::SUCCESS;

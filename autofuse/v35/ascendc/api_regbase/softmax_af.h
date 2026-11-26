@@ -572,7 +572,7 @@ __aicore__ inline void SoftmaxARFullLoadExtendImpl(const AscendC::LocalTensor<TO
 
   SoftmaxRegBase::SoftmaxARTilingInfo tilingInfo = SoftmaxRegBase::GetSoftmaxARTilingInfo<TIn>(a, r);
   ASCENDC_ASSERT(tmp_buf.GetSize() >= tilingInfo.requiredTmpBytes, {
-    KERNEL_LOG(KERNEL_ERROR, "softmax api tmp_buf is too small, tmp_buf size is %u elements, required is %u bytes!",
+    KERNEL_LOG(KERNEL_ERROR, "softmax api tmp_buf is too small, tmp_buf is %u bytes, required is %u bytes!",
                tmp_buf.GetSize(), tilingInfo.requiredTmpBytes);
   });
 
@@ -608,8 +608,7 @@ __aicore__ inline void SoftmaxARSmallRExtendImpl(const AscendC::LocalTensor<TOut
   const uint32_t outRAligned = SoftmaxRegBase::CalcRAligned<TOut>(r);
   const uint32_t requiredTmpBytes = SoftmaxRegBase::CalcSmallRExpCacheBytes(r);
   ASCENDC_ASSERT(tmp_buf.GetSize() >= requiredTmpBytes, {
-    KERNEL_LOG(KERNEL_ERROR,
-               "softmax small-r api tmp_buf is too small, tmp_buf size is %u elements, required is %u bytes!",
+    KERNEL_LOG(KERNEL_ERROR, "softmax small-r api tmp_buf is too small, tmp_buf is %u bytes, required is %u bytes!",
                tmp_buf.GetSize(), requiredTmpBytes);
   });
 
