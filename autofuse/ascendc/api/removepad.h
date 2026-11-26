@@ -14,10 +14,6 @@ template <typename T>
 inline __aicore__ void RemovePadExtend(const LocalTensor<T> &dst, const LocalTensor<T> &src,
                                        const uint64_t last_axis_actual_size, const uint64_t last_axis_size,
                                        const uint64_t non_last_axis_merge) {
-  if (last_axis_size == last_axis_actual_size) {
-    AscendC::Adds(dst, src, static_cast<T>(0), static_cast<uint32_t>(non_last_axis_merge * last_axis_actual_size));
-    return;
-  }
   uint64_t rsvd_cnt = 0;
   uint8_t mask = 7;
   AscendC::GatherMaskParams params;
@@ -25,6 +21,16 @@ inline __aicore__ void RemovePadExtend(const LocalTensor<T> &dst, const LocalTen
   params.repeatTimes = non_last_axis_merge;
   params.src0RepeatStride = last_axis_size * sizeof(T) / 32;
   params.src1RepeatStride = 0;
+  if (last_axis_size == last_axis_actual_size) {
+    // Flatten compact rows into one count-mode operation. A repeat spans 256 bytes,
+    // so the source repeat stride is 8 blocks, independent of dtype and row size.
+    constexpr uint16_t kVectorRepeatBytes = 256;
+    constexpr uint16_t kBlockBytes = 32;
+    params.repeatTimes = 1;
+    params.src0RepeatStride = kVectorRepeatBytes / kBlockBytes;
+    AscendC::GatherMask(dst, src, mask, true, non_last_axis_merge * last_axis_actual_size, params, rsvd_cnt);
+    return;
+  }
   AscendC::GatherMask(dst, src, mask, true, last_axis_actual_size, params, rsvd_cnt);
 }
 #endif  // __ASCENDC_API_REMOVEPAD_H__

@@ -255,7 +255,7 @@ class RemovePadAscIrCodegenImpl : public AscIrCodegen {
     return {"removepad.h"};
   }
   std::vector<std::string> IncludeApiHeaderFiles() const override {
-    return {"basic_api/kernel_operator_vec_gather_mask_intf.h", "basic_api/kernel_operator_vec_binary_scalar_intf.h"};
+    return {"basic_api/kernel_operator_vec_gather_mask_intf.h"};
   }
   [[nodiscard]] bool IsNodeValid(const AscNode &node) const override {
     GE_ASSERT_TRUE(!IsNodeHasScalarInput(node), "Node %s[%s] does not support scalar input", node.GetTypePtr(),

@@ -1,4 +1,5 @@
 add_library(test_ascendc OBJECT
+    ./test_removepad.cpp
     ./test_utils.cpp
     ./test_argmax.cpp
     ./test_transpose.cpp

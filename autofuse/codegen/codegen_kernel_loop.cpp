@@ -296,6 +296,22 @@ Status ConnectApiCallInputs(const ascir::NodeView &node, const std::map<ascir::T
   return af::SUCCESS;
 }
 
+// Sibling loop instances may use the same axis id, but their queue allocations
+// execute independently. Only a common loop nest can keep an allocation alive.
+bool IsSameLoopNest(const Loop *left, const Loop *right) {
+  for (auto loop = left; loop != nullptr; loop = loop->parent) {
+    if (loop == right) {
+      return true;
+    }
+  }
+  for (auto loop = right; loop != nullptr; loop = loop->parent) {
+    if (loop == left) {
+      return true;
+    }
+  }
+  return left == right;
+}
+
 Status UpdateQueueOutputReuse(const af::AscTensor *output, size_t output_index, ApiCall &call, TPipe &tpipe,
                               ConstructState &state) {
   const auto &attr = output->attr;
@@ -319,13 +335,15 @@ Status UpdateQueueOutputReuse(const af::AscTensor *output, size_t output_index, 
   last_share[attr.mem.reuse_id] = &call.outputs[output_index];
   const auto reused_tensor = state.que_last_use.find(attr.que.id);
   if (reused_tensor != state.que_last_use.end() &&
-      reused_tensor->second->reuse_id != call.outputs[output_index].reuse_id) {
+      reused_tensor->second->reuse_id != call.outputs[output_index].reuse_id &&
+      IsSameLoopNest(reused_tensor->second->write->owner_loop, call.owner_loop)) {
     reused_tensor->second->reuse_next = &call.outputs[output_index];
     call.outputs[output_index].reuse_from = reused_tensor->second;
     GELOGI("Que[%ld] reuse id[%ld] tensor id[%ld] reuse from tensor id[%ld] reuse id[%ld]", attr.que.id,
            attr.mem.reuse_id, call.outputs[output_index].id, reused_tensor->second->id,
            reused_tensor->second->reuse_id);
-  } else if (reused_tensor != state.que_last_use.end()) {
+  } else if (reused_tensor != state.que_last_use.end() &&
+             reused_tensor->second->reuse_id == call.outputs[output_index].reuse_id) {
     GELOGI("Que[%ld] reuse id[%ld] tensor id[%ld] share with last same que tensor", attr.que.id, attr.mem.reuse_id,
            call.outputs[output_index].id, reused_tensor->second->id);
   }
@@ -380,6 +398,7 @@ void Loop::AddLoop(Loop *loop) {
 }
 
 void Loop::AddCall(ApiCall *call) {
+  call->owner_loop = this;
   LoopBody tmp;
   tmp.type = LoopType::CALL;
   tmp.call = call;
