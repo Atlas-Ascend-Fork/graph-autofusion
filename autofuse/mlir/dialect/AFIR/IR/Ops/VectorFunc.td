@@ -47,7 +47,8 @@ include "mlir/IR/OpBase.td"
 // 元素类型域取 AFIR 今天建模的那 6 位（`Implementations/ElementwiseApiFamily.h`）。
 // 这里不收窄：这个算子是个容器，收不收某个 dtype 由 region 内算子自己的 ODS 说，
 // 而「这一侧有没有寄存器形态的实现」由能力层说（见 AFIRVectorFuncToRegBase）。
-defvar AFIR_VectorFuncElementTypes = [UI8, UI16, I16, I32, F16, F32, BF16];
+// i8 可以作为 VF 边界类型，region 内的计算类型由各算子和寄存器能力检查决定。
+defvar AFIR_VectorFuncElementTypes = [UI8, UI16, I16, I32, F16, F32, BF16, I8];
 
 def AFIR_VectorFuncOp : AFIR_Op<"vector_func", [
     SingleBlockImplicitTerminator<"::mlir::afir::VectorFuncYieldOp">,

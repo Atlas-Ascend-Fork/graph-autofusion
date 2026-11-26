@@ -207,3 +207,217 @@ func.func @condition_is_not_a_predicate(%c: !ascendc.local_tensor<?xui8>, %t: !a
        !ascendc.local_tensor<?xf32>) -> !ascendc.local_tensor<?xf32>
   return
 }
+
+// -----
+
+#in = #afir.tensor_desc<axis = [0], role = <input>>
+#out = #afir.tensor_desc<axis = [0], role = <compute>
+
+// 八、这一行在寄存器形态下不收这个元素类型。每个 `AscendC::Reg` API 有自己的类型白名单，与
+// AFIR 算子的 ODS 域不是一回事：`relu` 的 ODS 收 ui8，`Reg::Relu` 不收；`neg` 的 ODS 收 bf16，
+// `Reg::Neg` 不收。表里每一行带着量出来的 dtype 域（`AFIRVectorFuncToRegBase.cpp` 的
+// `kRegOp*ElementTypes`），能力判定统一查表。放行的后果是编 kernel 时 `static_assert`——那是
+// 硬失败，比回落晚一整截。
+//
+// 下面一格一个格子，覆盖表里今天收不了的每一种组合。每格都是单违反：边界与计算同一个 dtype，
+// 等宽的取与存不带 dist，除了 dtype 域那一条，其余判据都过得去，所以每格报的都是同一条诊断。
+// 顺序与表里的行序相同。
+//
+// 调度器会把 bf16 的 `exp` / `ln` / `sqrt` 升到 f32、把 int8 的乘法升到 int16，所以这几格只有 IR
+// 本身已经在那个 dtype 上算时才走到。
+
+// -----
+
+#in = #afir.tensor_desc<axis = [0], role = <input>>
+#out = #afir.tensor_desc<axis = [0], role = <compute>>
+
+// `Reg::Div`：`div` / `truediv` 两行共用它，只收 half 与 float。
+// CHECK: UnsupportedOperation: 'afir.truediv' has no register-form implementation for element type 'bf16'
+func.func @truediv_in_bfloat16(%a: !ascendc.local_tensor<?xbf16>, %b: !ascendc.local_tensor<?xbf16>,
+                                %y: !ascendc.local_tensor<?xbf16>) {
+  %0 = afir.vector_func srcs(%a, %b) dsts(%y) attributes {
+    afir.operand_descs = [#in, #in], afir.destination_descs = [#out], afir.result_descs = [#out]
+  } {
+  ^bb0(%la: tensor<?xbf16>, %lb: tensor<?xbf16>):
+    %res = afir.truediv %la, %lb {afir.operand_descs = [#in, #in], afir.result_descs = [#out]}
+        : (tensor<?xbf16>, tensor<?xbf16>) -> tensor<?xbf16>
+    afir.vector_func_yield %res : tensor<?xbf16>
+  } : (!ascendc.local_tensor<?xbf16>, !ascendc.local_tensor<?xbf16>,
+        !ascendc.local_tensor<?xbf16>) -> !ascendc.local_tensor<?xbf16>
+  return
+}
+
+// -----
+
+#in = #afir.tensor_desc<axis = [0], role = <input>>
+#out = #afir.tensor_desc<axis = [0], role = <compute>>
+
+// `Reg::Abs` / `Neg`：浮点与带符号整数，不收 bf16。
+// CHECK: UnsupportedOperation: 'afir.abs' has no register-form implementation for element type 'bf16'
+func.func @abs_in_bfloat16(%a: !ascendc.local_tensor<?xbf16>, %y: !ascendc.local_tensor<?xbf16>) {
+  %0 = afir.vector_func srcs(%a) dsts(%y) attributes {
+    afir.operand_descs = [#in], afir.destination_descs = [#out], afir.result_descs = [#out]
+  } {
+  ^bb0(%la: tensor<?xbf16>):
+    %res = afir.abs %la {afir.operand_descs = [#in], afir.result_descs = [#out]}
+        : tensor<?xbf16> -> tensor<?xbf16>
+    afir.vector_func_yield %res : tensor<?xbf16>
+  } : (!ascendc.local_tensor<?xbf16>, !ascendc.local_tensor<?xbf16>) -> !ascendc.local_tensor<?xbf16>
+  return
+}
+
+// -----
+
+#in = #afir.tensor_desc<axis = [0], role = <input>>
+#out = #afir.tensor_desc<axis = [0], role = <compute>>
+
+// 同上，`Reg::Abs` 也不收 ui8。
+// CHECK: UnsupportedOperation: 'afir.abs' has no register-form implementation for element type 'ui8'
+func.func @abs_in_uint8(%a: !ascendc.local_tensor<?xui8>, %y: !ascendc.local_tensor<?xui8>) {
+  %0 = afir.vector_func srcs(%a) dsts(%y) attributes {
+    afir.operand_descs = [#in], afir.destination_descs = [#out], afir.result_descs = [#out]
+  } {
+  ^bb0(%la: tensor<?xui8>):
+    %res = afir.abs %la {afir.operand_descs = [#in], afir.result_descs = [#out]}
+        : tensor<?xui8> -> tensor<?xui8>
+    afir.vector_func_yield %res : tensor<?xui8>
+  } : (!ascendc.local_tensor<?xui8>, !ascendc.local_tensor<?xui8>) -> !ascendc.local_tensor<?xui8>
+  return
+}
+
+// -----
+
+#in = #afir.tensor_desc<axis = [0], role = <input>>
+#out = #afir.tensor_desc<axis = [0], role = <compute>>
+
+// `Reg::Exp` / `Ln` / `Sqrt`：只收 half 与 float。
+// CHECK: UnsupportedOperation: 'afir.exp' has no register-form implementation for element type 'bf16'
+func.func @exp_in_bfloat16(%a: !ascendc.local_tensor<?xbf16>, %y: !ascendc.local_tensor<?xbf16>) {
+  %0 = afir.vector_func srcs(%a) dsts(%y) attributes {
+    afir.operand_descs = [#in], afir.destination_descs = [#out], afir.result_descs = [#out]
+  } {
+  ^bb0(%la: tensor<?xbf16>):
+    %res = afir.exp %la {afir.operand_descs = [#in], afir.result_descs = [#out]}
+        : tensor<?xbf16> -> tensor<?xbf16>
+    afir.vector_func_yield %res : tensor<?xbf16>
+  } : (!ascendc.local_tensor<?xbf16>, !ascendc.local_tensor<?xbf16>) -> !ascendc.local_tensor<?xbf16>
+  return
+}
+
+// -----
+
+#in = #afir.tensor_desc<axis = [0], role = <input>>
+#out = #afir.tensor_desc<axis = [0], role = <compute>>
+
+// 同上。
+// CHECK: UnsupportedOperation: 'afir.ln' has no register-form implementation for element type 'bf16'
+func.func @ln_in_bfloat16(%a: !ascendc.local_tensor<?xbf16>, %y: !ascendc.local_tensor<?xbf16>) {
+  %0 = afir.vector_func srcs(%a) dsts(%y) attributes {
+    afir.operand_descs = [#in], afir.destination_descs = [#out], afir.result_descs = [#out]
+  } {
+  ^bb0(%la: tensor<?xbf16>):
+    %res = afir.ln %la {afir.operand_descs = [#in], afir.result_descs = [#out]}
+        : tensor<?xbf16> -> tensor<?xbf16>
+    afir.vector_func_yield %res : tensor<?xbf16>
+  } : (!ascendc.local_tensor<?xbf16>, !ascendc.local_tensor<?xbf16>) -> !ascendc.local_tensor<?xbf16>
+  return
+}
+
+// -----
+
+#in = #afir.tensor_desc<axis = [0], role = <input>>
+#out = #afir.tensor_desc<axis = [0], role = <compute>>
+
+// 同上。
+// CHECK: UnsupportedOperation: 'afir.sqrt' has no register-form implementation for element type 'bf16'
+func.func @sqrt_in_bfloat16(%a: !ascendc.local_tensor<?xbf16>, %y: !ascendc.local_tensor<?xbf16>) {
+  %0 = afir.vector_func srcs(%a) dsts(%y) attributes {
+    afir.operand_descs = [#in], afir.destination_descs = [#out], afir.result_descs = [#out]
+  } {
+  ^bb0(%la: tensor<?xbf16>):
+    %res = afir.sqrt %la {afir.operand_descs = [#in], afir.result_descs = [#out]}
+        : tensor<?xbf16> -> tensor<?xbf16>
+    afir.vector_func_yield %res : tensor<?xbf16>
+  } : (!ascendc.local_tensor<?xbf16>, !ascendc.local_tensor<?xbf16>) -> !ascendc.local_tensor<?xbf16>
+  return
+}
+
+// -----
+
+#in = #afir.tensor_desc<axis = [0], role = <input>>
+#out = #afir.tensor_desc<axis = [0], role = <compute>>
+
+// `Reg::Relu`：浮点与 32 / 64 位整数，不收 ui8。
+// CHECK: UnsupportedOperation: 'afir.relu' has no register-form implementation for element type 'ui8'
+func.func @relu_in_uint8(%a: !ascendc.local_tensor<?xui8>, %y: !ascendc.local_tensor<?xui8>) {
+  %0 = afir.vector_func srcs(%a) dsts(%y) attributes {
+    afir.operand_descs = [#in], afir.destination_descs = [#out], afir.result_descs = [#out]
+  } {
+  ^bb0(%la: tensor<?xui8>):
+    %res = afir.relu %la {afir.operand_descs = [#in], afir.result_descs = [#out]}
+        : tensor<?xui8> -> tensor<?xui8>
+    afir.vector_func_yield %res : tensor<?xui8>
+  } : (!ascendc.local_tensor<?xui8>, !ascendc.local_tensor<?xui8>) -> !ascendc.local_tensor<?xui8>
+  return
+}
+
+// -----
+
+#in = #afir.tensor_desc<axis = [0], role = <input>>
+#out = #afir.tensor_desc<axis = [0], role = <compute>>
+
+// 同 `abs`：`Reg::Neg` 不收 bf16。
+// CHECK: UnsupportedOperation: 'afir.neg' has no register-form implementation for element type 'bf16'
+func.func @neg_in_bfloat16(%a: !ascendc.local_tensor<?xbf16>, %y: !ascendc.local_tensor<?xbf16>) {
+  %0 = afir.vector_func srcs(%a) dsts(%y) attributes {
+    afir.operand_descs = [#in], afir.destination_descs = [#out], afir.result_descs = [#out]
+  } {
+  ^bb0(%la: tensor<?xbf16>):
+    %res = afir.neg %la {afir.operand_descs = [#in], afir.result_descs = [#out]}
+        : tensor<?xbf16> -> tensor<?xbf16>
+    afir.vector_func_yield %res : tensor<?xbf16>
+  } : (!ascendc.local_tensor<?xbf16>, !ascendc.local_tensor<?xbf16>) -> !ascendc.local_tensor<?xbf16>
+  return
+}
+
+// -----
+
+#in = #afir.tensor_desc<axis = [0], role = <input>>
+#out = #afir.tensor_desc<axis = [0], role = <compute>>
+
+// `Reg::Mul`：除两种 8 位整数之外都收。
+// CHECK: UnsupportedOperation: 'afir.mul' has no register-form implementation for element type 'i8'
+func.func @mul_computes_in_int8(%a: !ascendc.local_tensor<?xi8>, %b: !ascendc.local_tensor<?xi8>,
+                                 %y: !ascendc.local_tensor<?xi8>) {
+  %0 = afir.vector_func srcs(%a, %b) dsts(%y) attributes {
+    afir.operand_descs = [#in, #in], afir.destination_descs = [#out], afir.result_descs = [#out]
+  } {
+  ^bb0(%la: tensor<?xi8>, %lb: tensor<?xi8>):
+    %res = afir.mul %la, %lb {afir.operand_descs = [#in, #in], afir.result_descs = [#out]}
+        : (tensor<?xi8>, tensor<?xi8>) -> tensor<?xi8>
+    afir.vector_func_yield %res : tensor<?xi8>
+  } : (!ascendc.local_tensor<?xi8>, !ascendc.local_tensor<?xi8>,
+        !ascendc.local_tensor<?xi8>) -> !ascendc.local_tensor<?xi8>
+  return
+}
+
+// -----
+
+#in = #afir.tensor_desc<axis = [0], role = <input>>
+#out = #afir.tensor_desc<axis = [0], role = <compute>>
+
+// 同上，无符号的那一位。ui8 早就在 VF 的边界 dtype 域里，不是哪一次放开带进来的。
+// CHECK: UnsupportedOperation: 'afir.mul' has no register-form implementation for element type 'ui8'
+func.func @mul_computes_in_uint8(%a: !ascendc.local_tensor<?xui8>, %b: !ascendc.local_tensor<?xui8>,
+                                  %y: !ascendc.local_tensor<?xui8>) {
+  %0 = afir.vector_func srcs(%a, %b) dsts(%y) attributes {
+    afir.operand_descs = [#in, #in], afir.destination_descs = [#out], afir.result_descs = [#out]
+  } {
+  ^bb0(%la: tensor<?xui8>, %lb: tensor<?xui8>):
+    %res = afir.mul %la, %lb {afir.operand_descs = [#in, #in], afir.result_descs = [#out]}
+        : (tensor<?xui8>, tensor<?xui8>) -> tensor<?xui8>
+    afir.vector_func_yield %res : tensor<?xui8>
+  } : (!ascendc.local_tensor<?xui8>, !ascendc.local_tensor<?xui8>,
+        !ascendc.local_tensor<?xui8>) -> !ascendc.local_tensor<?xui8>
+  return
+}

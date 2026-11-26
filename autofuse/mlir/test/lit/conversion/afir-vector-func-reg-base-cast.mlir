@@ -46,6 +46,46 @@ module {
     } : (!ascendc.local_tensor<?xf16>, !ascendc.local_tensor<?xf16>) -> !ascendc.local_tensor<?xf16>
     return
   }
+
+  func.func @vector_func_bf16_ln_sqrt(%a: !ascendc.local_tensor<?xbf16>, %y: !ascendc.local_tensor<?xbf16>) {
+    %0 = afir.vector_func srcs(%a) dsts(%y) attributes {
+      afir.operand_descs = [#in],
+      afir.destination_descs = [#out],
+      afir.result_descs = [#out]
+    } {
+    ^bb0(%la: tensor<?xbf16>):
+      %wide = afir.cast %la {afir.operand_descs = [#in], afir.result_descs = [#out]}
+          : tensor<?xbf16> -> tensor<?xf32>
+      %ln = afir.ln %wide {afir.operand_descs = [#out], afir.result_descs = [#out]}
+          : tensor<?xf32> -> tensor<?xf32>
+      %sqrt = afir.sqrt %ln {afir.operand_descs = [#out], afir.result_descs = [#out]}
+          : tensor<?xf32> -> tensor<?xf32>
+      %narrow = afir.cast %sqrt {afir.operand_descs = [#out], afir.result_descs = [#out]}
+          : tensor<?xf32> -> tensor<?xbf16>
+      afir.vector_func_yield %narrow : tensor<?xbf16>
+    } : (!ascendc.local_tensor<?xbf16>, !ascendc.local_tensor<?xbf16>) -> !ascendc.local_tensor<?xbf16>
+    return
+  }
+
+  // int8 的 VF 边界，跨 dtype：i8 进、half 算、i8 出。1 字节的边界取进来时被
+  // `DIST_UNPACK_B8` 撑进 2 字节的 lane 槽位，存回去时由 `DIST_PACK_B16` 压回。
+  func.func @vector_func_cast_abs_cast_i8(%a: !ascendc.local_tensor<?xi8>, %y: !ascendc.local_tensor<?xi8>) {
+    %0 = afir.vector_func srcs(%a) dsts(%y) attributes {
+      afir.operand_descs = [#in],
+      afir.destination_descs = [#out],
+      afir.result_descs = [#out]
+    } {
+    ^bb0(%la: tensor<?xi8>):
+      %wide = afir.cast %la {afir.operand_descs = [#in], afir.result_descs = [#out]}
+          : tensor<?xi8> -> tensor<?xf16>
+      %res = afir.abs %wide {afir.operand_descs = [#out], afir.result_descs = [#out]}
+          : tensor<?xf16> -> tensor<?xf16>
+      %narrow = afir.cast %res {afir.operand_descs = [#out], afir.result_descs = [#out]}
+          : tensor<?xf16> -> tensor<?xi8>
+      afir.vector_func_yield %narrow : tensor<?xi8>
+    } : (!ascendc.local_tensor<?xi8>, !ascendc.local_tensor<?xi8>) -> !ascendc.local_tensor<?xi8>
+    return
+  }
 }
 
 // IR-LABEL: func.func @vector_func_cast_abs_cast
@@ -92,3 +132,40 @@ module {
 // CPP: AscendC::Reg::Abs(
 // CPP: AscendC::Reg::Cast<half, float, cast_trait_float_2_half>(
 // CPP: AscendC::Reg::StoreAlign<half, AscendC::Reg::StoreDist::DIST_PACK_B32>(
+
+
+// The scheduled graph promotes bf16 Ln and Sqrt to f32 before building the VF.
+// IR-LABEL: func.func @vector_func_bf16_ln_sqrt
+// IR: ascendc.update_mask f32
+// IR: ascendc.cast_reg {{.*}}trait = "cast_trait_bf16_2_float"
+// IR: ascendc.ln_reg
+// IR: ascendc.sqrt_reg
+// IR: ascendc.cast_reg {{.*}}trait = "cast_trait_float_2_bf16"
+// IR: ascendc.store_align_reg {{.*}}dist = 7
+
+// CPP-LABEL: void vector_func_bf16_ln_sqrt(
+// CPP: __VEC_SCOPE__
+// CPP: AscendC::Reg::UpdateMask<float>(
+// CPP: AscendC::Reg::Cast<float, bfloat16_t, cast_trait_bf16_2_float>(
+// CPP: AscendC::Reg::Ln(
+// CPP: AscendC::Reg::Sqrt(
+// CPP: AscendC::Reg::Cast<bfloat16_t, float, cast_trait_float_2_bf16>(
+
+// int8 的 VF 边界，跨 dtype：i8 进、half 算、i8 出。lane 按最宽的 half 算；两条 dist 在 IR
+// 里是裸整数，13 是 `DIST_UNPACK_B8`、6 是 `DIST_PACK_B16`，名字那一侧由 CPP 段钉。
+// IR-LABEL: func.func @vector_func_cast_abs_cast_i8
+// IR: ascendc.update_mask f16
+// IR: ascendc.load_align_reg {{.*}}dist = 13
+// IR: ascendc.cast_reg {{.*}}trait = "cast_trait_bf16_2_float"
+// IR: ascendc.abs_reg
+// IR: ascendc.cast_reg {{.*}}trait = "cast_trait_half_2_int8"
+// IR: ascendc.store_align_reg {{.*}}dist = 6
+
+// CPP-LABEL: void vector_func_cast_abs_cast_i8(
+// CPP: __VEC_SCOPE__
+// CPP: AscendC::Reg::UpdateMask<half>(
+// CPP: AscendC::Reg::LoadAlign<int8_t, AscendC::Reg::LoadDist::DIST_UNPACK_B8>(
+// CPP: AscendC::Reg::Cast<half, int8_t, cast_trait_bf16_2_float>(
+// CPP: AscendC::Reg::Abs(
+// CPP: AscendC::Reg::Cast<int8_t, half, cast_trait_half_2_int8>(
+// CPP: AscendC::Reg::StoreAlign<int8_t, AscendC::Reg::StoreDist::DIST_PACK_B16>(

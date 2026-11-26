@@ -19,6 +19,7 @@
 #include <optional>
 
 #include "dialect/AFIR/IR/AFIR.h"
+#include "support/AfirElementTypes.h"
 #include "support/CapabilityShortfall.h"
 
 #include "ascir/Dialect/Asc/IR/Asc.h"
@@ -47,6 +48,9 @@ namespace {
 // M3 加 `eq` / `where` 这一对（带 `load_eq_where_reg_base_store`）；M4 加 `mul`
 // （带 `load_mul_abs_reg_base_store`）。
 // 其余按后续分期加，每期一条判据。
+//
+// 每一行还带着它在寄存器形态下的 dtype 域（`supportedElementTypes`，取值见下面 `kRegOp*`），
+// 由 `checkRegisterElementTypes` 统一查。加一行要把它量出来，量法见那几个集合上面那段。
 enum class RegOpArity : uint8_t { kUnary, kBinary, kTernary };
 
 // 这个算子在寄存器形态下会不会换元素类型。只有 `cast` 会。这一位不是装饰：它决定
@@ -79,12 +83,37 @@ struct RegOpOperands {
   llvm::StringRef castTrait;
 };
 
+// 各行在寄存器形态下收哪些元素类型。位取自 `support/AfirElementTypes.h` 的支持表，写法与 mem 侧
+// 注册处相同。集合都是量出来的：用 api_regbase 的编译选项把对应的 `AscendC::Reg` 调用逐位编一遍，
+// `static_assert` 的那几位不收——那种失败发生在编 kernel 的时候，比能力判定晚一整截，而且是
+// 硬失败。每一格拒收都对应 `test/lit/conversion/afir-vector-func-unsupported.mlir` 里的一格。
+//
+// 写成允许集合而不是排除集合：支持表加一位、或者 CANN 换版本之后，没量过的类型默认不进
+// 寄存器形态，要进来先量。ODS 收了不等于 Reg API 收（`relu` 的 ODS 收 ui8，`Reg::Relu` 不收）。
+constexpr uint32_t kRegOpAllElementTypes = afir::kAfirBitF16 | afir::kAfirBitF32 | afir::kAfirBitI16 |
+                                           afir::kAfirBitI32 | afir::kAfirBitUI8 | afir::kAfirBitUI16 |
+                                           afir::kAfirBitBF16 | afir::kAfirBitI64 | afir::kAfirBitI8 |
+                                           afir::kAfirBitUI32 | afir::kAfirBitUI64;
+// `Reg::Exp` / `Ln` / `Sqrt` / `Div`：只收 half 与 float。
+constexpr uint32_t kRegOpFloatElementTypes = afir::kAfirBitF16 | afir::kAfirBitF32;
+// `Reg::Abs` / `Neg`：浮点与带符号整数。
+constexpr uint32_t kRegOpSignedElementTypes =
+    kRegOpFloatElementTypes | afir::kAfirBitI8 | afir::kAfirBitI16 | afir::kAfirBitI32 | afir::kAfirBitI64;
+// `Reg::Relu`：浮点与 32 / 64 位整数。
+constexpr uint32_t kRegOpReluElementTypes = kRegOpFloatElementTypes | afir::kAfirBitI32 | afir::kAfirBitI64;
+// `Reg::Mul`：除两种 8 位整数之外都收。
+constexpr uint32_t kRegOpMulElementTypes = kRegOpAllElementTypes & ~(afir::kAfirBitI8 | afir::kAfirBitUI8);
+
 struct RegOpMapping {
   llvm::StringRef afirName;
   RegOpArity arity;
   RegOpElementTypes elementTypes;
   RegOpResult result;
   int64_t predicateOperand;
+  // 这一行收哪些元素类型（上面 `kRegOp*` 之一）。跟着行走，由 `checkRegisterElementTypes` 统一查：
+  // dtype 域是 Reg API 的属性，写成能力判定里的算子特判，新加一行就要记得回去补一个分支。
+  // `kConverting` 的那一行不读它——逐对的舍入与饱和由 cast trait 表定。
+  uint32_t supportedElementTypes;
   // 建 op 的那一下。表里存函数指针而不是在下降处写一串 `if`：加一行只动这张表。
   Operation *(*build)(OpBuilder &, Location, const RegOpOperands &);
 };
@@ -129,39 +158,43 @@ Operation *buildCastRegOp(OpBuilder &builder, Location loc, const RegOpOperands 
 llvm::ArrayRef<RegOpMapping> regOpMappings() {
   static const RegOpMapping mappings[] = {
       {afir::AddOp::getOperationName(), RegOpArity::kBinary, RegOpElementTypes::kUniform, RegOpResult::kValue,
-       kNoPredicateOperand, buildBinaryRegOp<ascendc::AddRegOp>},
+       kNoPredicateOperand, kRegOpAllElementTypes, buildBinaryRegOp<ascendc::AddRegOp>},
       {afir::DivOp::getOperationName(), RegOpArity::kBinary, RegOpElementTypes::kUniform, RegOpResult::kValue,
-       kNoPredicateOperand, buildBinaryRegOp<ascendc::DivRegOp>},
+       kNoPredicateOperand, kRegOpFloatElementTypes, buildBinaryRegOp<ascendc::DivRegOp>},
       // reg 侧 truediv 与 div 均使用 DivExtend，与 legacy reg_api_name 一致。
       // mem 侧使用带 tmp buffer 的 TrueDivExtend，不适用此映射。
       {afir::TrueDivOp::getOperationName(), RegOpArity::kBinary, RegOpElementTypes::kUniform, RegOpResult::kValue,
-       kNoPredicateOperand, buildBinaryRegOp<ascendc::DivRegOp>},
+       kNoPredicateOperand, kRegOpFloatElementTypes, buildBinaryRegOp<ascendc::DivRegOp>},
       {afir::AbsOp::getOperationName(), RegOpArity::kUnary, RegOpElementTypes::kUniform, RegOpResult::kValue,
-       kNoPredicateOperand, buildUnaryRegOp<ascendc::AbsRegOp>},
+       kNoPredicateOperand, kRegOpSignedElementTypes, buildUnaryRegOp<ascendc::AbsRegOp>},
       {afir::ExpOp::getOperationName(), RegOpArity::kUnary, RegOpElementTypes::kUniform, RegOpResult::kValue,
-       kNoPredicateOperand, buildUnaryRegOp<ascendc::ExpRegOp>},
+       kNoPredicateOperand, kRegOpFloatElementTypes, buildUnaryRegOp<ascendc::ExpRegOp>},
+      {afir::LnOp::getOperationName(), RegOpArity::kUnary, RegOpElementTypes::kUniform, RegOpResult::kValue,
+       kNoPredicateOperand, kRegOpFloatElementTypes, buildUnaryRegOp<ascendc::LnRegOp>},
+      {afir::SqrtOp::getOperationName(), RegOpArity::kUnary, RegOpElementTypes::kUniform, RegOpResult::kValue,
+       kNoPredicateOperand, kRegOpFloatElementTypes, buildUnaryRegOp<ascendc::SqrtRegOp>},
       {afir::ReluOp::getOperationName(), RegOpArity::kUnary, RegOpElementTypes::kUniform, RegOpResult::kValue,
-       kNoPredicateOperand, buildUnaryRegOp<ascendc::ReluRegOp>},
+       kNoPredicateOperand, kRegOpReluElementTypes, buildUnaryRegOp<ascendc::ReluRegOp>},
       {afir::NegOp::getOperationName(), RegOpArity::kUnary, RegOpElementTypes::kUniform, RegOpResult::kValue,
-       kNoPredicateOperand, buildUnaryRegOp<ascendc::NegRegOp>},
+       kNoPredicateOperand, kRegOpSignedElementTypes, buildUnaryRegOp<ascendc::NegRegOp>},
       {afir::CastOp::getOperationName(), RegOpArity::kUnary, RegOpElementTypes::kConverting, RegOpResult::kValue,
-       kNoPredicateOperand, buildCastRegOp},
+       kNoPredicateOperand, kRegOpAllElementTypes, buildCastRegOp},
       // M4：`afir.mul`。reg 侧接管表上 `load_brc_test` 报的就是这一行
       // （`'afir.mul' has no register-form lowering`），带一格 E2E
       // `load_mul_abs_reg_base_store`。
       {afir::MulOp::getOperationName(), RegOpArity::kBinary, RegOpElementTypes::kUniform, RegOpResult::kValue,
-       kNoPredicateOperand, buildBinaryRegOp<ascendc::MulRegOp>},
+       kNoPredicateOperand, kRegOpMulElementTypes, buildBinaryRegOp<ascendc::MulRegOp>},
       // M3：谓词这一对。两行一起加、一格 E2E（`load_eq_where_reg_base_store`）同时走到
       // ——单独加任一行都没有用：比较产出的谓词目前只有 `where` 消费得了，而 `where` 的
       // 条件今天只能由比较产出（从 UB 取一段 ui8 当条件要补一条 `CompareScalar ... NE 0`，
       // 那是 legacy 的另一条路，不在本期）。
       {afir::EqOp::getOperationName(), RegOpArity::kBinary, RegOpElementTypes::kUniform, RegOpResult::kPredicate,
-       kNoPredicateOperand, buildCompareRegOp<ascendc::CMPMODE::EQ>},
+       kNoPredicateOperand, kRegOpAllElementTypes, buildCompareRegOp<ascendc::CMPMODE::EQ>},
       // Legacy LoadGEWhereTransposeCase uses the same predicate path with GE mode.
       {afir::GeOp::getOperationName(), RegOpArity::kBinary, RegOpElementTypes::kUniform, RegOpResult::kPredicate,
-       kNoPredicateOperand, buildCompareRegOp<ascendc::CMPMODE::GE>},
+       kNoPredicateOperand, kRegOpAllElementTypes, buildCompareRegOp<ascendc::CMPMODE::GE>},
       {afir::WhereOp::getOperationName(), RegOpArity::kTernary, RegOpElementTypes::kUniform, RegOpResult::kValue,
-       /*predicateOperand=*/0, buildSelectRegOp},
+       /*predicateOperand=*/0, kRegOpAllElementTypes, buildSelectRegOp},
   };
   return mappings;
 }
@@ -363,6 +396,9 @@ FailureOr<std::optional<ascendc::StoreDist>> storeDistFor(Type boundary, Type wi
 // 判据的顺序就是诊断说哪一条的顺序，而一张图可能同时违反几条（最宽 8 字节那一类必然
 // 同时违反取与存两条，因为 8 字节不在 `afir.vector_func` 的边界 dtype 域里）。要改顺序就
 // 要同时改 `test/lit/conversion/afir-vector-func-unsupported.mlir` 的预期。
+//
+// 通用结构判据在前，按行走的那一条（这一行的 dtype 域）在最后：同一张图同时违反两条时，
+// 先说与算子无关的那一条。
 WalkResult checkRegisterElementTypes(Operation *inner, const RegOpMapping *mapping, Type widest) {
   const Type resultType = computeElementType(inner, *mapping);
   if (mapping->elementTypes == RegOpElementTypes::kConverting) {
@@ -397,6 +433,15 @@ WalkResult checkRegisterElementTypes(Operation *inner, const RegOpMapping *mappi
     afir::emitCapabilityShortfall(inner->getLoc())
         << "UnsupportedOperation: '" << inner->getName().getStringRef() << "' computes in " << resultType
         << " while the vector function's lanes are " << widest << " wide, which has no register-form lowering yet";
+    return WalkResult::interrupt();
+  }
+  // 这一行收不收这个元素类型：查表上带的 dtype 域。ODS 收了不算数——`static_assert` 要到编
+  // kernel 的时候才响，那是硬失败；在这里报能力不足，整图干净回落。
+  const uint32_t typeBit = afir::afirElementTypeBit(resultType);
+  if (typeBit == 0U || (mapping->supportedElementTypes & typeBit) == 0U) {
+    afir::emitCapabilityShortfall(inner->getLoc())
+        << "UnsupportedOperation: '" << inner->getName().getStringRef()
+        << "' has no register-form implementation for element type " << resultType;
     return WalkResult::interrupt();
   }
   return WalkResult::advance();

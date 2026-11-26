@@ -117,7 +117,11 @@ add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_add_abs_reg_base
 add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_cast_abs_cast_reg_base_store" cases/load_cast_abs_cast_reg_base_store)
 add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_abs_neg_reg_base_store" cases/load_abs_neg_reg_base_store)
 add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_eq_where_reg_base_store" cases/load_eq_where_reg_base_store)
+add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_eq_where_bool_reg_base_store" cases/load_eq_where_bool_reg_base_store)
 add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_mul_abs_reg_base_store" cases/load_mul_abs_reg_base_store)
+# 寄存器形态算子表新增的 `afir.sqrt` / `afir.ln` 两行，各一格（表头：加一行要带一格用例）。
+add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_sqrt_bf16_reg_base_store" cases/load_sqrt_bf16_reg_base_store)
+add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_ln_bf16_reg_base_store" cases/load_ln_bf16_reg_base_store)
 add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_reciprocal_store" cases/load_reciprocal_store)
 add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_abs_reciprocal_store" cases/load_abs_reciprocal_store)
 add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_isnan_store" cases/load_isnan_store)
@@ -148,12 +152,22 @@ add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_cast_reg_base_st
 add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_rsqrt_store" cases/load_rsqrt_store)
 add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_logical_not_store" cases/load_logical_not_store)
 add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_eq_store" cases/load_eq_store)
+# 比较结果是 `DT_BOOL` 的那一种图：bridge 把它按 ui8 建（`load_eq_store` 的图手写的是 `DT_UINT8`）。
+add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_eq_bool_store" cases/load_eq_bool_store)
 add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_eq_i64_store" cases/load_eq_i64_store)
 add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_eq_reg_base_store" cases/load_eq_reg_base_store)
 # dtype 第二波（i8 / ui32 / ui64，reg 侧）：加法拆行、sub 包装、比较常量、floor_div 无符号支。
 add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_add_ui32_reg_base_store" cases/load_add_ui32_reg_base_store)
 add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_sub_ui64_reg_base_store" cases/load_sub_ui64_reg_base_store)
 add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_eq_i8_reg_base_store" cases/load_eq_i8_reg_base_store)
+# int8 的 VF 边界：bridge 子图收集的 dtype 白名单放开了 int8。四格各压一条路——全程 int8 的
+# 同 dtype（lane 按 1 字节算）、legacy 把 int8 的 neg 升到 int16 带出来的 i8 源边界、显式
+# Cast 的 i8 <-> half 跨 dtype、两路 int8 相乘（`Reg::Mul` 没有 8 位分支，legacy 升到 i16 再
+# 乘，降回 int8 时带饱和）。
+add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_add_abs_i8_reg_base_store" cases/load_add_abs_i8_reg_base_store)
+add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_abs_neg_i8_reg_base_store" cases/load_abs_neg_i8_reg_base_store)
+add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_cast_abs_cast_i8_reg_base_store" cases/load_cast_abs_cast_i8_reg_base_store)
+add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_mul_i8_reg_base_store" cases/load_mul_i8_reg_base_store)
 add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_floor_div_ui32_reg_base_store" cases/load_floor_div_ui32_reg_base_store)
 add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_eq_select_store" cases/load_eq_select_store)
 add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/load_mask_select_store" cases/load_mask_select_store)

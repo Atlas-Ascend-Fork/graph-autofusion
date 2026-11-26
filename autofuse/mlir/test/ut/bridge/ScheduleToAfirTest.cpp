@@ -3915,3 +3915,289 @@ TEST(ScheduleToAfirTest, RejectsReduceScratchDtoWithoutNormalizedRole) {
   EXPECT_FALSE(bridge::BuildAfirModule(context, plan));
   EXPECT_NE(message.find("InvalidBinding: reduce scratch 4 has no normalized role"), std::string::npos) << message;
 }
+
+//===----------------------------------------------------------------------===//
+// 比较结果的 bool 存储
+//===----------------------------------------------------------------------===//
+//
+// 真实前端给的比较结果可以是 `DT_BOOL`。而仓库里的图一律手写成 `DT_UINT8`：图构造器的
+// `CompareOp` 把输出写死，E2E 用例与 legacy 的 `ShareGraph` 也都如此。于是
+// `AppendNodeOutputs` 里那条「比较输出是 bool 就按 ui8 建」的归一化，在本组之前没有任何
+// 用例走到——它要是没生效，受影响的图不会算错，而是整张静默回落 legacy。
+//
+// 这一组只有 UT 能钉：lit 从「IR 里类型已经写好」开始，走不到 bridge；E2E 的生成器不接
+// 回落，归一化没做时只看得到「生成失败」，看不到是哪一位 dtype 被拒。
+namespace {
+
+// 带显式输出 dtype 的二元比较。`CompareOp` 那个通道把输出写死成 `DT_UINT8`，说不出
+// 「比较结果是 bool」，所以借 `OpWithDtype` 在建节点之前改掉它。
+using CompareWithDtype = af::testing::AscGraphBuilder &(
+    af::testing::AscGraphBuilder::*)(const std::string &, const std::vector<std::string> &, size_t, af::DataType);
+
+// 比较族六个节点类型。归一化判的是节点类型名，所以六个都要走到：漏掉任何一个，那一种
+// 比较的图仍然整张回落。
+const std::pair<const char *, CompareWithDtype> kComparisonFamily[] = {
+    {"Eq", &af::testing::AscGraphBuilder::OpWithDtype<af::ascir_op::Eq>},
+    {"Ne", &af::testing::AscGraphBuilder::OpWithDtype<af::ascir_op::Ne>},
+    {"Lt", &af::testing::AscGraphBuilder::OpWithDtype<af::ascir_op::Lt>},
+    {"Le", &af::testing::AscGraphBuilder::OpWithDtype<af::ascir_op::Le>},
+    {"Gt", &af::testing::AscGraphBuilder::OpWithDtype<af::ascir_op::Gt>},
+    {"Ge", &af::testing::AscGraphBuilder::OpWithDtype<af::ascir_op::Ge>},
+};
+
+// `x -> load ┐`
+// `y -> load ┴ cmp -> store -> z`。比较结果、Store 的输出与图输出三处同取 `resultDtype`，
+// 与真实前端给的图同形：一条 bool 张量从比较一路流到 kernel 输出。
+af::AscGraph MakeCompareGraph(const CompareWithDtype compare, af::DataType resultDtype) {
+  af::testing::AscGraphBuilder builder("bool_compare");
+  builder.Loops({af::testing::Sym(8), af::testing::Sym(8)})
+      .Data("x", 0, af::DT_FLOAT)
+      .Data("y", 1, af::DT_FLOAT)
+      .Load("load_x", "x")
+      .Load("load_y", "y");
+  (builder.*compare)("cmp", {"load_x", "load_y"}, 0U, resultDtype);
+  auto graph = builder.Store("store_z", "cmp").Output("z", "store_z", 0, resultDtype).Build();
+  AssignTensorIds(graph);
+  graph.SetTilingKey(0);
+  return graph;
+}
+
+// 走一遍 bridge，把「建没建出来、是不是能力不足、诊断说了什么」一起带回来。context 由
+// 调用方持有：模块不能比它的 context 活得久。
+struct BridgeOutcome {
+  mlir::OwningOpRef<mlir::ModuleOp> module;
+  std::string message;
+  bool shortfall = false;
+};
+
+BridgeOutcome BridgeSingleGraph(mlir::MLIRContext &context, af::AscGraph graph) {
+  ascir::ScheduleGroup group;
+  group.impl_graphs.push_back(std::move(graph));
+  ascir::ScheduledResult scheduled;
+  scheduled.schedule_groups.push_back(std::move(group));
+  ascir::FusedScheduledResult fusedResult;
+  fusedResult.fused_graph_name = "bool_compare";
+  fusedResult.node_idx_to_scheduled_results = {{std::move(scheduled)}};
+
+  BridgeOutcome outcome;
+  mlir::afir::CapabilityShortfallObserver observer(context);
+  mlir::ScopedDiagnosticHandler handler(&context, [&](mlir::Diagnostic &diagnostic) {
+    llvm::raw_string_ostream output(outcome.message);
+    diagnostic.print(output);
+    return mlir::failure();
+  });
+  outcome.module =
+      mlir::afir::bridge::PlanToAfir(context, fusedResult, fusedResult.node_idx_to_scheduled_results[0][0], 0, 0);
+  outcome.shortfall = observer.sawShortfall();
+  return outcome;
+}
+
+mlir::func::FuncOp FindKernelBody(mlir::ModuleOp module) {
+  mlir::func::FuncOp kernel;
+  for (mlir::func::FuncOp function : module.getOps<mlir::func::FuncOp>()) {
+    if (mlir::afir::hasFunctionRole(function, mlir::afir::FunctionRole::KernelBody)) {
+      kernel = function;
+    }
+  }
+  return kernel;
+}
+
+mlir::Type ElementOf(mlir::Value value) {
+  return mlir::getElementTypeOrSelf(value.getType());
+}
+
+// 模块印成文本，用来比「两张图落到 AFIR 上是不是同一张」。
+std::string ModuleText(mlir::ModuleOp module) {
+  std::string text;
+  llvm::raw_string_ostream stream(text);
+  module.print(stream);
+  return text;
+}
+
+// kernel 形参的序号：比较的两路在前，`select` 的两路候选在后。
+constexpr int64_t kCompareLhsArg = 0;
+constexpr int64_t kCompareRhsArg = 1;
+constexpr int64_t kSelectThenArg = 2;
+constexpr int64_t kSelectElseArg = 3;
+
+// `x -> load ┐`
+// `y -> load ┴ eq(bool) ┐`
+// `a -> load ──┐        ├ select -> store -> z`。比较结果不落 GM，直接当 `select` 的条件。
+// `b -> load ──┴────────┘`
+af::AscGraph MakeBoolComparisonSelectGraph() {
+  af::testing::AscGraphBuilder builder("bool_compare_select");
+  builder.Loops({af::testing::Sym(8), af::testing::Sym(8)})
+      .Data("x", kCompareLhsArg, af::DT_FLOAT)
+      .Data("y", kCompareRhsArg, af::DT_FLOAT)
+      .Data("a", kSelectThenArg, af::DT_FLOAT)
+      .Data("b", kSelectElseArg, af::DT_FLOAT)
+      .Load("load_x", "x")
+      .Load("load_y", "y")
+      .Load("load_a", "a")
+      .Load("load_b", "b");
+  builder.OpWithDtype<af::ascir_op::Eq>("cmp", {"load_x", "load_y"}, 0U, af::DT_BOOL);
+  auto graph = builder.Select("select", "cmp", "load_a", "load_b")
+                   .Store("store_z", "select")
+                   .Output("z", "store_z", 0, af::DT_FLOAT)
+                   .Build();
+  AssignTensorIds(graph);
+  graph.SetTilingKey(0);
+  return graph;
+}
+
+// `x -> load ──┐`
+// `y -> load ──┴ eq(bool) -> logical_not(bool) -> store -> z`
+af::AscGraph MakeBoolComparisonConsumerGraph() {
+  af::testing::AscGraphBuilder builder("bool_compare_consumer");
+  builder.Loops({af::testing::Sym(8), af::testing::Sym(8)})
+      .Data("x", 0, af::DT_FLOAT)
+      .Data("y", 1, af::DT_FLOAT)
+      .Load("load_x", "x")
+      .Load("load_y", "y");
+  builder.OpWithDtype<af::ascir_op::Eq>("cmp", {"load_x", "load_y"}, 0U, af::DT_BOOL);
+  builder.OpWithDtype<af::ascir_op::LogicalNot>("not", {"cmp"}, 0U, af::DT_BOOL);
+  auto graph = builder.Store("store_z", "not").Output("z", "store_z", 0, af::DT_BOOL).Build();
+  AssignTensorIds(graph);
+  graph.SetTilingKey(0);
+  return graph;
+}
+
+// `x(bool) -> load -> store -> z`
+af::AscGraph MakeBoolInputGraph() {
+  auto graph = af::testing::AscGraphBuilder("bool_input")
+                   .Loops({af::testing::Sym(8), af::testing::Sym(8)})
+                   .Data("x", 0, af::DT_BOOL)
+                   .Load("load_x", "x")
+                   .Store("store_z", "load_x")
+                   .Output("z", "store_z", 0, af::DT_BOOL)
+                   .Build();
+  AssignTensorIds(graph);
+  graph.SetTilingKey(0);
+  return graph;
+}
+}  // namespace
+
+// 六个比较节点各走一遍：bool 的比较结果与顺着它流到 kernel 输出的那条张量，都按 ui8 建。
+TEST(ScheduleToAfirTest, NormalizesBoolComparisonOutputsToUint8Bytes) {
+  for (const auto &[nodeType, compare] : kComparisonFamily) {
+    SCOPED_TRACE(nodeType);
+    mlir::MLIRContext context;
+    const auto outcome = BridgeSingleGraph(context, MakeCompareGraph(compare, af::DT_BOOL));
+    // 建得出来还不够，得是「没回落」：回落时 `PlanToAfir` 返回空，而下面每一条断言在空
+    // 模块上都不会跑。
+    ASSERT_TRUE(outcome.module) << outcome.message;
+    EXPECT_FALSE(outcome.shortfall) << outcome.message;
+    ASSERT_TRUE(succeeded(mlir::verify(*outcome.module)));
+
+    // `FuncOp` 的访问器与 `walk` 不是 const 成员，所以这里不能声明成 const。
+    mlir::func::FuncOp kernel = FindKernelBody(*outcome.module);
+    ASSERT_TRUE(kernel);
+    // buffer 形态下参数是 [输入…, 输出…]：x、y、z。两个输入不动，输出按一个字节的 ui8 建。
+    ASSERT_EQ(kernel.getNumArguments(), 3U);
+    EXPECT_TRUE(ElementOf(kernel.getArgument(0)).isF32());
+    EXPECT_TRUE(ElementOf(kernel.getArgument(1)).isF32());
+    EXPECT_TRUE(ElementOf(kernel.getArgument(2)).isUnsignedInteger(8));
+
+    // GM 侧的字节数跟着存储 dtype 走：64 个元素每个 1 字节，与 bool 同宽，分配不变。
+    const auto descriptor =
+        mlir::cast<mlir::afir::BufferDescAttr>(kernel.getArgAttr(2, mlir::afir::kBufferDescAttrName));
+    ASSERT_TRUE(descriptor);
+    const auto expectedBytes = mlir::afir::bridge::detail::MakeSizeBytesExpr({"8", "8"}, 1);
+    ASSERT_TRUE(expectedBytes);
+    EXPECT_EQ(descriptor.getSizeBytesExpr().getValue().getValue().str(), *expectedBytes);
+
+    // 比较本身、以及把结果搬回 GM 的那一步，两端都是 ui8；整条 kernel 体里不出现 1 位的类型。
+    const std::string compareOp = "afir." + llvm::StringRef(nodeType).lower();
+    unsigned comparisons = 0;
+    unsigned stores = 0;
+    kernel.walk([&](mlir::Operation *op) {
+      for (mlir::Value value : op->getResults()) {
+        EXPECT_FALSE(ElementOf(value).isInteger(1)) << op->getName().getStringRef().str();
+      }
+      for (mlir::Value value : op->getOperands()) {
+        EXPECT_FALSE(ElementOf(value).isInteger(1)) << op->getName().getStringRef().str();
+      }
+      if (op->getName().getStringRef() == compareOp) {
+        ++comparisons;
+        EXPECT_TRUE(ElementOf(op->getResult(0)).isUnsignedInteger(8));
+      }
+      if (mlir::isa<mlir::afir::StoreOp>(op)) {
+        ++stores;
+        for (mlir::Value value : op->getOperands()) {
+          EXPECT_TRUE(ElementOf(value).isUnsignedInteger(8));
+        }
+        for (mlir::Value value : op->getResults()) {
+          EXPECT_TRUE(ElementOf(value).isUnsignedInteger(8));
+        }
+      }
+    });
+    EXPECT_EQ(comparisons, 1U);
+    EXPECT_EQ(stores, 1U);
+  }
+}
+
+// bool 与 ui8 两种写法落到 AFIR 上必须是同一张图。上一条只钉了 bool 那一侧「是 ui8」；
+// 这一条把两侧整个模块逐字比——归一化要是在别处留了痕（比如多插一个 cast、少带一个
+// 描述子），单看 bool 那一侧的几条断言看不出来。
+TEST(ScheduleToAfirTest, BoolAndUint8ComparisonGraphsProduceTheSameAfir) {
+  for (const auto &[nodeType, compare] : kComparisonFamily) {
+    SCOPED_TRACE(nodeType);
+    mlir::MLIRContext boolContext;
+    mlir::MLIRContext uint8Context;
+    const auto asBool = BridgeSingleGraph(boolContext, MakeCompareGraph(compare, af::DT_BOOL));
+    const auto asUint8 = BridgeSingleGraph(uint8Context, MakeCompareGraph(compare, af::DT_UINT8));
+    ASSERT_TRUE(asBool.module) << asBool.message;
+    ASSERT_TRUE(asUint8.module) << asUint8.message;
+    EXPECT_EQ(ModuleText(*asBool.module), ModuleText(*asUint8.module));
+  }
+}
+
+// 比较结果不落 GM、直接当 `select` 的条件。归一化出来的 ui8 正是条件位收得了的那个类型
+// （`Condition.td` 里是 `[UI8]`），所以这条链整张建得出来，输出仍是 f32。
+TEST(ScheduleToAfirTest, NormalizesBoolComparisonFeedingASelect) {
+  mlir::MLIRContext context;
+  const auto outcome = BridgeSingleGraph(context, MakeBoolComparisonSelectGraph());
+  ASSERT_TRUE(outcome.module) << outcome.message;
+  EXPECT_FALSE(outcome.shortfall) << outcome.message;
+  ASSERT_TRUE(succeeded(mlir::verify(*outcome.module)));
+
+  mlir::func::FuncOp kernel = FindKernelBody(*outcome.module);
+  ASSERT_TRUE(kernel);
+  // x、y、a、b、z；图输出跟着两个分支走，仍是 f32。
+  ASSERT_EQ(kernel.getNumArguments(), 5U);
+  EXPECT_TRUE(ElementOf(kernel.getArgument(4)).isF32());
+
+  // 条件位是 ui8，其余操作数与结果都是 f32。
+  unsigned selects = 0;
+  kernel.walk([&](mlir::afir::SelectOp select) {
+    ++selects;
+    unsigned conditions = 0;
+    for (mlir::Value value : select->getOperands()) {
+      EXPECT_FALSE(ElementOf(value).isInteger(1));
+      conditions += ElementOf(value).isUnsignedInteger(8) ? 1U : 0U;
+    }
+    EXPECT_EQ(conditions, 1U);
+    EXPECT_TRUE(ElementOf(select->getResult(0)).isF32());
+  });
+  EXPECT_EQ(selects, 1U);
+}
+
+// 归一化是按节点类型放行的，不是「见 bool 就改 ui8」。放行范围之外的 bool 张量必须还是
+// 能力不足——干净回落，而不是被改成 ui8 之后在某条 verifier 上变成硬失败。
+TEST(ScheduleToAfirTest, BoolOutsideTheComparisonFamilyStillFallsBack) {
+  const auto expectFallback = [](const BridgeOutcome &outcome) {
+    EXPECT_FALSE(static_cast<bool>(outcome.module)) << outcome.message;
+    EXPECT_TRUE(outcome.shortfall) << outcome.message;
+    EXPECT_NE(outcome.message.find("element type 'bool' is not in the AFIR supply table"), std::string::npos)
+        << outcome.message;
+  };
+
+  // 一、bool 的图输入：没有比较节点可归。
+  mlir::MLIRContext inputContext;
+  expectFallback(BridgeSingleGraph(inputContext, MakeBoolInputGraph()));
+
+  // 二、比较结果再过一个输出也是 bool 的节点：归一化只顺着 Store / Output 往下传，
+  //    到 `LogicalNot` 这一步就停了。
+  mlir::MLIRContext consumerContext;
+  expectFallback(BridgeSingleGraph(consumerContext, MakeBoolComparisonConsumerGraph()));
+}
