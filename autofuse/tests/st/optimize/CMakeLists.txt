@@ -15,6 +15,8 @@ add_executable(optimize_st
         ${CODE_ROOT_DIR}/tests/ut/optimize/test_base_template_generator.cpp
         ${CODE_ROOT_DIR}/tests/ut/optimize/task_generator/test_indirect_load_view_layout.cpp
         ${CODE_ROOT_DIR}/tests/v35/ut/optimize/test_concat_inputs_unification_pass.cpp
+        # L2 cache hint 豁免用例由 UT 维护，ST 复用同一组用例，保证 ST 增量覆盖率覆盖 L2 hint 管理路径。
+        ${CODE_ROOT_DIR}/tests/ut/optimize/test_l2_cache_hint_manager.cpp
 )
 
 if (ENABLE_ASAN)
