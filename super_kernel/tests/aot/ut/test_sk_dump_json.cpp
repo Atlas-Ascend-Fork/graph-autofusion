@@ -1019,6 +1019,41 @@ TEST_F(DumpGraphJsonTest, ExistingGraphWritesWithoutRebuildingFromModelRI) {
   sk::logger::FileLogger::Instance().SetEnabled(false);
 }
 
+TEST_F(DumpGraphJsonTest, InvalidUtf8FuncNamePreservesExistingFile) {
+  sk::logger::FileLogger::Instance().SetEnabled(true);
+
+  SuperKernelOptionsManager opts;
+  SuperKernelGraph graph(nullptr, opts, "model_invalid_utf8_func");
+  auto node = CreateKernelNode(400);
+  AddKernelInfoToNode(node.get());
+  node->nodeType = SkNodeType::NODE_KERNEL;
+  node->nodeInfos.kernelInfos.funcName = std::string("invalid") + static_cast<char>(0x80);
+  graph.graphMap[400] = std::move(node);
+  graph.streams.push_back(nullptr);
+  graph.nodeSizeInStream.push_back(1);
+
+  const std::string metaDir = CreateSkMetaDirectory("model_invalid_utf8_func");
+  const std::string filename = "test_invalid_utf8_func";
+  const std::string jsonPath = metaDir + "/" + filename + ".json";
+  std::ofstream(jsonPath) << "existing content";
+
+  EXPECT_FALSE(DumpGraphJson(graph, opts, metaDir, filename));
+  std::ifstream file(jsonPath);
+  std::string content;
+  std::getline(file, content, '\0');
+  EXPECT_EQ(content, "existing content");
+}
+
+TEST_F(DumpGraphJsonTest, InvalidUtf8InTemporaryGraphReturnsFalse) {
+  sk::logger::FileLogger::Instance().SetEnabled(true);
+
+  SuperKernelOptionsManager opts;
+  const std::string modelId = std::string("invalid") + static_cast<char>(0x80);
+  const std::string metaDir = CreateSkMetaDirectory("model_invalid_utf8_temp");
+
+  EXPECT_FALSE(DumpGraphJson(nullptr, modelId, opts, metaDir, "test_invalid_utf8_temp"));
+}
+
 TEST_F(DumpGraphJsonTest, WithPopulatedOptionsManager) {
   sk::logger::FileLogger::Instance().SetEnabled(true);
 

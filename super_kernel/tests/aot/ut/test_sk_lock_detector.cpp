@@ -17,6 +17,8 @@
 #include <map>
 #include <memory>
 #include <bitset>
+#include <atomic>
+#include <thread>
 
 #define private public
 #define protected public
@@ -315,6 +317,25 @@ class TestLockDetector : public ::testing::Test {
   std::unique_ptr<LockDetector> lockDetector;
   std::unique_ptr<ScopeDeadlockDetector> scopeDetector;
 };
+
+TEST_F(TestLockDetector, ConcurrentDeviceCoreInitialization) {
+  std::atomic<bool> allSucceeded{true};
+  std::vector<std::thread> threads;
+  for (int i = 0; i < 16; ++i) {
+    threads.emplace_back([&allSucceeded]() {
+      if (LockDetector::GetDeviceCores() != ACL_SUCCESS) {
+        allSucceeded = false;
+      }
+    });
+  }
+  for (auto &thread : threads) {
+    thread.join();
+  }
+
+  EXPECT_TRUE(allSucceeded);
+  EXPECT_GT(LockDetector::deviceRealCubeNum, 0);
+  EXPECT_GT(LockDetector::deviceRealVecNum, 0);
+}
 
 // Test 1: one stream, kernel node (after wait node) exceeds max sk cube/vec num
 TEST_F(TestLockDetector, SingleStreamKernelFirst) {
