@@ -5,6 +5,7 @@ add_executable(codegen_st
         test_codegen_infershape.cpp
         test_codegen_graph_check.cpp
         test_codegen_extend_conv2d.cpp
+        test_codegen_tbuf_merge.cpp
 )
 target_compile_definitions(codegen_st PRIVATE
         CMAKE_BINARY_DIR="${CMAKE_BINARY_DIR}"

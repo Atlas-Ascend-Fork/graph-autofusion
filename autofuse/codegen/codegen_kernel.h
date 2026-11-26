@@ -235,6 +235,12 @@ class TBuf : public Variable {
   TBuf(ascir::BufId buf_id, const ascir::Position pos, std::string &position_name);
   std::string AllocBuf(const bool with_define = true) const;
   std::string AllocBuf(std::string buf_name, std::string dtype_name, const bool with_define = true) const;
+  // TBuf 合并：不单独声明 TBuf，而是从合并后的大 TBuf(merged_buf) 上按字节偏移(offset_expr)切片
+  std::string AllocBuf(const bool with_define, const std::string &merged_buf, const std::string &offset_expr) const;
+  std::string AllocBuf(std::string buf_name, std::string dtype_name, const bool with_define,
+                       const std::string &merged_buf, const std::string &offset_expr) const;
+  std::string GetTensorExpr(const std::string &dtype_name, const std::string &merged_buf,
+                            const std::string &offset_expr) const;
 };
 
 class Tiler : public Code {
@@ -330,8 +336,12 @@ class TPipe : public Variable {
   std::string TensorActualSizeCalc(const ascir::TensorId id) const;
   Status MergeScopeSizeCalc(std::string &result) const;
   Status LocalTBufAlloc(const TBuf &buf, std::string &result, const bool with_define = true) const;
+  Status LocalTBufAlloc(const TBuf &buf, std::string &result, const bool with_define, const std::string &merged_buf,
+                        const std::string &offset_expr) const;
   Status LocalTBufAllocLoopTwice(std::string &result, const bool with_define = true) const;
   std::string AllocTmpBuf(const TBuf &buf, const bool with_define = true) const;
+  std::string AllocTmpBuf(const TBuf &buf, const bool with_define, const std::string &merged_buf,
+                          const std::string &offset_expr) const;
   std::string GenDuplicateBufAlloc(const std::set<std::pair<std::string, std::string>> &pre_api_extract_dup) const;
   Status LocalTQueAlloc(std::string &result) const;
   Status LocalTensorQueBufAlloc(std::string &result) const;
@@ -359,6 +369,20 @@ class TPipe : public Variable {
  private:
   Status ParseTBufReuse(TBuf buf, std::string &reuse_dtype_name, bool &is_buf_reuse,
                         std::vector<const Tensor *> &reuse_buf_tensors, std::stringstream &tensor_size_max) const;
+  // 单个 kernel 函数内 TBuf 数量超过阈值时，把 b* buffer 合并成一个 TBuf，每个 buffer 通过
+  // GetWithOffset 按 blk 对齐偏移切片（地址布局与逐个 InitBuffer 完全一致）。
+  // 数量正常的图（以及 CV/UBFuse、非 att 计算 size 的路径）保持逐 buffer 分配，生成代码不变。
+  bool ShouldMergeTBufs() const;
+  bool ShouldDedupScalarBlkTensors() const;
+  std::string ScalarBlkTensorConstValue(const Tensor &tensor) const;
+  std::map<ascir::TensorId, ascir::TensorId> ScalarBlkTensorCanonicalMap() const;
+  Status TBufAllocOrder(std::vector<ascir::BufId> &order) const;
+  Status MergedTBufPreamble(const std::vector<ascir::BufId> &order, std::string &result) const;
+  Status LocalTBufAllocMerged(const std::vector<ascir::BufId> &order, bool with_define, std::string &result) const;
+  Status AllocTBufTensor(const TBuf &buf, bool with_define, bool is_buf_reuse, bool is_merged,
+                         const std::string &merged_buf, const std::string &offset_expr,
+                         const std::string &reuse_dtype_name, const std::vector<const Tensor *> &reuse_buf_tensors,
+                         std::stringstream &result) const;
   bool using_att_calc_qbt_size_ = true;
   bool using_global_tpipe_ = false;
 };

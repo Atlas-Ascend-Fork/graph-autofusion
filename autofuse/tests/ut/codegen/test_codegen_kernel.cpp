@@ -544,6 +544,33 @@ TEST(CodegenKernel, OutputTensorIsScalarDuplicate_test) {
           "AscendC::PipeBarrier<PIPE_V>();\n"});
 }
 
+TEST(CodegenKernel, TPipe_ScalarBlkTensorDedup) {
+  codegen::Tiler tiler;
+  codegen::TPipe tpipe("tpipe", tiler);
+  af::AscGraph graph("scalar_dedup");
+  Load load("load");
+  graph.AddNode(load);
+  auto asc_tensor = graph.FindNode("load")->outputs[0];
+  asc_tensor.attr.dtype = ge::DT_FLOAT;
+  asc_tensor.attr.mem.alloc_type = af::AllocType::kAllocTypeBuffer;
+  asc_tensor.attr.buf.id = 0;
+  for (int64_t i = 0; i < 8; ++i) {
+    asc_tensor.attr.mem.tensor_id = i;
+    asc_tensor.attr.buf.id = i;
+    std::string name = "scalar_" + std::to_string(i);
+    std::string dtype = "float";
+    codegen::Tensor tensor(asc_tensor, dtype, name);
+    ASSERT_EQ(tensor.Init(), 0);
+    tensor.const_value = "1.0";
+    ASSERT_EQ(tpipe.AddTensor(tensor), af::SUCCESS);
+    tpipe.need_gen_blk_tensors.push_back(tensor.id);
+  }
+  std::string result;
+  ASSERT_EQ(tpipe.BlkTensorAllocAndInit(result), af::SUCCESS);
+  EXPECT_EQ(result.find("scalar_1_tbuf"), std::string::npos);
+  EXPECT_FALSE(result.empty());
+}
+
 TEST(CodegenKernel, ReduceTensorForceNonUbScalar) {
   af::AscGraph graph("test");
   auto s0 = graph.CreateSizeVar("s0");
@@ -1297,10 +1324,11 @@ TEST(CodegenKernel, TPipe_LocalTBufAlloc) {
 
   std::string result;
   tpipe.SetUsingAttCalcQBTSizeConfig(false);
+  tpipe.SetUsingGlobalTpipe(true);
   tpipe.LocalTBufAllocLoopTwice(result);
   EXPECT_EQ(result, std::string{"const uint32_t b1_size = KernelUtils::Max(m1_size, local_1_size * sizeof(float));\n"
                                 "TBuf<TPosition::VECIN> b1;\n"
-                                "tpipe.InitBuffer(b1, KernelUtils::BlkAlign<uint8_t>(b1_size));\n"
+                                "GetTPipePtr()->InitBuffer(b1, KernelUtils::BlkAlign<uint8_t>(b1_size));\n"
                                 "LocalTensor<float> local_1 = b1.Get<float>();\n\n"});
 }
 
@@ -1462,6 +1490,59 @@ TEST(CodegenKernel, TPipe_LocalTBufAlloc_NotMergeTensors_ERROR) {
   std::string result;
   tpipe.SetUsingAttCalcQBTSizeConfig(false);
   EXPECT_EQ(tpipe.LocalTBufAllocLoopTwice(result), af::FAILED);
+}
+
+TEST(CodegenKernel, TPipe_LocalTBufAlloc_MergedTbufs) {
+  af::AscGraph graph("merged_tbufs");
+  auto axis = graph.CreateAxis("axis", af::Symbol(128));
+  Data data("data", graph);
+  auto tensor = graph.FindNode("data")->outputs[0];
+  tensor.attr.axis = {axis.id};
+  tensor.attr.repeats = {axis.size};
+  tensor.attr.strides = {One};
+  tensor.attr.mem.alloc_type = af::AllocType::kAllocTypeBuffer;
+  tensor.attr.mem.position = af::Position::kPositionVecCalc;
+  codegen::Tiler tiler;
+  ASSERT_EQ(tiler.AddAxis(axis), af::SUCCESS);
+  codegen::TPipe tpipe("tpipe", tiler);
+  for (int64_t id = 0; id < 40; ++id) {
+    tensor.attr.mem.tensor_id = id;
+    tensor.attr.buf.id = id;
+    ASSERT_EQ(tpipe.AddTensor(tensor), af::SUCCESS);
+  }
+  tpipe.bufs.at(7).tmp_buf_reuse = true;
+  tpipe.SetUsingGlobalTpipe(true);
+  std::string result;
+  ASSERT_EQ(tpipe.LocalTBufAllocLoopTwice(result), af::SUCCESS);
+  EXPECT_NE(result.find("TBuf<TPosition::VECCALC> b_all;"), std::string::npos);
+  EXPECT_NE(result.find("GetWithOffset<float>"), std::string::npos);
+}
+
+TEST(CodegenKernel, TPipe_LocalTBufAlloc_MergedTbufsRejectNonVecCalc) {
+  af::AscGraph graph("merged_tbufs_position");
+  auto axis = graph.CreateAxis("axis", af::Symbol(128));
+  Data data("data", graph);
+  auto tensor = graph.FindNode("data")->outputs[0];
+  tensor.attr.axis = {axis.id};
+  tensor.attr.repeats = {axis.size};
+  tensor.attr.strides = {One};
+  tensor.attr.mem.alloc_type = af::AllocType::kAllocTypeBuffer;
+  tensor.attr.mem.position = af::Position::kPositionVecCalc;
+  codegen::Tiler tiler;
+  ASSERT_EQ(tiler.AddAxis(axis), af::SUCCESS);
+  codegen::TPipe tpipe("tpipe", tiler);
+  for (int64_t id = 0; id < 40; ++id) {
+    tensor.attr.mem.tensor_id = id;
+    tensor.attr.buf.id = id;
+    if (id == 7) {
+      tensor.attr.mem.position = af::Position::kPositionVecIn;
+    }
+    ASSERT_EQ(tpipe.AddTensor(tensor), af::SUCCESS);
+  }
+  std::string result;
+  ASSERT_EQ(tpipe.LocalTBufAllocLoopTwice(result), af::SUCCESS);
+  EXPECT_EQ(result.find("TBuf<TPosition::VECCALC> b_all;"), std::string::npos);
+  EXPECT_NE(result.find("TBuf<TPosition::VECIN> b7;"), std::string::npos);
 }
 
 TEST(CodegenKernel, TPipe_LocalTQueAlloc) {
