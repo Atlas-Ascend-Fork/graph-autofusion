@@ -1279,12 +1279,13 @@ LogicalResult registerArithmeticBinaryImplementations(ImplementationRegistry &re
 
   // 内联广播（brc_inline，第三批，设计见
   // docs/development/2026-11-10-afir-broadcast-inline-design.md）：`afir.add` /
-  // `afir.mul` 的第三个 implementation，只在两个输入满足 `(1, A) op (B, A)` 这个行广播
+  // `afir.mul` / `afir.minimum` 的行广播 implementation，只在两个输入满足 `(1, A) op (B, A)` 这个行广播
   // 形态时命中，与上面那两个 tensor-tensor implementation 的判据互斥（后者要求两个输入
   // 同形）。只接 mem 侧——`brc_inline_api.h` 没有对等的寄存器包装（设计文档「开工前三条
   // 实测结论」第三条）。
   if (failed(registerBinaryBrcInline<AddOp>(registry, "add.row_broadcast_inline", "Add")) ||
-      failed(registerBinaryBrcInline<MulOp>(registry, "mul.row_broadcast_inline", "Mul"))) {
+      failed(registerBinaryBrcInline<MulOp>(registry, "mul.row_broadcast_inline", "Mul")) ||
+      failed(registerBinaryBrcInline<MinimumOp>(registry, "minimum.row_broadcast_inline", "Min"))) {
     return failure();
   }
 

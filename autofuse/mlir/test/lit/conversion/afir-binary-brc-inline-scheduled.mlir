@@ -87,7 +87,24 @@ module @plan0 attributes {
       afir.result_descs = [#other_tile],
       afir.sched = #afir.sched<axis = [0, 1], loop_axis = 1>
     } : (memref<1x128xf32>, memref<128x128xf32>), memref<128x128xf32> -> memref<128x128xf32>
-    afir.store %computed outs(%output) {
+    // Minimum must use the same row-broadcast implementation in either direction.
+    %minimum_lhs = afir.minimum %loaded0, %loaded1 outs(%dst) {
+      afir.destination_descs = [#other_tile], afir.operand_descs = [#brc_tile, #other_tile],
+      afir.result_descs = [#other_tile],
+      afir.sched = #afir.sched<axis = [0, 1], loop_axis = 1>
+    } : (memref<1x128xf32>, memref<128x128xf32>), memref<128x128xf32> -> memref<128x128xf32>
+    %minimum_rhs = afir.minimum %loaded1, %loaded0 outs(%dst) {
+      afir.destination_descs = [#other_tile], afir.operand_descs = [#other_tile, #brc_tile],
+      afir.result_descs = [#other_tile],
+      afir.sched = #afir.sched<axis = [0, 1], loop_axis = 1>
+    } : (memref<128x128xf32>, memref<1x128xf32>), memref<128x128xf32> -> memref<128x128xf32>
+    // Equal shapes must keep selecting the ordinary tensor-tensor implementation.
+    %minimum_same = afir.minimum %loaded1, %minimum_rhs outs(%dst) {
+      afir.destination_descs = [#other_tile], afir.operand_descs = [#other_tile, #other_tile],
+      afir.result_descs = [#other_tile],
+      afir.sched = #afir.sched<axis = [0, 1], loop_axis = 1>
+    } : (memref<128x128xf32>, memref<128x128xf32>), memref<128x128xf32> -> memref<128x128xf32>
+    afir.store %minimum_same outs(%output) {
       afir.destination_descs = [#gm_out], afir.operand_descs = [#other_tile],
       afir.sched = #afir.sched<axis = [0, 1], loop_axis = 1>,
       indexing_maps = [affine_map<(d0, d1) -> (d0, d1)>, affine_map<(d0, d1) -> (d0, d1)>]
@@ -99,3 +116,8 @@ module @plan0 attributes {
 // CHECK: ascendc.binary_brc_inline
 // CHECK-SAME: wrappedApiName = "Add"
 // CHECK-NOT: ascendc.add_l2
+// CHECK: ascendc.binary_brc_inline
+// CHECK-SAME: wrappedApiName = "Min"
+// CHECK: ascendc.binary_brc_inline
+// CHECK-SAME: wrappedApiName = "Min"
+// CHECK: ascendc.min_l2
