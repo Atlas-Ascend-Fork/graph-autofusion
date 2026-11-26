@@ -527,7 +527,9 @@ class TestAscGraphCompileImplConvKwargs:
             ),
         )
         monkeypatch.setattr(module, "is_cross_compile", lambda params: False)
-        monkeypatch.setattr(module, "ascbc_conv_kernel_tiling_pro", lambda *a, **k: None)
+        monkeypatch.setattr(
+            module, "ascbc_conv_kernel_tiling_pro", lambda *a, **k: None
+        )
         monkeypatch.setattr(module, "static_shape_compile", lambda **k: None)
         monkeypatch.setattr(module, "timestamp_set", lambda *a, **k: None)
         monkeypatch.setattr(module, "asc_graph_compile_post", lambda *a, **k: None)
@@ -538,7 +540,9 @@ class TestAscGraphCompileImplConvKwargs:
             "vector_core_num": None,
             "impl_mode": None,
         }
-        module._asc_graph_compile_impl(("conv_kernel0",), temp_dir=str(tmpdir), params=params)
+        module._asc_graph_compile_impl(
+            ("conv_kernel0",), temp_dir=str(tmpdir), params=params
+        )
 
         assert captured.get("is_cube") is True
         assert captured.get("is_conv") is True
