@@ -45,6 +45,7 @@
 #include "sk_lock_detector.h"
 #include "sk_options_manager.h"
 #include "sk_scope_info.h"
+#include "sk_scope_recommendation.h"
 #include "sk_scope_split_result_reporter.h"
 
 /*!
@@ -340,7 +341,8 @@ class PerOpMaxCoreSplitPass : public ScopeSplitPass {
  */
 class InitialScopeSplitPass : public ScopeSplitPass {
  public:
-  explicit InitialScopeSplitPass(SuperKernelGraph &inputGraph, SkHeapType heapType);
+  explicit InitialScopeSplitPass(SuperKernelGraph &inputGraph, SkHeapType heapType,
+                                 const ScopeRecommendation *recommendation = nullptr);
   ~InitialScopeSplitPass() = default;
 
   bool Run(std::vector<SuperKernelScopeInfo> &scopes) override;
@@ -358,6 +360,7 @@ class InitialScopeSplitPass : public ScopeSplitPass {
   bool ProcessUnfusibleWaitNode(uint32_t streamIdx, SuperKernelBaseNode *waitNode);
   bool AllStreamsFinished() const;
   bool DetermineCurrentScopeBitFlags();
+  bool IsRecommendedNode(const SuperKernelBaseNode &node) const;
 
   // ============ Node Processing ============
   void InitNodeHeap();
@@ -381,6 +384,8 @@ class InitialScopeSplitPass : public ScopeSplitPass {
   std::set<uint64_t> processedNodes_;
   SkCandidateHeap nodeHeap_;
   std::bitset<MAX_SCOPE_NUM> currentScopeBitFlags_;
+  const ScopeRecommendation *recommendation_;
+  uint64_t currentCandidateId_ = ScopeRecommendation::INVALID_CANDIDATE_ID;
   std::unordered_map<uint32_t, ScopeBreakInfo> streamBreakInfos_;  // Per-stream break info (last one wins)
   ScopeBreakInfo currentScopeBreakInfo_;                           // Current scope's primary break reason
   ScopeBreakInfo scopeStartBreakInfo_;                             // Break reason from skipped nodes at scope start
@@ -678,6 +683,7 @@ class SuperKernelScopeSplitter {
 
   SuperKernelGraph &graph_;
   std::vector<SuperKernelScopeInfo> scopeInfos_;
+  ScopeRecommendation recommendation_;
   std::vector<std::unique_ptr<ScopeSplitPass>> passes_;
   ScopeSplitResultReporter splitResultReporter_;
   bool needResplit_ = false;
@@ -688,6 +694,7 @@ class SuperKernelScopeSplitter {
   SuperKernelOptionsManager *opts_ = nullptr;
   bool enableTaskBreakerBypass_ = false;
   bool enablePerOpMaxCore_ = false;
+  bool recommendationReady_ = true;
 };
 
 // Declaration for FindRootBreakInfo
