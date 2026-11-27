@@ -1,0 +1,13 @@
+factor_id,experiment,role,dtype,dtype_size,block_dim,api,dims,gm_or_input_strides,ub_or_output_strides,point_flush,packing_extra,compact_packed,grid_cols,core_tiles,source_plane,store_pitch,consumer
+wide9-train-0,fp32_padded_wide_row,train,float32,4,48,NDDMA,18x967,967x1,968x1,0,0,0,97,11,84129,93799,matrix_store
+wide9-train-1,fp32_padded_wide_row,train,float32,4,52,NDDMA,22x991,991x1,992x1,0,0,0,97,10,106037,96127,matrix_store
+wide9-train-2,fp32_padded_wide_row,train,float32,4,54,NDDMA,28x1015,1015x1,1016x1,0,0,0,97,9,139055,98455,matrix_store
+wide9-train-3,fp32_padded_wide_row,train,float32,4,56,NDDMA,30x1039,1039x1,1040x1,0,0,0,97,9,152733,100783,matrix_store
+wide9-holdout-0,fp32_padded_wide_row,holdout,float32,4,49,NDDMA,19x977,977x1,984x1,0,0,0,97,10,89884,94769,matrix_store
+wide9-holdout-1,fp32_padded_wide_row,holdout,float32,4,51,NDDMA,24x997,997x1,1000x1,0,0,0,97,10,116649,96709,matrix_store
+wide9-holdout-2,fp32_padded_wide_row,holdout,float32,4,54,NDDMA,27x1013,1013x1,1016x1,0,0,0,97,9,133716,98261,matrix_store
+wide9-holdout-3,fp32_padded_wide_row,holdout,float32,4,55,NDDMA,30x1031,1031x1,1032x1,0,0,0,97,9,151557,100007,matrix_store
+wide_h1-grid-matrix_store,fp32_padded_wide_row,diagnostic,float32,4,50,NDDMA,20x983,983x1,984x1,0,0,0,97,10,95351,95351,matrix_store
+wide_h2-grid-matrix_store,fp32_padded_wide_row,diagnostic,float32,4,53,NDDMA,25x1003,1003x1,1008x1,0,0,0,97,10,122366,97291,matrix_store
+wide_h3-grid-matrix_store,fp32_padded_wide_row,diagnostic,float32,4,56,NDDMA,29x1021,1021x1,1024x1,0,0,0,97,9,144982,99037,matrix_store
+wide_k-grid-matrix_store,fp32_padded_wide_row,known,float32,4,55,NDDMA,26x1007,1007x1,1008x1,0,0,0,99,9,127889,99693,matrix_store

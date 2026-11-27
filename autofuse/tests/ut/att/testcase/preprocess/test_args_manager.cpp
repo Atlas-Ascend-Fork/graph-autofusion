@@ -832,3 +832,48 @@ TEST_F(ArgsManagerUtest, test_small_shape_pattern_case4) {
   auto model_info = BuildSmallShapePatternModelInfo(hardware_cons);
   EXPECT_FALSE(TestHitSmallShapePattern(model_info));
 }
+
+TEST_F(ArgsManagerUtest, ProductionSolverClassUsesSameLocalRefinementConfiguration) {
+  for (const bool equal_order : {false, true}) {
+    for (const size_t groups : {1UL, 2UL}) {
+      for (const bool dynamic : {false, true}) {
+        ModelInfo model;
+        auto outer_m = std::make_shared<AttAxis>();
+        outer_m->name = "m";
+        outer_m->axis_pos = AxisPosition::ORIGIN;
+        outer_m->size = std::make_shared<SymConstInfo>(CreateExpr(64));
+        auto outer_n = std::make_shared<AttAxis>();
+        outer_n->name = "n";
+        outer_n->axis_pos = AxisPosition::ORIGIN;
+        outer_n->size = std::make_shared<SymConstInfo>(CreateExpr(128));
+        if (dynamic) {
+          outer_n->size = MakeSymVar(CreateExpr("n_size"));
+        }
+        auto tile_m = MakeSymVar(CreateExpr("mt_size"));
+        auto tile_n = MakeSymVar(CreateExpr("nt_size"));
+        SetSymVarScope(tile_m, {HardwareDef::UB});
+        SetSymVarScope(tile_n, {HardwareDef::UB});
+        auto inner_m = MakeAxis("mt", AxisPosition::INNER, false, true, true, tile_m, {outer_m.get()});
+        auto inner_n = MakeAxis("nt", AxisPosition::INNER, false, true, true, tile_n, {outer_n.get()});
+        inner_m->order = 1U;
+        inner_n->order = equal_order ? 1U : 2U;
+        model.arg_list = {outer_m, outer_n, inner_m, inner_n};
+        model.hardware_cons[HardwareDef::UB] = tile_m->symbol_expr * tile_n->symbol_expr;
+        model.hardware_cons[HardwareDef::CORENUM] = CreateExpr(1);
+        model.objects[PipeType::AIV_VEC] = tile_m->symbol_expr + tile_n->symbol_expr;
+        TilingCodeGenConfig config;
+        ScoreFuncs score_funcs;
+        AxesReorderTilingCodeGenImpl impl("op", config, {model}, score_funcs, false);
+        const auto &ident = model.schedule_group_ident;
+        impl.SetScheduleResultGroupNums({{{ident.asc_graph_id, ident.impl_graph_id}, groups}});
+        ASSERT_EQ(impl.GenSolverTiling(model), af::SUCCESS);
+        const auto class_code = impl.tiling_func_.GetOutputStr();
+        const bool expected = equal_order && groups > 1UL && !dynamic;
+        EXPECT_EQ(class_code.find("objective_keys_") != std::string::npos, expected);
+        ASSERT_EQ(impl.GenDoTiling(model), af::SUCCESS);
+        const auto all_code = impl.tiling_func_.GetOutputStr();
+        EXPECT_EQ(all_code.find("input.enable_local_core_refinement = true;") != std::string::npos, expected);
+      }
+    }
+  }
+}

@@ -75,7 +75,7 @@ TEST_F(TestSolverPassManager, AxesReorderInputKeepsOriginalShape) {
   ASSERT_TRUE(args_manager.Process(false));
 
   att::SolverPassManager manager(args_manager, {0}, "TilingData");
-  std::string impl_code = manager.GenAxesReorderFunc("").first;
+  std::string impl_code = manager.GenAxesReorderFunc("", true).first;
 
   EXPECT_NE(impl_code.find("m_size.value = tiling_data.get_m_size();"), std::string::npos);
   EXPECT_EQ(impl_code.find("m_size.value = (tiling_data.get_m_size()"), std::string::npos);
@@ -94,7 +94,7 @@ TEST_F(TestSolverPassManager, DynamicDefaultKeepsBalanceAndPgoRefinement) {
       manager.SetHighPerfTiling(high_precision);
       manager.SetEnableAutofusePGO(true);
       manager.SetEnableEqualOrder(false);
-      const auto code = manager.GenAxesReorderFunc("").first;
+      const auto code = manager.GenAxesReorderFunc("", true).first;
       const std::string enabled = high_precision ? "true" : "false";
       const std::string core_search_arg = is_static ? "" : ", false";
       EXPECT_NE(code.find("solver.Run(true, false, " + enabled + ", false)"), std::string::npos);

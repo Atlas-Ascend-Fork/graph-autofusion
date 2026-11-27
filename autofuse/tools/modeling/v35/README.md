@@ -10,6 +10,7 @@
 | [普通 Load / Store](dma/README.md) | v35 FP32 DMA 上板采集、精度校验和复现 |
 | [MTE2](mte2/README.md) | Load / NDDMA 已归档数据的误差核对与重拟合 |
 | [Gather](vector/gather/README.md) | bank 与 mask 组件上板采集 |
+| [VF 高精度采集](vector/vf/README.md) | 独立向量指令采集与拟合 |
 | [IsInf](vector/isinf/README.md) | 单 API 的上板采集与拟合 |
 | [GetOpHeadCost](common/op_head_cost/README.md) | 核数相关公共开销的上板采集、证据核对与离线复算 |
 
@@ -36,3 +37,10 @@ manifest 的 `case_inventory`、`reproduction` 相对其自身目录解析。
 `source_root=external_runs` 表示相对历史实验 runs 根目录。
 源文件 checksum 用于核对历史证据，路径迁移后继续使用同一 checksum。
 外部证据位置仅用于溯源，离线误差复核直接读取仓内 cases 和 samples。
+
+### 用例与本地采样
+
+新增校准输入保存在 [v35 用例目录](../../../att/modeling/v35/) 的 `cases*.csv` 和各场景的描述符清单中。
+DMA 采集使用 [collect.sh](dma/collect.sh)，Gather 采集使用 [Gather 工程](vector/gather/CMakeLists.txt)。
+重新拟合时向各 `fit_*.py` 传入输入用例及本次采集生成的数据路径，具体参数见 `--help`。
+完整拟合数据、图表和业务验证记录见 [私仓归档](https://gitcode.com/zhang_shengjie/AutoTilingModelSelfImproving/tree/main/archive/pr3016)。

@@ -15,6 +15,7 @@
 #include "tests/depends/slog/src/slog_stub.h"
 #include "common_utils.h"
 #include "v35/att/api_perf_register/nddma_model.h"
+#include "../../../../att/gen_model_info/api_perf_register/nddma_test_utils.h"
 
 namespace att {
 namespace {
@@ -27,16 +28,6 @@ NddmaDescriptorInfo MakeDescriptor(const Expr &dim, const Expr &input_stride, co
   return descriptor;
 }
 
-double GetConstCycles(Expr cycles) {
-  cycles.Simplify();
-  int64_t integer = 0;
-  if (cycles.GetConstValue(integer)) {
-    return static_cast<double>(integer);
-  }
-  double value = 0.0;
-  EXPECT_TRUE(cycles.GetConstValue(value));
-  return value;
-}
 }  // namespace
 
 TEST(NddmaModelV2, EvaluatesStaticB8LowCoreFormula) {
@@ -48,7 +39,7 @@ TEST(NddmaModelV2, EvaluatesStaticB8LowCoreFormula) {
   EXPECT_EQ(result.model_name, "NDDMA_1D_MULTICORE_V2");
   EXPECT_EQ(result.fallback_reason, NddmaFallbackReason::kNone);
   EXPECT_TRUE(result.ternary_ops.empty());
-  EXPECT_NEAR(GetConstCycles(result.cycles), 400.30727752648556, 1e-6);
+  EXPECT_NEAR(GetNddmaConstCycles(result.cycles), 400.30727752648556, 1e-6);
 }
 
 TEST(NddmaModelV2, UsesMergedLowCoreCoefficientsForStridedOutput) {
@@ -66,7 +57,7 @@ TEST(NddmaModelV2, AllowsZeroInputStride) {
 
   ASSERT_EQ(EvaluateNddmaModel(descriptor, "uint8", CreateExpr(2), result), af::SUCCESS);
   ASSERT_TRUE(result.selected);
-  EXPECT_NEAR(GetConstCycles(result.cycles), 216.18489573733697, 1e-6);
+  EXPECT_NEAR(GetNddmaConstCycles(result.cycles), 216.18489573733697, 1e-6);
 }
 
 TEST(NddmaModelV2, EvaluatesStaticB16HighCoreFormula) {
@@ -75,7 +66,7 @@ TEST(NddmaModelV2, EvaluatesStaticB16HighCoreFormula) {
 
   ASSERT_EQ(EvaluateNddmaModel(descriptor, "float16", CreateExpr(8), result), af::SUCCESS);
   ASSERT_TRUE(result.selected);
-  EXPECT_NEAR(GetConstCycles(result.cycles), 3604.1465027941949, 1e-6);
+  EXPECT_NEAR(GetNddmaConstCycles(result.cycles), 3604.1465027941949, 1e-6);
 }
 
 TEST(NddmaModelV2, EvaluatesStaticB32LowCoreFormula) {
@@ -84,7 +75,7 @@ TEST(NddmaModelV2, EvaluatesStaticB32LowCoreFormula) {
 
   ASSERT_EQ(EvaluateNddmaModel(descriptor, "float32", CreateExpr(2), result), af::SUCCESS);
   ASSERT_TRUE(result.selected);
-  EXPECT_NEAR(GetConstCycles(result.cycles), 638.66344907846417, 1e-6);
+  EXPECT_NEAR(GetNddmaConstCycles(result.cycles), 638.66344907846417, 1e-6);
 }
 
 TEST(NddmaModelV2, EvaluatesStaticB64HighCoreWithSaturatedInputStride) {
@@ -93,7 +84,7 @@ TEST(NddmaModelV2, EvaluatesStaticB64HighCoreWithSaturatedInputStride) {
 
   ASSERT_EQ(EvaluateNddmaModel(descriptor, "int64", CreateExpr(8), result), af::SUCCESS);
   ASSERT_TRUE(result.selected);
-  EXPECT_NEAR(GetConstCycles(result.cycles), 1788.750466100214, 1e-6);
+  EXPECT_NEAR(GetNddmaConstCycles(result.cycles), 1788.750466100214, 1e-6);
 }
 
 TEST(NddmaModelV2, ReplaysAllCoefficientGroupsForFourDtypeSizes) {
@@ -113,8 +104,8 @@ TEST(NddmaModelV2, ReplaysAllCoefficientGroupsForFourDtypeSizes) {
     NddmaModelResult high_result;
     ASSERT_EQ(EvaluateNddmaModel(descriptor, test_case.dtype, CreateExpr(2), low_result), af::SUCCESS);
     ASSERT_EQ(EvaluateNddmaModel(descriptor, test_case.dtype, CreateExpr(8), high_result), af::SUCCESS);
-    EXPECT_NEAR(GetConstCycles(low_result.cycles), test_case.low_core, 1e-5);
-    EXPECT_NEAR(GetConstCycles(high_result.cycles), test_case.high_core, 1e-5);
+    EXPECT_NEAR(GetNddmaConstCycles(low_result.cycles), test_case.low_core, 1e-5);
+    EXPECT_NEAR(GetNddmaConstCycles(high_result.cycles), test_case.high_core, 1e-5);
   }
 }
 
@@ -188,7 +179,7 @@ TEST(NddmaModelV2, UsesNg2ForAscendingInputStridesAndUbContiguousOutput) {
   ASSERT_EQ(EvaluateNddmaModel(descriptor, "int8", CreateExpr(2), result), af::SUCCESS);
   ASSERT_TRUE(result.selected);
   EXPECT_EQ(result.model_name, "NDDMA_ND_MULTICORE_NG2");
-  EXPECT_NEAR(GetConstCycles(result.cycles), 227.9001452458901, 1e-6);
+  EXPECT_NEAR(GetNddmaConstCycles(result.cycles), 227.9001452458901, 1e-6);
 }
 
 TEST(NddmaModelV2, ReproducesExpectedTransposeEstimate) {
@@ -202,7 +193,7 @@ TEST(NddmaModelV2, ReproducesExpectedTransposeEstimate) {
   ASSERT_EQ(EvaluateNddmaModel(descriptor, "float16", CreateExpr(64), result), af::SUCCESS);
   ASSERT_TRUE(result.selected);
   EXPECT_EQ(result.model_name, "NDDMA_ND_MULTICORE_NG2_V2");
-  EXPECT_NEAR(GetConstCycles(result.cycles), 4705.5751951840657, 1e-3);
+  EXPECT_NEAR(GetNddmaConstCycles(result.cycles), 4705.5751951840657, 1e-3);
 }
 
 TEST(NddmaModelV2, SelectsNg2ForSymbolicTilingDimensions) {
@@ -232,7 +223,9 @@ TEST(NddmaModelV2, SelectsNg2ForAlignedSymbolicOutputStride) {
 
   ASSERT_EQ(EvaluateNddmaModel(descriptor, "float16", CreateExpr(64), result), af::SUCCESS);
   ASSERT_TRUE(result.selected);
-  EXPECT_EQ(result.model_name, "NDDMA_RUNTIME_DISPATCH[NDDMA_ND_MULTICORE_NG2_V2|NDDMA_ND_MULTICORE_NG2]");
+  EXPECT_EQ(result.model_name,
+            "NDDMA_RUNTIME_DISPATCH[NDDMA_ND_MULTICORE_NG2_V2|"
+            "NDDMA_RUNTIME_DISPATCH[NDDMA_ND_MULTICORE_NG2|NDDMA_ND_MULTICORE_V1]]");
   EXPECT_TRUE(result.cycles.IsValid());
 }
 
@@ -247,7 +240,7 @@ TEST(NddmaModelV2, SelectsNg2WithUpdatedStaticMultiplier) {
   ASSERT_EQ(EvaluateNddmaModel(descriptor, "int64", CreateExpr(64), result), af::SUCCESS);
   EXPECT_TRUE(result.selected);
   EXPECT_EQ(result.fallback_reason, NddmaFallbackReason::kNone);
-  EXPECT_NEAR(GetConstCycles(result.cycles), 569.216677989927, 1e-6);
+  EXPECT_NEAR(GetNddmaConstCycles(result.cycles), 569.216677989927, 1e-6);
 }
 
 TEST(NddmaModelV2, UsesNg2WhenSingletonAxesArePresent) {
@@ -444,7 +437,7 @@ TEST(NddmaModelV2, StaticUnitAxesPreservePhysical1DTransferCost) {
         NddmaModelResult actual;
         ASSERT_EQ(EvaluateNddmaModel(descriptor, dtype, CreateExpr(core), actual), af::SUCCESS);
         ASSERT_TRUE(actual.selected);
-        EXPECT_NEAR(GetConstCycles(actual.cycles), GetConstCycles(expected.cycles), 1e-6);
+        EXPECT_NEAR(GetNddmaConstCycles(actual.cycles), GetNddmaConstCycles(expected.cycles), 1e-6);
       }
     }
   }
@@ -472,8 +465,8 @@ TEST(NddmaModelV2, RuntimeUnitAxisPreservesGenericCost) {
     NddmaModelResult expected;
     ASSERT_EQ(EvaluateNddmaModel(concrete, "float32", CreateExpr(32), expected), af::SUCCESS);
     ASSERT_TRUE(expected.selected);
-    EXPECT_NEAR(GetConstCycles(dynamic.cycles.Replace({{q, CreateExpr(value)}})), GetConstCycles(expected.cycles),
-                1e-6);
+    EXPECT_NEAR(GetNddmaConstCycles(dynamic.cycles.Replace({{q, CreateExpr(value)}})),
+                GetNddmaConstCycles(expected.cycles), 1e-6);
   }
 }
 
@@ -487,7 +480,7 @@ TEST(NddmaModelV2, TinySparseTransfersRemainPositiveWithoutRuntimeClamp) {
                                        CreateExpr(core), result),
                     af::SUCCESS);
           ASSERT_TRUE(result.selected);
-          const double cycles = GetConstCycles(result.cycles);
+          const double cycles = GetNddmaConstCycles(result.cycles);
           EXPECT_TRUE(std::isfinite(cycles));
           EXPECT_GT(cycles, 0.0);
         }
@@ -512,580 +505,11 @@ TEST(NddmaModelV2, JointlyContiguousAxesMatchDirect1DCost) {
       ASSERT_EQ(EvaluateNddmaModel(descriptor, dtype, CreateExpr(core), actual), af::SUCCESS);
       ASSERT_TRUE(direct.selected);
       ASSERT_TRUE(actual.selected);
-      EXPECT_NEAR(GetConstCycles(actual.cycles), GetConstCycles(direct.cycles), 1e-6);
+      EXPECT_NEAR(GetNddmaConstCycles(actual.cycles), GetNddmaConstCycles(direct.cycles), 1e-6);
       EXPECT_EQ(actual.model_name, "NDDMA_1D_MULTICORE_V2");
       EXPECT_EQ(actual.effective_rank, 3U);  // Cost normalization preserves the actual API identity.
     }
   }
-}
-
-TEST(NddmaModelV2, CalibratedNg2ReplaysMeasuredWholeApiCost) {
-  NddmaDescriptorInfo descriptor;
-  descriptor.output_dims = {CreateExpr(512), CreateExpr(8)};
-  descriptor.input_strides = {CreateExpr(1), CreateExpr(512)};
-  descriptor.output_strides = {CreateExpr(8), CreateExpr(1)};
-  descriptor.vectorized_axis = {0, 1};
-  NddmaModelResult result;
-  ASSERT_EQ(EvaluateNddmaModel(descriptor, "float32", CreateExpr(4), result), af::SUCCESS);
-  ASSERT_TRUE(result.selected);
-  EXPECT_EQ(result.model_name, "NDDMA_ND_MULTICORE_NG2_V2");
-  // Frozen NORMAL/fresh sample: full API cost, with no other-pipe estimate subtraction.
-  constexpr double kMeasuredCycles = 941.4653418978562;
-  EXPECT_LE(std::abs(GetConstCycles(result.cycles) - kMeasuredCycles), kMeasuredCycles * 0.5);
-}
-
-TEST(NddmaModelV2, CalibratedNg2PreservesLegacyForNonUnitSourceStep) {
-  NddmaDescriptorInfo descriptor;
-  descriptor.output_dims = {CreateExpr(128), CreateExpr(32)};
-  descriptor.input_strides = {CreateExpr(2), CreateExpr(512)};
-  descriptor.output_strides = {CreateExpr(32), CreateExpr(1)};
-  descriptor.vectorized_axis = {0, 1};
-  NddmaModelResult result;
-  ASSERT_EQ(EvaluateNddmaModel(descriptor, "float32", CreateExpr(56), result), af::SUCCESS);
-  ASSERT_TRUE(result.selected);
-  EXPECT_EQ(result.model_name, "NDDMA_ND_MULTICORE_NG2");
-  EXPECT_TRUE(result.cycles.IsValid());
-}
-
-TEST(NddmaModelV2, CalibratedNg2HasOnlyCoreAndInnerByteConditions) {
-  NddmaDescriptorInfo descriptor;
-  descriptor.output_dims = {CreateExpr("m"), CreateExpr("n")};
-  descriptor.input_strides = {CreateExpr(1), CreateExpr(4096)};
-  descriptor.output_strides = {CreateExpr("n"), CreateExpr(1)};
-  descriptor.vectorized_axis = {0, 1};
-  NddmaModelResult result;
-  ASSERT_EQ(EvaluateNddmaModel(descriptor, "float32", CreateExpr("block_dim"), result), af::SUCCESS);
-  ASSERT_TRUE(result.selected);
-  EXPECT_EQ(result.model_name, "NDDMA_RUNTIME_DISPATCH[NDDMA_ND_MULTICORE_NG2|NDDMA_ND_MULTICORE_NG2_V2]");
-  EXPECT_EQ(result.ternary_ops.size(), 2U);
-}
-
-TEST(NddmaModelV2, SymbolicPaddedPitchGuardsPackedCalibrationAndPreservesPaddedCost) {
-  const Expr n = CreateExpr("packed_guard_n");
-  NddmaDescriptorInfo descriptor;
-  descriptor.output_dims = {CreateExpr(960), n};
-  descriptor.input_strides = {CreateExpr(1), CreateExpr(122880)};
-  descriptor.output_strides = {CreateExpr(8) * af::sym::Ceiling(n / CreateExpr(8)), CreateExpr(1)};
-  descriptor.vectorized_axis = {0, 1};
-  NddmaModelResult dynamic;
-  ASSERT_EQ(EvaluateNddmaModel(descriptor, "float32", CreateExpr(43), dynamic), af::SUCCESS);
-  ASSERT_TRUE(dynamic.selected);
-  EXPECT_EQ(dynamic.model_name, "NDDMA_RUNTIME_DISPATCH[NDDMA_ND_MULTICORE_NG2_V2|NDDMA_ND_MULTICORE_NG2]");
-  ASSERT_EQ(dynamic.ternary_ops.size(), 2U);  // Inner-byte split and packed-layout equality; core count is static.
-  bool found = false;
-  for (const auto &entry : dynamic.ternary_ops) {
-    if (std::string(entry.first.Str().get()).find("nddma_ng2_packed") == std::string::npos) {
-      continue;
-    }
-    found = true;
-    auto guard = entry.second.DeepCopyIfCase();
-    EXPECT_EQ(guard->GetCondType(), CondType::K_EQ);
-    for (const int value : {5, 8}) {
-      const auto bindings = std::vector<std::pair<Expr, Expr>>{{n, CreateExpr(value)}};
-      int64_t pitch = 0;
-      int64_t inner = 0;
-      ASSERT_TRUE(guard->GetCondLeft().Replace(bindings).GetConstValue(pitch));
-      ASSERT_TRUE(guard->GetCondRight().Replace(bindings).GetConstValue(inner));
-      EXPECT_EQ(pitch == inner, value == 8);
-      if (value == 5) {
-        // The unchanged pre-patch symbolic padded path uses the legacy NG2
-        // multiplier. Preserve that expression, rather than selecting a
-        // different legacy branch after making the descriptor static.
-        constexpr double kOriginalSymbolicPaddedCycles = 30900.75893124455;
-        EXPECT_NEAR(GetConstCycles(guard->GetChoiceB()->GetExpr().Replace(bindings)), kOriginalSymbolicPaddedCycles,
-                    1e-6);
-      }
-    }
-  }
-  EXPECT_TRUE(found);
-  NddmaModelResult low;
-  ASSERT_EQ(EvaluateNddmaModel(descriptor, "float32", CreateExpr(2), low), af::SUCCESS);
-  EXPECT_TRUE(low.selected);
-  EXPECT_TRUE(low.ternary_ops.empty());  // The unmeasured low-core path is unchanged.
-}
-
-TEST(NddmaModelV2, FitsPackedThreeAxisB32AndKeepsOtherPaths) {
-  NddmaDescriptorInfo descriptor;
-  descriptor.output_dims = {CreateExpr(10), CreateExpr(64), CreateExpr(39)};
-  descriptor.input_strides = {CreateExpr(2496), CreateExpr(1), CreateExpr(64)};
-  descriptor.output_strides = {CreateExpr(2496), CreateExpr(39), CreateExpr(1)};
-  descriptor.vectorized_axis = {0, 1, 2};
-  NddmaModelResult result;
-  ASSERT_EQ(EvaluateNddmaModel(descriptor, "float32", CreateExpr(52), result), af::SUCCESS);
-  EXPECT_EQ(result.model_name, "NDDMA_ND_MULTICORE_PACKED3D_V1");
-  EXPECT_NEAR(GetConstCycles(result.cycles), 7614.416348341308, 1e-6);
-  for (const auto cores : {2, 72}) {
-    ASSERT_EQ(EvaluateNddmaModel(descriptor, "float32", CreateExpr(cores), result), af::SUCCESS);
-    EXPECT_EQ(result.model_name, "NDDMA_ND_MULTICORE_V1");
-  }
-  ASSERT_EQ(EvaluateNddmaModel(descriptor, "float16", CreateExpr(52), result), af::SUCCESS);
-  EXPECT_EQ(result.model_name, "NDDMA_ND_MULTICORE_V1");
-  descriptor.input_strides[0] = CreateExpr(2500);
-  ASSERT_EQ(EvaluateNddmaModel(descriptor, "float32", CreateExpr(52), result), af::SUCCESS);
-  EXPECT_EQ(result.model_name, "NDDMA_ND_MULTICORE_V1");
-}
-
-TEST(NddmaModelV2, SparseThreeAxisResidualKeepsBandwidthAndStartup) {
-  NddmaDescriptorInfo descriptor;
-  descriptor.output_dims = {CreateExpr(235), CreateExpr(32), CreateExpr(2)};
-  descriptor.input_strides = {CreateExpr(1), CreateExpr(65536), CreateExpr(2097152)};
-  descriptor.output_strides = {CreateExpr(64), CreateExpr(2), CreateExpr(1)};
-  descriptor.vectorized_axis = {0, 1, 2};
-  NddmaModelResult result;
-  ASSERT_EQ(EvaluateNddmaModel(descriptor, "float32", CreateExpr(56), result), af::SUCCESS);
-  EXPECT_EQ(result.model_name, "NDDMA_ND_MULTICORE_SPARSE3D_V2");
-  const double baseline = 235.0 * 32 * 2 * 4 / 29.4096 + 453.859;
-  EXPECT_NEAR(GetConstCycles(result.cycles), baseline + 0.017212331646550515 * (121055.7889984 - baseline), 1e-4);
-  for (const auto cores : {2, 39, 57}) {
-    ASSERT_EQ(EvaluateNddmaModel(descriptor, "float32", CreateExpr(cores), result), af::SUCCESS);
-    EXPECT_EQ(result.model_name, "NDDMA_ND_MULTICORE_V1");
-  }
-  for (const auto width : {191, 257}) {
-    descriptor.output_dims[0] = CreateExpr(width);
-    ASSERT_EQ(EvaluateNddmaModel(descriptor, "float32", CreateExpr(56), result), af::SUCCESS);
-    EXPECT_EQ(result.model_name, "NDDMA_ND_MULTICORE_V1");
-  }
-  descriptor.output_dims[0] = CreateExpr(235);
-  descriptor.input_strides = {CreateExpr(1), CreateExpr(262144), CreateExpr(8388608)};
-  ASSERT_EQ(EvaluateNddmaModel(descriptor, "float32", CreateExpr(56), result), af::SUCCESS);
-  EXPECT_EQ(result.model_name, "NDDMA_ND_MULTICORE_V1");
-}
-
-TEST(NddmaModelV2, SparseThreeAxisSymbolicGuardRetainsOutOfDomainCost) {
-  const auto width = CreateExpr("sparse_width");
-  const auto cores = CreateExpr("sparse_cores");
-  NddmaDescriptorInfo descriptor;
-  descriptor.output_dims = {width, CreateExpr(32), CreateExpr(2)};
-  descriptor.input_strides = {CreateExpr(1), CreateExpr(65536), CreateExpr(2097152)};
-  descriptor.output_strides = {CreateExpr(64), CreateExpr(2), CreateExpr(1)};
-  descriptor.vectorized_axis = {0, 1, 2};
-  NddmaModelResult result;
-  ASSERT_EQ(EvaluateNddmaModel(descriptor, "float32", cores, result), af::SUCCESS);
-  bool found = false;
-  for (const auto &entry : result.ternary_ops) {
-    if (std::string(entry.first.Str().get()).find("nddma_sparse_nd") == std::string::npos) {
-      continue;
-    }
-    found = true;
-    const auto guard = entry.second.DeepCopyIfCase();
-    EXPECT_EQ(guard->GetCondType(), CondType::K_EQ);
-    for (const auto w : {1, 191, 192, 235, 256, 257}) {
-      for (const auto n : {2, 39, 40, 56, 57}) {
-        auto condition = guard->GetCondLeft().Replace({{width, CreateExpr(w)}, {cores, CreateExpr(n)}});
-        condition.Simplify();
-        int64_t outside = 0;
-        ASSERT_TRUE(condition.GetConstValue(outside));
-        EXPECT_EQ(outside == 0, w >= 192 && w <= 256 && n >= 40 && n <= 56);
-      }
-    }
-  }
-  EXPECT_TRUE(found);
-}
-
-TEST(NddmaModelV2, SparseFourAxisResidualKeepsOtherPitchAndLargerTiles) {
-  NddmaDescriptorInfo descriptor;
-  descriptor.output_dims = {CreateExpr(512), CreateExpr(2), CreateExpr(4), CreateExpr(2)};
-  descriptor.input_strides = {CreateExpr(1), CreateExpr(512), CreateExpr(65536), CreateExpr(2097152)};
-  descriptor.output_strides = {CreateExpr(16), CreateExpr(8), CreateExpr(2), CreateExpr(1)};
-  descriptor.vectorized_axis = {0, 1, 2, 3};
-  NddmaModelResult result;
-  ASSERT_EQ(EvaluateNddmaModel(descriptor, "float32", CreateExpr(52), result), af::SUCCESS);
-  EXPECT_EQ(result.model_name, "NDDMA_ND_MULTICORE_SPARSE4D_V2");
-  EXPECT_NEAR(GetConstCycles(result.cycles), 2796.1584908378627, 1e-6);
-  // The four-axis fit is selected by layout, without a product core-count
-  // special case; the high-core formula retains symbolic block_dim.
-  ASSERT_EQ(EvaluateNddmaModel(descriptor, "float32", CreateExpr(64), result), af::SUCCESS);
-  EXPECT_EQ(result.model_name, "NDDMA_ND_MULTICORE_SPARSE4D_V2");
-  for (const auto dtype : {"float16", "uint8", "uint64"}) {
-    ASSERT_EQ(EvaluateNddmaModel(descriptor, dtype, CreateExpr(52), result), af::SUCCESS);
-    EXPECT_EQ(result.model_name, "NDDMA_ND_MULTICORE_V1");
-  }
-  for (const auto pitch : {81920, 131072, 262144}) {
-    descriptor.input_strides[2] = CreateExpr(pitch);
-    descriptor.input_strides[3] = CreateExpr(32 * pitch);
-    ASSERT_EQ(EvaluateNddmaModel(descriptor, "float32", CreateExpr(52), result), af::SUCCESS);
-    EXPECT_EQ(result.model_name, "NDDMA_ND_MULTICORE_V1");
-  }
-  descriptor.input_strides = {CreateExpr(1), CreateExpr(512), CreateExpr(65536), CreateExpr(2097152)};
-  descriptor.output_dims[2] = CreateExpr(8);
-  descriptor.output_strides = {CreateExpr(32), CreateExpr(16), CreateExpr(2), CreateExpr(1)};
-  ASSERT_EQ(EvaluateNddmaModel(descriptor, "float32", CreateExpr(52), result), af::SUCCESS);
-  EXPECT_EQ(result.model_name, "NDDMA_ND_MULTICORE_V1");
-}
-
-TEST(NddmaModelV2, SparseFourAxisSymbolicGuardIncludesMeasuredPadding) {
-  const auto tile1 = CreateExpr("sparse_tile1");
-  const auto tile2 = CreateExpr("sparse_tile2");
-  const auto pitch = CreateExpr(8) * af::sym::Ceiling(tile2 / CreateExpr(4));
-  NddmaDescriptorInfo descriptor;
-  descriptor.output_dims = {CreateExpr(512), tile1, tile2, CreateExpr(2)};
-  descriptor.input_strides = {CreateExpr(1), CreateExpr(512), CreateExpr(65536), CreateExpr(2097152)};
-  descriptor.output_strides = {pitch * tile1, pitch, CreateExpr(2), CreateExpr(1)};
-  descriptor.vectorized_axis = {0, 1, 2, 3};
-  NddmaModelResult result;
-  ASSERT_EQ(EvaluateNddmaModel(descriptor, "float32", CreateExpr(52), result), af::SUCCESS);
-  bool found = false;
-  for (const auto &entry : result.ternary_ops) {
-    if (std::string(entry.first.Str().get()).find("nddma_sparse_nd") == std::string::npos) {
-      continue;
-    }
-    found = true;
-    const auto guard = entry.second.DeepCopyIfCase();
-    for (const auto a : {1, 2, 3, 4}) {
-      for (const auto b : {1, 3, 4, 5, 8}) {
-        auto condition = guard->GetCondLeft().Replace({{tile1, CreateExpr(a)}, {tile2, CreateExpr(b)}});
-        condition.Simplify();
-        int64_t outside = 0;
-        ASSERT_TRUE(condition.GetConstValue(outside));
-        EXPECT_EQ(outside == 0, a <= 3 && (b == 3 || b == 4 || b == 8) && a * b <= 12);
-      }
-    }
-  }
-  EXPECT_TRUE(found);
-}
-
-TEST(NddmaModelV2, SparseFourAxisPaddingRetainsLongSourceRunsAndOtherUbLayouts) {
-  NddmaDescriptorInfo descriptor;
-  descriptor.output_dims = {CreateExpr(512), CreateExpr(3), CreateExpr(3), CreateExpr(2)};
-  descriptor.input_strides = {CreateExpr(1), CreateExpr(512), CreateExpr(65536), CreateExpr(2097152)};
-  descriptor.output_strides = {CreateExpr(24), CreateExpr(8), CreateExpr(2), CreateExpr(1)};
-  descriptor.vectorized_axis = {0, 1, 2, 3};
-  NddmaModelResult result;
-  ASSERT_EQ(EvaluateNddmaModel(descriptor, "float32", CreateExpr(53), result), af::SUCCESS);
-  EXPECT_EQ(result.model_name, "NDDMA_ND_MULTICORE_SPARSE4D_V2");
-  EXPECT_NEAR(GetConstCycles(result.cycles), 4227.740075369205, 1e-6);
-  descriptor.output_dims[0] = CreateExpr(1024);
-  descriptor.input_strides[1] = CreateExpr(1024);
-  ASSERT_EQ(EvaluateNddmaModel(descriptor, "float32", CreateExpr(53), result), af::SUCCESS);
-  EXPECT_EQ(result.model_name, "NDDMA_ND_MULTICORE_V1");
-  descriptor.output_dims[0] = CreateExpr(512);
-  descriptor.input_strides[1] = CreateExpr(512);
-  descriptor.output_strides[1] = CreateExpr(16);
-  descriptor.output_strides[0] = CreateExpr(48);
-  ASSERT_EQ(EvaluateNddmaModel(descriptor, "float32", CreateExpr(53), result), af::SUCCESS);
-  EXPECT_EQ(result.model_name, "NDDMA_ND_MULTICORE_V1");
-}
-
-TEST(NddmaModelV2, FitsOnlyMeasuredFp32PaddedNg2Domain) {
-  NddmaDescriptorInfo descriptor;
-  descriptor.output_dims = {CreateExpr(19), CreateExpr(385)};
-  descriptor.input_strides = {CreateExpr(1), CreateExpr(19)};
-  descriptor.output_strides = {CreateExpr(392), CreateExpr(1)};
-  descriptor.vectorized_axis = {0, 1};
-  NddmaModelResult result;
-  ASSERT_EQ(EvaluateNddmaModel(descriptor, "float32", CreateExpr(54), result), af::SUCCESS);
-  EXPECT_EQ(result.model_name, "NDDMA_ND_MULTICORE_NG2_PADDED_V1");
-  EXPECT_NEAR(GetConstCycles(result.cycles), 3338.394714124599, 1e-6);
-
-  for (const auto cores : {2, 15, 57}) {
-    ASSERT_EQ(EvaluateNddmaModel(descriptor, "float32", CreateExpr(cores), result), af::SUCCESS);
-    EXPECT_EQ(result.model_name, "NDDMA_ND_MULTICORE_V1");
-  }
-  ASSERT_EQ(EvaluateNddmaModel(descriptor, "int32", CreateExpr(54), result), af::SUCCESS);
-  EXPECT_EQ(result.model_name, "NDDMA_ND_MULTICORE_V1");
-  descriptor.output_strides[0] = CreateExpr(400);
-  ASSERT_EQ(EvaluateNddmaModel(descriptor, "float32", CreateExpr(54), result), af::SUCCESS);
-  EXPECT_EQ(result.model_name, "NDDMA_ND_MULTICORE_V1");
-}
-
-TEST(NddmaModelV2, SymbolicPaddedNg2GuardExcludesPackedAndOutOfDomainTiles) {
-  const auto m = CreateExpr("padded_ng2_m");
-  const auto n = CreateExpr("padded_ng2_n");
-  NddmaDescriptorInfo descriptor;
-  descriptor.output_dims = {m, n};
-  descriptor.input_strides = {CreateExpr(1), CreateExpr(19)};
-  descriptor.output_strides = {CreateExpr(8) * af::sym::Ceiling(n / CreateExpr(8)), CreateExpr(1)};
-  descriptor.vectorized_axis = {0, 1};
-  NddmaModelResult result;
-  ASSERT_EQ(EvaluateNddmaModel(descriptor, "float32", CreateExpr(54), result), af::SUCCESS);
-  EXPECT_EQ(result.model_name,
-            "NDDMA_RUNTIME_DISPATCH[NDDMA_ND_MULTICORE_NG2_V2|"
-            "NDDMA_RUNTIME_DISPATCH[NDDMA_ND_MULTICORE_NG2_PADDED_V1|NDDMA_ND_MULTICORE_NG2]]");
-  bool found = false;
-  for (const auto &entry : result.ternary_ops) {
-    if (std::string(entry.first.Str().get()).find("nddma_ng2_padded") == std::string::npos) {
-      continue;
-    }
-    found = true;
-    const auto guard = entry.second.DeepCopyIfCase();
-    EXPECT_EQ(guard->GetCondType(), CondType::K_EQ);
-    const auto evaluate = [&](const std::vector<std::pair<Expr, Expr>> &bindings) {
-      auto condition = guard->GetCondLeft().Replace(bindings);
-      condition.Simplify();
-      int64_t violation = 0;
-      EXPECT_TRUE(condition.GetConstValue(violation));
-      return violation;
-    };
-    for (const auto inner : {192, 384, 385, 521}) {
-      const std::vector<std::pair<Expr, Expr>> bindings{{m, CreateExpr(19)}, {n, CreateExpr(inner)}};
-      EXPECT_EQ(evaluate(bindings) == 0, inner == 385);
-    }
-    const std::vector<std::pair<Expr, Expr>> gapped{{m, CreateExpr(18)}, {n, CreateExpr(385)}};
-    EXPECT_GT(evaluate(gapped), 0);
-  }
-  EXPECT_TRUE(found);
-}
-
-TEST(NddmaModelV2, GuardsPackedThreeAxisCostForSymbolicOuterAndCoreCount) {
-  const auto outer = CreateExpr("packed_outer");
-  const auto cores = CreateExpr("packed_cores");
-  NddmaDescriptorInfo descriptor;
-  descriptor.output_dims = {outer, CreateExpr(64), CreateExpr(39)};
-  descriptor.input_strides = {CreateExpr(2496), CreateExpr(1), CreateExpr(64)};
-  descriptor.output_strides = {CreateExpr(2496), CreateExpr(39), CreateExpr(1)};
-  descriptor.vectorized_axis = {0, 1, 2};
-  NddmaModelResult result;
-  ASSERT_EQ(EvaluateNddmaModel(descriptor, "float32", cores, result), af::SUCCESS);
-  ASSERT_TRUE(result.selected);
-  EXPECT_EQ(result.model_name,
-            "NDDMA_RUNTIME_DISPATCH[NDDMA_ND_MULTICORE_V1|"
-            "NDDMA_RUNTIME_DISPATCH[NDDMA_ND_MULTICORE_PACKED3D_V1|NDDMA_ND_MULTICORE_V1]]");
-  ASSERT_EQ(result.ternary_ops.size(), 2U);
-  for (const auto &entry : result.ternary_ops) {
-    if (std::string(entry.first.Str().get()).find("nddma_packed3d") == std::string::npos) {
-      continue;
-    }
-    const auto guard = entry.second.DeepCopyIfCase();
-    for (const auto batch : {1, 10}) {
-      for (const auto blocks : {52, 72}) {
-        const std::vector<std::pair<Expr, Expr>> bindings{{outer, CreateExpr(batch)}, {cores, CreateExpr(blocks)}};
-        int64_t use_fitted = 0;
-        auto predicate = guard->GetCondLeft().Replace(bindings);
-        predicate.Simplify();
-        ASSERT_TRUE(predicate.GetConstValue(use_fitted));
-        EXPECT_EQ(use_fitted, batch == 10 && blocks == 52 ? 1 : 0);
-      }
-    }
-    return;
-  }
-  ADD_FAILURE() << "packed 3D cost guard was not generated";
-}
-
-TEST(NddmaModelV2, FitsSmallInt64PackedAndPaddedTransposes) {
-  for (const auto m : {24, 38, 64}) {
-    for (const auto n : {2, 3, 8}) {
-      for (const auto padding : {0, 1}) {
-        NddmaDescriptorInfo descriptor;
-        descriptor.output_dims = {CreateExpr(m), CreateExpr(n)};
-        descriptor.input_strides = {CreateExpr(1), CreateExpr(m)};
-        descriptor.output_strides = {CreateExpr(n + padding), CreateExpr(1)};
-        descriptor.vectorized_axis = {0, 1};
-        for (const auto cores : {16, 43, 56}) {
-          NddmaModelResult result;
-          ASSERT_EQ(EvaluateNddmaModel(descriptor, "int64", CreateExpr(cores), result), af::SUCCESS);
-          ASSERT_TRUE(result.selected);
-          EXPECT_EQ(result.model_name, "NDDMA_ND_MULTICORE_NG2_SMALL_INT64_V1");
-          EXPECT_DOUBLE_EQ(GetConstCycles(result.cycles), 506.0);
-        }
-      }
-    }
-  }
-}
-
-TEST(NddmaModelV2, KeepsSmallInt64UnmeasuredLayoutsAndDtypes) {
-  // Each row crosses one measured-domain boundary while retaining a valid descriptor.
-  const int cases[][6] = {{23, 3, 23, 3, 43, 1}, {65, 3, 65, 3, 43, 1}, {38, 1, 38, 1, 43, 1}, {38, 9, 38, 9, 43, 1},
-                          {38, 3, 38, 5, 43, 1}, {38, 3, 39, 3, 43, 1}, {38, 3, 76, 3, 43, 2}, {38, 3, 38, 3, 15, 1},
-                          {38, 3, 38, 3, 57, 1}, {38, 3, 38, 3, 2, 1}};
-  for (const auto &point : cases) {
-    NddmaDescriptorInfo descriptor;
-    descriptor.output_dims = {CreateExpr(point[0]), CreateExpr(point[1])};
-    descriptor.input_strides = {CreateExpr(point[5]), CreateExpr(point[2])};
-    descriptor.output_strides = {CreateExpr(point[3]), CreateExpr(1)};
-    descriptor.vectorized_axis = {0, 1};
-    NddmaModelResult result;
-    ASSERT_EQ(EvaluateNddmaModel(descriptor, "int64", CreateExpr(point[4]), result), af::SUCCESS);
-    ASSERT_TRUE(result.selected);
-    EXPECT_NE(result.model_name, "NDDMA_ND_MULTICORE_NG2_SMALL_INT64_V1");
-  }
-  NddmaDescriptorInfo descriptor;
-  descriptor.output_dims = {CreateExpr(38), CreateExpr(3)};
-  descriptor.input_strides = {CreateExpr(1), CreateExpr(38)};
-  descriptor.output_strides = {CreateExpr(3), CreateExpr(1)};
-  descriptor.vectorized_axis = {0, 1};
-  for (const auto dtype : {"uint8", "float16", "float32", "uint64"}) {
-    NddmaModelResult result;
-    ASSERT_EQ(EvaluateNddmaModel(descriptor, dtype, CreateExpr(43), result), af::SUCCESS);
-    EXPECT_NE(result.model_name, "NDDMA_ND_MULTICORE_NG2_SMALL_INT64_V1");
-  }
-}
-
-TEST(NddmaModelV2, GuardsSmallInt64SymbolicTileAndCoreCount) {
-  const auto n = CreateExpr("small_ng2_n");
-  const auto cores = CreateExpr("small_ng2_cores");
-  NddmaDescriptorInfo descriptor;
-  descriptor.output_dims = {CreateExpr(38), n};
-  descriptor.input_strides = {CreateExpr(1), CreateExpr(38)};
-  descriptor.output_strides = {n + CreateExpr(1), CreateExpr(1)};
-  descriptor.vectorized_axis = {0, 1};
-  NddmaModelResult result;
-  ASSERT_EQ(EvaluateNddmaModel(descriptor, "int64", cores, result), af::SUCCESS);
-  EXPECT_EQ(result.model_name,
-            "NDDMA_RUNTIME_DISPATCH[NDDMA_ND_MULTICORE_NG2|"
-            "NDDMA_RUNTIME_DISPATCH[NDDMA_ND_MULTICORE_NG2_SMALL_INT64_V1|NDDMA_ND_MULTICORE_NG2]]");
-  for (const auto &entry : result.ternary_ops) {
-    if (std::string(entry.first.Str().get()).find("nddma_ng2_small_int64") == std::string::npos) {
-      continue;
-    }
-    const auto guard = entry.second.DeepCopyIfCase();
-    EXPECT_EQ(guard->GetCondType(), CondType::K_EQ);
-    EXPECT_DOUBLE_EQ(GetConstCycles(guard->GetChoiceA()->GetExpr()), 506.0);
-    for (const auto tile : {1, 2, 8, 9}) {
-      for (const auto core : {15, 16, 56, 57}) {
-        auto violation = guard->GetCondLeft().Replace({{n, CreateExpr(tile)}, {cores, CreateExpr(core)}});
-        violation.Simplify();
-        int64_t value = 0;
-        ASSERT_TRUE(violation.GetConstValue(value));
-        EXPECT_EQ(value == 0, tile >= 2 && tile <= 8 && core >= 16 && core <= 56);
-      }
-    }
-    return;
-  }
-  ADD_FAILURE() << "small INT64 NG2 guard was not generated";
-}
-
-TEST(NddmaModelV2, NarrowSourceUsesIndependentRequestCostAndPhysicalUnitAxis) {
-  for (const int m : {1, 3, 8}) {
-    NddmaDescriptorInfo descriptor;
-    descriptor.output_dims = {CreateExpr(m), CreateExpr(4096)};
-    descriptor.input_strides = {CreateExpr(1), CreateExpr(512)};
-    descriptor.output_strides = {CreateExpr(4096), CreateExpr(1)};
-    descriptor.vectorized_axis = {0, 1};
-    NddmaModelResult result;
-    ASSERT_EQ(EvaluateNddmaModel(descriptor, "float32", CreateExpr(56), result), af::SUCCESS);
-    ASSERT_TRUE(result.selected);
-    EXPECT_EQ(result.model_name, "NDDMA_ND_MULTICORE_NARROW_SOURCE_V1");
-    EXPECT_NEAR(GetConstCycles(result.cycles), 39245.68947748, 0.01);
-  }
-}
-
-TEST(NddmaModelV2, NarrowSourceKeepsUnmeasuredDtypesAndDescriptorDomains) {
-  NddmaDescriptorInfo descriptor;
-  descriptor.output_dims = {CreateExpr(3), CreateExpr(4096)};
-  descriptor.input_strides = {CreateExpr(1), CreateExpr(512)};
-  descriptor.output_strides = {CreateExpr(4096), CreateExpr(1)};
-  descriptor.vectorized_axis = {0, 1};
-  for (const auto *dtype : {"float16", "int32", "int64"}) {
-    NddmaModelResult result;
-    ASSERT_EQ(EvaluateNddmaModel(descriptor, dtype, CreateExpr(56), result), af::SUCCESS);
-    EXPECT_EQ(result.model_name.find("NARROW_SOURCE"), std::string::npos);
-  }
-  for (const auto &dims : {std::vector<int>{9, 4096}, std::vector<int>{3, 511}, std::vector<int>{3, 16385}}) {
-    descriptor.output_dims = {CreateExpr(dims[0]), CreateExpr(dims[1])};
-    descriptor.output_strides[0] = CreateExpr(dims[1]);
-    NddmaModelResult result;
-    ASSERT_EQ(EvaluateNddmaModel(descriptor, "float32", CreateExpr(56), result), af::SUCCESS);
-    EXPECT_EQ(result.model_name.find("NARROW_SOURCE"), std::string::npos);
-  }
-}
-
-TEST(NddmaModelV2, NarrowSourcePublishesSymbolicDomainGuard) {
-  const Expr m = CreateExpr("narrow_m");
-  const Expr n = CreateExpr("narrow_n");
-  NddmaDescriptorInfo descriptor;
-  descriptor.output_dims = {m, n};
-  descriptor.input_strides = {CreateExpr(1), CreateExpr(30)};
-  descriptor.output_strides = {n, CreateExpr(1)};
-  descriptor.vectorized_axis = {0, 1};
-  NddmaModelResult result;
-  ASSERT_EQ(EvaluateNddmaModel(descriptor, "float32", CreateExpr(48), result), af::SUCCESS);
-  bool found = false;
-  for (const auto &entry : result.ternary_ops) {
-    if (std::string(entry.first.Str().get()).find("nddma_narrow_source") == std::string::npos) {
-      continue;
-    }
-    found = true;
-    auto guard = entry.second.DeepCopyIfCase();
-    for (const int rows : {1, 8, 9}) {
-      const std::vector<std::pair<Expr, Expr>> bindings = {{m, CreateExpr(rows)}, {n, CreateExpr(2048)}};
-      auto violation = guard->GetCondLeft().Replace(bindings);
-      violation.Simplify();
-      int64_t value = 0;
-      ASSERT_TRUE(violation.GetConstValue(value));
-      EXPECT_EQ(value == 0, rows <= 8);
-      if (rows <= 8) {
-        EXPECT_NEAR(GetConstCycles(guard->GetChoiceA()->GetExpr().Replace(bindings)), 16661.30891215, 0.01);
-      }
-    }
-  }
-  EXPECT_TRUE(found);
-}
-
-TEST(NddmaModelV2, DirectStoreContentionIsSeparateFromIsolatedApiCost) {
-  NddmaDescriptorInfo descriptor{
-      {CreateExpr(8), CreateExpr(3960)}, {CreateExpr(1), CreateExpr(8)}, {CreateExpr(3960), CreateExpr(1)}, {0, 1}};
-  for (const int cores : {8, 56, 64, 72}) {
-    NddmaModelResult isolated;
-    NddmaModelResult direct;
-    ASSERT_EQ(EvaluateNddmaModel(descriptor, "float32", CreateExpr(cores), isolated), af::SUCCESS);
-    ASSERT_EQ(EvaluateNddmaModel(descriptor, "float32", CreateExpr(cores), direct, true), af::SUCCESS);
-    ASSERT_TRUE(direct.selected);
-    const double contention = 0.0038940645164791633 * std::max(0.0, 126720.0 * cores - 4456448.0);
-    EXPECT_NEAR(GetConstCycles(direct.cycles) - GetConstCycles(isolated.cycles), contention, 1e-6);
-    EXPECT_EQ(direct.model_name, "NDDMA_ND_MULTICORE_DIRECT_STORE_V1");
-    EXPECT_EQ(isolated.model_name, "NDDMA_ND_MULTICORE_NG2_V2");
-  }
-}
-
-TEST(NddmaModelV2, DirectStoreKeepsUncalibratedDtypesAndPhysicalLayouts) {
-  const NddmaDescriptorInfo packed{
-      {CreateExpr(8), CreateExpr(3960)}, {CreateExpr(1), CreateExpr(8)}, {CreateExpr(3960), CreateExpr(1)}, {0, 1}};
-  const auto unchanged = [](const NddmaDescriptorInfo &descriptor, const std::string &dtype, int cores) {
-    NddmaModelResult isolated;
-    NddmaModelResult direct;
-    ASSERT_EQ(EvaluateNddmaModel(descriptor, dtype, CreateExpr(cores), isolated), af::SUCCESS);
-    ASSERT_EQ(EvaluateNddmaModel(descriptor, dtype, CreateExpr(cores), direct, true), af::SUCCESS);
-    ASSERT_TRUE(isolated.selected);
-    ASSERT_TRUE(direct.selected);
-    EXPECT_NEAR(GetConstCycles(direct.cycles), GetConstCycles(isolated.cycles), 1e-6);
-    EXPECT_EQ(direct.model_name, isolated.model_name);
-  };
-  for (const auto *dtype : {"uint8", "float16", "int32", "int64"}) {
-    unchanged(packed, dtype, 56);
-  }
-  unchanged(packed, "float32", 2);
-  auto padded = packed;
-  padded.output_strides[0] = CreateExpr(3968);
-  unchanged(padded, "float32", 56);
-  auto sparse = packed;
-  sparse.input_strides[1] = CreateExpr(16);
-  unchanged(sparse, "float32", 56);
-  for (const int width : {12, 16, 24}) {
-    auto wide = packed;
-    wide.output_dims[0] = CreateExpr(width);
-    wide.input_strides[1] = CreateExpr(width);
-    unchanged(wide, "float32", 56);
-  }
-}
-
-TEST(NddmaModelV2, DirectStoreSymbolicGuardChecksRuntimePackingAndPayload) {
-  const auto n = CreateExpr("bound_store_n");
-  const auto cores = CreateExpr("block_dim");
-  NddmaDescriptorInfo descriptor{{CreateExpr(8), n},
-                                 {CreateExpr(1), CreateExpr(8)},
-                                 {CreateExpr(8) * af::sym::Ceiling(n / CreateExpr(8)), CreateExpr(1)},
-                                 {0, 1}};
-  NddmaModelResult result;
-  ASSERT_EQ(EvaluateNddmaModel(descriptor, "float32", cores, result, true), af::SUCCESS);
-  bool found = false;
-  for (const auto &entry : result.ternary_ops) {
-    if (std::string(entry.first.Str().get()).find("nddma_direct_store") == std::string::npos) {
-      continue;
-    }
-    found = true;
-    const auto guard = entry.second.DeepCopyIfCase();
-    for (const int width : {511, 512, 3960, 3961, 4096, 4104}) {
-      const std::vector<std::pair<Expr, Expr>> bindings = {{n, CreateExpr(width)}, {cores, CreateExpr(56)}};
-      const bool in_domain = width >= 512 && width <= 4096 && width % 8 == 0;
-      EXPECT_EQ(GetConstCycles(guard->GetCondLeft().Replace(bindings)) == 0, in_domain);
-      if (in_domain) {
-        const auto increment = guard->GetChoiceA()->GetExpr() - guard->GetChoiceB()->GetExpr();
-        EXPECT_NEAR(GetConstCycles(increment.Replace(bindings)),
-                    0.0038940645164791633 * std::max(0.0, 32.0 * width * 56 - 4456448.0), 1e-6);
-      }
-    }
-  }
-  EXPECT_TRUE(found);
 }
 
 }  // namespace att

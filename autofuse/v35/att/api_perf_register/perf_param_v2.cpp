@@ -11,6 +11,7 @@
 #include "perf_param_v2.h"
 #include <algorithm>
 #include "base/att_const_values.h"
+#include "optimize/pre_process/pre_process_config.h"
 
 namespace att {
 namespace {
@@ -493,6 +494,22 @@ PerfParamTableV2::PerfParamTableV2() {
   vf_instruct_type_2_dtype_mapping_api_perf_ = GetVfInstructDtypeMappingPerfTable();
 }
 
+const std::vector<VfInstructPerf> &PerfParamTableV2::GetVectorFunctionInstructPerfTable(
+    const std::string &vf_instruct_type) const {
+  const auto &precision = af::pre_process::PreProcessConfig::Instance();
+  // The high-precision FP32 lowering uses a longer DIV sequence inside the
+  // VF. Keep the regular instruction costs when Codegen uses default mode.
+  if ((vf_instruct_type == kDiv || vf_instruct_type == kTrueDiv) && !precision.IsInImprovePrecisionBlacklist(kDiv)) {
+    static const std::vector<VfInstructPerf> high_precision_div = {{{kFloat16}, 19, 8}, {{kFloat32}, 14, 23}};
+    return high_precision_div;
+  }
+  if (vf_instruct_type == kRsqrt && !precision.IsInImprovePrecisionBlacklist(kRsqrt)) {
+    static const std::vector<VfInstructPerf> high_precision_rsqrt = {{{kFloat16}, 38, 17}, {{kFloat32}, 28, 24}};
+    return high_precision_rsqrt;
+  }
+  return GetVfInstructPerfTable(vf_instruct_type);
+}
+
 const std::vector<VfInstructPerf> &PerfParamTableV2::GetVfInstructPerfTable(const std::string &vf_instruct_type) const {
   const auto &iter = vf_instruct_type_2_api_perf_.find(vf_instruct_type);
   if (iter == vf_instruct_type_2_api_perf_.end()) {
@@ -945,6 +962,12 @@ const std::string kParamV2Info = R"(
             "bfloat16tobfloat16": {"h": 160, "b": 6.6155, "a": 11.8292, "hl": 0, "data_type_size": 2}
         }
     },
+    "LoadWideFp16Compact": {
+        "model_type": "LoadStoreFunc",
+        "model_params": {
+            "float16tofloat16": {"h": 160, "b": 10.2492377817, "a": 21.0068753715, "hl": 0, "data_type_size": 2}
+        }
+    },
     "LoadSmallPayload": {
         "model_type": "LoadStoreFunc",
         "model_params": {
@@ -957,10 +980,42 @@ const std::string kParamV2Info = R"(
             "float32tofloat32": {"h": 294.009388, "a": 32.296047, "b": 252.871196, "hl": 0, "data_type_size": 4}
         }
     },
+    "LoadWideAlignedLoopPayload": {
+        "model_type": "LoadStoreFunc",
+        "model_params": {
+            "float32tofloat32": {"h": 126.92874234542198, "a": 1.0438615613113968, "b": 1043.8615613113968,
+                                 "hl": 0, "data_type_size": 4}
+        }
+    },
+    "LoadLongAlignedLoopPayload": {
+        "model_type": "LoadStoreFunc",
+        "model_params": {
+            "float32tofloat32": {"h": 247.753204, "a": 36.14535, "b": 0, "hl": 0, "data_type_size": 4}
+        }
+    },
+    "LoadSparsePitchLoopPayload": {
+        "model_type": "LoadStoreFunc",
+        "model_params": {
+            "float32tofloat32": {"h": 308.447, "a": 0, "b": 2000.924, "hl": 0, "data_type_size": 4}
+        }
+    },
     "LoadNarrowLoopPayload": {
         "model_type": "LoadStoreFunc",
         "model_params": {
             "float32tofloat32": {"h": 531.6421388441569, "a": 18.86785800658518, "b": 0.7583841815917162, "hl": 0, "data_type_size": 4}
+        }
+    },
+    "LoadStridedPayload": {
+        "model_type": "LoadStoreFunc",
+        "model_params": {
+            "float32tofloat32": {"h": 0.0, "a": 0.0, "b": 995.867852951217, "hl": 0.0, "data_type_size": 4.0},
+            "uint8touint8": {"h": 275.87602063506347, "a": 0.0, "b": 2636.2293141488776, "hl": 0.0, "data_type_size": 1.0}
+        }
+    },
+    "LoadAlignedLargePitch": {
+        "model_type": "LoadStoreFunc",
+        "model_params": {
+            "float32tofloat32": {"h": 0, "a": 0, "b": 967.9169608668066, "hl": 0, "data_type_size": 4}
         }
     },
     "LoadAlignedDensePayload": {
@@ -975,10 +1030,66 @@ const std::string kParamV2Info = R"(
             "float32tofloat32": {"h": 142.17870407217006, "a": 1.1266553015411542, "b": 1126.6553015411544, "hl": 0, "data_type_size": 4}
         }
     },
+    "LoadAlignedDenseWidePayload": {
+        "model_type": "LoadStoreFunc",
+        "model_params": {
+            "float32tofloat32": {"h": 894.426736348055, "a": 1.4510486519501142, "b": 1451.0486519501142,
+                                 "hl": 0, "data_type_size": 4}
+        }
+    },
+    "LoadCompactMediumPayload": {
+        "model_type": "LoadStoreFunc",
+        "model_params": {
+            "float32tofloat32": {"h": 174.04801583428278, "a": 16.888974025687947, "b": 504.2004950764574,
+                                 "hl": 0, "data_type_size": 4}
+        }
+    },
+    "LoadCompactScalarRowPayload": {
+        "model_type": "LoadStoreFunc",
+        "model_params": {
+            "float32tofloat32": {"h": 246.28713793, "a": 1.46795185, "b": 0, "hl": 0, "data_type_size": 4}
+        }
+    },
+    "LoadCompactWidePitchPayload": {
+        "model_type": "LoadStoreFunc",
+        "model_params": {
+            "float32tofloat32": {"h": 392.7109059476482, "a": 32.52458821557291, "b": 0, "hl": 0, "data_type_size": 4}
+        }
+    },
     "LoadSmallPayloadCompact": {
         "model_type": "LoadStoreFunc",
         "model_params": {
             "float32tofloat32": {"h": 282.480993, "a": 20.736478, "b": 779.354414, "hl": 0, "data_type_size": 4}
+        }
+    },
+    "StoreCompactLoopSingleRow": {
+        "model_type": "SimpleLinear",
+        "model_params": {
+            "float16tofloat16": {"k": 0, "b": 689.7}
+        }
+    },
+    "StoreCompactLoopShortRows": {
+        "model_type": "SimpleLinear",
+        "model_params": {
+            "float16tofloat16": {"k": 241.911344362745, "b": 726.83856372549}
+        }
+    },
+    "StoreAdjacentSlicesPayload": {
+        "model_type": "LoadStoreFunc",
+        "model_params": {
+            "float32tofloat32": {"h": 41.3872239625, "a": 59.7052349, "b": 0, "hl": 0, "data_type_size": 4}
+        }
+    },
+    "StoreAlignedMediumPayload": {
+        "model_type": "LoadStoreFunc",
+        "model_params": {
+            "float32tofloat32": {"h": 282.359015, "a": 102.591770, "b": 247.402733, "hl": 0, "data_type_size": 4}
+        }
+    },
+    "StoreAlignedConcurrentPayload": {
+        "model_type": "LoadStoreFunc",
+        "model_params": {
+            "float32tofloat32": {"h": 345.98049252, "a": 19.67816071, "b": 6982.07489624, "hl": 0, "data_type_size": 4}
         }
     },
     "StoreSmallPayload": {
@@ -997,6 +1108,19 @@ const std::string kParamV2Info = R"(
         "model_type": "LoadStoreFunc",
         "model_params": {
             "float32tofloat32": {"h": 160, "a": 21.813945, "b": 6.4088, "hl": 0, "data_type_size": 4}
+        }
+    },
+    "LoadAlignedSingleRowFewCore": {
+        "model_type": "LoadStoreFunc",
+        "model_params": {
+            "float32tofloat32": {"h": 290.13430, "a": 164.632577, "b": 0, "hl": 0, "data_type_size": 4}
+        }
+    },
+    "LoadAlignedSingleRowLowCore": {
+        "model_type": "LoadStoreFunc",
+        "model_params": {
+            "float32tofloat32": {"h": 214.10933316338443, "a": 62.38033097130953, "b": 147.9270766158348,
+                                 "hl": 0, "data_type_size": 4}
         }
     },
     "LoadAlignedSingleRow": {

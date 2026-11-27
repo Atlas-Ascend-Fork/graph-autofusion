@@ -1,0 +1,13 @@
+factor_id,experiment,role,dtype,dtype_size,block_dim,api,dims,gm_or_input_strides,ub_or_output_strides,point_flush,packing_extra,compact_packed
+known_compact_3072,fp32_many_short_compact,known,float32,4,48,LOAD,3072x3,144x1,3x1,1,0,1
+known_compact_4608,fp32_many_short_compact,known,float32,4,48,LOAD,4608x3,144x1,3x1,1,0,1
+train_short1536,fp32_many_short_compact,train,float32,4,44,LOAD,1536x3,120x1,3x1,1,0,1
+train_short2048,fp32_many_short_compact,train,float32,4,48,LOAD,2048x3,144x1,3x1,1,0,1
+train_w2,fp32_many_short_compact,train,float32,4,52,LOAD,2816x2,144x1,2x1,1,0,1
+train_short3584,fp32_many_short_compact,train,float32,4,56,LOAD,3584x3,168x1,3x1,1,0,1
+train_w4,fp32_many_short_compact,train,float32,4,50,LOAD,4096x4,120x1,4x1,1,0,1
+train_short4992,fp32_many_short_compact,train,float32,4,54,LOAD,4992x3,144x1,3x1,1,0,1
+holdout_2304,fp32_many_short_compact,holdout,float32,4,46,LOAD,2304x3,128x1,3x1,1,0,1
+holdout_3200,fp32_many_short_compact,holdout,float32,4,52,LOAD,3200x3,160x1,3x1,1,0,1
+holdout_4224,fp32_many_short_compact,holdout,float32,4,48,LOAD,4224x3,144x1,3x1,1,0,1
+holdout_4864,fp32_many_short_compact,holdout,float32,4,56,LOAD,4864x3,168x1,3x1,1,0,1

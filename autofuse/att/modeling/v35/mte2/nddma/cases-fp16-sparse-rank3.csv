@@ -1,0 +1,13 @@
+factor_id,experiment,role,dtype,dtype_size,block_dim,api,dims,gm_or_input_strides,ub_or_output_strides,point_flush,packing_extra
+reference_erf,fp16_padded_sparse_nddma3d,known,float16,2,56,NDDMA,18x4x118,1x3384x13536,480x118x1,1,0
+train_small_m,fp16_padded_sparse_nddma3d,train,float16,2,48,NDDMA,8x4x112,1x3264x13056,448x112x1,1,0
+train_small_w,fp16_padded_sparse_nddma3d,train,float16,2,50,NDDMA,12x4x104,1x3176x12704,416x104x1,1,0
+train_large_m,fp16_padded_sparse_nddma3d,train,float16,2,56,NDDMA,24x4x120,1x3448x13792,480x120x1,1,0
+train_large_w,fp16_padded_sparse_nddma3d,train,float16,2,52,NDDMA,20x4x128,1x3544x14176,512x128x1,1,0
+train_small_pitch,fp16_padded_sparse_nddma3d,train,float16,2,54,NDDMA,16x4x116,1x2960x11840,464x116x1,1,0
+train_padded,fp16_padded_sparse_nddma3d,train,float16,2,56,NDDMA,18x4x122,1x3408x13632,496x122x1,1,0
+holdout_m10,fp16_padded_sparse_nddma3d,holdout,float16,2,52,NDDMA,10x4x114,1x3272x13088,464x114x1,1,0
+holdout_highbw,fp16_padded_sparse_nddma3d,holdout,float16,2,54,NDDMA,22x4x124,1x3496x13984,496x124x1,1,0
+holdout_mid,fp16_padded_sparse_nddma3d,holdout,float16,2,56,NDDMA,16x4x126,1x3208x12832,512x126x1,1,0
+holdout_low_core,fp16_padded_sparse_nddma3d,holdout,float16,2,48,NDDMA,20x4x110,1x3344x13376,448x110x1,1,0
+control_different_middle,fp16_padded_sparse_nddma3d,control,float16,2,54,NDDMA,18x3x118,1x3384x10152,368x118x1,1,0

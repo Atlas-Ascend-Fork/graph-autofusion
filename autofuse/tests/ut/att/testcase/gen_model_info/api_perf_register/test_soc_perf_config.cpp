@@ -465,6 +465,29 @@ TEST_F(SocPerfConfigTest, GetSocApiParamsRejectsIncompleteInvalidAndZeroDivisorR
   EXPECT_EQ(params, nullptr);
 }
 
+TEST_F(SocPerfConfigTest, GetSocApiParamsOverridesZeroAForPositiveBandwidthFits) {
+  constexpr char kModel[] = "LoadStridedPayload";
+  constexpr char kDtype[] = "float32tofloat32";
+  const SocPerfTarget target{kV35NpuArch, "SOC_STRIDED_LOAD"};
+  Json overrides = Json::object();
+  auto &record = overrides[kModel]["model_params"][kDtype];
+  record = {{"h", 0.0}, {"a", 0.0}, {"b", 1000.0}, {"hl", 0.0}};
+
+  std::shared_ptr<const Json> params;
+  ASSERT_EQ(GetSocApiParams(target, kParamV2Info, MakeSingleConfig(target.soc_version, overrides), params),
+            af::SUCCESS);
+  ASSERT_NE(params, nullptr);
+  const auto &resolved = params->at(kModel).at("model_params").at(kDtype);
+  EXPECT_EQ(resolved.at("a"), 0.0);
+  EXPECT_EQ(resolved.at("b"), 1000.0);
+
+  for (const double invalid_b : {0.0, -1.0, 1e-300}) {
+    record["b"] = invalid_b;
+    EXPECT_NE(GetSocApiParams(target, kParamV2Info, MakeSingleConfig(target.soc_version, overrides), params),
+              af::SUCCESS);
+  }
+}
+
 TEST_F(SocPerfConfigTest, GetSocApiParamsRejectsFloatOverflowAndUnderflowDivisor) {
   Json api_override = soc_perf_test::MakeApiOverride(1.0F, 10.0F);
   api_override["Abs"]["model_params"]["float16tofloat16"]["k"] = 1e100;

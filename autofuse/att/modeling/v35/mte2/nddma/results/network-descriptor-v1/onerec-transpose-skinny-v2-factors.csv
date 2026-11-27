@@ -1,0 +1,14 @@
+factor_id,experiment,role,dtype,dtype_size,block_dim,api,api_rank,dims,gm_or_input_strides,ub_or_output_strides,bytes_per_call,input_span_bytes,output_span_bytes,point_flush,nd_dci,grid_cols,core_tiles,source_plane,grid_row_step_elements,store_pitch
+train_c32_m4_n1280_gm768,transposed-skinny-source,train,float32,4,32,NDDMA,2,4x1280,1x768,1280x1,20480,3929104,20480,0,0,1,10,983040,4,1280
+train_c40_m5_n1856_gm896,transposed-skinny-source,train,float32,4,40,NDDMA,2,5x1856,1x896,1856x1,37120,6648340,37120,0,0,1,10,1662976,5,1856
+train_c48_m6_n2560_gm1024,transposed-skinny-source,train,float32,4,48,NDDMA,2,6x2560,1x1024,2560x1,61440,10481688,61440,0,0,1,10,2621440,6,2560
+train_c56_m8_n1792_gm1152,transposed-skinny-source,train,float32,4,56,NDDMA,2,8x1792,1x1152,1792x1,57344,8252960,57344,0,0,1,10,2064384,8,1792
+train_c52_m9_n2240_gm1280,transposed-skinny-source,train,float32,4,52,NDDMA,2,9x2240,1x1280,2240x1,80640,11463716,80640,0,0,1,10,2867200,9,2240
+train_c48_m10_n2304_gm896,transposed-skinny-source,train,float32,4,48,NDDMA,2,10x2304,1x896,2304x1,92160,8253992,92160,0,0,1,10,2064384,10,2304
+train_c40_m8_n1536_gm1024,transposed-skinny-source,train,float32,4,40,NDDMA,2,8x1536,1x1024,1536x1,49152,6287392,49152,0,0,1,10,1572864,8,1536
+train_c56_m6_n2688_gm1152,transposed-skinny-source,train,float32,4,56,NDDMA,2,6x2688,1x1152,2688x1,64512,12381720,64512,0,0,1,10,3096576,6,2688
+holdout_c36_m6_n1792_gm896,transposed-skinny-source,holdout,float32,4,36,NDDMA,2,6x1792,1x896,1792x1,43008,6418968,43008,0,0,1,10,1605632,6,1792
+holdout_c45_m7_n1920_gm1024,transposed-skinny-source,holdout,float32,4,45,NDDMA,2,7x1920,1x1024,1920x1,53760,7860252,53760,0,0,1,10,1966080,7,1920
+holdout_c50_m8_n2368_gm1024,transposed-skinny-source,holdout,float32,4,50,NDDMA,2,8x2368,1x1024,2368x1,75776,9695264,75776,0,0,1,10,2424832,8,2368
+holdout_c56_m9_n2432_gm1280,transposed-skinny-source,holdout,float32,4,56,NDDMA,2,9x2432,1x1280,2432x1,87552,12446756,87552,0,0,1,10,3112960,9,2432
+known_c49_m7_n2048_gm1024,transposed-skinny-source,known,float32,4,49,NDDMA,2,7x2048,1x1024,2048x1,57344,8384540,57344,0,0,1,10,2097152,7,2048

@@ -1,0 +1,14 @@
+id,role,rows,middle,lanes,pitch
+target_mask4,known,36,58,4,48
+train_short2,train,20,29,2,32
+train_mask4,train,32,45,4,32
+train_mask4_wider,train,44,72,4,48
+train_mask6,train,30,51,6,32
+train_mask8,train,42,43,8,48
+train_mask12,train,20,37,12,32
+train_mask16,train,36,24,16,48
+holdout_mask3,holdout,28,73,3,32
+holdout_mask4,holdout,40,63,4,48
+holdout_mask8,holdout,36,52,8,48
+holdout_mask12,holdout,28,45,12,32
+holdout_mask16,holdout,30,47,16,32

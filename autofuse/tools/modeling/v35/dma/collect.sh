@@ -9,12 +9,12 @@
 
 set -euo pipefail
 if [[ $# != 6 ]]; then
-    echo "Usage: bash collect.sh <steady|loop|stability|nddma|nddma_full_store|nddma_long|store> <build-dir> <factors.csv> <mode> <device-lock> <new-run-dir>" >&2
+    echo "Usage: bash collect.sh <steady|transpose_pipeline|loop|stability|nddma|nddma_full_store|nddma_long|store|store_compact_loop|wide_ng2> <build-dir> <factors.csv> <mode> <device-lock> <new-run-dir>" >&2
     exit 2
 fi
 case "$1:$4" in
-    steady:[NC]|loop:[NC]|stability:[NC]|nddma:[NC]|nddma_full_store:[NC]|nddma_long:[NC]) ;;
-    store:normal|store:bypass) ;;
+    steady:[NC]|transpose_pipeline:[NC]|loop:[NC]|stability:[NC]|nddma:[NC]|nddma_full_store|nddma_long:[NC]) ;;
+    store:normal|store:bypass|store_compact_loop:normal|store_compact_loop:bypass|wide_ng2:normal|wide_ng2:bypass) ;;
     *) echo "Load mode must be N or C. Store mode must be normal or bypass." >&2; exit 2 ;;
 esac
 build=$(realpath -- "$2")
@@ -22,7 +22,7 @@ factors=$(realpath -- "$3")
 test -f "$factors"
 mode=$4
 case "$1" in
-    store) exe="$build/att_dma_store" ;;
+    store|store_compact_loop|wide_ng2) exe="$build/att_dma_$1" ;;
     nddma_full_store) exe="$build/att_dma_load_nddma" ;;
     *) exe="$build/att_dma_load_$1" ;;
 esac
@@ -38,7 +38,7 @@ mkdir -- "$run"
 sha256sum -- "$exe" "$factors" > "$run/input.sha256"
 exec 9>>"$5"
 flock -x 9
-if [[ "$1" == store ]]; then
+if [[ "$1" == store || "$1" == store_compact_loop || "$1" == wide_ng2 ]]; then
     msprof --application="$exe $factors $run/launches.jsonl $mode" \
         --output="$run/profile" --aic-mode=task-based --aic-metrics=PipeUtilization >"$run/profile.log" 2>&1
     expected=$(awk 'END {print NR-1}' "$factors")
@@ -47,6 +47,8 @@ else
     consumer=tail_store
     if [[ "$1" == nddma_full_store ]]; then
         consumer=span_store
+    elif [[ "$1" == transpose_pipeline ]]; then
+        consumer=transpose_store
     fi
     "$exe" "$factors" "$run/verify.jsonl" verify "$consumer" "$mode" >"$run/verify.log" 2>&1
     expected=$(awk 'END {print NR-1}' "$factors")

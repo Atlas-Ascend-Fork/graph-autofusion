@@ -1,0 +1,15 @@
+point,role,rows,width
+p00,train,8,960
+p01,train,10,991
+p02,train,11,1001
+p03,train,13,961
+p04,train,14,1013
+p05,train,15,1057
+p06,holdout,9,975
+p07,holdout,11,1031
+p08,holdout,13,1003
+p09,holdout,15,992
+p10,holdout,16,1089
+p11,control,10,1024
+p12,control,14,1024
+p13,known,12,1007

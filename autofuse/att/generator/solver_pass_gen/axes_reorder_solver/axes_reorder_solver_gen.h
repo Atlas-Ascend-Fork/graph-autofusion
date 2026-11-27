@@ -10,6 +10,7 @@
 #ifndef ATT_AXES_REORDER_SOLVER_GEN_H_
 #define ATT_AXES_REORDER_SOLVER_GEN_H_
 #include <map>
+#include <set>
 #include <vector>
 #include <string>
 #include <algorithm>
@@ -176,6 +177,12 @@ class AxesReorderSolverGen : public SolverGen,
   void SetGroupNum(size_t group_num) {
     group_num_ = group_num;
   }
+  void SetSingleTilingCase(bool single_tiling_case) {
+    single_tiling_case_ = single_tiling_case;
+  }
+  void SetHasMultipleGraphOutputs(bool has_multiple_outputs) {
+    has_multiple_graph_outputs_ = has_multiple_outputs;
+  }
 
  private:
   static bool VarCmp(Expr &a, Expr &b);
@@ -185,6 +192,9 @@ class AxesReorderSolverGen : public SolverGen,
   void GetRelatedArgs(const Expr &expr, std::vector<Expr> &related_args) const;
   bool NeedUBMultiCoreBalance();
   std::string GenGetStaticInputParam(const HardwareDef &hardware_type, bool no_type = false) const;
+  std::set<std::string> GetObjStaticInputParams(bool no_type) const;
+  bool NeedLocalCoreRefinement() const;
+  bool UseObjectiveCache() const;
   std::string GenGetObjStaticInputParam(bool no_type = false);
   std::string GenGetObjStaticFunc();
   void CollectInitialWorkList(std::vector<Expr> &work_list) const;
@@ -243,6 +253,10 @@ class AxesReorderSolverGen : public SolverGen,
   std::vector<uint32_t> GetArgRelateCons(const Expr &arg, const std::vector<Expr> &all_cons) const;
   std::string IsEnableBlockLoopTradeOffByPerf() const;
   std::string GenPendingSearchConfigOverride();
+  bool CanProbeBalancedCores();
+  std::string GenCoreProbeInput();
+  std::string GenSingleIterationProbe();
+  std::string GenPackedStoreProbes();
   std::vector<Expr> mc_args_;
   std::vector<Expr> input_args_;
   std::vector<Expr> const_args_;
@@ -274,6 +288,7 @@ class AxesReorderSolverGen : public SolverGen,
   double corenum_threshold_{0.4};
   bool enable_high_perf_{false};
   bool enable_core_search_{true};
+  bool single_tiling_case_{false};
   bool enable_equal_order_{false};
   std::string arrange_code_;
   const TilingScheduleConfigTable *tiling_schedule_config_table_{nullptr};
@@ -283,6 +298,7 @@ class AxesReorderSolverGen : public SolverGen,
   uint32_t core_num_budget_{0U};
   bool enable_group_parallel_{false};
   size_t group_num_{1UL};
+  bool has_multiple_graph_outputs_{false};
   TilingCaseIdent tiling_case_ident_{ScheduleGroupIdent{}, 0U, ""};
 };
 bool CheckExist(const std::vector<Expr> &args, const Expr &check_arg);

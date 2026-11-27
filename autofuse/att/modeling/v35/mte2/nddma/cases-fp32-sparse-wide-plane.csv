@@ -1,0 +1,7 @@
+factor_id,experiment,role,dtype,dtype_size,block_dim,api,dims,gm_or_input_strides,ub_or_output_strides,point_flush,packing_extra
+sparse_ref,sparse,known,float32,4,53,NDDMA,16x32x48,1x36864x16,1536x48x1,1,0
+train_sparse_16,sparse,train,float32,4,48,NDDMA,16x16x48,1x36864x16,768x48x1,1,0
+train_sparse_20,sparse,train,float32,4,56,NDDMA,16x20x48,1x36864x16,960x48x1,1,0
+train_sparse_28,sparse,train,float32,4,50,NDDMA,16x28x48,1x36864x16,1344x48x1,1,0
+holdout_sparse_24,sparse,holdout,float32,4,54,NDDMA,16x24x48,1x36864x16,1152x48x1,1,0
+holdout_sparse_30,sparse,holdout,float32,4,56,NDDMA,16x30x48,1x36864x16,1440x48x1,1,0

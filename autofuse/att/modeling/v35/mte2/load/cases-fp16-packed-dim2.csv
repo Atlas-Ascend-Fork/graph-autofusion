@@ -1,0 +1,9 @@
+factor_id,experiment,role,dtype,dtype_size,block_dim,api,dims,gm_or_input_strides,ub_or_output_strides,point_flush,packing_extra,compact_packed
+isnan_wide_ref,isnan_wide,known,float16,2,56,LOAD,118x36,13536x1,36x1,0,0,1
+isnan_wide_t1,isnan_wide,train,float16,2,48,LOAD,96x32,12000x1,32x1,0,0,1
+isnan_wide_t2,isnan_wide,train,float16,2,50,LOAD,116x40,13504x1,40x1,0,0,1
+isnan_wide_t3,isnan_wide,train,float16,2,54,LOAD,128x48,15008x1,48x1,0,0,1
+isnan_wide_t4,isnan_wide,train,float16,2,56,LOAD,136x32,15616x1,32x1,0,0,1
+isnan_wide_h1,isnan_wide,holdout,float16,2,50,LOAD,100x36,12544x1,36x1,0,0,1
+isnan_wide_h2,isnan_wide,holdout,float16,2,53,LOAD,122x44,13824x1,44x1,0,0,1
+isnan_wide_h3,isnan_wide,holdout,float16,2,56,LOAD,132x40,15360x1,40x1,0,0,1

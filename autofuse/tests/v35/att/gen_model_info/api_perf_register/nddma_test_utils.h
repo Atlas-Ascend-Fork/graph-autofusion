@@ -13,6 +13,8 @@
 
 #include <string>
 
+#include "gtest/gtest.h"
+
 #include "api_perf_register/api_perf.h"
 
 namespace att {
@@ -27,6 +29,17 @@ inline TensorShapeInfo Make1DNddmaShape(const std::string &dtype, int32_t dtype_
   shape.gm_strides = {input_stride};
   shape.strides = {output_stride};
   return shape;
+}
+
+inline double GetNddmaConstCycles(Expr cycles) {
+  cycles.Simplify();
+  int64_t integer = 0;
+  if (cycles.GetConstValue(integer)) {
+    return static_cast<double>(integer);
+  }
+  double value = 0.0;
+  EXPECT_TRUE(cycles.GetConstValue(value));
+  return value;
 }
 
 }  // namespace att

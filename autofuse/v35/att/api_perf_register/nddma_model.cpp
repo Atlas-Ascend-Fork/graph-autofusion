@@ -15,6 +15,7 @@
 #include "base/att_const_values.h"
 #include "common_utils.h"
 #include "framework/common/debug/ge_log.h"
+#include "perf_param_v2.h"
 
 namespace att {
 namespace {
@@ -456,6 +457,13 @@ NddmaFallbackReason BuildNddmaCoreCycles(const NddmaNormalizedDesc &normalized, 
   return NddmaFallbackReason::kNone;
 }
 
+Expr Packed3DHighCoreCycles(const Expr &payload_elements, uint64_t dtype_size) {
+  constexpr double kStartupCycles = 177.39897232376856;
+  constexpr double kCyclesPerKiB = 76.27710129248759;
+  constexpr uint64_t kBytesPerKiB = 1024U;
+  return CreateExpr(kStartupCycles) + CreateExpr(kCyclesPerKiB * dtype_size / kBytesPerKiB) * payload_elements;
+}
+
 bool ApplyPacked3DHighCoreCost(const NddmaNormalizedDesc &desc, uint64_t dtype_size, const Expr &block_dim,
                                Expr &high_core, NddmaModelResult &result) {
   constexpr uint64_t kMaxFittedCoreCount = 56U;
@@ -486,9 +494,7 @@ bool ApplyPacked3DHighCoreCost(const NddmaNormalizedDesc &desc, uint64_t dtype_s
 
   // Whole-API fit for a packed batch of transposed planes, measured with
   // fresh GM addresses and normal L2 policy. Payload is in KiB.
-  constexpr double kStartupCycles = 177.39897232376856;
-  constexpr double kCyclesPerKiB = 76.27710129248759;
-  const auto fitted = CreateExpr(kStartupCycles) + CreateExpr(kCyclesPerKiB * dtype_size / 1024) * outer * plane;
+  const auto fitted = Packed3DHighCoreCycles(outer * plane, dtype_size);
   if (af::SymbolicUtils::StaticCheckGt(outer, one) == af::TriBool::kTrue &&
       af::SymbolicUtils::StaticCheckLe(block_dim, upper) == af::TriBool::kTrue) {
     high_core = fitted;
@@ -611,6 +617,355 @@ bool ApplySparseNdResidualScale(const NddmaNormalizedDesc &desc, uint64_t dtype_
   return true;
 }
 
+Expr OutsideRange(const Expr &value, int32_t lower, int32_t upper) {
+  return af::sym::Max(af::sym::kSymbolZero, af::sym::Max(CreateExpr(lower) - value, value - CreateExpr(upper)));
+}
+
+bool ApplyFp32UnitBroadcastRowCost(const NddmaNormalizedDesc &desc, const Expr &block_dim, Expr &high_core,
+                                   NddmaModelResult &result) {
+  const auto &one = af::sym::kSymbolOne;
+  const auto &zero = af::sym::kSymbolZero;
+  if (desc.effective_rank != 2U || af::SymbolicUtils::StaticCheckEq(desc.input_strides[0], one) != af::TriBool::kTrue ||
+      af::SymbolicUtils::StaticCheckEq(desc.input_strides[1], zero) != af::TriBool::kTrue ||
+      af::SymbolicUtils::StaticCheckEq(desc.output_strides[0], one) != af::TriBool::kTrue) {
+    return false;
+  }
+  constexpr int32_t kMinWidth = 1024;
+  constexpr int32_t kMaxWidth = 8192;
+  constexpr int32_t kMinCores = 4;
+  constexpr int32_t kMaxCores = 24;
+  constexpr int32_t kRowAlignment = 32 / sizeof(float);
+  constexpr double kStartup = 282.35013548341914;
+  constexpr double kBytesPerCycle = 29.240946869971374;
+  const auto &width = desc.output_dims[0];
+  const Expr violation = AbsExpr(desc.output_dims[1] - one) + AbsExpr(desc.output_strides[1] - width) +
+                         AbsExpr(af::sym::Mod(width, CreateExpr(kRowAlignment))) +
+                         OutsideRange(width, kMinWidth, kMaxWidth) + OutsideRange(block_dim, kMinCores, kMaxCores);
+  const auto supported = af::SymbolicUtils::StaticCheckEq(violation, zero);
+  if (supported == af::TriBool::kFalse) {
+    return false;
+  }
+  const Expr fitted = CreateExpr(kStartup) + width * CreateExpr(sizeof(float)) / CreateExpr(kBytesPerCycle);
+  if (supported == af::TriBool::kTrue) {
+    high_core = fitted;
+    return true;
+  }
+  Expr guarded;
+  GetPerfVar("nddma_unit_broadcast_row", guarded, result.ternary_ops);
+  TernaryOp guard(CondType::K_EQ, violation, zero, fitted, high_core);
+  guard.SetVariable(guarded);
+  result.ternary_ops[guarded] = std::move(guard);
+  high_core = guarded;
+  return true;
+}
+
+bool ScaleNdResidual(const Expr &violation, const Expr &payload, const Nddma1DParams &params, double scale,
+                     const char *perf_var, Expr &high_core, NddmaModelResult &result) {
+  const auto &zero = af::sym::kSymbolZero;
+  const auto supported = af::SymbolicUtils::StaticCheckEq(violation, zero);
+  if (supported == af::TriBool::kFalse) {
+    return false;
+  }
+  const Expr baseline = payload / CreateExpr(params.t2) + CreateExpr(params.h2);
+  const Expr fitted = baseline + CreateExpr(scale) * (high_core - baseline);
+  if (supported == af::TriBool::kTrue) {
+    high_core = fitted;
+    return true;
+  }
+  Expr guarded;
+  GetPerfVar(perf_var, guarded, result.ternary_ops);
+  TernaryOp guard(CondType::K_EQ, violation, zero, std::make_shared<IfCase>(fitted),
+                  std::make_shared<IfCase>(high_core));
+  guard.SetVariable(guarded);
+  result.ternary_ops[guarded] = std::move(guard);
+  high_core = guarded;
+  return true;
+}
+
+// Consecutive FP32 GM rows with a wide, padded UB row. Preserve the ND payload
+// and startup terms; long-call production-grid samples calibrate only its residual.
+bool ApplyFp32WidePaddedRowScale(const NddmaNormalizedDesc &desc, const Nddma1DParams &params, const Expr &block_dim,
+                                 Expr &high_core, NddmaModelResult &result) {
+  if (desc.effective_rank != 2U && desc.effective_rank != 3U) {
+    return false;
+  }
+  const auto &dims = desc.output_dims;
+  const auto &gm = desc.input_strides;
+  const auto &ub = desc.output_strides;
+  const auto &one = af::sym::kSymbolOne;
+  if (af::SymbolicUtils::StaticCheckEq(gm[0], one) != af::TriBool::kTrue ||
+      af::SymbolicUtils::StaticCheckEq(ub[0], one) != af::TriBool::kTrue) {
+    return false;
+  }
+  const auto &width = dims[0];
+  const auto &rows = dims.back();
+  const auto alignment = CreateExpr(8);
+  const auto &zero = af::sym::kSymbolZero;
+  Expr violation = zero;
+  for (const auto &check :
+       {OutsideRange(width, 967, 1039), OutsideRange(rows, 18, 30), OutsideRange(block_dim, 48, 56),
+        AbsExpr(gm.back() - width), AbsExpr(ub.back() - alignment * af::sym::Ceiling(af::sym::Div(width, alignment))),
+        OutsideRange(ub.back() - width, 1, 7)}) {
+    if (af::SymbolicUtils::StaticCheckGt(check, zero) == af::TriBool::kTrue) {
+      return false;
+    }
+    violation = violation + check;
+  }
+  if (desc.effective_rank == 3U) {
+    violation = violation + AbsExpr(dims[1] - one);
+  }
+  constexpr double kResidualScale = 1.9724183277398053;
+  return ScaleNdResidual(violation, rows * width * CreateExpr(sizeof(uint32_t)), params, kResidualScale,
+                         "nddma_wide_padded_fp32", high_core, result);
+}
+
+// Short FP16 rows sampled at a non-unit GM inner stride and padded in UB.
+bool ApplyFp16ShortInnerStrideScale(const NddmaNormalizedDesc &desc, const Nddma1DParams &params, Expr &high_core,
+                                    NddmaModelResult &result) {
+  if (desc.effective_rank != 2U) {
+    return false;
+  }
+  const auto &gm = desc.input_strides;
+  const auto &ub = desc.output_strides;
+  const auto &one = af::sym::kSymbolOne;
+  uint64_t outer_stride = 0;
+  uint64_t inner_stride = 0;
+  if (!gm[1].GetConstValue(outer_stride) || outer_stride < 2048U || outer_stride > 3456U ||
+      !gm[0].GetConstValue(inner_stride) || inner_stride < 33U || inner_stride > 49U ||
+      af::SymbolicUtils::StaticCheckEq(ub[0], one) != af::TriBool::kTrue) {
+    return false;
+  }
+  const auto &rows = desc.output_dims[1];
+  const auto &width = desc.output_dims[0];
+  const auto &zero = af::sym::kSymbolZero;
+  const auto alignment = CreateExpr(16);
+  const auto violation = OutsideRange(rows, 2, 4) + OutsideRange(width, 28, 46) + OutsideRange(ub[1] - width, 1, 15) +
+                         AbsExpr(ub[1] - alignment * af::sym::Ceiling(af::sym::Div(width, alignment))) +
+                         af::sym::Max(zero, width * gm[0] - gm[1]);
+  constexpr double kResidualScale = 0.37866923612622494;
+  return ScaleNdResidual(violation, rows * width * CreateExpr(sizeof(uint16_t)), params, kResidualScale,
+                         "nddma_short_inner_stride_fp16", high_core, result);
+}
+
+// Refit only the existing ND residual for FP16 with consecutive GM
+// planes written as packed or padded UB planes. A fourth axis may be physically unit.
+bool ApplySparseFp16NdResidualScale(const NddmaNormalizedDesc &desc, const Nddma1DParams &params, const Expr &block_dim,
+                                    Expr &high_core, NddmaModelResult &result) {
+  constexpr uint64_t kMinGmRowPitch = 2960U;
+  constexpr uint64_t kMaxGmRowPitch = 3544U;
+  const auto rank = desc.effective_rank;
+  if (rank != 3U && rank != 4U) {
+    return false;
+  }
+  const auto &dims = desc.output_dims;
+  const auto &gm = desc.input_strides;
+  const auto &ub = desc.output_strides;
+  const auto &one = af::sym::kSymbolOne;
+  const auto rows = CreateExpr(4);
+  const auto alignment = CreateExpr(16);
+  uint64_t gm_pitch = 0;
+  if (!gm[1].GetConstValue(gm_pitch) || gm_pitch < kMinGmRowPitch || gm_pitch > kMaxGmRowPitch ||
+      af::SymbolicUtils::StaticCheckEq(gm.back(), one) != af::TriBool::kTrue ||
+      af::SymbolicUtils::StaticCheckEq(gm[0], rows * gm[1]) != af::TriBool::kTrue ||
+      af::SymbolicUtils::StaticCheckEq(ub[0], one) != af::TriBool::kTrue) {
+    return false;
+  }
+  const auto &width = dims[0];
+  const auto &planes = dims.back();
+  const auto packed_pitch = rows * width;
+  const auto padded_pitch = alignment * af::sym::Ceiling(af::sym::Div(packed_pitch, alignment));
+  const auto padded_violation = OutsideRange(planes, 8, 36) + AbsExpr(ub.back() - padded_pitch);
+  const auto packed_violation = OutsideRange(planes, 20, 40) + AbsExpr(ub.back() - packed_pitch);
+  Expr violation = OutsideRange(width, 104, 128) + AbsExpr(dims[1] - rows) + OutsideRange(block_dim, 48, 56) +
+                   AbsExpr(ub[1] - width) + af::sym::Min(padded_violation, packed_violation);
+  if (rank == 4U) {
+    violation = violation + AbsExpr(dims[2] - one);
+  }
+  const Expr payload = width * rows * planes * CreateExpr(sizeof(uint16_t));
+  constexpr double kResidualScale = 0.040936234851127434;
+  return ScaleNdResidual(violation, payload, params, kResidualScale, "nddma_sparse_fp16", high_core, result);
+}
+
+// A narrow strided source row and a separate, much wider GM plane stride.
+bool ApplyFp16TwoLevelSparseScale(const NddmaNormalizedDesc &desc, const Nddma1DParams &params, const Expr &block_dim,
+                                  Expr &high_core, NddmaModelResult &result) {
+  constexpr uint64_t kMinGmRowPitch = 3168U;
+  constexpr uint64_t kMaxGmRowPitch = 3520U;
+  constexpr uint64_t kMinGroupsPerPlane = 100U;
+  constexpr uint64_t kMaxGroupsPerPlane = 120U;
+  constexpr int32_t kMaxOuterRepeat = 7;
+  const auto rank = desc.effective_rank;
+  if (rank != 3U && rank != 4U) {
+    return false;
+  }
+  const auto &dims = desc.output_dims;
+  const auto &gm = desc.input_strides;
+  const auto &ub = desc.output_strides;
+  const auto &one = af::sym::kSymbolOne;
+  uint64_t row_pitch = 0;
+  uint64_t plane_pitch = 0;
+  if (!gm[0].GetConstValue(row_pitch) || row_pitch < kMinGmRowPitch || row_pitch > kMaxGmRowPitch ||
+      !gm[2].GetConstValue(plane_pitch) || af::SymbolicUtils::StaticCheckEq(gm[1], one) != af::TriBool::kTrue ||
+      af::SymbolicUtils::StaticCheckEq(ub[0], one) != af::TriBool::kTrue) {
+    return false;
+  }
+  constexpr uint64_t kRows = 4;
+  const auto group_pitch = kRows * row_pitch;
+  if (plane_pitch % group_pitch != 0 || plane_pitch / group_pitch < kMinGroupsPerPlane ||
+      plane_pitch / group_pitch > kMaxGroupsPerPlane) {
+    return false;
+  }
+  const auto rows = CreateExpr(kRows);
+  const auto plane = rows * dims[1];
+  const auto batch = plane * dims[2];
+  Expr violation = AbsExpr(dims[0] - rows) + OutsideRange(dims[1], 24, 42) + OutsideRange(dims[2], 20, 40) +
+                   OutsideRange(block_dim, 48, 56) + AbsExpr(ub[1] - rows) + AbsExpr(ub[2] - plane);
+  Expr payload = batch * CreateExpr(sizeof(uint16_t));
+  if (rank == 4U) {
+    violation =
+        violation + OutsideRange(dims[3], 1, kMaxOuterRepeat) + AbsExpr(gm[3] - dims[1]) + AbsExpr(ub[3] - batch);
+    payload = payload * dims[3];
+  }
+  constexpr double kResidualScale = 0.007910991623176598;
+  return ScaleNdResidual(violation, payload, params, kResidualScale, "nddma_two_level_sparse_fp16", high_core, result);
+}
+
+// The inner four strided lanes cover the same GM period as each outer row.
+bool ApplyFp16CommensurateStrideScale(const NddmaNormalizedDesc &desc, const Nddma1DParams &params,
+                                      const Expr &block_dim, Expr &high_core, NddmaModelResult &result) {
+  const auto rank = desc.effective_rank;
+  if (rank != 3U && rank != 4U) {
+    return false;
+  }
+  const auto &dims = desc.output_dims;
+  const auto &gm = desc.input_strides;
+  const auto &ub = desc.output_strides;
+  const auto &one = af::sym::kSymbolOne;
+  const auto lanes = CreateExpr(4);
+  uint64_t stride = 0;
+  if (!gm[0].GetConstValue(stride) || stride < 3072U || stride > 3584U ||
+      af::SymbolicUtils::StaticCheckEq(gm[1], one) != af::TriBool::kTrue ||
+      af::SymbolicUtils::StaticCheckEq(gm[2], lanes * gm[0]) != af::TriBool::kTrue ||
+      af::SymbolicUtils::StaticCheckEq(ub[0], one) != af::TriBool::kTrue ||
+      af::SymbolicUtils::StaticCheckEq(ub[1], lanes) != af::TriBool::kTrue) {
+    return false;
+  }
+  const auto plane = lanes * dims[1];
+  Expr violation = AbsExpr(dims[0] - lanes) + OutsideRange(dims[1], 32, 40) + OutsideRange(dims[2], 88, 128) +
+                   AbsExpr(ub[2] - plane) + OutsideRange(block_dim, 48, 56);
+  if (rank == 4U) {
+    violation = violation + AbsExpr(dims[3] - one);
+  }
+  constexpr double kResidualScale = 0.011888285459372117;
+  return ScaleNdResidual(violation, plane * dims[2] * CreateExpr(sizeof(uint16_t)), params, kResidualScale,
+                         "nddma_commensurate_stride_fp16", high_core, result);
+}
+
+bool ApplyFp32SparseWidePlaneScale(const NddmaNormalizedDesc &desc, const Nddma1DParams &params, const Expr &block_dim,
+                                   Expr &high_core, NddmaModelResult &result) {
+  constexpr int32_t kGmPlanePitch = 36864;
+  if (desc.effective_rank != 3U) {
+    return false;
+  }
+  const auto &dims = desc.output_dims;
+  const auto &gm = desc.input_strides;
+  const auto &ub = desc.output_strides;
+  const auto &one = af::sym::kSymbolOne;
+  const auto lanes = CreateExpr(16);
+  const auto width = CreateExpr(48);
+  if (af::SymbolicUtils::StaticCheckEq(gm[0], lanes) != af::TriBool::kTrue ||
+      af::SymbolicUtils::StaticCheckEq(gm[1], CreateExpr(kGmPlanePitch)) != af::TriBool::kTrue ||
+      af::SymbolicUtils::StaticCheckEq(gm[2], one) != af::TriBool::kTrue ||
+      af::SymbolicUtils::StaticCheckEq(ub[0], one) != af::TriBool::kTrue ||
+      af::SymbolicUtils::StaticCheckEq(ub[1], width) != af::TriBool::kTrue) {
+    return false;
+  }
+  const auto plane = dims[1] * width;
+  const auto violation = AbsExpr(dims[0] - width) + OutsideRange(dims[1], 16, 32) + AbsExpr(dims[2] - lanes) +
+                         OutsideRange(block_dim, 48, 56) + AbsExpr(ub[2] - plane);
+  constexpr double kResidualScale = 0.0760036317579465;
+  const auto payload = plane * lanes * CreateExpr(sizeof(float));
+  return ScaleNdResidual(violation, payload, params, kResidualScale, "nddma_sparse_wide_plane_fp32", high_core, result);
+}
+
+bool ApplyFp32PackedShortRowResidualScale(const NddmaNormalizedDesc &desc, const Nddma1DParams &params,
+                                          const Expr &block_dim, Expr &high_core, NddmaModelResult &result) {
+  constexpr uint64_t kMinGmRowPitch = 120U;
+  constexpr uint64_t kMaxGmRowPitch = 168U;
+  if (desc.effective_rank != 3U) {
+    return false;
+  }
+  const auto &dims = desc.output_dims;
+  const auto &gm = desc.input_strides;
+  const auto &ub = desc.output_strides;
+  const auto &one = af::sym::kSymbolOne;
+  const auto lanes = CreateExpr(3);
+  const auto alignment = CreateExpr(8);
+  uint64_t gm_pitch = 0;
+  if (!gm[1].GetConstValue(gm_pitch) || gm_pitch < kMinGmRowPitch || gm_pitch > kMaxGmRowPitch ||
+      af::SymbolicUtils::StaticCheckEq(gm[0], one) != af::TriBool::kTrue ||
+      af::SymbolicUtils::StaticCheckEq(gm[2], lanes) != af::TriBool::kTrue ||
+      af::SymbolicUtils::StaticCheckEq(ub[0], one) != af::TriBool::kTrue ||
+      af::SymbolicUtils::StaticCheckEq(ub[1], lanes) != af::TriBool::kTrue) {
+    return false;
+  }
+  const auto ub_pitch = alignment * af::sym::Ceiling(af::sym::Div(lanes * dims[1], alignment));
+  const auto overlap = af::sym::Max(af::sym::kSymbolZero, dims[2] * lanes - gm[1]);
+  const auto violation = AbsExpr(dims[0] - lanes) + OutsideRange(dims[1], 32, 56) + OutsideRange(dims[2], 32, 56) +
+                         OutsideRange(block_dim, 44, 56) + AbsExpr(ub[2] - ub_pitch) + overlap;
+  constexpr double kResidualScale = 0.10462327934265224;
+  const auto payload = lanes * dims[1] * dims[2] * CreateExpr(sizeof(float));
+  return ScaleNdResidual(violation, payload, params, kResidualScale, "nddma_packed_short_fp32", high_core, result);
+}
+
+// A symbolic unit axis can hide a packed physical rank-3 transfer. The
+// source may be contiguous along either outer axis; UB stays densely packed.
+bool ApplyFp32UnitAxisPacked3DCost(const NddmaNormalizedDesc &desc, const Expr &block_dim, Expr &high_core,
+                                   NddmaModelResult &result) {
+  if (desc.effective_rank != 4U) {
+    return false;
+  }
+  const auto &dims = desc.output_dims;
+  const auto &gm = desc.input_strides;
+  const auto &ub = desc.output_strides;
+  const auto &zero = af::sym::kSymbolZero;
+  const auto &one = af::sym::kSymbolOne;
+  const auto lanes = CreateExpr(16);
+  const auto width = CreateExpr(48);
+  const auto equal = [](const Expr &lhs, const Expr &rhs) {
+    return af::SymbolicUtils::StaticCheckEq(lhs, rhs) == af::TriBool::kTrue;
+  };
+  if (!equal(gm[0], lanes) || !equal(ub[0], one)) {
+    return false;
+  }
+  const auto plane = width * lanes;
+  const bool contiguous_middle = equal(gm[2], one) && equal(gm[3], plane) && equal(dims[2], lanes);
+  const bool contiguous_outer = equal(gm[3], one) && equal(gm[2], plane) && equal(dims[3], lanes);
+  if (!contiguous_middle && !contiguous_outer) {
+    return false;
+  }
+  const auto &rows = contiguous_middle ? dims[3] : dims[2];
+  const auto violation = AbsExpr(dims[0] - width) + AbsExpr(dims[1] - one) + OutsideRange(rows, 16, 28) +
+                         OutsideRange(block_dim, 48, 56) + AbsExpr(ub[2] - width) + AbsExpr(ub[3] - width * dims[2]);
+  const auto supported = af::SymbolicUtils::StaticCheckEq(violation, zero);
+  if (supported == af::TriBool::kFalse) {
+    return false;
+  }
+  auto fitted = Packed3DHighCoreCycles(plane * rows, sizeof(float));
+  if (supported == af::TriBool::kTrue) {
+    high_core = fitted;
+    return true;
+  }
+  Expr guarded;
+  GetPerfVar("nddma_packed3d_unit_axis", guarded, result.ternary_ops);
+  TernaryOp guard(CondType::K_EQ, violation, zero, std::make_shared<IfCase>(fitted),
+                  std::make_shared<IfCase>(high_core));
+  guard.SetVariable(guarded);
+  result.ternary_ops[guarded] = std::move(guard);
+  high_core = guarded;
+  return true;
+}
+
 bool IsNg2Eligible(const NddmaNormalizedDesc &normalized, NddmaNg2Config &config, bool require_packed = true) {
   std::vector<size_t> non_unit_positions;
   for (size_t pos = 0U; pos < normalized.output_dims.size(); ++pos) {
@@ -638,6 +993,13 @@ bool IsNg2Eligible(const NddmaNormalizedDesc &normalized, NddmaNg2Config &config
          (!require_packed || IsStaticallyEqualOrUnknown(output_strides[config.m_pos], dims[config.n_pos]));
 }
 
+Expr GetNg2Multiplier(const NddmaNormalizedDesc &normalized, const NddmaNg2Params &params,
+                      const NddmaNg2Config &config) {
+  const auto &m = normalized.output_dims[config.m_pos];
+  return (CreateExpr(params.g10) + CreateExpr(params.g11_m) * m) * normalized.input_strides[config.m_pos] +
+         CreateExpr(params.g00) + CreateExpr(params.g01_m) * m;
+}
+
 NddmaFallbackReason BuildNg2Cycles(const NddmaNormalizedDesc &normalized, const Nddma1DParams &params,
                                    const NddmaNg2Params &ng2_params, uint64_t dtype_size, Expr &low_core,
                                    Expr &high_core, const NddmaNg2Config &config, bool generate_high_core = true) {
@@ -647,9 +1009,7 @@ NddmaFallbackReason BuildNg2Cycles(const NddmaNormalizedDesc &normalized, const 
   if (HasStaticByteCountOverflow(m * n, dtype_size)) {
     return NddmaFallbackReason::kSchemaMismatch;
   }
-  const Expr ng2 =
-      (CreateExpr(ng2_params.g10) + CreateExpr(ng2_params.g11_m) * m) * normalized.input_strides[config.m_pos] +
-      CreateExpr(ng2_params.g00) + CreateExpr(ng2_params.g01_m) * m;
+  const Expr ng2 = GetNg2Multiplier(normalized, ng2_params, config);
   if (IsStaticNonPositive(ng2)) {
     return NddmaFallbackReason::kSchemaMismatch;
   }
@@ -715,6 +1075,87 @@ af::Status BuildCalibratedNg2High(const NddmaNormalizedDesc &normalized, const N
   return af::SUCCESS;
 }
 
+// Preserve the small-inner NG2 formula. Only its bandwidth terms are
+// recalibrated for wide GM strides with a packed FP16 UB descriptor.
+bool ApplyWideFp16Ng2High(const NddmaNormalizedDesc &normalized, const NddmaNg2Config &config,
+                          const CalibratedNg2Params &params, const Expr &block_dim, Expr &high_core,
+                          NddmaModelResult &result) {
+  const auto &m = normalized.output_dims[config.m_pos];
+  const auto &n = normalized.output_dims[config.n_pos];
+  const auto &gm_pitch = normalized.input_strides[config.n_pos];
+  const auto &ub_pitch = normalized.output_strides[config.m_pos];
+  const auto &zero = af::sym::kSymbolZero;
+  constexpr int64_t kMinPitch = 1282048;
+  constexpr int64_t kMaxPitch = 1648640;
+  if (af::SymbolicUtils::StaticCheckGe(gm_pitch, CreateExpr(kMinPitch)) != af::TriBool::kTrue ||
+      af::SymbolicUtils::StaticCheckLe(gm_pitch, CreateExpr(kMaxPitch)) != af::TriBool::kTrue) {
+    return false;
+  }
+  const auto outside = [&](const Expr &value, int32_t lower, int32_t upper) {
+    return af::sym::Max(zero, af::sym::Max(CreateExpr(lower) - value, value - CreateExpr(upper)));
+  };
+  Expr violation = zero;
+  for (const auto &check : {outside(m, 1, 752), outside(n, 16, 32), outside(block_dim, 32, 56),
+                            AbsExpr(af::sym::Mod(n, CreateExpr(16))), AbsExpr(ub_pitch - n)}) {
+    if (af::SymbolicUtils::StaticCheckGt(check, zero) == af::TriBool::kTrue) {
+      return false;
+    }
+    violation = violation + check;
+  }
+  constexpr double kPayloadCost = 1751.89015325;
+  constexpr double kSharedCost = 753.57769812;
+  const auto payload = m * n * CreateExpr(sizeof(uint16_t)) / CreateExpr(16384);
+  const auto shared = af::sym::Max(block_dim - CreateExpr(32), zero) / CreateExpr(24);
+  const auto &small = params.small_inner;
+  const auto fitted =
+      high_core + payload * (CreateExpr(kPayloadCost - small[1]) + shared * CreateExpr(kSharedCost - small[3]));
+  if (af::SymbolicUtils::StaticCheckEq(violation, zero) == af::TriBool::kTrue) {
+    high_core = fitted;
+    return true;
+  }
+  Expr guarded;
+  GetPerfVar("nddma_ng2_wide_fp16", guarded, result.ternary_ops);
+  TernaryOp guard(CondType::K_EQ, violation, zero, std::make_shared<IfCase>(fitted),
+                  std::make_shared<IfCase>(high_core));
+  guard.SetVariable(guarded);
+  result.ternary_ops[guarded] = std::move(guard);
+  high_core = guarded;
+  return true;
+}
+
+bool ApplyFp16MediumPitchNg2High(const NddmaNormalizedDesc &desc, const NddmaNg2Config &config, Expr &high_core,
+                                 NddmaModelResult &result) {
+  const auto &m = desc.output_dims[config.m_pos];
+  const auto &n = desc.output_dims[config.n_pos];
+  const auto &ub_pitch = desc.output_strides[config.m_pos];
+  const auto &zero = af::sym::kSymbolZero;
+  uint64_t gm_pitch = 0;
+  if (!desc.input_strides[config.n_pos].GetConstValue(gm_pitch) || gm_pitch < 12032U || gm_pitch > 15104U) {
+    return false;
+  }
+  const auto violation = OutsideRange(m, 144, 208) + OutsideRange(n, 106, 128) + AbsExpr(ub_pitch - n);
+  const auto supported = af::SymbolicUtils::StaticCheckEq(violation, zero);
+  if (supported == af::TriBool::kFalse) {
+    return false;
+  }
+  // Keep the large-inner packed NG2 startup and contention terms. Replace
+  // only the measured payload slope for this range of GM pitches.
+  constexpr double kPayloadDelta = 3918.5085980813437;
+  const auto fitted = high_core + CreateExpr(kPayloadDelta * sizeof(uint16_t) / 65536.0) * m * n;
+  if (supported == af::TriBool::kTrue) {
+    high_core = fitted;
+    return true;
+  }
+  Expr guarded;
+  GetPerfVar("nddma_ng2_medium_pitch_fp16", guarded, result.ternary_ops);
+  TernaryOp guard(CondType::K_EQ, violation, zero, std::make_shared<IfCase>(fitted),
+                  std::make_shared<IfCase>(high_core));
+  guard.SetVariable(guarded);
+  result.ternary_ops[guarded] = std::move(guard);
+  high_core = guarded;
+  return true;
+}
+
 bool ApplySmallInt64Ng2High(const NddmaNormalizedDesc &normalized, const NddmaNg2Config &config, const Expr &block_dim,
                             Expr &high_core, NddmaModelResult &result) {
   const auto &m = normalized.output_dims[config.m_pos];
@@ -751,7 +1192,7 @@ bool ApplySmallInt64Ng2High(const NddmaNormalizedDesc &normalized, const NddmaNg
 }
 
 bool ApplyPaddedNg2High(const NddmaNormalizedDesc &normalized, const NddmaNg2Config &config, const Expr &block_dim,
-                        Expr &high_core, NddmaModelResult &result) {
+                        Expr &high_core, NddmaModelResult &result, bool sparse_source = false) {
   const auto &m = normalized.output_dims[config.m_pos];
   const auto &n = normalized.output_dims[config.n_pos];
   const auto &step = normalized.input_strides[config.n_pos];
@@ -759,33 +1200,35 @@ bool ApplyPaddedNg2High(const NddmaNormalizedDesc &normalized, const NddmaNg2Con
   const auto &zero = af::sym::kSymbolZero;
   const auto &one = af::sym::kSymbolOne;
   const auto alignment = CreateExpr(8);  // FP32 elements in one 32-byte UB block.
-  const auto outside = [&](const Expr &value, int32_t lower, int32_t upper) {
-    return af::sym::Max(zero, af::sym::Max(CreateExpr(lower) - value, value - CreateExpr(upper)));
-  };
+  // Both formulas use the same padded UB layout. The sparse source has a
+  // much larger GM pitch than its contiguous read width.
+  const auto pitch_domain = sparse_source ? OutsideRange(step, 768, 1280) : OutsideRange(step, 12, 32);
   Expr violation = zero;
   for (const auto &part :
-       {outside(m, 12, 32), outside(n, 193, 519), outside(block_dim, 16, 56), outside(step, 12, 32), AbsExpr(step - m),
-        AbsExpr(pitch - alignment * af::sym::Ceiling(n / CreateExpr(8))), af::sym::Max(zero, n + one - pitch)}) {
+       {pitch_domain, OutsideRange(m, sparse_source ? 80 : 12, sparse_source ? 132 : 32),
+        OutsideRange(n, sparse_source ? 88 : 193, sparse_source ? 136 : 519),
+        OutsideRange(block_dim, sparse_source ? 32 : 16, 56), sparse_source ? CreateExpr(0) : AbsExpr(step - m),
+        AbsExpr(pitch - alignment * af::sym::Ceiling(af::sym::Div(n, alignment))),
+        af::sym::Max(zero, n + one - pitch)}) {
     if (af::SymbolicUtils::StaticCheckGt(part, zero) == af::TriBool::kTrue) {
       return false;
     }
     violation = violation + part;
   }
 
-  // Refit the existing large-inner form on fresh GM addresses, with no source pitch gap.
-  constexpr double kStartup = 162.5294017115518;
-  constexpr double kBandwidthCost = 6594.471271606094;
-  constexpr double kContentionCost = 565.9335005446032;
+  const double startup = sparse_source ? 186.219 : 162.5294017115518;
+  const double bandwidth_cost = sparse_source ? 4993.870 : 6594.471271606094;
+  const double contention_cost = sparse_source ? 653.375 : 565.9335005446032;
   const auto payload = m * n / CreateExpr(16384);  // FP32 payload in units of 64 KiB.
   const auto shared = af::sym::Max(block_dim - CreateExpr(32), zero) / CreateExpr(24);
   const auto fitted =
-      CreateExpr(kStartup) + payload * (CreateExpr(kBandwidthCost) + CreateExpr(kContentionCost) * shared);
+      CreateExpr(startup) + payload * (CreateExpr(bandwidth_cost) + CreateExpr(contention_cost) * shared);
   if (af::SymbolicUtils::StaticCheckEq(violation, zero) == af::TriBool::kTrue) {
     high_core = fitted;
     return true;
   }
   Expr guarded;
-  GetPerfVar("nddma_ng2_padded", guarded, result.ternary_ops);
+  GetPerfVar(sparse_source ? "nddma_ng2_sparse_padded" : "nddma_ng2_padded", guarded, result.ternary_ops);
   TernaryOp guard(CondType::K_EQ, violation, zero, std::make_shared<IfCase>(fitted),
                   std::make_shared<IfCase>(high_core));
   guard.SetVariable(guarded);
@@ -794,28 +1237,227 @@ bool ApplyPaddedNg2High(const NddmaNormalizedDesc &normalized, const NddmaNg2Con
   return true;
 }
 
+// A short transposed row can read few contiguous GM bursts despite the large
+// pitch between those bursts. Keep the existing head plus payload cost form.
+bool ApplyShortPaddedNg2High(const NddmaNormalizedDesc &desc, const NddmaNg2Config &config, const Expr &block_dim,
+                             Expr &high_core, NddmaModelResult &result) {
+  const auto &m = desc.output_dims[config.m_pos];
+  const auto &n = desc.output_dims[config.n_pos];
+  const auto &step = desc.input_strides[config.n_pos];
+  const auto &pitch = desc.output_strides[config.m_pos];
+  const auto &zero = af::sym::kSymbolZero;
+  constexpr int32_t kFp32UbBlockElements = 8;
+  constexpr int32_t kFp32GmBurstElements = 32;
+  const auto alignment = CreateExpr(kFp32UbBlockElements);
+  Expr violation = zero;
+  for (const auto &part :
+       {OutsideRange(m, 64, 160), OutsideRange(n, 9, 12), OutsideRange(step, 2048, 8192),
+        OutsideRange(block_dim, 16, 56), AbsExpr(af::sym::Mod(step, CreateExpr(kFp32GmBurstElements))),
+        AbsExpr(pitch - alignment * af::sym::Ceiling(af::sym::Div(n, alignment)))}) {
+    if (af::SymbolicUtils::StaticCheckGt(part, zero) == af::TriBool::kTrue) {
+      return false;
+    }
+    violation = violation + part;
+  }
+  constexpr double kStartupCycles = 513.736889;
+  constexpr double kCyclesPerElement = 0.1240756744;
+  const auto fitted = CreateExpr(kStartupCycles) + m * n * CreateExpr(kCyclesPerElement);
+  if (af::SymbolicUtils::StaticCheckEq(violation, zero) == af::TriBool::kTrue) {
+    high_core = fitted;
+    return true;
+  }
+  Expr guarded;
+  GetPerfVar("nddma_ng2_short_padded_fp32", guarded, result.ternary_ops);
+  TernaryOp guard(CondType::K_EQ, violation, zero, fitted, high_core);
+  guard.SetVariable(guarded);
+  result.ternary_ops[guarded] = std::move(guard);
+  high_core = guarded;
+  return true;
+}
+
+struct DensePaddedNddmaCalibration {
+  int32_t min_rows;
+  int32_t max_rows;
+  int32_t min_width;
+  int32_t max_width;
+  int32_t min_gm_pitch;
+  int32_t max_gm_pitch;
+  int32_t gm_alignment;
+  int32_t max_gm_gap;
+  int32_t min_active_cores;
+  int32_t max_active_cores;
+  bool requires_ub_padding;
+  double startup;
+  double cycles_per_element;
+  const char *perf_var;
+  bool broadcasts_inner{false};
+};
+
+constexpr DensePaddedNddmaCalibration kSmallDensePaddedTranspose = {
+    16, 40, 17, 32, 24, 48, 8, 32, 4, 16, false, 499.88124, 0.0629557012, "nddma_small_dense_padded_transpose"};
+constexpr DensePaddedNddmaCalibration kDensePaddedTranspose = {32,
+                                                               128,
+                                                               25,
+                                                               53,
+                                                               32,
+                                                               128,
+                                                               32,
+                                                               32,
+                                                               32,
+                                                               56,
+                                                               true,
+                                                               347.52579736,
+                                                               3731.65830216 / 16384.0,
+                                                               "nddma_dense_padded_transpose"};
+// Use the existing startup and payload form for rows confined to a 32-element padded span.
+constexpr DensePaddedNddmaCalibration kNarrowDensePaddedTranspose = {64,
+                                                                     128,
+                                                                     25,
+                                                                     31,
+                                                                     64,
+                                                                     128,
+                                                                     32,
+                                                                     32,
+                                                                     28,
+                                                                     54,
+                                                                     true,
+                                                                     323.07841553006364,
+                                                                     0.1979937390396284,
+                                                                     "nddma_narrow_dense_padded_transpose"};
+constexpr DensePaddedNddmaCalibration kPaddedInnerBroadcast = {
+    64, 192, 18, 31, 0, 0, 1, 0, 28, 56, false, 265.32598703, 0.1179375330, "nddma_padded_inner_broadcast", true};
+
+bool ApplyDensePaddedNddma(const NddmaNormalizedDesc &desc, const Expr &block_dim, Expr &high_core,
+                           NddmaModelResult &result, const DensePaddedNddmaCalibration &calibration) {
+  constexpr size_t kInner = 0;
+  constexpr size_t kRows = 1;
+  constexpr size_t kOuter = 2;
+  if (desc.effective_rank != 2U && desc.effective_rank != 3U) {
+    return false;
+  }
+  const auto &one = af::sym::kSymbolOne;
+  const auto &zero = af::sym::kSymbolZero;
+  const auto &m = desc.output_dims[kRows];
+  const auto &n = desc.output_dims[kInner];
+  const auto &step = desc.input_strides[kInner];
+  const auto &pitch = desc.output_strides[kRows];
+  constexpr int32_t kFp32UbBlockElements = 8;
+  const auto alignment = CreateExpr(kFp32UbBlockElements);
+  const Expr outer = desc.effective_rank == 3U ? desc.output_dims[kOuter] : one;
+  // A zero GM stride repeats each source value across the inner UB row.
+  const Expr gm_gap =
+      calibration.broadcasts_inner
+          ? Expr(zero)
+          : af::sym::Max(zero, m - step) + af::sym::Max(zero, step - m - CreateExpr(calibration.max_gm_gap));
+  Expr violation = zero;
+  for (const auto &part : {AbsExpr(outer - one), OutsideRange(m, calibration.min_rows, calibration.max_rows),
+                           OutsideRange(n, calibration.min_width, calibration.max_width),
+                           OutsideRange(step, calibration.min_gm_pitch, calibration.max_gm_pitch), gm_gap,
+                           AbsExpr(af::sym::Mod(step, CreateExpr(calibration.gm_alignment))),
+                           OutsideRange(block_dim, calibration.min_active_cores, calibration.max_active_cores),
+                           AbsExpr(desc.input_strides[kRows] - one), AbsExpr(desc.output_strides[kInner] - one),
+                           AbsExpr(pitch - alignment * af::sym::Ceiling(af::sym::Div(n, alignment))),
+                           calibration.requires_ub_padding ? af::sym::Max(zero, n + one - pitch) : Expr(zero)}) {
+    if (af::SymbolicUtils::StaticCheckGt(part, zero) == af::TriBool::kTrue) {
+      return false;
+    }
+    violation = violation + part;
+  }
+  const auto fitted = CreateExpr(calibration.startup) + m * n * CreateExpr(calibration.cycles_per_element);
+  if (af::SymbolicUtils::StaticCheckEq(violation, zero) == af::TriBool::kTrue) {
+    high_core = fitted;
+    return true;
+  }
+  Expr guarded;
+  GetPerfVar(calibration.perf_var, guarded, result.ternary_ops);
+  TernaryOp guard(CondType::K_EQ, violation, zero, fitted, high_core);
+  guard.SetVariable(guarded);
+  result.ternary_ops[guarded] = std::move(guard);
+  high_core = guarded;
+  return true;
+}
+
+// The outer axis is contiguous in GM. The two inner axes have a regular GM stride and padded UB rows.
+bool ApplyFp32ShortStrided3DCost(const NddmaNormalizedDesc &desc, const Expr &block_dim, Expr &high_core,
+                                 NddmaModelResult &result) {
+  constexpr size_t kInner = 0U;
+  constexpr size_t kMiddle = 1U;
+  constexpr size_t kOuter = 2U;
+  const auto &one = af::sym::kSymbolOne;
+  if (desc.effective_rank != 3U ||
+      af::SymbolicUtils::StaticCheckEq(desc.input_strides[kOuter], one) != af::TriBool::kTrue ||
+      af::SymbolicUtils::StaticCheckEq(desc.output_strides[kInner], one) != af::TriBool::kTrue) {
+    return false;
+  }
+  const auto &width = desc.output_dims[kInner];
+  const auto &rows = desc.output_dims[kMiddle];
+  const auto &planes = desc.output_dims[kOuter];
+  const auto &pitch = desc.input_strides[kInner];
+  const auto alignment = CreateExpr(dma_calibration_v2::kAlignedRowElements);
+  const auto ub_rows = alignment * af::sym::Ceiling(af::sym::Div(width, alignment));
+  const auto &zero = af::sym::kSymbolZero;
+  Expr violation = zero;
+  for (const auto &part :
+       {OutsideRange(width, 9, 13), OutsideRange(rows, 9, 13), OutsideRange(planes, 2, 8), OutsideRange(pitch, 32, 96),
+        AbsExpr(af::sym::Mod(pitch, alignment)), OutsideRange(block_dim, 8, 48),
+        AbsExpr(desc.input_strides[kMiddle] - width * pitch), AbsExpr(desc.output_strides[kMiddle] - ub_rows),
+        AbsExpr(desc.output_strides[kOuter] - rows * ub_rows)}) {
+    if (af::SymbolicUtils::StaticCheckGt(part, zero) == af::TriBool::kTrue) {
+      return false;
+    }
+    violation = violation + part;
+  }
+  constexpr double kStartupCycles = 608.2696492508591;
+  constexpr double kCyclesPerElement = 0.23230562028891266;
+  const auto fitted = CreateExpr(kStartupCycles) + CreateExpr(kCyclesPerElement) * width * rows * planes;
+  if (af::SymbolicUtils::StaticCheckEq(violation, zero) == af::TriBool::kTrue) {
+    high_core = fitted;
+    return true;
+  }
+  Expr guarded;
+  GetPerfVar("nddma_short_strided3d_fp32", guarded, result.ternary_ops);
+  TernaryOp guard(CondType::K_EQ, violation, zero, fitted, high_core);
+  guard.SetVariable(guarded);
+  result.ternary_ops[guarded] = std::move(guard);
+  high_core = guarded;
+  return true;
+}
+
+std::vector<Expr> GetNarrowSourceDomain(const Expr &m, const Expr &n, const Expr &step, const Expr &block_dim,
+                                        bool include_wider_source, bool wide_pitch) {
+  auto source_width = OutsideRange(m, 1, 8);
+  if (include_wider_source) {
+    // The same request-cost model was verified for a wider source over this
+    // narrower range of long axes and GM pitches.
+    const auto wider_domain = OutsideRange(m, 9, 11) + OutsideRange(n, 2608, 2880) + OutsideRange(step, 324, 384);
+    source_width = af::sym::Min(source_width, wider_domain);
+  }
+  return wide_pitch
+             ? std::vector<Expr>{OutsideRange(m, 4, 10), OutsideRange(n, 1280, 2688), OutsideRange(step, 768, 1280),
+                                 OutsideRange(block_dim, 32, 56), AbsExpr(af::sym::Mod(n, CreateExpr(8)))}
+             : std::vector<Expr>{source_width, OutsideRange(n, 512, 16384), OutsideRange(step, 30, 512)};
+}
+
 // Long strided reads with a narrow contiguous GM window are request-bound.
 // Fit the existing startup + payload + shared-core form using the number of
 // strided positions; UB payload alone hides the cost when the GM window is tiny.
 bool ApplyNarrowSourceHigh(const NddmaNormalizedDesc &normalized, const NddmaNormalizedDesc *physical,
-                           const Expr &block_dim, Expr &high_core, NddmaModelResult &result) {
+                           const Expr &block_dim, Expr &high_core, NddmaModelResult &result, bool wide_pitch = false) {
   NddmaNg2Config config{};
   if (physical == nullptr && !IsNg2Eligible(normalized, config, false)) {
     return false;
   }
   if (physical != nullptr &&
-      af::SymbolicUtils::StaticCheckEq(physical->output_strides[0], af::sym::kSymbolOne) != af::TriBool::kTrue) {
+      (wide_pitch ||
+       af::SymbolicUtils::StaticCheckEq(physical->output_strides[0], af::sym::kSymbolOne) != af::TriBool::kTrue)) {
     return false;
   }
   const Expr m = physical == nullptr ? normalized.output_dims[config.m_pos] : af::sym::kSymbolOne;
   const Expr n = physical == nullptr ? normalized.output_dims[config.n_pos] : physical->output_dims[0];
   const Expr step = physical == nullptr ? normalized.input_strides[config.n_pos] : physical->input_strides[0];
   const auto &zero = af::sym::kSymbolZero;
-  const auto outside = [&](const Expr &value, int32_t lower, int32_t upper) {
-    return af::sym::Max(zero, af::sym::Max(CreateExpr(lower) - value, value - CreateExpr(upper)));
-  };
   Expr violation = zero;
-  std::vector<Expr> checks = {outside(m, 1, 8), outside(n, 512, 16384), outside(step, 30, 512)};
+  auto checks = GetNarrowSourceDomain(m, n, step, block_dim, physical == nullptr, wide_pitch);
   if (physical == nullptr) {
     checks.emplace_back(AbsExpr(normalized.input_strides[config.m_pos] - af::sym::kSymbolOne));
     checks.emplace_back(AbsExpr(normalized.output_strides[config.m_pos] - n));
@@ -829,13 +1471,17 @@ bool ApplyNarrowSourceHigh(const NddmaNormalizedDesc &normalized, const NddmaNor
     violation = violation + check;
   }
   const Expr shared = af::sym::Max(block_dim - CreateExpr(32), zero) / CreateExpr(24);
-  const Expr fitted = CreateExpr(267.664177) + n * (CreateExpr(4.98188927) + CreateExpr(4.53423011) * shared);
+  // Use the fresh NORMAL policy for narrow reads, where neighbouring
+  // blocks can share cache lines even when each launch reads new data.
+  const Expr fitted =
+      wide_pitch ? CreateExpr(422.798) + n / CreateExpr(2048) * (CreateExpr(6219.263) + CreateExpr(2394.068) * shared)
+                 : CreateExpr(267.664177) + n * (CreateExpr(4.98188927) + CreateExpr(4.53423011) * shared);
   if (af::SymbolicUtils::StaticCheckEq(violation, zero) == af::TriBool::kTrue) {
     high_core = fitted;
     return true;
   }
   Expr guarded;
-  GetPerfVar("nddma_narrow_source", guarded, result.ternary_ops);
+  GetPerfVar(wide_pitch ? "nddma_narrow_source_wide_pitch" : "nddma_narrow_source", guarded, result.ternary_ops);
   TernaryOp guard(CondType::K_EQ, violation, zero, std::make_shared<IfCase>(fitted),
                   std::make_shared<IfCase>(high_core));
   guard.SetVariable(guarded);
@@ -975,9 +1621,14 @@ af::Status EvaluateNddmaModel(const NddmaDescriptorInfo &descriptor, const std::
   Expr high_core;
   NddmaNg2Config ng2_config{};
   const auto *ng2_params = IsNg2Eligible(normalized, ng2_config) ? GetNddmaNg2Params(dtype_size) : nullptr;
-  const std::string low_model = ng2_params != nullptr                            ? "NDDMA_ND_MULTICORE_NG2"
-                                : (direct_1d || normalized.effective_rank == 1U) ? "NDDMA_1D_MULTICORE_V2"
-                                                                                 : "NDDMA_ND_MULTICORE_V1";
+  // NG2 is a fitted multiplier, not a signed correction. Use the existing ND
+  // model outside its positive domain, including symbolic tiles at runtime.
+  if (ng2_params != nullptr && IsStaticNonPositive(GetNg2Multiplier(normalized, *ng2_params, ng2_config))) {
+    ng2_params = nullptr;
+  }
+  std::string low_model = ng2_params != nullptr                            ? "NDDMA_ND_MULTICORE_NG2"
+                          : (direct_1d || normalized.effective_rank == 1U) ? "NDDMA_1D_MULTICORE_V2"
+                                                                           : "NDDMA_ND_MULTICORE_V1";
   std::string high_model = low_model;
   if (ng2_params != nullptr) {
     const auto *calibrated = GetCalibratedNg2Params(dtype_size);
@@ -988,6 +1639,32 @@ af::Status EvaluateNddmaModel(const NddmaDescriptorInfo &descriptor, const std::
       GE_ASSERT_SUCCESS(
           BuildCalibratedNg2High(normalized, ng2_config, *calibrated, dtype_size, block_dim, high_core, result));
       high_model = "NDDMA_ND_MULTICORE_NG2_V2";
+    }
+    const Expr multiplier = GetNg2Multiplier(normalized, *ng2_params, ng2_config);
+    if (!multiplier.IsConstExpr() && result.fallback_reason == NddmaFallbackReason::kNone) {
+      Expr nd_low;
+      Expr nd_high;
+      const auto nd_fallback_reason = BuildNddmaCoreCycles(normalized, *params, dtype_size, nd_low, nd_high);
+      const auto guard_domain = [&](Expr &cycles, const Expr &fallback, const char *name) {
+        Expr guarded;
+        GetPerfVar(name, guarded, result.ternary_ops);
+        TernaryOp guard(CondType::K_LT, af::sym::kSymbolZero, multiplier, std::make_shared<IfCase>(cycles),
+                        std::make_shared<IfCase>(fallback));
+        guard.SetVariable(guarded);
+        result.ternary_ops[guarded] = std::move(guard);
+        cycles = guarded;
+      };
+      if (nd_fallback_reason == NddmaFallbackReason::kNone) {
+        if (af::SymbolicUtils::StaticCheckGt(block_dim, CreateExpr(kLowCoreUpperBound)) != af::TriBool::kTrue) {
+          guard_domain(low_core, nd_low, "nddma_ng2_low_domain");
+          low_model = RuntimeModelDispatch(low_model, "NDDMA_ND_MULTICORE_V1");
+        }
+        if (!use_calibrated &&
+            af::SymbolicUtils::StaticCheckLe(block_dim, CreateExpr(kLowCoreUpperBound)) != af::TriBool::kTrue) {
+          guard_domain(high_core, nd_high, "nddma_ng2_high_domain");
+          high_model = RuntimeModelDispatch(high_model, "NDDMA_ND_MULTICORE_V1");
+        }
+      }
     }
   } else {
     result.fallback_reason =
@@ -1005,14 +1682,45 @@ af::Status EvaluateNddmaModel(const NddmaDescriptorInfo &descriptor, const std::
     return true;
   };
   if (ng2_params == nullptr && !direct_1d) {
-    if (!track_fit("NDDMA_ND_MULTICORE_PACKED3D_V1",
-                   [&] { return ApplyPacked3DHighCoreCost(normalized, dtype_size, block_dim, high_core, result); })) {
+    if (dtype == "float16") {
+      (void)track_fit("NDDMA_ND_MULTICORE_SHORT_INNER_STRIDE_FP16_V1",
+                      [&] { return ApplyFp16ShortInnerStrideScale(normalized, *params, high_core, result); });
+      if (!track_fit("NDDMA_ND_MULTICORE_SPARSE_FP16_V2", [&] {
+            return ApplySparseFp16NdResidualScale(normalized, *params, block_dim, high_core, result);
+          })) {
+        (void)track_fit("NDDMA_ND_MULTICORE_TWO_LEVEL_SPARSE_FP16_V1", [&] {
+          return ApplyFp16TwoLevelSparseScale(normalized, *params, block_dim, high_core, result);
+        });
+        (void)track_fit("NDDMA_ND_MULTICORE_FP16_COMMENSURATE_STRIDES_V1", [&] {
+          return ApplyFp16CommensurateStrideScale(normalized, *params, block_dim, high_core, result);
+        });
+      }
+    }
+    if (dtype == "float32") {
+      if (!track_fit("NDDMA_ND_MULTICORE_WIDE_PADDED_ROW_FP32_V1",
+                     [&] { return ApplyFp32WidePaddedRowScale(normalized, *params, block_dim, high_core, result); }) &&
+          !track_fit("NDDMA_ND_MULTICORE_SPARSE_WIDE_PLANE_FP32_V1", [&] {
+            return ApplyFp32SparseWidePlaneScale(normalized, *params, block_dim, high_core, result);
+          })) {
+        (void)track_fit("NDDMA_ND_MULTICORE_PACKED_SHORT_FP32_V1", [&] {
+          return ApplyFp32PackedShortRowResidualScale(normalized, *params, block_dim, high_core, result);
+        });
+      }
+    }
+    if (!track_fit("NDDMA_ND_MULTICORE_PACKED3D_V1", [&] {
+          return ApplyPacked3DHighCoreCost(normalized, dtype_size, block_dim, high_core, result) ||
+                 (dtype == "float32" && ApplyFp32UnitAxisPacked3DCost(normalized, block_dim, high_core, result));
+        })) {
       const char *sparse_model =
           normalized.effective_rank == 3U ? "NDDMA_ND_MULTICORE_SPARSE3D_V2" : "NDDMA_ND_MULTICORE_SPARSE4D_V2";
       (void)track_fit(sparse_model, [&] {
         return ApplySparseNdResidualScale(normalized, dtype_size, *params, block_dim, high_core, result);
       });
     }
+  }
+  if (dtype == "float32" && !direct_1d && ng2_params == nullptr) {
+    (void)track_fit("NDDMA_ND_MULTICORE_SHORT_STRIDED3D_FP32_V1",
+                    [&] { return ApplyFp32ShortStrided3DCost(normalized, block_dim, high_core, result); });
   }
   // A padded symbolic row pitch can equal the actual inner dimension at runtime
   // (e.g. 8*ceil(n/8) when n=8). Select the packed calibration only on equality.
@@ -1026,6 +1734,11 @@ af::Status EvaluateNddmaModel(const NddmaDescriptorInfo &descriptor, const std::
         af::SymbolicUtils::StaticCheckEq(pitch, inner) != af::TriBool::kTrue) {
       (void)track_fit("NDDMA_ND_MULTICORE_NG2_PADDED_V1",
                       [&] { return ApplyPaddedNg2High(normalized, packed_config, block_dim, high_core, result); });
+      (void)track_fit("NDDMA_ND_MULTICORE_NG2_SPARSE_PADDED_FP32_V1", [&] {
+        return ApplyPaddedNg2High(normalized, packed_config, block_dim, high_core, result, true);
+      });
+      (void)track_fit("NDDMA_ND_MULTICORE_NG2_SHORT_PADDED_FP32_V1",
+                      [&] { return ApplyShortPaddedNg2High(normalized, packed_config, block_dim, high_core, result); });
     }
     if ((!pitch.IsConstExpr() || !inner.IsConstExpr()) &&
         af::SymbolicUtils::StaticCheckEq(pitch, inner) != af::TriBool::kTrue) {
@@ -1041,6 +1754,13 @@ af::Status EvaluateNddmaModel(const NddmaDescriptorInfo &descriptor, const std::
       high_core = guarded_high;
       high_model = RuntimeModelDispatch("NDDMA_ND_MULTICORE_NG2_V2", high_model);
     }
+    if (dtype == "float16" && normalized.effective_rank == 2U) {
+      (void)track_fit("NDDMA_ND_MULTICORE_NG2_MEDIUM_PITCH_FP16_V1",
+                      [&] { return ApplyFp16MediumPitchNg2High(normalized, packed_config, high_core, result); });
+      (void)track_fit("NDDMA_ND_MULTICORE_NG2_WIDE_FP16_V1", [&] {
+        return ApplyWideFp16Ng2High(normalized, packed_config, *packed_params, block_dim, high_core, result);
+      });
+    }
   }
   NddmaNg2Config small_config{};
   if (dtype == "int64" && normalized.effective_rank == 2U && IsNg2Eligible(normalized, small_config, false)) {
@@ -1050,6 +1770,26 @@ af::Status EvaluateNddmaModel(const NddmaDescriptorInfo &descriptor, const std::
   if (dtype == "float32") {
     (void)track_fit("NDDMA_ND_MULTICORE_NARROW_SOURCE_V1", [&] {
       return ApplyNarrowSourceHigh(normalized, direct_1d ? &physical_1d : nullptr, block_dim, high_core, result);
+    });
+    if (!direct_1d) {
+      (void)track_fit("NDDMA_ND_MULTICORE_NARROW_SOURCE_WIDE_PITCH_FP32_V1",
+                      [&] { return ApplyNarrowSourceHigh(normalized, nullptr, block_dim, high_core, result, true); });
+    }
+  }
+  if (dtype == "float32") {
+    (void)track_fit("NDDMA_ND_UNIT_BROADCAST_ROW_FP32_V1",
+                    [&] { return ApplyFp32UnitBroadcastRowCost(normalized, block_dim, high_core, result); });
+    (void)track_fit("NDDMA_ND_MULTICORE_SMALL_DENSE_PADDED_FP32_V1", [&] {
+      return ApplyDensePaddedNddma(normalized, block_dim, high_core, result, kSmallDensePaddedTranspose);
+    });
+    (void)track_fit("NDDMA_ND_MULTICORE_DENSE_PADDED_FP32_V1", [&] {
+      return ApplyDensePaddedNddma(normalized, block_dim, high_core, result, kDensePaddedTranspose);
+    });
+    (void)track_fit("NDDMA_ND_MULTICORE_NARROW_DENSE_PADDED_FP32_V1", [&] {
+      return ApplyDensePaddedNddma(normalized, block_dim, high_core, result, kNarrowDensePaddedTranspose);
+    });
+    (void)track_fit("NDDMA_ND_PADDED_INNER_BROADCAST_FP32_V1", [&] {
+      return ApplyDensePaddedNddma(normalized, block_dim, high_core, result, kPaddedInnerBroadcast);
     });
   }
   if (direct_store && dtype == "float32") {

@@ -8,6 +8,7 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 #include "vf_perf_utils.h"
+#include <algorithm>
 #include <numeric>
 #include "common_utils.h"
 #include "api_perf_register/api_perf_factory.h"
@@ -75,8 +76,10 @@ Expr GetVFApiCount(const NodePerfInfo &node_info, const uint32_t micro_api_len, 
 
 // 获取vf api的基础latency和throughput
 af::Status GetVFNodePerf(const NodePerfInfo &node_info, const uint32_t micro_api_len, bool strides_equal,
-                         const ascir_param::VectorFuncNodeParams &vector_func_params, Expr &latency, Expr &throughput) {
-  GE_ASSERT_SUCCESS(VfPerfUtils::GetVfInstructPerf(node_info.optype, node_info.input_dtype, latency, throughput));
+                         const ascir_param::VectorFuncNodeParams &vector_func_params, bool use_calibrated_rsqrt,
+                         Expr &latency, Expr &throughput) {
+  GE_ASSERT_SUCCESS(VfPerfUtils::GetVfInstructPerf(node_info.optype, node_info.input_dtype, latency, throughput,
+                                                   use_calibrated_rsqrt));
   // 简化计算，后续进一步考虑每个op的latency和throughput的掩盖
   Expr api_count = GetVFApiCount(node_info, micro_api_len, strides_equal, vector_func_params);
   api_count = api_count.Simplify();
@@ -92,10 +95,16 @@ af::Status GetVectorFunctionPerfByStrideStatus(const std::vector<NodePerfInfo> &
                                                const ascir_param::VectorFuncNodeParams &vector_func_params, Expr &res) {
   Expr all_micro_api_cost = CreateExpr(0);
   Expr max_latency = CreateExpr(0);
+  // The Rsqrt calibration uses FP32 loads and stores. Mixed-precision conversion
+  // sequences have different issue and dependency costs.
+  const bool use_calibrated_rsqrt = std::none_of(node_perf_infos.begin(), node_perf_infos.end(), [](const auto &node) {
+    return node.optype == kCast && node.input_dtype != node.output_dtype;
+  });
   for (const auto &node_info : node_perf_infos) {
     Expr latency = CreateExpr(0);
     Expr throughput = CreateExpr(0);
-    GE_ASSERT_SUCCESS(GetVFNodePerf(node_info, micro_api_len, strides_equal, vector_func_params, latency, throughput));
+    GE_ASSERT_SUCCESS(GetVFNodePerf(node_info, micro_api_len, strides_equal, vector_func_params, use_calibrated_rsqrt,
+                                    latency, throughput));
     all_micro_api_cost = af::sym::Add(all_micro_api_cost, throughput);
     max_latency = af::sym::Max(max_latency, latency);
   }
@@ -114,10 +123,12 @@ af::Status GetVectorFunctionPerfByStrideStatus(const std::vector<NodePerfInfo> &
 }  // namespace
 
 af::Status VfPerfUtils::GetVfInstructPerf(const std::string &micro_api_type, const std::string &data_type,
-                                          Expr &latency, Expr &throughput) {
+                                          Expr &latency, Expr &throughput, bool use_calibrated_rsqrt) {
   const auto param_table = GetParamPerfTable();
   GE_ASSERT_NOTNULL(param_table);
-  const auto &api_perf_table = param_table->GetVfInstructPerfTable(micro_api_type);
+  const auto &api_perf_table = (micro_api_type != kRsqrt || use_calibrated_rsqrt)
+                                   ? param_table->GetVectorFunctionInstructPerfTable(micro_api_type)
+                                   : param_table->GetVfInstructPerfTable(micro_api_type);
   for (const auto &api_perf : api_perf_table) {
     if (std::count(api_perf.support_data_types.begin(), api_perf.support_data_types.end(), data_type) > 0) {
       latency = CreateExpr(api_perf.latency);

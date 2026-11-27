@@ -1,0 +1,14 @@
+factor_id,experiment,role,dtype,dtype_size,block_dim,api,api_rank,dims,gm_or_input_strides,ub_or_output_strides,bytes_per_call,input_span_bytes,output_span_bytes,point_flush,nd_dci,packing_extra
+train_c16_m64_n7_pitch2048,narrow-transpose-padded,train,float32,4,16,NDDMA,2,64x7,1x2048,8x1,1792,49408,2044,0,0,0
+train_c24_m96_n9_pitch3072,narrow-transpose-padded,train,float32,4,24,NDDMA,2,96x9,1x3072,16x1,3456,98688,6116,0,0,0
+train_c32_m64_n10_pitch4096,narrow-transpose-padded,train,float32,4,32,NDDMA,2,64x10,1x4096,16x1,2560,147712,4072,0,0,0
+train_c40_m112_n12_pitch5120,narrow-transpose-padded,train,float32,4,40,NDDMA,2,112x12,1x5120,16x1,5376,225728,7152,0,0,0
+train_c48_m128_n7_pitch4096,narrow-transpose-padded,train,float32,4,48,NDDMA,2,128x7,1x4096,8x1,3584,98816,4092,0,0,0
+train_c56_m160_n9_pitch6144,narrow-transpose-padded,train,float32,4,56,NDDMA,2,160x9,1x6144,16x1,5760,197248,10212,0,0,0
+train_c32_m160_n12_pitch8192,narrow-transpose-padded,train,float32,4,32,NDDMA,2,160x12,1x8192,16x1,7680,361088,10224,0,0,0
+train_c24_m128_n11_pitch4096,narrow-transpose-padded,train,float32,4,24,NDDMA,2,128x11,1x4096,16x1,5632,164352,8172,0,0,0
+holdout_c20_m80_n9_pitch2560,narrow-transpose-padded,holdout,float32,4,20,NDDMA,2,80x9,1x2560,16x1,2880,82240,5092,0,0,0
+holdout_c28_m112_n8_pitch4096,narrow-transpose-padded,holdout,float32,4,28,NDDMA,2,112x8,1x4096,8x1,3584,115136,3584,0,0,0
+holdout_c36_m144_n10_pitch5120,narrow-transpose-padded,holdout,float32,4,36,NDDMA,2,144x10,1x5120,16x1,5760,184896,9192,0,0,0
+holdout_c44_m96_n11_pitch8192,narrow-transpose-padded,holdout,float32,4,44,NDDMA,2,96x11,1x8192,16x1,4224,328064,6124,0,0,0
+known_c32_m128_n9_pitch4096,narrow-transpose-padded,known,float32,4,32,NDDMA,2,128x9,1x4096,16x1,4608,131584,8164,0,0,0

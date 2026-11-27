@@ -1,0 +1,14 @@
+factor_id,experiment,role,dtype,dtype_size,block_dim,api,api_rank,dims,gm_or_input_strides,ub_or_output_strides,bytes_per_call,input_span_bytes,output_span_bytes,point_flush,nd_dci,packing_extra
+train_c18_o1_n32_w32_p256_load,short-strided-normal-load,train,float32,4,18,LOAD,2,32x32,256x1,32x1,4096,31872,4096,0,0,0
+train_c24_o1_n60_w64_p384_load,short-strided-normal-load,train,float32,4,24,LOAD,2,60x64,384x1,64x1,15360,90880,15360,0,0,0
+train_c32_o1_n48_w64_p640_load,short-strided-normal-load,train,float32,4,32,LOAD,2,48x64,640x1,64x1,12288,120576,12288,0,0,0
+train_c36_o1_n72_w96_p512_load,short-strided-normal-load,train,float32,4,36,LOAD,2,72x96,512x1,96x1,27648,145792,27648,0,0,0
+train_c44_o1_n32_w64_p384_load,short-strided-normal-load,train,float32,4,44,LOAD,2,32x64,384x1,64x1,8192,47872,8192,0,0,0
+train_c48_o1_n64_w96_p768_load,short-strided-normal-load,train,float32,4,48,LOAD,2,64x96,768x1,96x1,24576,193920,24576,0,0,0
+train_c52_o1_n80_w64_p640_load,short-strided-normal-load,train,float32,4,52,LOAD,2,80x64,640x1,64x1,20480,202496,20480,0,0,0
+train_c56_o1_n40_w128_p512_load,short-strided-normal-load,train,float32,4,56,LOAD,2,40x128,512x1,128x1,20480,80384,20480,0,0,0
+holdout_c20_o1_n42_w64_p512_load,short-strided-normal-load,holdout,float32,4,20,LOAD,2,42x64,512x1,64x1,10752,84224,10752,0,0,0
+holdout_c30_o1_n64_w32_p256_load,short-strided-normal-load,holdout,float32,4,30,LOAD,2,64x32,256x1,32x1,8192,64640,8192,0,0,0
+holdout_c40_o1_n56_w64_p576_load,short-strided-normal-load,holdout,float32,4,40,LOAD,2,56x64,576x1,64x1,14336,126976,14336,0,0,0
+holdout_c54_o1_n70_w96_p640_load,short-strided-normal-load,holdout,float32,4,54,LOAD,2,70x96,640x1,96x1,26880,177024,26880,0,0,0
+known_c43_o1_n50_w64_p512_load,short-strided-normal-load,known,float32,4,43,LOAD,2,50x64,512x1,64x1,12800,100608,12800,0,0,0

@@ -39,7 +39,10 @@
 #include "pre_process/pre_process.h"
 #include "static_ub_template_filter.h"
 #include "common/l2_cache_hint_manager.h"
+#include "common/platform_context.h"
+#include "backend/backend_spec.h"
 #include "schedule_graph_validator.h"
+#include "utils/extern_math_util.h"
 
 using namespace ascir;
 using namespace optimize;
@@ -51,16 +54,129 @@ const char *const kAttrAscGraph = "ascgraph";
 constexpr int64_t kInvalidNodeId = -1;
 constexpr size_t kMaxGraphNameLength = 60UL;  // 截断后的最大graph name长度
 
+bool GetCopyGroupNodes(const af::AscGraph &graph, af::AscNodePtr &load_node, af::AscNodePtr &store_node) {
+  af::AscNodePtr data_node;
+  for (const auto &node : graph.GetAllNodes()) {
+    if (af::ops::IsOps<Load>(node) && load_node == nullptr) {
+      load_node = node;
+    } else if (af::ops::IsOps<Data>(node) && data_node == nullptr) {
+      data_node = node;
+    } else if (af::ops::IsOps<Store>(node) && store_node == nullptr) {
+      store_node = node;
+    } else if (!af::ops::IsOps<Output>(node)) {
+      return false;
+    }
+  }
+  return load_node != nullptr && data_node != nullptr && store_node != nullptr && load_node->outputs().size() == 1U &&
+         store_node->outputs().size() == 1U;
+}
+bool GetContiguousCopyExtent(const af::AscGraph &graph, int64_t &elements) {
+  const auto axes = graph.GetAllAxis();
+  // The offset-store copy template has one non-unit source axis before tiling.
+  // Read that original extent, since the scheduled repeats include tile variables.
+  elements = 1;
+  for (const auto &axis : axes) {
+    if (axis->type != af::Axis::kAxisTypeOriginal) {
+      continue;
+    }
+    int64_t extent = 0;
+    if (!axis->size.GetConstValue(extent) || extent <= 0 || (extent > 1 && elements > 1)) {
+      return false;
+    }
+    elements *= extent;
+  }
+  return true;
+}
+bool EstimateCopyGroupMinCores(const ascir::ScheduleGroup &group, const ge::PlatformInfo &platform, int64_t &needed) {
+  if (group.impl_graphs.size() != 1U || !group.runtime_shape_vars.empty()) {
+    return false;
+  }
+  af::AscNodePtr load_node;
+  af::AscNodePtr store_node;
+  if (!GetCopyGroupNodes(group.impl_graphs[0], load_node, store_node)) {
+    return false;
+  }
+  const auto &ub = load_node->outputs[0].attr;
+  const auto &dst = store_node->outputs[0].attr;
+  if (ub.vectorized_axis.size() != 1U || dst.vectorized_axis != ub.vectorized_axis ||
+      !ScheduleUtils::IsVectorizedAxisContinuousInGM(ub) || !ScheduleUtils::IsVectorizedAxisContinuousInGM(dst) ||
+      ub.que.buf_num <= 0 || ub.dtype != dst.dtype) {
+    return false;
+  }
+  int64_t elements = 0;
+  if (!GetContiguousCopyExtent(group.impl_graphs[0], elements)) {
+    return false;
+  }
+  const int64_t element_bytes = ge::GetSizeByDataType(ub.dtype);
+  const int64_t capacity = platform.ub_size / ub.que.buf_num;
+  int64_t total = 0;
+  if (capacity <= 0 || element_bytes <= 0 || ge::MulOverflow(elements, element_bytes, total)) {
+    return false;
+  }
+  needed = std::min((total - 1) / capacity, static_cast<int64_t>(platform.aiv_num)) + 1;
+  return true;
+}
+
+// Two static contiguous copy groups can oversubscribe the vector cores even
+// at their largest one-tile UB allocation. Give each group the full core
+// budget when they would already need to share cores.
+bool CopyGroupsExceedParallelBudget(const ascir::ScheduledResult &result) {
+  if (result.semantic_name != ascgen_utils::template_semantic::kConcatOffsetStore ||
+      result.schedule_groups.size() != 2U) {
+    return false;
+  }
+  const auto spec = optimize::BackendSpec::GetInstance();
+  if (spec == nullptr ||
+      spec->transpose_mode != static_cast<uint32_t>(optimize::TransposeMode::TRANSPOSE_MODE_UNNORMAL)) {
+    return false;
+  }
+  ge::PlatformInfo platform;
+  if (ge::PlatformContext::GetInstance().GetPlatformInfo(platform) != af::SUCCESS || platform.aiv_num <= 0 ||
+      platform.ub_size <= 0) {
+    return false;
+  }
+  int64_t needed = 0;
+  for (const auto &group : result.schedule_groups) {
+    int64_t group_cores = 0;
+    if (!EstimateCopyGroupMinCores(group, platform, group_cores)) {
+      return false;
+    }
+    needed += group_cores;
+  }
+  return needed > platform.aiv_num;
+}
+
 bool CanAlignRCoreWorkspace(const ScheduleTask &schedule_task) {
   if (schedule_task.reduce_type != ReduceTemplateType::kRCore) {
     return false;
   }
+  const auto spec = BackendSpec::GetInstance();
+  const bool supports_workspace_alignment =
+      spec != nullptr && spec->transpose_mode == static_cast<uint32_t>(TransposeMode::TRANSPOSE_MODE_UNNORMAL);
   for (const auto &grouped_graph : schedule_task.grouped_graphs) {
     for (const auto &node : grouped_graph.GetAllNodes()) {
       if (node == nullptr) {
         continue;
       }
       if (ascgen_utils::IsArgReduceType(node->GetType())) {
+        return true;
+      }
+      if (!supports_workspace_alignment || !IsOps<Sum>(node) || node->outputs().size() != 1U ||
+          node->outputs[0].attr.dtype != ge::DT_FLOAT) {
+        continue;
+      }
+      // One FP32 partial per core fits into a shared cache line without alignment.
+      const auto &shape = node->outputs[0].attr.repeats;
+      if (!std::all_of(shape.begin(), shape.end(), [](const af::Expression &extent) {
+            return af::SymbolicUtils::StaticCheckEq(extent, af::sym::kSymbolOne) == af::TriBool::kTrue;
+          })) {
+        continue;
+      }
+      const auto producers = node->GetInDataNodes();
+      if (std::any_of(producers.begin(), producers.end(), [](const af::NodePtr &producer) {
+            const auto asc_producer = std::dynamic_pointer_cast<af::AscNode>(producer);
+            return asc_producer != nullptr && ScheduleUtils::IsElewise(asc_producer);
+          })) {
         return true;
       }
     }
@@ -1575,8 +1691,9 @@ void Optimizer::TryEnableGroupParallel(FusedScheduledResult &fused_scheduled_res
         schedule_result.enable_group_parallel = false;
         return;
       }
-      schedule_result.enable_group_parallel =
-          schedule_result.schedule_groups.size() > 1UL && schedule_result.var_relations.empty();
+      schedule_result.enable_group_parallel = schedule_result.schedule_groups.size() > 1UL &&
+                                              schedule_result.var_relations.empty() &&
+                                              !CopyGroupsExceedParallelBudget(schedule_result);
     }
   }
 }

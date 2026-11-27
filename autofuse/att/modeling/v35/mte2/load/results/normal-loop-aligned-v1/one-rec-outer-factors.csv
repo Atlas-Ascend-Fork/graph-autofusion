@@ -1,0 +1,10 @@
+factor_id,experiment,role,dtype,dtype_size,block_dim,api,api_rank,dims,gm_or_input_strides,ub_or_output_strides,bytes_per_call,input_span_bytes,output_span_bytes,point_flush,nd_dci,packing_extra
+train_c28_o8_n9_w96_p768_load_normal_loop2d,wide-row-hardware-loop,train,float32,4,28,LOAD_NORMAL_LOOP2D,3,8x9x96,96x768x1,864x96x1,27648,27648,27648,0,0,0
+train_c40_o8_n12_w128_p1024_load_normal_loop2d,wide-row-hardware-loop,train,float32,4,40,LOAD_NORMAL_LOOP2D,3,8x12x128,128x1024x1,1536x128x1,49152,49152,49152,0,0,0
+train_c48_o7_n16_w128_p1152_load_normal_loop2d,wide-row-hardware-loop,train,float32,4,48,LOAD_NORMAL_LOOP2D,3,7x16x128,128x1152x1,2048x128x1,57344,72704,57344,0,0,0
+train_c56_o8_n18_w128_p1152_load_normal_loop2d,wide-row-hardware-loop,train,float32,4,56,LOAD_NORMAL_LOOP2D,3,8x18x128,128x1152x1,2304x128x1,73728,82432,73728,0,0,0
+train_c52_o8_n12_w160_p1280_load_normal_loop2d,wide-row-hardware-loop,train,float32,4,52,LOAD_NORMAL_LOOP2D,3,8x12x160,160x1280x1,1920x160x1,61440,61440,61440,0,0,0
+holdout_c32_o8_n15_w96_p768_load_normal_loop2d,wide-row-hardware-loop,holdout,float32,4,32,LOAD_NORMAL_LOOP2D,3,8x15x96,96x768x1,1440x96x1,46080,46080,46080,0,0,0
+holdout_c54_o8_n16_w128_p1024_load_normal_loop2d,wide-row-hardware-loop,holdout,float32,4,54,LOAD_NORMAL_LOOP2D,3,8x16x128,128x1024x1,2048x128x1,65536,65536,65536,0,0,0
+holdout_c56_o8_n11_w160_p1280_load_normal_loop2d,wide-row-hardware-loop,holdout,float32,4,56,LOAD_NORMAL_LOOP2D,3,8x11x160,160x1280x1,1760x160x1,56320,56320,56320,0,0,0
+known_c53_o8_n13_w128_p1024_load_normal_loop2d,wide-row-hardware-loop,known,float32,4,53,LOAD_NORMAL_LOOP2D,3,8x13x128,128x1024x1,1664x128x1,53248,53248,53248,0,0,0

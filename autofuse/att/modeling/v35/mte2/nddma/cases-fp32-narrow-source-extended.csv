@@ -1,0 +1,9 @@
+factor_id,experiment,role,dtype,dtype_size,block_dim,api,dims,gm_or_input_strides,ub_or_output_strides,point_flush,packing_extra,compact_packed
+isfinite_t1,fp32_load_to_nddma,train,float32,4,48,NDDMA,6x2304,1x288,2304x1,0,0,0
+isfinite_t2,fp32_load_to_nddma,train,float32,4,52,NDDMA,8x2560,1x316,2560x1,0,0,0
+isfinite_t3,fp32_load_to_nddma,train,float32,4,54,NDDMA,10x2880,1x352,2880x1,0,0,0
+isfinite_t4,fp32_load_to_nddma,train,float32,4,56,NDDMA,11x2608,1x384,2608x1,0,0,0
+isfinite_h1,fp32_load_to_nddma,holdout,float32,4,50,NDDMA,7x2432,1x304,2432x1,0,0,0
+isfinite_h2,fp32_load_to_nddma,holdout,float32,4,51,NDDMA,9x2752,1x344,2752x1,0,0,0
+isfinite_h3,fp32_load_to_nddma,holdout,float32,4,55,NDDMA,11x2632,1x368,2632x1,0,0,0
+isfinite_k,fp32_load_to_nddma,known,float32,4,48,NDDMA,9x2688,1x324,2688x1,0,0,0

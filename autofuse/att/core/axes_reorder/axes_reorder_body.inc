@@ -143,7 +143,8 @@ bool AxesReorderSolver::MulticoreTilingCore(bool block_loop_auto_tune) {
       last_val = var->value;
       var->value = CeilDiv((boundary + var->value) / kMidpointDivisor, var->align);
       bool not_satisfied_mc_cons = !SatisfyMCCons();
-      if (block_loop_auto_tune) {
+      // Objectives cannot change the rejection of an infeasible midpoint.
+      if (block_loop_auto_tune && !not_satisfied_mc_cons) {
         cur_obj = AF_AXES_GET_PERF();
         var->value += 1;
         next_obj = AF_AXES_GET_PERF();
@@ -1764,6 +1765,37 @@ inline void AxesReorderSolver::FindBetterSolutionByUpperBlockDim(double next_upp
   RestoreInputTilingVars(tiling_vars, pure_mc_vars, local_buffer_vars);
 }
 
+template <typename Probe>
+void AxesReorderSolver::ProbeOtherCoreBudgets(uint32_t block_dim, bool enable_equal_order, const Probe &probe) {
+#if AF_AXES_EQUAL_ORDER
+  if (enable_equal_order && input_.enable_local_core_refinement) {
+    // Coarse neighboring budgets can skip a narrow minimum at a tile/call-count boundary.
+    // Refine only their open interval: at most six additional complete solves.
+    uint32_t lower = block_dim;
+    uint32_t upper = block_dim;
+    (void)FindNextLowerBlockDim(block_dim, lower);
+    (void)FindNextUpperBlockDim(block_dim, upper);
+    for (uint32_t budget = lower + 1U; budget < upper; ++budget) {
+      if (budget != block_dim) {
+        probe(budget);
+      }
+    }
+  }
+#else
+  (void)enable_equal_order;
+#endif
+  constexpr int64_t kTwoIterations = 2;
+  uint32_t lower_budget = block_dim;
+  if (input_.balance_core_probes && input_.pure_mc_vars[0]->value == kTwoIterations &&
+      FindNextLowerBlockDim(block_dim, lower_budget) && lower_budget + 1U < block_dim) {
+    // One intermediate budget can replace a two-iteration tile with a single iteration.
+    probe(block_dim - 1U);
+  }
+  for (uint32_t budget = block_dim / 2U; budget > 0U; budget /= 2U) {
+    probe(budget);
+  }
+}
+
 #if AF_AXES_EQUAL_ORDER
 inline bool AxesReorderSolver::TuneCoreCounts(bool enable_equal_order) {
 #else
@@ -1776,28 +1808,38 @@ inline bool AxesReorderSolver::TuneCoreCounts() {
 #endif
     return false;
   }
-  auto current_perf = AF_AXES_GET_PERF();
   double used_cores = 0.0;
   (void)AF_AXES_CAL_USED_CORE_NUM(used_cores);
   const auto block_dim = static_cast<uint32_t>(Ceiling(used_cores));
+  if (input_.probe_aligned_core_tile && !ProbeAlignedCoreTile(block_dim)) {
+    return false;
+  }
+  auto current_perf = AF_AXES_GET_PERF();
   TilingVariable tiling_vars[AF_AXES_BACKUP_SIZE(input_.tiling_vars_size)];
   TilingVariable pure_mc_vars[AF_AXES_BACKUP_SIZE(input_.pure_mc_vars_size)];
   TilingVariable local_buffer_vars[AF_AXES_BACKUP_SIZE(input_.local_buffer_vars_size)];
   // Preserve the local optimum while probing other basins of piecewise API costs.
   SaveInputTilingVars(tiling_vars, pure_mc_vars, local_buffer_vars);
-  for (uint32_t budget = block_dim / 2U; budget > 0U; budget /= 2U) {
+  const auto probe = [&](uint32_t budget) {
 #if AF_AXES_EQUAL_ORDER
     const bool solved = GetMaxBlockDimTiling(budget, enable_equal_order);
 #else
     const bool solved = GetMaxBlockDimTiling(budget);
 #endif
-    const auto perf = solved ? AF_AXES_GET_PERF() : current_perf;
-    if (solved && perf < current_perf) {
+    // Compare the balanced tile, which is the one returned by AutoTuning.
+    const bool valid = solved && (!input_.balance_core_probes || WorkloadBalance());
+    const auto perf = valid ? AF_AXES_GET_PERF() : current_perf;
+    if (valid && perf < current_perf) {
       current_perf = perf;
       SaveInputTilingVars(tiling_vars, pure_mc_vars, local_buffer_vars);
     }
     RestoreInputTilingVars(tiling_vars, pure_mc_vars, local_buffer_vars);
-  }
+  };
+#if AF_AXES_EQUAL_ORDER
+  ProbeOtherCoreBudgets(block_dim, enable_equal_order, probe);
+#else
+  ProbeOtherCoreBudgets(block_dim, false, probe);
+#endif
   return true;
 }
 
@@ -2057,6 +2099,134 @@ bool AxesReorderSolver::AutoTuning(bool has_threshold_seed, bool enable_equal_or
     input_.corenum_threshold = corenum_threshold;
   }
   return true;
+}
+
+// Test an exact partition with one tile per core and a power-of-two core budget.
+bool AxesReorderSolver::ProbeAlignedCoreTile(uint32_t block_dim) {
+  if (input_.local_buffer_vars_size != 1U || input_.pure_mc_vars_size != 1U) {
+    return true;
+  }
+  constexpr uint32_t kMinimumProbeCores = 2U;
+  const uint32_t half_budget = block_dim / 2U;
+  auto &tile = *input_.local_buffer_vars[0];
+  if (half_budget < kMinimumProbeCores || input_.pure_mc_vars[0]->value != 1 || !tile.mc_related ||
+      !AF_AXES_HAS_UPPER_BOUND(&tile)) {
+    return true;
+  }
+  uint32_t aligned_budget = kMinimumProbeCores;
+  while (aligned_budget <= half_budget / 2U) {
+    aligned_budget *= 2U;
+  }
+#if AF_AXES_EXPLICIT_EVAL
+  try {
+#endif
+    const auto extent = AF_AXES_EVAL_UPPER_BOUND(&tile);
+    if (extent <= 0 || extent % aligned_budget != 0 || extent / aligned_budget <= tile.value) {
+      return true;
+    }
+    return ProbeAlignedOuterTile(tile, extent / aligned_budget);
+#if AF_AXES_EXPLICIT_EVAL
+  } catch (const EvalAbort &) {
+    return false;
+  }
+#endif
+}
+
+bool AxesReorderSolver::SatisfyTileProbeConstraints() {
+  return SatisfyCons(ConstraintType::LOCAL_BUFFER) && SatisfyCons(ConstraintType::LB_MIXED) &&
+         SatisfyCons(ConstraintType::MC_MIXED) && SatisfyMCCons();
+}
+
+// Probe one outer tile against the existing constraints and objective.
+bool AxesReorderSolver::ProbeAlignedOuterTile(TilingVariable &var, int64_t alignment) {
+  const auto original = var.value;
+  if (alignment <= 1 || !AF_AXES_HAS_UPPER_BOUND(&var)) {
+    return true;
+  }
+#if AF_AXES_EXPLICIT_EVAL
+  try {
+#endif
+    const auto remainder = original % alignment;
+    const auto limit = AF_AXES_EVAL_UPPER_BOUND(&var);
+    if (remainder == 0 || limit < original || alignment - remainder > limit - original) {
+      return true;
+    }
+    const auto aligned = original + alignment - remainder;
+    if (aligned % var.align != 0 || (var.notail && var.notail_var->value % aligned != 0)) {
+      return true;
+    }
+    const auto original_perf = AF_AXES_GET_PERF();
+    if (!var.SetValue(aligned)) {
+      return true;
+    }
+    if (!SatisfyTileProbeConstraints() || AF_AXES_GET_PERF() >= original_perf) {
+      var.SetValue(original);
+    }
+    return true;
+#if AF_AXES_EXPLICIT_EVAL
+  } catch (const EvalAbort &) {
+    var.SetValue(original);
+    return false;
+  }
+#endif
+}
+
+bool AxesReorderSolver::CanProbeSingleIterationTile() const {
+  if (input_.local_buffer_vars_size != 1U || input_.pure_mc_vars_size != 1U) {
+    return false;
+  }
+  constexpr int64_t kTwoIterations = 2;
+  auto *inner = input_.local_buffer_vars[0];
+  const auto *loop = input_.pure_mc_vars[0];
+  return inner->mc_related && !inner->notail && !loop->notail && loop->align == 1 &&
+         loop->value == kTwoIterations && AF_AXES_HAS_UPPER_BOUND(inner);
+}
+
+// Test one larger tile at the same active core count when two tiles are assigned to each core.
+void AxesReorderSolver::ProbeSingleIterationTile() {
+  if (!CanProbeSingleIterationTile()) {
+    return;
+  }
+  auto *inner = input_.local_buffer_vars[0];
+  auto *loop = input_.pure_mc_vars[0];
+  const auto original = inner->value;
+  const auto original_loop = loop->value;
+#if AF_AXES_EXPLICIT_EVAL
+  try {
+#endif
+    const auto upper = AF_AXES_EVAL_UPPER_BOUND(inner);
+    if (original <= 0 || upper <= original) {
+      return;
+    }
+    auto candidate = original + std::min(original, upper - original);
+    candidate -= candidate % inner->prompt_align;
+    if (candidate <= original || candidate % inner->align != 0) {
+      return;
+    }
+    int64_t original_cores = 0;
+    if (!AF_AXES_CAL_REAL_USED_CORE_NUM(original_cores) || original_cores <= 0) {
+      return;
+    }
+    const auto original_perf = AF_AXES_GET_PERF();
+    inner->SetValue(candidate);
+    loop->SetValue(1);
+    const auto preserves_core_count = [&]() {
+      int64_t candidate_cores = 0;
+      return AF_AXES_CAL_REAL_USED_CORE_NUM(candidate_cores) && candidate_cores == original_cores;
+    };
+    if (!preserves_core_count() || !WorkloadBalance() || !preserves_core_count() ||
+        inner->value % inner->align != 0 || !SatisfyTileProbeConstraints() || !(AF_AXES_GET_PERF() < original_perf)) {
+      inner->SetValue(original);
+      loop->SetValue(original_loop);
+    }
+#if AF_AXES_EXPLICIT_EVAL
+  } catch (const EvalAbort &) {
+    inner->SetValue(original);
+    loop->SetValue(original_loop);
+    // Evaluation errors from the discarded probe do not invalidate the solved tile.
+    eval_context_.ResetError();
+  }
+#endif
 }
 
 // is_trade_off：初解是否使用 UB / 多核占用率双阈值；关闭时用二分求初解。

@@ -251,6 +251,25 @@ bool CheckPromptAlignmentAdapters() {
   return optional.var.value == 31 && solver.GetEvaluationContext().first_error == EvalStatus::kSuccess;
 }
 
+bool CheckAlignedCoreProbeSkipsMissingAxes() {
+  TilingVariable axis;
+  TilingVariable *vars[] = {&axis};
+  AxesReorderSolverInput input;
+  input.local_buffer_vars = vars;
+  input.local_buffer_vars_size = 1U;
+  Probe probe;
+  ProbeSolver no_multicore_axis(input, probe);
+  if (!no_multicore_axis.ProbeAlignedCoreTile(8U)) {
+    return false;
+  }
+  input.local_buffer_vars = nullptr;
+  input.local_buffer_vars_size = 0U;
+  input.pure_mc_vars = vars;
+  input.pure_mc_vars_size = 1U;
+  ProbeSolver no_local_axis(input, probe);
+  return no_local_axis.ProbeAlignedCoreTile(8U) && probe.calls == 0;
+}
+
 bool CheckInvalidBindings() {
   Fixture missing;
   missing.var.upper_bound_entry = nullptr;
@@ -302,7 +321,7 @@ int main() {
   }
   return InjectAtEveryEvaluation(false, false, false, true) && InjectAtEveryEvaluation(true, true, true, true) &&
                  CheckBindingsAndIsolation() && CheckInvalidBindings() && CheckPromptAlignmentAdapters() &&
-                 CheckPgoFailure()
+                 CheckPgoFailure() && CheckAlignedCoreProbeSkipsMissingAxes()
              ? 0
              : 2;
 }

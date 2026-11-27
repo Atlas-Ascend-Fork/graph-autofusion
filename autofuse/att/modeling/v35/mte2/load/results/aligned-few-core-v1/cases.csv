@@ -1,0 +1,13 @@
+factor_id,experiment,role,dtype,dtype_size,block_dim,api,api_rank,dims,gm_or_input_strides,ub_or_output_strides,bytes_per_call,input_span_bytes,output_span_bytes,point_flush,nd_dci,packing_extra
+train_c1_w1536,single-contiguous-rows,train,float32,4,1,LOAD_NORMAL,2,1x1536,1536x1,1536x1,6144,6144,6144,0,0,0
+train_c1_w3072,single-contiguous-rows,train,float32,4,1,LOAD_NORMAL,2,1x3072,3072x1,3072x1,12288,12288,12288,0,0,0
+train_c1_w6144,single-contiguous-rows,train,float32,4,1,LOAD_NORMAL,2,1x6144,6144x1,6144x1,24576,24576,24576,0,0,0
+train_c2_w2048,single-contiguous-rows,train,float32,4,2,LOAD_NORMAL,2,1x2048,2048x1,2048x1,8192,8192,8192,0,0,0
+train_c2_w8192,single-contiguous-rows,train,float32,4,2,LOAD_NORMAL,2,1x8192,8192x1,8192x1,32768,32768,32768,0,0,0
+train_c3_w1024,single-contiguous-rows,train,float32,4,3,LOAD_NORMAL,2,1x1024,1024x1,1024x1,4096,4096,4096,0,0,0
+train_c3_w5120,single-contiguous-rows,train,float32,4,3,LOAD_NORMAL,2,1x5120,5120x1,5120x1,20480,20480,20480,0,0,0
+holdout_c1_w2048,single-contiguous-rows,holdout,float32,4,1,LOAD_NORMAL,2,1x2048,2048x1,2048x1,8192,8192,8192,0,0,0
+holdout_c1_w5120,single-contiguous-rows,holdout,float32,4,1,LOAD_NORMAL,2,1x5120,5120x1,5120x1,20480,20480,20480,0,0,0
+holdout_c2_w3584,single-contiguous-rows,holdout,float32,4,2,LOAD_NORMAL,2,1x3584,3584x1,3584x1,14336,14336,14336,0,0,0
+holdout_c3_w4096,single-contiguous-rows,holdout,float32,4,3,LOAD_NORMAL,2,1x4096,4096x1,4096x1,16384,16384,16384,0,0,0
+known_c1_w4096,single-contiguous-rows,known,float32,4,1,LOAD_NORMAL,2,1x4096,4096x1,4096x1,16384,16384,16384,0,0,0

@@ -7,6 +7,9 @@
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  * See LICENSE in the root of the software repository for the full text of the License.
  */
+#include <algorithm>
+#include <optional>
+#include <set>
 #include "perf_param_v2.h"
 #include "nddma_model.h"
 #include "base/att_const_values.h"
@@ -15,6 +18,8 @@
 #include "v35/att/api_perf_register/ascendc_regbase_perf.h"
 #include "api_perf_register/api_perf_factory.h"
 #include "api_perf_register/ascendc_api_perf.h"
+#include "codegen_api_param/codegen_api_param.h"
+#include "ascir_ops.h"
 namespace att {
 namespace {
 constexpr int32_t kMaxDmaLen = 4;
@@ -30,13 +35,207 @@ std::vector<int64_t> GetNddmaVectorizedAxis(const af::AscNodePtr &node) {
   return node->outputs[0].attr.vectorized_axis;
 }
 
-// Calibrate the physical-dense outer permutation implemented by one LoopMode Load.
-// Keep the raw GM/UB strides here: the scalar DMA stride alone loses the loop address advance.
-af::Status SelectAlignedLoopLoad(const TensorShapeInfo &shape, const NodeInfo &node, PerfOutputInfo &perf,
-                                 bool narrow_row = false) {
+std::optional<TensorShapeInfo> GetMergedCompactLoadShape(const TensorShapeInfo &shape, const NodeInfo &node) {
+  if (node.is_cv_ub_fusion || shape.data_type != "float32" || shape.data_type_size != sizeof(float) ||
+      shape.dims.size() != 2U || shape.repeats.size() <= shape.dims.size()) {
+    return std::nullopt;
+  }
+  const auto api = codegen::CodegenApiParam::TryGetNodeApiParam(node.node_ptr);
+  const auto *dma = api == nullptr ? nullptr : std::get_if<codegen::DmaSpecificParams>(&api->specific_params);
+  if (dma == nullptr || !dma->data_copy_params.valid || dma->loop_mode_params.valid || !api->outer_loop_axes.empty() ||
+      api->template_params.size() < 2U || api->template_params.back() != "AscendC::PaddingMode::Compact") {
+    return std::nullopt;
+  }
+  const auto &copy = dma->data_copy_params;
+  const auto equal = [](const Expr &a, const Expr &b) {
+    return af::SymbolicUtils::StaticCheckEq(a, b) == af::TriBool::kTrue;
+  };
+  const auto &row = shape.dims.back();
+  if (!equal(copy.block_count.combined_expr, shape.dims.front()) || !equal(copy.block_len.combined_expr, row) ||
+      !copy.src_stride.combined_expr.IsValid() || !equal(copy.dst_stride.combined_expr, af::sym::kSymbolZero)) {
+    return std::nullopt;
+  }
+  Expr pitch = row + copy.src_stride.combined_expr;
+  pitch.Simplify();
+  int64_t pitch_elements = 0;
+  const auto &domain = dma_calibration_v2::kLoadMergedCompactPitch;
+  if (!pitch.GetConstValue(pitch_elements) || pitch_elements < domain.lower || pitch_elements > domain.upper) {
+    return std::nullopt;
+  }
+  // The stride model needs the row pitch and count in the same axis order as the merged payload.
+  TensorShapeInfo physical = shape;
+  physical.repeats = shape.dims;
+  physical.origin_repeats = shape.dims;
+  physical.gm_strides = {pitch, af::sym::kSymbolOne};
+  physical.strides = {row, af::sym::kSymbolOne};
+  return physical;
+}
+
+bool SameDmaExpr(const Expr &lhs, const Expr &rhs) {
+  return af::SymbolicUtils::StaticCheckEq(lhs, rhs) == af::TriBool::kTrue;
+}
+
+bool IsCompactSingleCopy(const codegen::CodegenApiParam &api, const codegen::DmaSpecificParams &dma) {
+  return dma.data_copy_params.valid && !dma.loop_mode_params.valid && api.outer_loop_axes.empty() &&
+         api.template_params.size() >= 2U && api.template_params.back() == "AscendC::PaddingMode::Compact";
+}
+
+bool MatchesCalibratedCompactLoadPitch(const codegen::DataCopyBaseParams &copy, const Expr &width, bool scalar_row) {
+  using namespace dma_calibration_v2;
+  const auto &zero = af::sym::kSymbolZero;
+  if ((!scalar_row && !SameDmaExpr(width, CreateExpr(kLoadCompactWidePitchWidth))) ||
+      !SameDmaExpr(copy.block_len.combined_expr, width) || !SameDmaExpr(copy.dst_stride.combined_expr, zero) ||
+      !copy.block_count.combined_expr.IsValid() || !copy.src_stride.combined_expr.IsValid()) {
+    return false;
+  }
+  Expr pitch = copy.src_stride.combined_expr + width;
+  pitch.Simplify();
+  int64_t elements = 0;
+  const auto &pitch_range = scalar_row ? kLoadCompactScalarPitch : kLoadCompactWidePitch;
+  if (!pitch.GetConstValue(elements) || elements < pitch_range.lower || elements > pitch_range.upper ||
+      (!scalar_row && elements % kLoadCompactWidePitchWidth != 0)) {
+    return false;
+  }
+  return true;
+}
+
+// The descriptor uses nominal block count even while pricing a tail.
+af::Status MatchCompactLoadRows(const TensorShapeInfo &shape, const NodeInfo &node,
+                                const codegen::DataCopyBaseParams &copy, const Expr &width, bool &matches) {
+  matches = SameDmaExpr(copy.block_count.combined_expr, shape.dims.front());
+  if (matches || shape.origin_repeats.size() != shape.repeats.size()) {
+    return af::SUCCESS;
+  }
+  auto nominal = shape;
+  nominal.repeats = shape.origin_repeats;
+  GE_ASSERT_SUCCESS(MergeTensorContinuousDims(node.node_ptr, GetNodeOutTensorName(node.node_ptr, 0), nominal));
+  matches = nominal.dims.size() == shape.dims.size() &&
+            SameDmaExpr(nominal.dims.front(), copy.block_count.combined_expr) &&
+            (nominal.dims.size() != 2U || SameDmaExpr(nominal.dims.back(), width));
+  return af::SUCCESS;
+}
+
+// Match ordinary Compact Load at the physical descriptor used by codegen.
+af::Status SelectCalibratedCompactLoad(const TensorShapeInfo &shape, const NodeInfo &node, PerfOutputInfo &perf) {
   using namespace dma_calibration_v2;
   if (node.is_cv_ub_fusion || shape.data_type != "float32" || shape.data_type_size != sizeof(float) ||
+      shape.dims.empty() || shape.dims.size() > 2U) {
+    return af::SUCCESS;
+  }
+  const auto api = codegen::CodegenApiParam::TryGetNodeApiParam(node.node_ptr);
+  const auto *dma = api == nullptr ? nullptr : std::get_if<codegen::DmaSpecificParams>(&api->specific_params);
+  if (dma == nullptr || !IsCompactSingleCopy(*api, *dma)) {
+    return af::SUCCESS;
+  }
+  const auto &zero = af::sym::kSymbolZero;
+  const auto &one = af::sym::kSymbolOne;
+  const auto &copy = dma->data_copy_params;
+  const auto &rows = shape.dims.front();
+  const auto &width = shape.dims.size() == 1U ? one : shape.dims.back();
+  const bool scalar_row = SameDmaExpr(width, one);
+  if (!MatchesCalibratedCompactLoadPitch(copy, width, scalar_row)) {
+    return af::SUCCESS;
+  }
+  const auto outside = [&](const Expr &value, const Range &range) {
+    return af::sym::Max(zero, af::sym::Max(CreateExpr(range.lower) - value, value - CreateExpr(range.upper)));
+  };
+  const auto &row_range = scalar_row ? kLoadCompactScalarRows : kLoadCompactWidePitchRows;
+  const auto &core_range = scalar_row ? kLoadCompactScalarCores : kLoadCompactWidePitchCores;
+  const auto violation = outside(rows, row_range) + outside(CreateExpr("block_dim"), core_range);
+  if (af::SymbolicUtils::StaticCheckGt(violation, zero) == af::TriBool::kTrue) {
+    return af::SUCCESS;
+  }
+  bool matches_rows = false;
+  GE_ASSERT_SUCCESS(MatchCompactLoadRows(shape, node, copy, width, matches_rows));
+  if (!matches_rows) {
+    return af::SUCCESS;
+  }
+  Expr fitted;
+  const char *model = scalar_row ? "LoadCompactScalarRowPayload" : "LoadCompactWidePitchPayload";
+  GE_ASSERT_SUCCESS(GetPerf({model, shape.data_type, shape.data_type, {rows, width}, zero}, fitted));
+  auto &cycles = perf.pipe_res.at(PipeType::AIV_MTE2);
+  const auto result = CreateExpr(scalar_row ? "load_compact_scalar_row_node" : "load_compact_wide_pitch_node");
+  TernaryOp guard(CondType::K_EQ, violation, zero, fitted, cycles);
+  guard.SetVariable(result);
+  perf.ternary_ops[result] = std::move(guard);
+  cycles = result;
+  return af::SUCCESS;
+}
+
+struct LoopLoadCalibration {
+  dma_calibration_v2::Range outer;
+  dma_calibration_v2::Range rows;
+  dma_calibration_v2::Range width;
+  dma_calibration_v2::Range cores;
+  const dma_calibration_v2::Range *pitch;
+  const char *model;
+  const char *symbol;
+  bool narrow_alignment;
+  bool require_normal_loop;
+};
+
+using namespace dma_calibration_v2;
+constexpr LoopLoadCalibration kAlignedLoopLoad{kLoadLoopOuter,
+                                               kLoadLoopRows,
+                                               kLoadLoopWidth,
+                                               kLoadLoopCores,
+                                               nullptr,
+                                               "LoadAlignedLoopPayload",
+                                               "load_aligned_loop_payload_node",
+                                               false,
+                                               false};
+constexpr LoopLoadCalibration kNarrowLoopLoad{kLoadLoopOuter,
+                                              kLoadNarrowLoopRows,
+                                              kLoadNarrowLoopWidth,
+                                              kLoadLoopCores,
+                                              nullptr,
+                                              "LoadNarrowLoopPayload",
+                                              "load_narrow_loop_payload_node",
+                                              true,
+                                              false};
+constexpr LoopLoadCalibration kWideLoopLoad{kLoadWideLoopOuter,
+                                            kLoadWideLoopRows,
+                                            kLoadWideLoopWidth,
+                                            kLoadWideLoopCores,
+                                            &kLoadWideLoopPitch,
+                                            "LoadWideAlignedLoopPayload",
+                                            "load_wide_aligned_loop_payload_node",
+                                            false,
+                                            false};
+constexpr LoopLoadCalibration kLongLoopLoad{kLoadLongLoopOuter,
+                                            kLoadLongLoopRows,
+                                            kLoadLongLoopWidth,
+                                            kLoadLongLoopCores,
+                                            &kLoadLongLoopPitch,
+                                            "LoadLongAlignedLoopPayload",
+                                            "load_long_aligned_loop_payload_node",
+                                            false,
+                                            true};
+constexpr LoopLoadCalibration kSparseLoopLoad{kLoadSparseLoopOuter,
+                                              kLoadSparseLoopRows,
+                                              kLoadSparseLoopWidth,
+                                              kLoadSparseLoopCores,
+                                              &kLoadSparseLoopPitch,
+                                              "LoadSparsePitchLoopPayload",
+                                              "load_sparse_pitch_loop_payload_node",
+                                              false,
+                                              true};
+
+// Keep the raw GM and UB strides of the outer permutation for the LoopMode cost.
+bool IsNormalHardwareLoopLoad(const NodeInfo &node) {
+  const auto api = codegen::CodegenApiParam::TryGetNodeApiParam(node.node_ptr);
+  const auto *dma = api == nullptr ? nullptr : std::get_if<codegen::DmaSpecificParams>(&api->specific_params);
+  return dma != nullptr && dma->data_copy_params.valid && dma->loop_mode_params.valid &&
+         !api->template_params.empty() && api->template_params.back() == "AscendC::PaddingMode::Normal";
+}
+
+af::Status SelectAlignedLoopLoad(const TensorShapeInfo &shape, const NodeInfo &node, PerfOutputInfo &perf,
+                                 const LoopLoadCalibration &calibration) {
+  if (node.is_cv_ub_fusion || shape.data_type != "float32" || shape.data_type_size != sizeof(float) ||
       shape.repeats.size() != 3U || shape.gm_strides.size() != 3U || shape.strides.size() != 3U) {
+    return af::SUCCESS;
+  }
+  if (calibration.require_normal_loop && !IsNormalHardwareLoopLoad(node)) {
     return af::SUCCESS;
   }
   const auto &zero = af::sym::kSymbolZero;
@@ -48,31 +247,33 @@ af::Status SelectAlignedLoopLoad(const TensorShapeInfo &shape, const NodeInfo &n
   const auto outside = [&](const Expr &value, const Range &range) {
     return af::sym::Max(zero, af::sym::Max(CreateExpr(range.lower) - value, value - CreateExpr(range.upper)));
   };
-  // GM [W, M*W, 1], UB [(N+p)*W, W, 1], p=0 or 1.
-  // All dimensions exceed one, so Codegen retains exactly one hardware loop.
-  // Both calibrated row widths are DMA-block aligned, with no Normal/Compact padding difference.
+  // GM [W, pitch, 1], UB [(N+p)*W, W, 1]. The wide row
+  // measurements use p=0 and allow a gap between GM row groups.
   const Expr outer_gap = shape.strides[0] - n * width;
-  const auto &rows_domain = narrow_row ? kLoadNarrowLoopRows : kLoadLoopRows;
-  const auto &width_domain = narrow_row ? kLoadNarrowLoopWidth : kLoadLoopWidth;
-  const Expr alignment = CreateExpr(narrow_row ? kLoadNarrowLoopWidth.lower
-                                               : tiling_schedule_config_table_v2.GetCacheLineSize() / sizeof(float));
+  const Expr &pitch = shape.gm_strides[1];
+  const auto alignment =
+      CreateExpr(calibration.narrow_alignment ? kLoadNarrowLoopWidth.lower
+                                              : tiling_schedule_config_table_v2.GetCacheLineSize() / sizeof(float));
+  const Expr pitch_violation = calibration.pitch != nullptr
+                                   ? outside(pitch, *calibration.pitch) + af::sym::Max(zero, m * width - pitch) +
+                                         af::sym::Abs(af::sym::Mod(pitch, alignment))
+                                   : af::sym::Abs(pitch - m * width);
   Expr violation = zero;
   for (const auto &part :
-       {outside(m, kLoadLoopOuter), outside(n, rows_domain), outside(width, width_domain),
-        outside(cores, kLoadLoopCores), af::sym::Abs(af::sym::Mod(width, alignment)),
-        af::sym::Abs(shape.gm_strides[0] - width), af::sym::Abs(shape.gm_strides[1] - m * width),
-        af::sym::Abs(shape.gm_strides[2] - one), af::sym::Abs(shape.strides[1] - width),
-        af::sym::Abs(shape.strides[2] - one), af::sym::Min(af::sym::Abs(outer_gap), af::sym::Abs(outer_gap - width))}) {
+       {outside(m, calibration.outer), outside(n, calibration.rows), outside(width, calibration.width),
+        outside(cores, calibration.cores), af::sym::Abs(af::sym::Mod(width, alignment)),
+        af::sym::Abs(shape.gm_strides[0] - width), pitch_violation, af::sym::Abs(shape.gm_strides[2] - one),
+        af::sym::Abs(shape.strides[1] - width), af::sym::Abs(shape.strides[2] - one),
+        calibration.pitch != nullptr ? af::sym::Abs(outer_gap)
+                                     : af::sym::Min(af::sym::Abs(outer_gap), af::sym::Abs(outer_gap - width))}) {
     if (af::SymbolicUtils::StaticCheckGt(part, zero) == af::TriBool::kTrue) {
       return af::SUCCESS;
     }
     violation = violation + part;
   }
   Expr fitted;
-  GE_ASSERT_SUCCESS(GetPerf({narrow_row ? "LoadNarrowLoopPayload" : "LoadAlignedLoopPayload", shape.data_type,
-                             shape.data_type, shape.repeats, zero},
-                            fitted));
-  const Expr result = CreateExpr(narrow_row ? "load_narrow_loop_payload_node" : "load_aligned_loop_payload_node");
+  GE_ASSERT_SUCCESS(GetPerf({calibration.model, shape.data_type, shape.data_type, shape.repeats, zero}, fitted));
+  const Expr result = CreateExpr(calibration.symbol);
   TernaryOp guard(CondType::K_EQ, violation, zero, fitted, perf.pipe_res.at(PipeType::AIV_MTE2));
   guard.SetVariable(result);
   perf.ternary_ops[result] = std::move(guard);
@@ -105,6 +306,547 @@ std::vector<bool> GetNddmaTileInner(const NodeInfo &node, const TensorShapeInfo 
     }
   }
   return tile_inner;
+}
+
+bool HasPackedShortMergedRows(const TensorShapeInfo &shape) {
+  constexpr uint64_t kMinGmRowPitch = 120U;
+  constexpr uint64_t kMaxGmRowPitch = 168U;
+  constexpr int32_t kPackedLaneCount = 3;
+  const auto &gm = shape.gm_strides;
+  const auto &ub = shape.strides;
+  const auto &repeats = shape.repeats;
+  const auto &rows = shape.dims.front();
+  const auto &width = shape.dims.back();
+  const auto &one = af::sym::kSymbolOne;
+  uint64_t pitch = 0;
+  if (!gm[1].GetConstValue(pitch) || pitch < kMinGmRowPitch || pitch > kMaxGmRowPitch || !repeats[1].IsConstExpr() ||
+      !SameDmaExpr(repeats[3], CreateExpr(kPackedLaneCount)) || !SameDmaExpr(gm[3], one) ||
+      !SameDmaExpr(gm[2], repeats[3]) || !SameDmaExpr(gm[0], gm[1] * repeats[1]) || !SameDmaExpr(ub[3], one) ||
+      !SameDmaExpr(ub[2], repeats[3]) || !SameDmaExpr(ub[1], width) || !SameDmaExpr(ub[0], width * repeats[1]) ||
+      !SameDmaExpr(rows, repeats[0] * repeats[1]) || !SameDmaExpr(width, repeats[2] * repeats[3])) {
+    return false;
+  }
+  return true;
+}
+
+// Both GM and UB merge the same two pairs. Read the row pitch from the
+// preceding physical axis, not the stride inside the merged row.
+af::Status SelectManyShortFp32CompactLoad(const TensorShapeInfo &shape, const NodeInfo &node, PerfOutputInfo &perf) {
+  if (node.is_cv_ub_fusion || shape.data_type != "float32" || shape.data_type_size != sizeof(float) ||
+      shape.dims.size() != 2U || shape.repeats.size() != 4U || shape.gm_strides.size() != 4U ||
+      shape.strides.size() != 4U) {
+    return af::SUCCESS;
+  }
+  if (!HasPackedShortMergedRows(shape)) {
+    return af::SUCCESS;
+  }
+  const auto &gm = shape.gm_strides;
+  const auto &rows = shape.dims.front();
+  const auto &width = shape.dims.back();
+  const auto &zero = af::sym::kSymbolZero;
+  const auto outside = [&](const Expr &value, int32_t lo, int32_t hi) {
+    return af::sym::Max(zero, af::sym::Max(CreateExpr(lo) - value, value - CreateExpr(hi)));
+  };
+  const auto block_dim = CreateExpr("block_dim");
+  const Expr violation = outside(rows, 512, 4992) + outside(width, 2, 4) + outside(block_dim, 1, 56);
+  if (af::SymbolicUtils::StaticCheckGt(violation, zero) == af::TriBool::kTrue) {
+    return af::SUCCESS;
+  }
+  Expr payload;
+  GE_ASSERT_SUCCESS(GetPerf({kMoveGmToUb + "SmallBlk", shape.data_type, shape.data_type, shape.dims, zero}, payload));
+  const auto stride_bytes = af::sym::Min(CreateExpr(4096), (gm[1] - width) * CreateExpr(sizeof(float)));
+  const auto stride = rows * stride_bytes *
+                      (CreateExpr(dma_calibration_v2::kManyShortCompactStrideBase) +
+                       CreateExpr(dma_calibration_v2::kManyShortCompactStridePerCore) * block_dim);
+  auto &mte2 = perf.pipe_res.at(PipeType::AIV_MTE2);
+  Expr value = CreateExpr("LoadManyShortFp32Compact_dma_node");
+  TernaryOp select(CondType::K_EQ, violation, zero, payload + stride, mte2);
+  select.SetVariable(value);
+  perf.ternary_ops[value] = std::move(select);
+  mte2 = value;
+  return af::SUCCESS;
+}
+
+bool GetCompactHardwareLoopPitch(const TensorShapeInfo &shape, uint64_t &gm_inner) {
+  constexpr uint64_t kMinGmInnerPitch = 8192U;
+  constexpr uint64_t kMaxGmInnerPitch = 9216U;
+  constexpr uint64_t kMinGmPitchRatio = 96U;
+  constexpr uint64_t kMaxGmPitchRatio = 104U;
+  const auto rank = shape.repeats.size();
+  const auto &gm = shape.gm_strides;
+  const auto &ub = shape.strides;
+  const auto &repeats = shape.repeats;
+  const auto &one = af::sym::kSymbolOne;
+  const auto &width = shape.dims[2];
+  const auto &outer = repeats[0];
+  const auto &rows = repeats[1];
+  uint64_t gm_outer = 0;
+  if (!gm[0].GetConstValue(gm_outer) || !gm[1].GetConstValue(gm_inner) || gm_inner == 0U) {
+    return false;
+  }
+  if (gm_inner < kMinGmInnerPitch || gm_inner > kMaxGmInnerPitch || gm_outer % gm_inner != 0 ||
+      gm_outer / gm_inner < kMinGmPitchRatio || gm_outer / gm_inner > kMaxGmPitchRatio ||
+      !SameDmaExpr(gm.back(), one) || !SameDmaExpr(ub.back(), one) || !SameDmaExpr(shape.dims[0], outer) ||
+      !SameDmaExpr(shape.dims[1], rows)) {
+    return false;
+  }
+  if (rank == 4U && (!SameDmaExpr(gm[2], repeats[3]) || !SameDmaExpr(ub[2], repeats[3]) ||
+                     !SameDmaExpr(width, repeats[2] * repeats[3]))) {
+    return false;
+  }
+  return true;
+}
+
+af::Status SelectFp32CompactHardwareLoopLoad(const TensorShapeInfo &shape, const NodeInfo &node, PerfOutputInfo &perf) {
+  const size_t rank = shape.repeats.size();
+  if (node.is_cv_ub_fusion || shape.data_type != "float32" || (rank != 3U && rank != 4U) || shape.dims.size() != 3U ||
+      shape.gm_strides.size() != rank || shape.strides.size() != rank) {
+    return af::SUCCESS;
+  }
+  const auto &ub = shape.strides;
+  const auto &repeats = shape.repeats;
+  const auto &width = shape.dims[2];
+  const auto &outer = repeats[0];
+  const auto &rows = repeats[1];
+  const auto &zero = af::sym::kSymbolZero;
+  uint64_t gm_inner = 0;
+  if (!GetCompactHardwareLoopPitch(shape, gm_inner)) {
+    return af::SUCCESS;
+  }
+  const auto outside = [&](const Expr &x, int32_t lo, int32_t hi) {
+    return af::sym::Max(zero, af::sym::Max(CreateExpr(lo) - x, x - CreateExpr(hi)));
+  };
+  const auto alignment = CreateExpr(8);
+  const auto plane = alignment * af::sym::Ceiling(af::sym::Div(rows * width, alignment));
+  const auto violation = outside(outer, 24, 34) + outside(rows, 4, 8) + outside(width, 36, 43) +
+                         outside(CreateExpr("block_dim"), 48, 56) + af::sym::Abs(ub[0] - plane) +
+                         af::sym::Abs(ub[1] - width);
+  if (af::SymbolicUtils::StaticCheckGt(violation, zero) == af::TriBool::kTrue) {
+    return af::SUCCESS;
+  }
+  Expr payload;
+  GE_ASSERT_SUCCESS(GetPerf({kMoveGmToUb, shape.data_type, shape.data_type, shape.dims, zero}, payload));
+  constexpr double kRowStride = 0.0014523647805489179;
+  const auto gap = af::sym::Min(CreateExpr(4096), (CreateExpr(gm_inner) - width) * CreateExpr(sizeof(float)));
+  auto &mte2 = perf.pipe_res.at(PipeType::AIV_MTE2);
+  Expr result = CreateExpr("load_fp32_compact_hw_loop");
+  TernaryOp guard(CondType::K_EQ, violation, zero, payload + outer * rows * gap * CreateExpr(kRowStride), mte2);
+  guard.SetVariable(result);
+  perf.ternary_ops[result] = std::move(guard);
+  mte2 = result;
+  return af::SUCCESS;
+}
+
+bool IsNarrowCompactStore(const codegen::CodegenApiParamPtr &store, const Expr &rows, const Expr &width) {
+  const auto *store_dma = store == nullptr ? nullptr : std::get_if<codegen::DmaSpecificParams>(&store->specific_params);
+  if (store_dma == nullptr || !IsCompactSingleCopy(*store, *store_dma) || store->template_params.front() != "uint8_t" ||
+      !SameDmaExpr(store_dma->data_copy_params.block_count.combined_expr, width) ||
+      !SameDmaExpr(store_dma->data_copy_params.block_len.combined_expr, rows)) {
+    return false;
+  }
+  return true;
+}
+
+// Scope the calibrated read to a single-input transpose with a compact,
+// narrower writeback. Equal-width read/write streams share a different
+// memory traffic budget and keep the legacy estimate.
+bool HasSingleNarrowCompactStore(const af::AscNodePtr &load, const Expr &rows, const Expr &width) {
+  const auto graph = load->GetOwnerComputeGraph();
+  if (graph == nullptr) {
+    return false;
+  }
+  bool has_narrow_store = false;
+  for (const auto &other : graph->GetAllNodes()) {
+    if (other.get() != load.get() && (other->GetType() == kLoad || other->GetType() == kNddma)) {
+      return false;
+    }
+    if (other->GetType() != kStore) {
+      continue;
+    }
+    const auto store = codegen::CodegenApiParam::TryGetNodeApiParam(std::dynamic_pointer_cast<af::AscNode>(other));
+    if (has_narrow_store || !IsNarrowCompactStore(store, rows, width)) {
+      return false;
+    }
+    has_narrow_store = true;
+  }
+  return has_narrow_store;
+}
+
+af::Status SelectPackedShortRowLoad(const TensorShapeInfo &shape, const NodeInfo &node, PerfOutputInfo &perf) {
+  if (node.is_cv_ub_fusion || shape.data_type != "float16" || shape.repeats.size() != 2U ||
+      shape.strides.size() != 2U || shape.gm_strides.size() != 2U) {
+    return af::SUCCESS;
+  }
+  const auto &zero = af::sym::kSymbolZero;
+  const auto &one = af::sym::kSymbolOne;
+  const auto &rows = shape.repeats[0];
+  const auto &width = shape.repeats[1];
+  uint64_t pitch = 0;
+  if (!shape.gm_strides[0].GetConstValue(pitch) || pitch < 12000U || pitch > 15616U ||
+      !SameDmaExpr(shape.gm_strides[1], one) || !SameDmaExpr(shape.strides[1], one)) {
+    return af::SUCCESS;
+  }
+  const auto api = codegen::CodegenApiParam::TryGetNodeApiParam(node.node_ptr);
+  const auto *dma = api == nullptr ? nullptr : std::get_if<codegen::DmaSpecificParams>(&api->specific_params);
+  if (dma == nullptr || !IsCompactSingleCopy(*api, *dma) ||
+      !SameDmaExpr(dma->data_copy_params.block_count.combined_expr, rows) ||
+      !SameDmaExpr(dma->data_copy_params.block_len.combined_expr, width)) {
+    return af::SUCCESS;
+  }
+  if (!HasSingleNarrowCompactStore(node.node_ptr, rows, width)) {
+    return af::SUCCESS;
+  }
+  const auto outside = [&](const Expr &x, int32_t lo, int32_t hi) {
+    return af::sym::Max(zero, af::sym::Max(CreateExpr(lo) - x, x - CreateExpr(hi)));
+  };
+  const auto violation = outside(rows, 96, 136) + outside(width, 32, 48) + outside(CreateExpr("block_dim"), 48, 56) +
+                         af::sym::Abs(shape.strides[0] - width);
+  if (af::SymbolicUtils::StaticCheckGt(violation, zero) == af::TriBool::kTrue) {
+    return af::SUCCESS;
+  }
+  Expr payload;
+  GE_ASSERT_SUCCESS(GetPerf({kMoveGmToUb, shape.data_type, shape.data_type, {rows, width}, zero}, payload));
+  auto &mte2 = perf.pipe_res.at(PipeType::AIV_MTE2);
+  Expr value = CreateExpr("load_packed_short_row");
+  TernaryOp select(CondType::K_EQ, violation, zero, payload, mte2);
+  select.SetVariable(value);
+  perf.ternary_ops[value] = std::move(select);
+  mte2 = value;
+  return af::SUCCESS;
+}
+
+bool HasFoldableStoreTrailingAxis(const NodeInfo &node, const TensorShapeInfo &shape, size_t rank) {
+  const auto *axis = node.outputs[0]->dim_info.back();
+  if (axis == nullptr || (axis->axis_type == AxisPosition::INNER && !axis->is_bind_multi_core)) {
+    return false;
+  }
+
+  const auto &one = af::sym::kSymbolOne;
+  const auto &inner = shape.repeats.back();
+  const size_t fold = rank - 2U;
+  if (!inner.IsConstExpr() || af::SymbolicUtils::StaticCheckGt(inner, one) != af::TriBool::kTrue ||
+      !SameDmaExpr(shape.origin_repeats.back(), inner) || !SameDmaExpr(shape.gm_strides[fold], inner) ||
+      !SameDmaExpr(shape.strides[fold], inner) || !SameDmaExpr(shape.gm_strides.back(), one) ||
+      !SameDmaExpr(shape.strides.back(), one) || !SameDmaExpr(shape.dims.back(), shape.repeats[fold] * inner)) {
+    return false;
+  }
+  for (size_t i = 0; i < fold; ++i) {
+    if (!SameDmaExpr(shape.dims[i], shape.repeats[i])) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+// Return a descriptor only for a shared, Codegen-compatible trailing-axis merge.
+std::optional<TensorShapeInfo> FoldStoreInnermostAxis(const NodeInfo &node, const TensorShapeInfo &shape) {
+  const size_t rank = shape.repeats.size();
+  if (node.is_cv_ub_fusion || (rank != 3U && rank != 4U) || shape.dims.size() != rank - 1U ||
+      shape.origin_repeats.size() != rank || shape.gm_strides.size() != rank || shape.strides.size() != rank ||
+      node.outputs.empty() || node.outputs[0] == nullptr || node.outputs[0]->dim_info.size() != rank) {
+    return std::nullopt;
+  }
+  if (!HasFoldableStoreTrailingAxis(node, shape, rank)) {
+    return std::nullopt;
+  }
+  const size_t fold = rank - 2U;
+
+  auto folded = shape;
+  folded.repeats = shape.dims;
+  folded.origin_repeats[fold] = shape.origin_repeats[fold] * shape.origin_repeats.back();
+  folded.origin_repeats.pop_back();
+  folded.gm_strides.erase(folded.gm_strides.begin() + fold);
+  folded.strides.erase(folded.strides.begin() + fold);
+  return folded;
+}
+
+// Re-price only the measured FP16 long hardware-loop geometry. Other Store
+// costs retain the existing interpretation until their descriptors are validated.
+bool UseFoldedStoreStride(const TensorShapeInfo &shape) {
+  using namespace dma_calibration_v2;
+  if (shape.data_type != "float16" || shape.repeats.size() != 3U) {
+    return false;
+  }
+  const auto in_range = [](const Expr &value, const Range &range) {
+    return af::SymbolicUtils::StaticCheckGe(value, CreateExpr(range.lower)) == af::TriBool::kTrue &&
+           af::SymbolicUtils::StaticCheckLe(value, CreateExpr(range.upper)) == af::TriBool::kTrue;
+  };
+  return in_range(shape.repeats[0], kFoldedStoreLongLoopOuter) &&
+         in_range(shape.gm_strides[1], kFoldedStoreLongLoopGmRowPitch);
+}
+
+// A short-row Compact Store retains one hardware loop when the GM rows are strided
+// and the UB outer pitch keeps the outer axis separate.
+af::Status SelectCompactLoopStore(const TensorShapeInfo &shape, const NodeInfo &node, PerfOutputInfo &perf) {
+  using namespace dma_calibration_v2;
+  if (node.is_cv_ub_fusion || shape.data_type != "float16" || shape.data_type_size != kCompactStoreElementBytes ||
+      shape.repeats.size() != 3U || shape.dims.size() != 3U || shape.gm_strides.size() != 3U ||
+      shape.strides.size() != 3U) {
+    return af::SUCCESS;
+  }
+  const auto &zero = af::sym::kSymbolZero;
+  const auto &one = af::sym::kSymbolOne;
+  const auto &outer = shape.repeats[0];
+  const auto &rows = shape.repeats[1];
+  const auto &width = shape.repeats[2];
+  // A compile-time unit row is removed by Codegen before selecting LoopMode.
+  if (af::SymbolicUtils::StaticCheckEq(rows, one) == af::TriBool::kTrue) {
+    return af::SUCCESS;
+  }
+  const auto outside = [&](const Expr &value, const Range &range) {
+    return af::sym::Max(zero, af::sym::Max(CreateExpr(range.lower) - value, value - CreateExpr(range.upper)));
+  };
+  const auto ub_pitch = CreateExpr(kCompactStoreUbAlignment);
+  Expr violation = zero;
+  for (const auto &part : {af::sym::Abs(outer - CreateExpr(kCompactStoreOuter)), outside(rows, kCompactStoreRows),
+                           outside(width, kCompactStoreWidth), outside(CreateExpr("block_dim"), kCompactStoreCores),
+                           af::sym::Abs(shape.gm_strides[0] - CreateExpr(kCompactStoreGmLoopPitch)),
+                           af::sym::Abs(shape.gm_strides[1] - CreateExpr(kCompactStoreGmRowPitch)),
+                           af::sym::Max(zero, rows * width + one - ub_pitch),
+                           af::sym::Abs(shape.gm_strides.back() - one), af::sym::Abs(shape.strides[1] - width),
+                           af::sym::Abs(shape.strides.back() - one), af::sym::Abs(shape.strides[0] - ub_pitch)}) {
+    if (af::SymbolicUtils::StaticCheckGt(part, zero) == af::TriBool::kTrue) {
+      return af::SUCCESS;
+    }
+    violation = violation + part;
+  }
+  Expr fitted;
+  GE_ASSERT_SUCCESS(GetPerf({"StoreCompactLoopShortRows", shape.data_type, shape.data_type, {rows}, zero}, fitted));
+  Expr single_row;
+  GE_ASSERT_SUCCESS(GetPerf({"StoreCompactLoopSingleRow", shape.data_type, shape.data_type, {one}, zero}, single_row));
+  const auto compact = CreateExpr("store_compact_loop_per_call");
+  TernaryOp row_guard(CondType::K_EQ, rows, one, single_row, fitted);
+  row_guard.SetVariable(compact);
+  perf.ternary_ops[compact] = std::move(row_guard);
+  const auto result = CreateExpr("store_compact_loop_short_rows");
+  TernaryOp guard(CondType::K_EQ, violation, zero, compact, perf.pipe_res.at(PipeType::AIV_MTE3));
+  guard.SetVariable(result);
+  perf.ternary_ops[result] = std::move(guard);
+  perf.pipe_res[PipeType::AIV_MTE3] = result;
+  return af::SUCCESS;
+}
+
+constexpr size_t kAdjacentSliceStoreCount = 4U;
+
+bool MatchesAdjacentSliceStoreCopy(const af::AscNodePtr &store, const codegen::CodegenApiParam &candidate,
+                                   const af::AscNodePtr &owner, const codegen::CodegenApiParam &api,
+                                   const codegen::DmaSpecificParams &reference, const NodeDetail &dma) {
+  const auto *copy = std::get_if<codegen::DmaSpecificParams>(&candidate.specific_params);
+  const auto &width = dma.input_dims.back();
+  const auto &zero = af::sym::kSymbolZero;
+  if (copy == nullptr || !copy->data_copy_params.valid || copy->loop_mode_params.valid ||
+      !candidate.outer_loop_axes.empty() || candidate.template_params != api.template_params ||
+      candidate.template_params.back() != "AscendC::PaddingMode::Compact" ||
+      store->attr.sched.loop_axis != owner->attr.sched.loop_axis ||
+      store->attr.sched.exec_condition != af::ExecuteCondition::kNoCache ||
+      !SameDmaExpr(copy->data_copy_params.block_count.combined_expr,
+                   reference.data_copy_params.block_count.combined_expr) ||
+      !SameDmaExpr(copy->data_copy_params.block_len.combined_expr, width) ||
+      !SameDmaExpr(copy->data_copy_params.src_stride.combined_expr, zero) ||
+      !SameDmaExpr(copy->data_copy_params.dst_stride.combined_expr, dma.gm_stride)) {
+    return false;
+  }
+  return true;
+}
+
+bool InsertAdjacentSliceStoreOffset(const af::AscNodePtr &store, std::set<int64_t> &offsets) {
+  Expr offset = af::sym::kSymbolZero;
+  auto *attr = store->attr.ir_attr == nullptr
+                   ? nullptr
+                   : store->attr.ir_attr->DownCastTo<af::ascir_op::Store::AscStoreIrAttrDef>();
+  if (attr != nullptr) {
+    (void)attr->GetOffset(offset);
+  }
+  int64_t offset_value = 0;
+  return offset.GetConstValue(offset_value) && offsets.insert(offset_value).second;
+}
+
+bool HasAdjacentSliceStoreOffsets(const af::ComputeGraphPtr &graph, const af::AscNodePtr &owner,
+                                  const codegen::CodegenApiParam &api, const codegen::DmaSpecificParams &reference,
+                                  const NodeDetail &dma, int64_t width_value) {
+  std::set<int64_t> offsets;
+  for (const auto &member : graph->GetAllNodes()) {
+    if (member->GetType() != kStore) {
+      continue;
+    }
+    const auto store = std::dynamic_pointer_cast<af::AscNode>(member);
+    const auto candidate = store == nullptr ? nullptr : codegen::CodegenApiParam::TryGetNodeApiParam(store);
+    if (candidate == nullptr || candidate->output_params.size() != 1U) {
+      return false;
+    }
+    if (candidate->output_params[0].name != api.output_params[0].name) {
+      continue;
+    }
+    if (!MatchesAdjacentSliceStoreCopy(store, *candidate, owner, api, reference, dma) ||
+        !InsertAdjacentSliceStoreOffset(store, offsets)) {
+      return false;
+    }
+  }
+  if (offsets.size() != kAdjacentSliceStoreCount || *offsets.begin() != 0) {
+    return false;
+  }
+  return std::adjacent_find(offsets.begin(), offsets.end(), [width_value](int64_t left, int64_t right) {
+           return right - left != width_value;
+         }) == offsets.end();
+}
+
+af::Status SelectAdjacentSliceStore(const NodeDetail &dma, const NodeInfo &node, PerfOutputInfo &perf) {
+  constexpr int32_t kBurstElements = 32;
+  const auto &owner = node.node_ptr;
+  if (node.is_cv_ub_fusion || owner == nullptr || dma.output_dtype[0] != "float32" || dma.input_dims.size() != 2U ||
+      !dma.vectorized_shape.empty()) {
+    return af::SUCCESS;
+  }
+  const auto &rows = dma.input_dims.front();
+  const auto &width = dma.input_dims.back();
+  const auto &zero = af::sym::kSymbolZero;
+  if (!width.IsConstExpr() || !SameDmaExpr(dma.gm_stride, width * CreateExpr(kAdjacentSliceStoreCount - 1U)) ||
+      !SameDmaExpr(dma.ub_stride, zero) || !SameDmaExpr(af::sym::Mod(width, CreateExpr(kBurstElements)), zero)) {
+    return af::SUCCESS;
+  }
+  const auto api = codegen::CodegenApiParam::TryGetNodeApiParam(owner);
+  const auto graph = owner->GetOwnerComputeGraph();
+  if (api == nullptr || api->output_params.size() != 1U || api->template_params.size() < 2U || graph == nullptr) {
+    return af::SUCCESS;
+  }
+  const auto *reference = std::get_if<codegen::DmaSpecificParams>(&api->specific_params);
+  if (reference == nullptr || !reference->data_copy_params.valid) {
+    return af::SUCCESS;
+  }
+
+  int64_t width_value = 0;
+  GE_ASSERT_TRUE(width.GetConstValue(width_value) && width_value > 0);
+  if (!HasAdjacentSliceStoreOffsets(graph, owner, *api, *reference, dma, width_value)) {
+    return af::SUCCESS;
+  }
+
+  // Charge each adjacent slice its share of the whole writeback measurement.
+  const auto outside = [&](const Expr &value, int32_t lo, int32_t hi) {
+    return af::sym::Max(zero, af::sym::Max(CreateExpr(lo) - value, value - CreateExpr(hi)));
+  };
+  const auto violation = outside(rows, 12, 48) + outside(width, 64, 128) + outside(CreateExpr("block_dim"), 8, 32);
+  Expr fitted;
+  GE_ASSERT_SUCCESS(GetPerf({"StoreAdjacentSlicesPayload", "float32", "float32", {rows, width}, zero}, fitted));
+  const auto result = CreateExpr("store_adjacent_slices_payload");
+  auto &cycles = perf.pipe_res.at(PipeType::AIV_MTE3);
+  TernaryOp guard(CondType::K_EQ, violation, zero, fitted, cycles);
+  guard.SetVariable(result);
+  perf.ternary_ops[result] = std::move(guard);
+  cycles = result;
+  return af::SUCCESS;
+}
+
+bool HasStaticNddmaReadSource(const af::AscNodePtr &read) {
+  if (read == nullptr || read->outputs().size() != 1U || read->GetInDataNodesSize() != 1U) {
+    return false;
+  }
+  const auto source = std::dynamic_pointer_cast<af::AscNode>(*read->GetInDataNodes().begin());
+  if (source == nullptr || source->GetType() != kData || source->outputs().size() != 1U) {
+    return false;
+  }
+  const auto &source_dims = source->outputs[0].attr.repeats;
+  if (source_dims.empty() ||
+      !std::all_of(source_dims.begin(), source_dims.end(), [](const Expr &dim) { return dim.IsConstExpr(); })) {
+    return false;
+  }
+  return true;
+}
+
+bool MatchesNddmaReadGroupLayout(const af::AscNodePtr &read, const af::AscNodePtr &node) {
+  const auto &layout = node->outputs[0].attr;
+  const auto &sched = node->attr.sched;
+  // ASCIR records the planned queue depth and buffer count. The queue
+  // template argument emitted by Codegen is a separate property.
+  constexpr int64_t kDoubleBufferedDepth = 2;
+  const auto &output = read->outputs[0].attr;
+  const auto &read_sched = read->attr.sched;
+  if (output.axis != layout.axis || output.vectorized_axis != layout.vectorized_axis ||
+      output.repeats != layout.repeats || output.strides != layout.strides ||
+      output.mem.alloc_type != af::AllocType::kAllocTypeQueue || output.que.depth != kDoubleBufferedDepth ||
+      output.que.buf_num != kDoubleBufferedDepth || read_sched.axis != sched.axis ||
+      read_sched.loop_axis != sched.loop_axis || read_sched.exec_condition != af::ExecuteCondition::kNoCache) {
+    return false;
+  }
+  return true;
+}
+
+bool HasStaticNddmaReadGroup(const af::AscNodePtr &node) {
+  const auto graph = node->GetOwnerComputeGraph();
+  if (graph == nullptr || node->outputs().size() != 1U) {
+    return false;
+  }
+  size_t fp32_count = 0U;
+  size_t byte_count = 0U;
+  for (const auto &member : graph->GetAllNodes()) {
+    if (member->GetType() == kLoad) {
+      return false;
+    }
+    if (member->GetType() != kNddma) {
+      continue;
+    }
+    const auto read = std::dynamic_pointer_cast<af::AscNode>(member);
+    if (!HasStaticNddmaReadSource(read) || !MatchesNddmaReadGroupLayout(read, node)) {
+      return false;
+    }
+    const auto &output = read->outputs[0].attr;
+    const auto dtype = static_cast<af::DataType>(output.dtype);
+    fp32_count += static_cast<size_t>(dtype == af::DT_FLOAT);
+    byte_count += static_cast<size_t>(dtype == af::DT_UINT8);
+    if (dtype != af::DT_FLOAT && dtype != af::DT_UINT8) {
+      return false;
+    }
+  }
+  return fp32_count == 2U && byte_count == 1U;
+}
+
+void ApplyWideNddmaReadGroupBound(const NddmaDescriptorInfo &descriptor, const TensorShapeInfo &shape,
+                                  const NodeInfo &node, NddmaModelResult &result) {
+  constexpr uint64_t kLanes = 32U;
+  constexpr uint64_t kFp32Bytes = sizeof(float);
+  constexpr uint64_t kBytesPerLane = 2U * kFp32Bytes + 1U;
+  constexpr uint64_t kMinPitchBytes = 6319104U;
+  constexpr uint64_t kMaxPitchBytes = 7555072U;
+  constexpr uint64_t kPitchSplitBytes = 7110656U;
+  constexpr double kLowerPitchCyclesPerRow = 59215.03125 / 256.0;
+  constexpr double kUpperPitchCyclesPerRow = 25672.84766612026 / 256.0;
+  if (node.node_ptr == nullptr || (shape.data_type != "float32" && shape.data_type != "uint8") ||
+      descriptor.output_dims.size() != 2U ||
+      af::SymbolicUtils::StaticCheckEq(descriptor.input_strides[0], af::sym::kSymbolOne) != af::TriBool::kTrue ||
+      af::SymbolicUtils::StaticCheckEq(descriptor.output_strides[1], af::sym::kSymbolOne) != af::TriBool::kTrue) {
+    return;
+  }
+  uint64_t pitch = 0;
+  if (!descriptor.input_strides[1].GetConstValue(pitch) || pitch < kMinPitchBytes / kFp32Bytes ||
+      pitch > kMaxPitchBytes / kFp32Bytes) {
+    return;
+  }
+  const auto lanes = CreateExpr(kLanes);
+  const auto &width = descriptor.output_dims[1];
+  const auto width_match = af::SymbolicUtils::StaticCheckEq(width, lanes);
+  const auto stride_match = af::SymbolicUtils::StaticCheckEq(descriptor.output_strides[0], lanes);
+  if (width_match == af::TriBool::kFalse || stride_match == af::TriBool::kFalse ||
+      !HasStaticNddmaReadGroup(node.node_ptr)) {
+    return;
+  }
+  // Calibrate the aggregate read rate, then apportion the lower bound by payload. Scaling by rows
+  // also covers a short tail without charging it as a full tile. Each API retains its legacy minimum.
+  const double cycles_per_row =
+      pitch * kFp32Bytes > kPitchSplitBytes ? kUpperPitchCyclesPerRow : kLowerPitchCyclesPerRow;
+  const auto per_node_row =
+      CreateExpr(cycles_per_row * static_cast<double>(shape.data_type_size) / static_cast<double>(kBytesPerLane));
+  const auto bounded = af::sym::Max(result.cycles, descriptor.output_dims[0] * per_node_row);
+  if (width_match == af::TriBool::kTrue && stride_match == af::TriBool::kTrue) {
+    result.cycles = bounded;
+  } else {
+    const auto violation = af::sym::Abs(width - lanes) + af::sym::Abs(descriptor.output_strides[0] - lanes);
+    const auto value = CreateExpr("nddma_wide_read_group_bound");
+    TernaryOp guard(CondType::K_EQ, violation, af::sym::kSymbolZero, bounded, result.cycles);
+    guard.SetVariable(value);
+    result.ternary_ops[value] = std::move(guard);
+    result.cycles = value;
+  }
+  GELOGD("[ATT NDDMA] wide read group bound: node=%s, pitch_bytes=%lu", node.name.c_str(), pitch * kFp32Bytes);
 }
 
 af::Status TryNewNddmaModel(const TensorShapeInfo &shape_info, const NodeInfo &node, NodeDetail &node_detail,
@@ -152,6 +894,7 @@ af::Status TryNewNddmaModel(const TensorShapeInfo &shape_info, const NodeInfo &n
     LogNddmaFallback(node_detail.name, shape_info.data_type, &descriptor, result);
     return af::SUCCESS;
   }
+  ApplyWideNddmaReadGroupBound(descriptor, shape_info, node, result);
   perf_res.pipe_res[PipeType::AIV_MTE2] = result.cycles;
   perf_res.ternary_ops.insert(result.ternary_ops.begin(), result.ternary_ops.end());
   selected = true;
@@ -206,10 +949,19 @@ af::Status LoadApi([[maybe_unused]] const std::vector<TensorShapeInfo> &input_sh
   dma_info.optype = node_ptr->GetType();
   dma_info.input_dtype = {merged_output_shapes.data_type};
   dma_info.output_dtype = {merged_output_shapes.data_type};
-  GE_ASSERT_SUCCESS(SetDims(merged_output_shapes, dma_info));
-  GE_ASSERT_SUCCESS(GetDmaPerf(merged_output_shapes, dma_info, perf_res, kMaxDmaLen));
-  GE_ASSERT_SUCCESS(SelectAlignedLoopLoad(output_shapes[0], node, perf_res));
-  GE_ASSERT_SUCCESS(SelectAlignedLoopLoad(output_shapes[0], node, perf_res, true));
+  const auto physical_shape = GetMergedCompactLoadShape(merged_output_shapes, node);
+  const auto &dma_shape = physical_shape ? *physical_shape : merged_output_shapes;
+  GE_ASSERT_SUCCESS(SetDims(dma_shape, dma_info));
+  GE_ASSERT_SUCCESS(GetDmaPerf(dma_shape, dma_info, perf_res, kMaxDmaLen));
+  GE_ASSERT_SUCCESS(SelectCalibratedCompactLoad(merged_output_shapes, node, perf_res));
+  GE_ASSERT_SUCCESS(SelectManyShortFp32CompactLoad(merged_output_shapes, node, perf_res));
+  GE_ASSERT_SUCCESS(SelectFp32CompactHardwareLoopLoad(merged_output_shapes, node, perf_res));
+  GE_ASSERT_SUCCESS(SelectPackedShortRowLoad(output_shapes[0], node, perf_res));
+  GE_ASSERT_SUCCESS(SelectAlignedLoopLoad(output_shapes[0], node, perf_res, kAlignedLoopLoad));
+  GE_ASSERT_SUCCESS(SelectAlignedLoopLoad(output_shapes[0], node, perf_res, kNarrowLoopLoad));
+  GE_ASSERT_SUCCESS(SelectAlignedLoopLoad(output_shapes[0], node, perf_res, kWideLoopLoad));
+  GE_ASSERT_SUCCESS(SelectAlignedLoopLoad(output_shapes[0], node, perf_res, kLongLoopLoad));
+  GE_ASSERT_SUCCESS(SelectAlignedLoopLoad(output_shapes[0], node, perf_res, kSparseLoopLoad));
   return af::SUCCESS;
 }
 
@@ -269,14 +1021,17 @@ af::Status StoreApiV2([[maybe_unused]] const std::vector<TensorShapeInfo> &input
   auto merged_output_shapes = output_shapes[0];
   GE_ASSERT_SUCCESS(
       MergeTensorContinuousDims(store_node_ptr, GetNodeOutTensorName(store_node_ptr, 0), merged_output_shapes));
+  const auto folded = FoldStoreInnermostAxis(node, merged_output_shapes);
+  const auto &dma_shape = folded && UseFoldedStoreStride(*folded) ? *folded : merged_output_shapes;
   NodeDetail dma_info;
   dma_info.name = store_node_name;
   dma_info.optype = store_node_ptr->GetType();
   dma_info.input_dtype = {merged_output_shapes.data_type};
   dma_info.output_dtype = {merged_output_shapes.data_type};
-  GE_ASSERT_SUCCESS(SetDims(merged_output_shapes, dma_info));
-  GE_ASSERT_SUCCESS(GetDmaPerf(merged_output_shapes, dma_info, perf_res, kMaxDmaLen));
-  return af::SUCCESS;
+  GE_ASSERT_SUCCESS(SetDims(dma_shape, dma_info));
+  GE_ASSERT_SUCCESS(GetDmaPerf(dma_shape, dma_info, perf_res, kMaxDmaLen));
+  GE_ASSERT_SUCCESS(SelectAdjacentSliceStore(dma_info, node, perf_res));
+  return SelectCompactLoopStore(folded ? *folded : merged_output_shapes, node, perf_res);
 }
 
 inline af::Status CompareSpecificPerf(const std::string &mode, const NodeDetail &node_info, PerfOutputInfo &perf) {

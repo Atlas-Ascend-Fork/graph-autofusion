@@ -1,0 +1,13 @@
+factor_id,experiment,role,dtype,dtype_size,block_dim,api,dims,gm_or_input_strides,ub_or_output_strides,point_flush,packing_extra
+train_m20,fp16_sparse_extended_rank3,train,float16,2,48,NDDMA,20x4x116,1x3200x12800,464x116x1,1,0
+train_m24,fp16_sparse_extended_rank3,train,float16,2,50,NDDMA,24x4x128,1x3424x13696,512x128x1,1,0
+train_m30,fp16_sparse_extended_rank3,train,float16,2,54,NDDMA,30x4x108,1x3048x12192,432x108x1,1,0
+train_m40,fp16_sparse_extended_rank3,train,float16,2,56,NDDMA,40x4x120,1x3544x14176,480x120x1,1,0
+train_m36,fp16_sparse_extended_rank3,train,float16,2,52,NDDMA,36x4x126,1x3312x13248,512x126x1,1,0
+train_m32,fp16_sparse_extended_rank3,train,float16,2,56,NDDMA,32x4x118,1x3384x13536,472x118x1,1,0
+holdout_m28,fp16_sparse_extended_rank3,holdout,float16,2,50,NDDMA,28x4x106,1x3096x12384,424x106x1,1,0
+holdout_m34,fp16_sparse_extended_rank3,holdout,float16,2,54,NDDMA,34x4x124,1x3496x13984,496x124x1,1,0
+holdout_m38,fp16_sparse_extended_rank3,holdout,float16,2,56,NDDMA,38x4x114,1x3256x13024,456x114x1,1,0
+holdout_m36_aligned,fp16_sparse_extended_rank3,holdout,float16,2,48,NDDMA,36x4x122,1x3360x13440,496x122x1,1,0
+target_ne,fp16_sparse_extended_rank3,known,float16,2,56,NDDMA,36x4x118,1x3384x13536,472x118x1,1,0
+control_m18_aligned,fp16_sparse_extended_rank3,control,float16,2,56,NDDMA,18x4x118,1x3384x13536,480x118x1,1,0

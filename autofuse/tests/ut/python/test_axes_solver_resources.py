@@ -426,3 +426,52 @@ def test_program_evaluation_uses_shared_solver(
         result.stdout.strip()
         == "program_bindings=ok search_and_pgo=ok concurrent_contexts=ok"
     )
+
+
+@pytest.mark.parametrize("owner", ["native", "embedded", "codegen"])
+@pytest.mark.parametrize("sanitize", [False, True])
+def test_floating_mod_matches_standard_library(tmp_path, owner, sanitize):
+    helper = ROOT / "autofuse/att/core/scalar/scalar_helpers.inc"
+    if owner == "native":
+        content = f'#include "{helper}"\n'
+    elif owner == "embedded":
+        content = EMBED.read_resource(helper)
+    else:
+        # Compile the real generated-Host template, not a test copy of its body.
+        text = (ROOT / "autofuse/codegen/codegen_tiling.cpp").read_text()
+        signature = text.index("inline auto Mod(T1 a, T2 b) -> typename")
+        start = text.rfind("template", 0, signature)
+        opening = text.index("{", signature)
+        depth = 1
+        end = opening + 1
+        while depth:
+            depth += (text[end] == "{") - (text[end] == "}")
+            end += 1
+        content = text[start:end] + "\n"
+    contract = Path(__file__).parent / "data/scalar_mod_contract.cpp"
+    source = tmp_path / "mod_contract.cpp"
+    source.write_text(
+        "#include <cmath>\n#include <cstdint>\n#include <type_traits>\n"
+        + content
+        + f'\n#include "{contract}"\n'
+    )
+    binary = tmp_path / "mod_contract"
+    command = [
+        os.environ.get("CXX", "g++"),
+        "-std=c++17",
+        "-O2",
+        "-fno-fast-math",
+        *(
+            ["-fsanitize=undefined,float-cast-overflow", "-fno-sanitize-recover=all"]
+            if sanitize
+            else []
+        ),
+        str(source),
+        "-o",
+        str(binary),
+    ]
+    compiled = subprocess.run(command, capture_output=True, text=True, timeout=60)
+    assert compiled.returncode == 0, compiled.stderr
+    result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "verified=483600" in result.stdout

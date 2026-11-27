@@ -49,7 +49,7 @@ class SolverPassManager : public InputOutputSettersMixin<SolverPassManager>,
   static std::string GenAxesReorderPgoClassesHead(int64_t pgo_step_max);
   static std::string GenAxesReorderPgoClassesFunc();
   std::string GenAxesReorderClass();
-  std::pair<std::string, std::string> GenAxesReorderFunc(const std::string &arrange_code);
+  std::pair<std::string, std::string> GenAxesReorderFunc(const std::string &arrange_code, bool single_tiling_case);
   void SetUBThreshold(double &ub_threshold) {
     ub_threshold_ = ub_threshold;
   }

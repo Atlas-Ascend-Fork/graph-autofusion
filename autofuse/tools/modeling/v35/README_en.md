@@ -11,6 +11,7 @@ Collection and fitting code is centralized here. Designs, cases, and concise mea
 | [Ordinary Load / Store](dma/README_en.md) | v35 FP32 DMA device collection, accuracy validation, and reproduction |
 | [MTE2](mte2/README_en.md) | Error checking and refitting for archived Load / NDDMA data |
 | [Gather](vector/gather/README_en.md) | Device collection of bank and mask components |
+| [High-accuracy VF profiling](vector/vf/README_en.md) | Standalone vector instruction profiling and fitting |
 | [IsInf](vector/isinf/README_en.md) | Device collection and fitting for a single API |
 | [GetOpHeadCost](common/op_head_cost/README_en.md) | Device collection, evidence checking, and offline recomputation of the shared per-core cost |
 
@@ -38,3 +39,11 @@ The manifest `case_inventory` and `reproduction` entries are resolved relative t
 and `source_root=external_runs` means it is relative to the historical experiment runs root.
 Source-file checksums are used to verify historical evidence and remain in use after path migration.
 External evidence locations are for provenance only; offline error revalidation reads the in-repo cases and samples directly.
+
+### Cases and local profiling
+
+Calibration inputs are stored in the [v35 case directories](../../../att/modeling/v35/) as case CSV files and
+descriptor lists. Use [collect.sh](dma/collect.sh) for DMA profiling and the [Gather project](vector/gather/CMakeLists.txt)
+for Gather profiling. Pass the cases and the newly collected samples to each fitting script. See its command-line
+help for supported arguments. Full fitting data, plots, and regression records are in the
+[private archive](https://gitcode.com/zhang_shengjie/AutoTilingModelSelfImproving/tree/main/archive/pr3016).

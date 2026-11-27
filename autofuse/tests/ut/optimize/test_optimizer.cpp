@@ -37,6 +37,7 @@
 #include "task_generator/reduce_schedule_case_generator.h"
 #include "ascgraph_info_complete.h"
 #include "schedule_result.h"
+#include "common/common_utils.h"
 #include "attribute_group/attr_group_shape_env.h"
 #include "autoschedule/autoschedule.h"
 #include "autoschedule/tiling_group.h"
@@ -378,6 +379,54 @@ class TestOptimizer : public ::testing::Test {
     return ss;
   }
 };
+
+TEST_F(TestOptimizer, OffsetStoreCopyGroupsRespectParallelCoreBudget) {
+  ge::PlatformInfo platform;
+  platform.soc_ver = "3510";
+  platform.aiv_num = 8;
+  platform.ub_size = 4096;
+  auto &context = ge::PlatformContext::GetInstance();
+  context.SetPlatformInfo(platform);
+
+  ::ascir::FusedScheduledResult fused;
+  fused.node_idx_to_scheduled_results.resize(1);
+  auto &result = fused.node_idx_to_scheduled_results.front().emplace_back();
+  result.semantic_name = ascgen_utils::template_semantic::kConcatOffsetStore;
+  for (size_t i = 0; i < 2U; ++i) {
+    auto &group = result.schedule_groups.emplace_back();
+    auto &graph = group.impl_graphs.emplace_back("copy");
+    const auto extent = af::Symbol(2048);
+    const auto axis = graph.CreateAxis("x", extent);
+    af::ascir_op::Data data("data", graph);
+    af::ascir_op::Load load("load");
+    load.x = data.y;
+    load.y.dtype = ge::DT_FLOAT;
+    *load.y.axis = {axis.id};
+    *load.y.repeats = {extent};
+    *load.y.strides = {af::ops::One};
+    af::ascir_op::Store store("store");
+    store.x = load.y;
+    store.y.dtype = ge::DT_FLOAT;
+    *store.y.axis = {axis.id};
+    *store.y.repeats = {extent};
+    *store.y.strides = {af::ops::One};
+    const auto load_node = graph.FindNode("load");
+    const auto store_node = graph.FindNode("store");
+    ASSERT_NE(load_node, nullptr);
+    ASSERT_NE(store_node, nullptr);
+    load_node->outputs[0].attr.vectorized_axis = {axis.id};
+    load_node->outputs[0].attr.que.buf_num = 2;
+    store_node->outputs[0].attr.vectorized_axis = {axis.id};
+  }
+
+  optimizer.TryEnableGroupParallel(fused);
+  EXPECT_TRUE(result.enable_group_parallel);
+
+  platform.aiv_num = 7;
+  context.SetPlatformInfo(platform);
+  optimizer.TryEnableGroupParallel(fused);
+  EXPECT_FALSE(result.enable_group_parallel);
+}
 
 TEST_F(TestOptimizer, TwoWorkspace) {
   af::AscGraph graph("test_graph");

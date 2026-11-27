@@ -885,3 +885,181 @@ TEST_F(TestAxesReorderSolverGen, test_contain_heavy_op) {
   std::string actual = solver.GenSolverFuncImpl();
   EXPECT_TRUE(actual.find("solver.Run(true, ") != std::string::npos);
 }
+
+namespace {
+std::string ObjectiveCacheClass(const std::string &name, bool enabled) {
+  AxesReorderSolverGen generator(name, "TilingData");
+  const auto x = CreateExpr("x");
+  const auto scale = CreateExpr("scale");
+  const auto mc = CreateExpr("mc");
+  const auto tile = CreateExpr("tile");
+  generator.SetInputArgs({x, scale});
+  generator.mc_args_ = {mc};
+  generator.local_buffer_tiling_vars_ = {tile};
+  generator.SetBufferUseAlg({{HardwareDef::UB, tile}});
+  generator.SetObjFunc(CreateExpr(0), {{PipeType::AIV_VEC, af::sym::Div(x, scale) + mc + CreateExpr(2) * tile}});
+  generator.SetEnableCoreSearch(enabled);
+  generator.SetEnableEqualOrder(true);
+  generator.SetGroupNum(2UL);
+  auto source = generator.GenSolverClassImpl();
+  // Count actual evaluations of the generated mathematical function without changing its value.
+  const auto signature = source.find("::GetPerfStatic(");
+  const auto opening = source.find('{', signature);
+  if (signature == std::string::npos || opening == std::string::npos) {
+    ADD_FAILURE() << "Generated objective definition is missing";
+    return {};
+  }
+  source.insert(opening + 1U, "\n  ++g_objective_calls;\n");
+  return source;
+}
+
+constexpr char kObjectiveCacheTestIncludes[] = R"generated(#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <functional>
+#include <limits>
+#include <map>
+#include <sstream>
+#include <type_traits>
+#include <vector>
+#define OP_LOGD(...) ((void)0)
+#define OP_LOGI(...) ((void)0)
+#define OP_LOGW(...) ((void)0)
+#define OP_LOGE(...) ((void)0)
+#define OP_NAME "ObjectiveCacheContract"
+  )generated";
+
+constexpr char kObjectiveCacheTilingData[] = R"generated(
+    enum class PipeType { ALL, AIV_VEC };
+    static uint32_t g_objective_calls = 0U;
+    struct TilingData {
+      int64_t get_x() const {
+        return 0;
+      }
+      int64_t get_scale() const {
+        return 0;
+      }
+      int64_t get_mc() const {
+        return 1;
+      }
+      int64_t get_tile() const {
+        return 1;
+      }
+      uint32_t get_block_dim() const {
+        return 1U;
+      }
+    };
+  )generated";
+
+constexpr char kObjectiveCacheTestCases[] = R"generated(
+    struct Inputs {
+      Variable x;
+      Variable scale;
+      TilingVariable mc;
+      TilingVariable tile;
+      Variable *inputs[2] = {&x, &scale};
+      TilingVariable *multicore[1] = {&mc};
+      TilingVariable *local[1] = {&tile};
+      AxesReorderSolverInput data;
+      Inputs() {
+        x.value = 8;
+        scale.value = 2;
+        mc.value = 1;
+        tile.value = 1;
+        data.input_vars = inputs;
+        data.input_vars_size = 2U;
+        data.pure_mc_vars = multicore;
+        data.pure_mc_vars_size = 1U;
+        data.local_buffer_vars = local;
+        data.local_buffer_vars_size = 1U;
+      }
+    };
+    template <typename Base>
+    class Probe : public Base {
+     public:
+      explicit Probe(const AxesReorderSolverInput &input) : Base(input) {}
+      double blocks = 1.0;
+      bool CalUsedCoreNum(double &value) override {
+        value = blocks;
+        return true;
+      }
+    };
+#define REQUIRE(condition)                                                     \
+      do {                                                                         \
+        if (!(condition)) {                                                        \
+          std::fprintf(stderr, "line=%d calls=%u\n", __LINE__, g_objective_calls); \
+          return 1;                                                                \
+        }                                                                          \
+      } while (false)
+    int main() {
+      Inputs first;
+      Probe<AxesReorderSolvercached> cached(first.data);
+      REQUIRE(cached.GetPerf() == 7.0 && cached.GetPerf() == 7.0 && g_objective_calls == 1U);
+      first.x.value = 12;
+      REQUIRE(cached.GetPerf() == 9.0 && g_objective_calls == 2U);
+      first.scale.value = 4;
+      REQUIRE(cached.GetPerf() == 6.0 && g_objective_calls == 3U);
+      first.mc.value = 2;
+      REQUIRE(cached.GetPerf() == 7.0 && g_objective_calls == 4U);
+      first.tile.value = 3;
+      REQUIRE(cached.GetPerf() == 11.0 && g_objective_calls == 5U);
+      cached.blocks = 0.0;
+      REQUIRE(cached.GetPerf() == 11.0 && g_objective_calls == 6U);
+      cached.blocks = -0.0;
+      REQUIRE(cached.GetPerf() == 11.0 && g_objective_calls == 7U);
+      cached.blocks = 0.0;
+      REQUIRE(cached.GetPerf() == 11.0 && g_objective_calls == 7U);
+      Inputs second;
+      Probe<AxesReorderSolvercached> independent(second.data);
+      REQUIRE(independent.GetPerf() == 7.0 && g_objective_calls == 8U);
+      REQUIRE(cached.GetPerf() == 11.0 && g_objective_calls == 8U);
+      Inputs exceptional;
+      exceptional.x.value = 1;
+      exceptional.scale.value = 0;
+      Probe<AxesReorderSolvercached> invalid(exceptional.data);
+      REQUIRE(std::isinf(invalid.GetPerf()) && std::isinf(invalid.GetPerf()) && g_objective_calls == 10U);
+      exceptional.x.value = 0;
+      REQUIRE(std::isnan(invalid.GetPerf()) && std::isnan(invalid.GetPerf()) && g_objective_calls == 12U);
+      g_objective_calls = 0U;
+      Inputs off_inputs;
+      Probe<AxesReorderSolveruncached> uncached(off_inputs.data);
+      REQUIRE(uncached.GetPerf() == 7.0 && uncached.GetPerf() == 7.0 && g_objective_calls == 2U);
+      g_objective_calls = 0U;
+      Inputs ring_inputs;
+      Probe<AxesReorderSolvercached> ring(ring_inputs.data);
+      for (int64_t i = 0; i < 32; ++i) {
+        ring_inputs.x.value = 100 + i;
+        REQUIRE(ring.GetPerf() == (100.0 + i) / 2.0 + 3.0);
+      }
+      REQUIRE(g_objective_calls == 32U && ring.GetPerf() == 68.5 && g_objective_calls == 32U);
+      ring_inputs.x.value = 100;
+      REQUIRE(ring.GetPerf() == 53.0 && g_objective_calls == 33U);
+      return 0;
+    }
+  )generated";
+
+std::string ObjectiveCacheContractSource() {
+  std::ostringstream source;
+  source << kObjectiveCacheTestIncludes;
+  source << axes_resource::kExpressionHelpers << axes_resource::kScalarHelpers << axes_resource::kAxesCeilDiv;
+  source << GetAxesSolverSolverHead(true);
+  source << kObjectiveCacheTilingData;
+  source << ObjectiveCacheClass("cached", true) << ObjectiveCacheClass("uncached", false);
+  source << kObjectiveCacheTestCases;
+  return source.str();
+}
+}  // namespace
+
+TEST_F(TestAxesReorderSolverGen, GeneratedObjectiveCachePreservesValuesAndInvalidation) {
+  const auto source_path = test_work_dir_ / "tiling_func_main_objective_cache_contract.cpp";
+  const auto binary_path = test_work_dir_ / "tiling_func_main_objective_cache_contract";
+  std::ofstream source(source_path);
+  source << ObjectiveCacheContractSource();
+  source.close();
+  ASSERT_TRUE(source.good());
+  const char *cxx = std::getenv("CXX");
+  ASSERT_TRUE(RunCommand(
+      {cxx == nullptr ? "g++" : cxx, "-std=c++17", "-O2", source_path.string(), "-o", binary_path.string()}, 60));
+  ASSERT_TRUE(RunCommand({binary_path.string()}, 30));
+}

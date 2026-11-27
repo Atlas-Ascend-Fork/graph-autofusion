@@ -23,6 +23,8 @@ namespace {
 // AxesReorderSolverGen 默认阈值
 constexpr double kDefaultSolverUbThreshold = 0.2;
 constexpr double kDefaultSolverCoreNumThreshold = 0.4;
+constexpr uint32_t kObjectiveCacheEntries = 16U;
+constexpr size_t kMaxObjectiveCacheParams = 16U;
 
 void CollectContainerWorkList(const std::vector<Expr> &exprs, const ExprExprMap &container_expr,
                               std::vector<Expr> &work_list) {
@@ -369,7 +371,26 @@ std::string AxesReorderSolverGen::GenObjFunc() {
     codes += "  double " + Str(local_buffer_tiling_vars_[i]) + " = static_cast<double>(input_.local_buffer_vars[" +
              std::to_string(i) + "]->value);\n";
   }
-  codes += "  return GetPerfStatic(PipeType::ALL, " + GenGetObjStaticInputParam(true) + ");\n";
+  const auto arguments = GenGetObjStaticInputParam(true);
+  if (!UseObjectiveCache()) {
+    codes += "  return GetPerfStatic(PipeType::ALL, " + arguments + ");\n";
+  } else {
+    // The complete static-function argument list is the key; no result crosses solver instances.
+    codes += "  const double objective_key[] = {" + arguments + "};\n";
+    codes += "  for (uint32_t i = 0U; i < objective_cache_size_; ++i) {\n";
+    codes += "    if (__builtin_memcmp(objective_key, objective_keys_[i], sizeof(objective_key)) == 0) {\n";
+    codes += "      return objective_values_[i];\n";
+    codes += "    }\n";
+    codes += "  }\n";
+    codes += "  const auto objective = GetPerfStatic(PipeType::ALL, " + arguments + ");\n";
+    codes += "  if (std::isfinite(objective)) {\n";
+    codes += "    __builtin_memcpy(objective_keys_[objective_cache_next_], objective_key, sizeof(objective_key));\n";
+    codes += "    objective_values_[objective_cache_next_] = objective;\n";
+    codes += "    objective_cache_size_ = std::min(objective_cache_size_ + 1U, kObjectiveCacheEntries);\n";
+    codes += "    objective_cache_next_ = (objective_cache_next_ + 1U) % kObjectiveCacheEntries;\n";
+    codes += "  }\n";
+    codes += "  return objective;\n";
+  }
   codes += "}\n";
   codes += "\n";
   return codes;
@@ -535,8 +556,7 @@ std::string AxesReorderSolverGen::GenGetTilingDataBlockDimStatic(Expr &corenum_c
   return codes;
 }
 
-std::string AxesReorderSolverGen::GenGetObjStaticInputParam(bool no_type) {
-  std::string codes;
+std::set<std::string> AxesReorderSolverGen::GetObjStaticInputParams(bool no_type) const {
   std::set<std::string> param_set;
   if (no_type) {
     param_set.insert("block_dim");
@@ -563,8 +583,21 @@ std::string AxesReorderSolverGen::GenGetObjStaticInputParam(bool no_type) {
     std::string param = type_prefix + Str(var);
     param_set.insert(param);
   }
-  GetExprFromParamList(param_set, codes);
+  return param_set;
+}
+
+std::string AxesReorderSolverGen::GenGetObjStaticInputParam(bool no_type) {
+  std::string codes;
+  GetExprFromParamList(GetObjStaticInputParams(no_type), codes);
   return codes;
+}
+
+bool AxesReorderSolverGen::NeedLocalCoreRefinement() const {
+  return enable_equal_order_ && enable_core_search_ && group_num_ > 1UL && !enable_group_parallel_;
+}
+
+bool AxesReorderSolverGen::UseObjectiveCache() const {
+  return NeedLocalCoreRefinement() && GetObjStaticInputParams(true).size() <= kMaxObjectiveCacheParams;
 }
 
 void AxesReorderSolverGen::CollectInitialWorkList(std::vector<Expr> &work_list) const {
@@ -909,6 +942,15 @@ std::string AxesReorderSolverGen::GenSolverClassImpl() {
   codes += "  static double GetTilingDataPerfStatic(const PipeType &pipe_type, " + type_name_ + "& tiling_data);\n";
   codes += "  static int64_t GetUbSizeStatic(" + GenGetStaticInputParam(HardwareDef::UB) + ");\n";
   codes += "  static int GetTilingDataUbSizeStatic(" + type_name_ + "& tiling_data);\n";
+  if (UseObjectiveCache()) {
+    codes += " private:\n";
+    codes += "  static constexpr uint32_t kObjectiveCacheEntries = " + std::to_string(kObjectiveCacheEntries) + "U;\n";
+    codes += "  double objective_keys_[kObjectiveCacheEntries][" +
+             std::to_string(GetObjStaticInputParams(true).size()) + "]{};\n";
+    codes += "  double objective_values_[kObjectiveCacheEntries]{};\n";
+    codes += "  uint32_t objective_cache_size_ = 0U;\n";
+    codes += "  uint32_t objective_cache_next_ = 0U;\n";
+  }
   codes += "};\n";
   codes += "\n";
   codes += GenGetObjStaticFunc();
@@ -1634,6 +1676,72 @@ std::string AxesReorderSolverGen::GenPendingSearchConfigOverride() {
   return codes;
 }
 
+bool AxesReorderSolverGen::CanProbeBalancedCores() {
+  return is_inductor_scene_ && !enable_autofuse_pgo_ && enable_high_perf_ && enable_core_search_ && group_num_ == 1UL &&
+         !enable_group_parallel_ && !enable_equal_order_ && mc_args_.size() == 1UL &&
+         local_buffer_tiling_vars_.size() == 1UL && tiling_schedule_config_.trade_off_config.is_enable &&
+         !tiling_schedule_config_.is_penalty_config && tiling_schedule_config_table_ != nullptr &&
+         tiling_schedule_config_table_->EnableBalancedCoreProbe() && NeedUBMultiCoreBalance();
+}
+
+std::string AxesReorderSolverGen::GenCoreProbeInput() {
+  std::string codes;
+  if (CanProbeBalancedCores()) {
+    const char *probe_field = single_tiling_case_ ? "balance_core_probes" : "probe_aligned_core_tile";
+    codes += std::string("    input.") + probe_field +
+             " = pending_search_cfg_ == nullptr && input.corenum_threshold == 1.0;\n";
+  }
+  if (tiling_schedule_config_.is_penalty_config && !enable_multicore_ub_tradeoff_ && !enable_group_parallel_) {
+    codes += "    input.preserve_reduce_store_penalty_seed = ";
+    if (enable_autofuse_pgo_) {
+      codes += "PgoConfig::Instance().need_change_solver_run != 1 && ";
+    }
+    codes += (enable_autofuse_pgo_ || is_inductor_scene_) ? "pending_search_cfg_ == nullptr;\n" : "true;\n";
+  }
+  return codes;
+}
+
+std::string AxesReorderSolverGen::GenSingleIterationProbe() {
+  std::string codes;
+  // Restrict the probe to the tail of a two-group graph with materialized graph outputs.
+  if (is_inductor_scene_ && enable_high_perf_ && enable_core_search_ && !enable_group_parallel_ && group_num_ == 2UL &&
+      has_multiple_graph_outputs_ && tiling_case_ident_.schedule_group_ident.group_id > 0U &&
+      tiling_schedule_config_.trade_off_config.is_enable && !tiling_schedule_config_.is_penalty_config &&
+      !enable_equal_order_ && mc_args_.size() == 1UL && local_buffer_tiling_vars_.size() == 1UL &&
+      NeedUBMultiCoreBalance()) {
+    codes +=
+        "    if (pending_search_cfg_ == nullptr && input.corenum_threshold == 1.0) { "
+        "solver.ProbeSingleIterationTile(); }\n";
+  }
+  return codes;
+}
+
+std::string AxesReorderSolverGen::GenPackedStoreProbes() {
+  std::string codes;
+  if (enable_high_perf_ && enable_core_search_ && !enable_group_parallel_ && cache_line_config_ != nullptr) {
+    for (const auto &config : *cache_line_config_) {
+      const auto &rows = config.packed_store_rows;
+      const auto &cols = config.packed_store_cols;
+      if (config.packed_store_row_alignment <= 1U ||
+          std::find(local_buffer_tiling_vars_.begin(), local_buffer_tiling_vars_.end(), rows) ==
+              local_buffer_tiling_vars_.end()) {
+        continue;
+      }
+      const auto probe =
+          "solver.ProbeAlignedOuterTile(" + Str(rows) + ", " + std::to_string(config.packed_store_row_alignment) + ")";
+      uint32_t const_width = 0U;
+      if (cols.GetConstValue(const_width) && const_width == config.packed_store_full_width) {
+        codes += "    if (!" + probe + ") { return false; }\n";
+      } else if (std::find(local_buffer_tiling_vars_.begin(), local_buffer_tiling_vars_.end(), cols) !=
+                 local_buffer_tiling_vars_.end()) {
+        codes += "    if (" + Str(cols) + ".value == " + std::to_string(config.packed_store_full_width) + " && !" +
+                 probe + ") { return false; }\n";
+      }
+    }
+  }
+  return codes;
+}
+
 std::string AxesReorderSolverGen::GenSolverFuncImpl() {
   std::string codes;
   std::vector<Expr> all_cons;
@@ -1645,6 +1753,10 @@ std::string AxesReorderSolverGen::GenSolverFuncImpl() {
   codes += GenInputInfo(all_cons, local_buffer_cons, mc_mixed_cons);
   // 直接使用 ModelInfo 中的 TilingScheduleConfig
   codes += GenInput(tiling_schedule_config_.trade_off_config, all_cons);
+  // Keep the extra local search within sequential multi-stage equal-order schedules.
+  if (NeedLocalCoreRefinement()) {
+    codes += "    input.enable_local_core_refinement = true;\n";
+  }
   codes += GenRuntimeReorderRules();
   // 支持二次Tiling：使用调整后的核数比例（需在创建solver之前设置）
   // 注意：g_secondary_tiling_ratio 只在 enable_group_parallel_ 为 true 时才声明
@@ -1658,16 +1770,12 @@ std::string AxesReorderSolverGen::GenSolverFuncImpl() {
     codes += "    }\n";
   }
   codes += GenPendingSearchConfigOverride();
-  if (tiling_schedule_config_.is_penalty_config && !enable_multicore_ub_tradeoff_ && !enable_group_parallel_) {
-    codes += "    input.preserve_reduce_store_penalty_seed = ";
-    if (enable_autofuse_pgo_) {
-      codes += "PgoConfig::Instance().need_change_solver_run != 1 && ";
-    }
-    codes += (enable_autofuse_pgo_ || is_inductor_scene_) ? "pending_search_cfg_ == nullptr;\n" : "true;\n";
-  }
+  codes += GenCoreProbeInput();
   codes += "    " + class_name + " solver(input);\n";
   codes += GenSolverRunInvoke(class_name);
   codes += GenEmptyTensorCheckInSolver();
+  codes += GenSingleIterationProbe();
+  codes += GenPackedStoreProbes();
   codes += GenSetTiling();
   codes += "    return true;\n";
   codes += "  }\n";

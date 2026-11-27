@@ -205,6 +205,46 @@ TEST(GeneratorUT, LowUbPrefersObjectiveForTwoSingleBlockCandidatesInSingleGroup)
   EXPECT_NE(v1_source.find("&& !IsEqual(cur_ub_ratio, ub_ratio))"), std::string::npos);
 }
 
+TEST(GeneratorUT, LowUbPrefersObjectiveForStaticInputFreeInductorGroup) {
+  TilingCodeGenConfig config;
+  config.is_inductor_scene = true;
+  TilingScheduleConfigTableV2 v2_config;
+  TilingModelInfo model_infos{CreateModelInfo(), CreateModelInfo()};
+  for (auto &model : model_infos) {
+    model.tiling_schedule_config_table = &v2_config;
+    model.input_nodes.clear();
+    model.dynamic_size_var_names.clear();
+    model.workspace_size_map.clear();
+  }
+  const ScoreFuncs score_funcs;
+  const auto emit_selection = [&](const bool is_uniq_group) {
+    MockHighPerfTilingCodeGenImpl gen_impl("test", config, model_infos, score_funcs, is_uniq_group);
+    EXPECT_EQ(gen_impl.GenSelectBetterTilingBasedOnObjAndUbRatio(), af::SUCCESS);
+    return gen_impl.tiling_func_.GetOutputStr();
+  };
+  const std::string low_ub_tiebreaker = "if (cur_ub_ratio > ub_ratio)";
+  const std::string relative_gap_guard =
+      "tiling_data.get_block_dim() != 1U) && std::abs(cur_obj - obj) <= 0.100000 * std::min(cur_obj, obj)";
+  const auto source = emit_selection(true);
+  EXPECT_EQ(source.find(low_ub_tiebreaker), std::string::npos);
+  EXPECT_NE(source.find("if (cur_obj < obj)"), std::string::npos);
+  EXPECT_NE(emit_selection(false).find(low_ub_tiebreaker), std::string::npos);
+
+  model_infos.back().input_nodes.emplace_back(nullptr);
+  EXPECT_NE(emit_selection(true).find(low_ub_tiebreaker), std::string::npos);
+  EXPECT_NE(emit_selection(true).find(relative_gap_guard), std::string::npos);
+  model_infos.back().input_nodes.clear();
+  model_infos.back().dynamic_size_var_names.emplace("n");
+  EXPECT_NE(emit_selection(true).find(low_ub_tiebreaker), std::string::npos);
+  EXPECT_EQ(emit_selection(true).find(relative_gap_guard), std::string::npos);
+  model_infos.back().dynamic_size_var_names.clear();
+  model_infos.back().workspace_size_map.emplace(0, CreateExpr(32));
+  EXPECT_NE(emit_selection(true).find(low_ub_tiebreaker), std::string::npos);
+  model_infos.back().workspace_size_map.clear();
+  config.is_inductor_scene = false;
+  EXPECT_NE(emit_selection(true).find(low_ub_tiebreaker), std::string::npos);
+}
+
 TEST(GeneratorUT, GenUpdatePerfAddsSerializedEdgeToNonParallelObjective) {
   const auto test_case = MakeTwoGroupScheduleResultSourceCase(false);
   ScoreFuncs score_funcs;
@@ -2299,6 +2339,36 @@ TEST(GeneratorUT, DISABLED_GenGetScheduleResultPGOSuccess) {
             std::string::npos);
   EXPECT_EQ(tiling_func_output.find("ArrangeBlockOffsetsAscGraph0Result0(tiling_data, tiling_data.get_block_dim());"),
             std::string::npos);
+}
+
+TEST(GeneratorUT, NeutralScheduleScoresFallThroughToObjectiveSearch) {
+  TilingCodeGenConfig config;
+  config.is_inductor_scene = true;
+  TilingModelInfo models(2);
+  ScoreFuncs scores;
+  scores[kModelInfoLevel::K_SCHEDULE_RESULT_LEVEL][0][0] =
+      "int32_t CalcScore(const AutofuseTilingData &tiling_data) { (void)tiling_data; return 0; }";
+  const std::map<size_t, std::map<size_t, std::pair<std::string, std::string>>> results{
+      {0, {{0, {"Group0", "group0"}}}}, {1, {{0, {"Group0", "group0"}}, {1, {"Group1", "group1"}}}}};
+  MockHighPerfTilingCodeGenImpl gen_impl("test", config, models, scores, false);
+  ASSERT_EQ(gen_impl.GenGetTilingForAllSchedulesResults(0, results), af::SUCCESS);
+  const auto source = gen_impl.tiling_func_.GetOutputStr();
+  EXPECT_NE(source.find("int32_t scores[2]{};"), std::string::npos);
+  EXPECT_NE(source.find("scores[0] = AscGraph0ScheduleResult0::CalcScore(tiling_data);"), std::string::npos);
+  EXPECT_EQ(source.find("scores[1] ="), std::string::npos);
+  const auto scored = source.find("if (max_score > 0)");
+  ASSERT_NE(scored, std::string::npos);
+  const auto fallback = source.find("if (IsEqual(best_perf, -1))", scored);
+  ASSERT_NE(fallback, std::string::npos);
+  EXPECT_NE(source.find("scores[index] == -1 || (max_score > 0 && scores[index] == max_score)", fallback),
+            std::string::npos);
+
+  gen_impl.config_.force_schedule_result = 1;
+  gen_impl.tiling_func_.Reset();
+  ASSERT_EQ(gen_impl.GenGetTilingForAllSchedulesResults(0, results), af::SUCCESS);
+  const auto forced = gen_impl.tiling_func_.GetOutputStr();
+  EXPECT_EQ(forced.find("int32_t scores"), std::string::npos);
+  EXPECT_NE(forced.find("kScheduleResultFunctions[1](ori_block_dim"), std::string::npos);
 }
 
 TEST(GeneratorUT, InductorPgoCollectsWorkspaceFromAllGroupsOfEachCandidate) {

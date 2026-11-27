@@ -65,7 +65,7 @@ namespace att {
  * - 动态 is/os 保留符号 Min，输出 stride 修正项按统一公式保留符号表达式；
  * - 符号化 tiling 维度仅排除静态确认的 unit 维度；对齐后的符号化 UB stride 等价性为 unknown 时保留 NG2 候选，
  *   由后续静态非法值检查和运行时 tiling 约束保证模型安全；
- * - NG2 乘子静态非正时回退 legacy，避免发出非法性能表达式；
+ * - NG2 乘子非正时使用已有 ND 公式；符号乘子通过运行时守卫选择，保持与静态描述符一致；
  * - 静态非正 dim、负 input_stride、非正 output_stride、非法 dtype/schema 均记录原因并回退 legacy。
  *
  * 处理阶段：

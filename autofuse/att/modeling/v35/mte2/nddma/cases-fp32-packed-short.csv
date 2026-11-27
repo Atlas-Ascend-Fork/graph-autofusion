@@ -1,0 +1,12 @@
+factor_id,experiment,role,dtype,dtype_size,block_dim,api,dims,gm_or_input_strides,ub_or_output_strides,point_flush,packing_extra
+known_fp32_short,fp32_three_contiguous_lanes,known,float32,4,48,NDDMA,48x48x3,3x144x1,144x3x1,1,0
+train_low32,fp32_three_contiguous_lanes,train,float32,4,44,NDDMA,32x32x3,3x120x1,96x3x1,1,0
+train_box48,fp32_three_contiguous_lanes,train,float32,4,48,NDDMA,42x48x3,3x144x1,144x3x1,1,0
+train_n40,fp32_three_contiguous_lanes,train,float32,4,52,NDDMA,48x40x3,3x168x1,120x3x1,1,0
+train_n56,fp32_three_contiguous_lanes,train,float32,4,56,NDDMA,36x56x3,3x120x1,168x3x1,1,0
+train_m56,fp32_three_contiguous_lanes,train,float32,4,48,NDDMA,56x42x3,3x168x1,128x3x1,1,0
+train_n32,fp32_three_contiguous_lanes,train,float32,4,54,NDDMA,40x32x3,3x144x1,96x3x1,1,0
+holdout_40x44,fp32_three_contiguous_lanes,holdout,float32,4,48,NDDMA,40x44x3,3x144x1,136x3x1,1,0
+holdout_48x48,fp32_three_contiguous_lanes,holdout,float32,4,50,NDDMA,48x48x3,3x168x1,144x3x1,1,0
+holdout_32x52,fp32_three_contiguous_lanes,holdout,float32,4,56,NDDMA,32x52x3,3x144x1,160x3x1,1,0
+holdout_44x36,fp32_three_contiguous_lanes,holdout,float32,4,44,NDDMA,44x36x3,3x144x1,112x3x1,1,0

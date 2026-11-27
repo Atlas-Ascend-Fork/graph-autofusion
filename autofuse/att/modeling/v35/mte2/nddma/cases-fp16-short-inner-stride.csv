@@ -1,0 +1,16 @@
+factor_id,experiment,role,dtype,dtype_size,block_dim,api,dims,gm_or_input_strides,ub_or_output_strides,point_flush,packing_extra,compact_packed
+short_t1,fp16_inner_strided_rank2,train,float16,2,48,NDDMA,2x28,2048x33,32x1,0,0,0
+short_t2,fp16_inner_strided_rank2,train,float16,2,51,NDDMA,2x34,2432x37,48x1,0,0,0
+short_t3,fp16_inner_strided_rank2,train,float16,2,55,NDDMA,3x40,3072x44,48x1,0,0,0
+short_t4,fp16_inner_strided_rank2,train,float16,2,56,NDDMA,4x46,3456x49,48x1,0,0,0
+short_h1,fp16_inner_strided_rank2,holdout,float16,2,50,NDDMA,2x30,2208x36,32x1,0,0,0
+short_h2,fp16_inner_strided_rank2,holdout,float16,2,54,NDDMA,2x42,3008x43,48x1,0,0,0
+short_h3,fp16_inner_strided_rank2,holdout,float16,2,56,NDDMA,3x45,3264x46,48x1,0,0,0
+short_h4,fp16_inner_strided_rank2,holdout,float16,2,53,NDDMA,4x36,2704x41,48x1,0,0,0
+short_k,fp16_inner_strided_rank2,known,float16,2,55,NDDMA,2x38,2886x39,48x1,0,0,0
+short_low_core,fp16_inner_strided_rank2,control,float16,2,17,NDDMA,2x38,2886x39,48x1,0,0,0
+short_unpadded,fp16_inner_strided_rank2,control,float16,2,55,NDDMA,2x32,2886x39,32x1,0,0,0
+short_core3,fp16_inner_strided_rank2,holdout,float16,2,3,NDDMA,3x36,2624x40,48x1,0,0,0
+short_core8,fp16_inner_strided_rank2,holdout,float16,2,8,NDDMA,3x36,2624x40,48x1,0,0,0
+short_core32,fp16_inner_strided_rank2,holdout,float16,2,32,NDDMA,3x36,2624x40,48x1,0,0,0
+short_core56,fp16_inner_strided_rank2,holdout,float16,2,56,NDDMA,3x36,2624x40,48x1,0,0,0

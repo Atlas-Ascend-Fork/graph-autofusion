@@ -19,7 +19,7 @@ from operator import mul
 from pathlib import Path
 
 SMALL_LOAD = ("LoadSmallPayload", "LoadSmallPayloadCompact")
-DENSE_LOAD = "LoadAlignedDenseBulkPayload"
+DENSE_LOAD = ("LoadAlignedDenseBulkPayload", "LoadAlignedDenseWidePayload")
 PADDED_NG2 = "NG2 padded FP32"
 NARROW_NG2 = "NG2 narrow source FP32"
 
@@ -174,7 +174,7 @@ def main():
     parser.add_argument("samples", type=Path)
     parser.add_argument(
         "--fit",
-        choices=(*SMALL_LOAD, DENSE_LOAD, PADDED_NG2, NARROW_NG2),
+        choices=(*SMALL_LOAD, *DENSE_LOAD, PADDED_NG2, NARROW_NG2),
         help="refit using train rows only",
     )
     parser.add_argument(

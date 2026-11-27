@@ -1,0 +1,14 @@
+factor_id,experiment,role,dtype,dtype_size,block_dim,api,api_rank,dims,gm_or_input_strides,ub_or_output_strides,bytes_per_call,input_span_bytes,output_span_bytes,point_flush,nd_dci,packing_extra
+train_c4_m16_n17_gm24,short-dense-padded-ng2,train,float32,4,4,NDDMA,2,16x17,1x24,24x1,1088,1600,1508,0,0,0
+train_c6_m24_n21_gm24,short-dense-padded-ng2,train,float32,4,6,NDDMA,2,24x21,1x24,24x1,2016,2016,2292,0,0,0
+train_c8_m24_n24_gm32,short-dense-padded-ng2,train,float32,4,8,NDDMA,2,24x24,1x32,24x1,2304,3040,2304,0,0,0
+train_c8_m32_n29_gm32,short-dense-padded-ng2,train,float32,4,8,NDDMA,2,32x29,1x32,32x1,3712,3712,4084,0,0,0
+train_c12_m16_n30_gm24,short-dense-padded-ng2,train,float32,4,12,NDDMA,2,16x30,1x24,32x1,1920,2848,2040,0,0,0
+train_c16_m32_n17_gm32,short-dense-padded-ng2,train,float32,4,16,NDDMA,2,32x17,1x32,24x1,2176,2176,3044,0,0,0
+train_c12_m40_n25_gm40,short-dense-padded-ng2,train,float32,4,12,NDDMA,2,40x25,1x40,32x1,4000,4000,5092,0,0,0
+train_c16_m40_n32_gm48,short-dense-padded-ng2,train,float32,4,16,NDDMA,2,40x32,1x48,32x1,5120,6112,5120,0,0,0
+holdout_c5_m24_n22_gm24,short-dense-padded-ng2,holdout,float32,4,5,NDDMA,2,24x22,1x24,24x1,2112,2112,2296,0,0,0
+holdout_c7_m32_n23_gm40,short-dense-padded-ng2,holdout,float32,4,7,NDDMA,2,32x23,1x40,24x1,2944,3648,3068,0,0,0
+holdout_c10_m40_n27_gm40,short-dense-padded-ng2,holdout,float32,4,10,NDDMA,2,40x27,1x40,32x1,4320,4320,5100,0,0,0
+holdout_c14_m32_n31_gm40,short-dense-padded-ng2,holdout,float32,4,14,NDDMA,2,32x31,1x40,32x1,3968,4928,4092,0,0,0
+known_c8_m32_n26_gm32,short-dense-padded-ng2,known,float32,4,8,NDDMA,2,32x26,1x32,32x1,3328,3328,4072,0,0,0

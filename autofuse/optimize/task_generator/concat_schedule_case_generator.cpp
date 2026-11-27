@@ -36,6 +36,35 @@ constexpr size_t kTemplateSizeAll = 3UL;
 constexpr int32_t kConcatAlgTranspose = 0;
 constexpr int64_t kSmallDimSizeThreshold = 256;
 
+// The adjacent Store slices have a measured ATT model in this domain, so
+// both schedules can be ranked by modeled cycles.
+bool CanCompareAlignedSliceStores(const af::AscNodePtr &concat, size_t concat_dim) {
+  constexpr size_t kSliceCount = 4U;
+  constexpr int64_t kMinSliceElements = 64;
+  constexpr int64_t kMaxSliceElements = 128;
+  constexpr int64_t kBurstElements = 32;
+  if (concat->inputs.Size() != kSliceCount || concat->outputs[0].attr.dtype != af::DT_FLOAT) {
+    return false;
+  }
+  const auto &shape = concat->outputs[0].attr.repeats;
+  if (concat_dim + 1 != shape.size() ||
+      !std::all_of(shape.begin(), shape.end(), [](const auto &dim) { return dim.IsConstExpr(); })) {
+    return false;
+  }
+  int64_t width = 0;
+  const auto &first = concat->inputs[0].attr.repeats;
+  if (first.size() != shape.size() || !first.back().GetConstValue(width) || width < kMinSliceElements ||
+      width > kMaxSliceElements || width % kBurstElements != 0) {
+    return false;
+  }
+  for (size_t i = 1; i < kSliceCount; ++i) {
+    if (concat->inputs[i].attr.repeats != first) {
+      return false;
+    }
+  }
+  return true;
+}
+
 void CollectInAndOutNodes(const af::NodePtr &node, std::set<af::Node *> &visited_nodes,
                           std::queue<af::NodePtr> &nodes) {
   for (const auto &in_node : node->GetInDataNodes()) {
@@ -216,7 +245,7 @@ Status ConcatFusionCaseGenerator::GenerateScoreFunctions(const std::vector<ascir
       const auto concat_node = FindConcatNodes(graphs.front()).front();
       constexpr uint32_t kMaxNumInputs = 16;
       if ((!has_recompute_) && (concat_node->inputs.Size() <= kMaxNumInputs) &&
-          IsSmallBlock(concat_node, concat_dim_)) {
+          IsSmallBlock(concat_node, concat_dim_) && !CanCompareAlignedSliceStores(concat_node, concat_dim_)) {
         score_functions.resize(graphs.size());
         ConcatScoreFunctionGenerator::GenerateScoreOne(score_functions.front());
       }

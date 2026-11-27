@@ -1,0 +1,13 @@
+factor_id,experiment,role,dtype,dtype_size,block_dim,api,dims,gm_or_input_strides,ub_or_output_strides,point_flush,packing_extra,pack_sparse_groups
+log1p_one_tile,fp16_log1p_two_level_sparse_exact,known,float16,2,56,NDDMA,1x32x36x4,36x1597248x1x3384,4608x144x4x1,1,0,1
+log1p_six_tiles,fp16_log1p_two_level_sparse_exact,known,float16,2,56,NDDMA,6x32x36x4,36x1597248x1x3384,4608x144x4x1,1,0,1
+train_one,fp16_log1p_two_level_sparse_exact,train,float16,2,48,NDDMA,1x24x24x4,24x1280000x1x3200,2304x96x4x1,1,0,1
+train_two,fp16_log1p_two_level_sparse_exact,train,float16,2,54,NDDMA,2x36x36x4,36x1476608x1x3296,5184x144x4x1,1,0,1
+train_three,fp16_log1p_two_level_sparse_exact,train,float16,2,52,NDDMA,3x28x36x4,36x1449216x1x3264,4032x144x4x1,1,0,1
+train_four,fp16_log1p_two_level_sparse_exact,train,float16,2,54,NDDMA,4x24x36x4,36x1658880x1x3456,3456x144x4x1,1,0,1
+train_six,fp16_log1p_two_level_sparse_exact,train,float16,2,56,NDDMA,6x32x32x4,32x1647360x1x3520,4096x128x4x1,1,0,1
+train_seven,fp16_log1p_two_level_sparse_exact,train,float16,2,50,NDDMA,7x40x32x4,32x1560320x1x3392,5120x128x4x1,1,0,1
+holdout_two,fp16_log1p_two_level_sparse_exact,holdout,float16,2,56,NDDMA,2x28x24x4,24x1393920x1x3168,2688x96x4x1,1,0,1
+holdout_three,fp16_log1p_two_level_sparse_exact,holdout,float16,2,52,NDDMA,3x36x32x4,32x1612800x1x3360,4608x128x4x1,1,0,1
+holdout_four,fp16_log1p_two_level_sparse_exact,holdout,float16,2,48,NDDMA,4x20x42x4,42x1533952x1x3424,3360x168x4x1,1,0,1
+holdout_five,fp16_log1p_two_level_sparse_exact,holdout,float16,2,54,NDDMA,5x34x40x4,40x1534720x1x3488,5440x160x4x1,1,0,1

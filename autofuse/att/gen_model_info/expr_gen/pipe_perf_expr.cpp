@@ -275,13 +275,17 @@ bool CheckSingleCut(const NodeInfo &node) {
 
 std::vector<Expr> GetTensorTailRepeat(const TensorPtr &tensor, std::map<Expr, TernaryOp, ExprCmp> &ternary_ops) {
   std::vector<Expr> ret;
-  for (const auto &dim : tensor->dim_info) {
-    if (dim->axis_type != AxisPosition::INNER) {
-      ret.emplace_back(dim->repeat);
+  GE_ASSERT_TRUE(tensor->repeat.size() == tensor->dim_info.size());
+  for (size_t i = 0; i < tensor->repeat.size(); ++i) {
+    const auto *dim = tensor->dim_info[i];
+    const auto &repeat = tensor->repeat[i];
+    // A broadcast input can retain one element on a split scheduling axis.
+    if (dim->axis_type != AxisPosition::INNER || repeat == af::sym::kSymbolOne) {
+      ret.emplace_back(repeat);
     } else {
       GE_ASSERT_TRUE(dim->parent_axis.size() == 1);
-      Expr parent_size = dim->parent_axis[0]->repeat;
-      ret.emplace_back(GetTailSize(parent_size, dim->repeat, ternary_ops));
+      const Expr tail = GetTailSize(dim->parent_axis[0]->repeat, dim->repeat, ternary_ops);
+      ret.emplace_back(repeat.Replace({{dim->repeat, tail}}));
     }
   }
   return ret;

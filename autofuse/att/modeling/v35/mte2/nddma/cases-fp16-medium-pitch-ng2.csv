@@ -1,0 +1,10 @@
+factor_id,experiment,role,dtype,dtype_size,block_dim,api,dims,gm_or_input_strides,ub_or_output_strides,point_flush,packing_extra,compact_packed
+rsqrt_t1,fp16_medium_pitch_packed,train,float16,2,48,NDDMA,144x106,1x12032,106x1,0,0,0
+rsqrt_t2,fp16_medium_pitch_packed,train,float16,2,52,NDDMA,164x114,1x12896,114x1,0,0,0
+rsqrt_t3,fp16_medium_pitch_packed,train,float16,2,55,NDDMA,188x120,1x14112,120x1,0,0,0
+rsqrt_t4,fp16_medium_pitch_packed,train,float16,2,56,NDDMA,208x128,1x15104,128x1,0,0,0
+rsqrt_h1,fp16_medium_pitch_packed,holdout,float16,2,50,NDDMA,156x110,1x12448,110x1,0,0,0
+rsqrt_h2,fp16_medium_pitch_packed,holdout,float16,2,54,NDDMA,172x122,1x13312,122x1,0,0,0
+rsqrt_h3,fp16_medium_pitch_packed,holdout,float16,2,56,NDDMA,184x116,1x14528,116x1,0,0,0
+rsqrt_h4,fp16_medium_pitch_packed,holdout,float16,2,53,NDDMA,196x126,1x14864,126x1,0,0,0
+rsqrt_k,fp16_medium_pitch_packed,known,float16,2,56,NDDMA,176x118,1x13536,118x1,0,0,0

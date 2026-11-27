@@ -121,9 +121,15 @@ af::Status ValidateRecord(const Json &override_record, const Json &baseline_reco
     return af::FAILED;
   }
   if (model_type == kLoadStoreFuncModel || model_type == kLoadUbStrideModel) {
-    const auto divisor = override_record.find("a");
-    if (divisor != override_record.end() && IsZeroFloat(divisor.value())) {
-      return af::FAILED;
+    const auto a = override_record.find("a");
+    if (a != override_record.end() && IsZeroFloat(a.value())) {
+      // A fit with a = 0 uses b / block_dim as its bandwidth for positive block_dim.
+      // Keep rejecting underflow and zero a for models fitted with a nonzero term.
+      const auto b = override_record.find("b");
+      if (a.value() != 0.0 || baseline_record.at("a") != 0.0 || b == override_record.end() ||
+          static_cast<float>(b.value().get<double>()) <= 0.0F) {
+        return af::FAILED;
+      }
     }
   }
   return af::SUCCESS;

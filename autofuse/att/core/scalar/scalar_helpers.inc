@@ -40,6 +40,41 @@ inline auto Mod(T1 a, T2 b)->decltype(a % b)
 template<typename T1, typename T2>
 inline auto Mod(T1 a, T2 b)->typename std::enable_if<std::is_floating_point<T1>::value || std::is_floating_point<T2>::value, decltype(std::fmod(a, b))>::type
 {
+    // Classify IEEE binary32/binary64 bits before converting nonnegative integers.
+    // Negative zero, zero divisors, fractions and exceptional values retain the fmod path.
+    using Result = decltype(std::fmod(a, b));
+    const auto as_uint32 = [](Result value, uint32_t &integer) {
+      if (!((std::is_same<Result, float>::value && sizeof(Result) == 4U) ||
+            (std::is_same<Result, double>::value && sizeof(Result) == 8U))) {
+        return false;
+      }
+      using Bits = typename std::conditional<sizeof(Result) == 8U, uint64_t, uint32_t>::type;
+      constexpr uint32_t kFractionBits = sizeof(Result) == 8U ? 52U : 23U;
+      constexpr uint32_t kExponentBias = sizeof(Result) == 8U ? 1023U : 127U;
+      Bits bits = 0;
+      __builtin_memcpy(&bits, &value, sizeof(bits));
+      if (bits == 0U) {
+        integer = 0U;
+        return true;
+      }
+      const auto exponent_with_sign = bits >> kFractionBits;
+      if (exponent_with_sign < kExponentBias || exponent_with_sign >= kExponentBias + 32U) {
+        return false;
+      }
+      const auto exponent = exponent_with_sign - kExponentBias;
+      const Bits fraction_mask =
+          exponent >= kFractionBits ? Bits{0} : (Bits{1} << (kFractionBits - exponent)) - 1U;
+      if ((bits & fraction_mask) != 0U) {
+        return false;
+      }
+      integer = static_cast<uint32_t>(value);
+      return true;
+    };
+    uint32_t left = 0U;
+    uint32_t right = 0U;
+    if (as_uint32(static_cast<Result>(a), left) && as_uint32(static_cast<Result>(b), right) && right != 0U) {
+      return static_cast<Result>(left % right);
+    }
     return std::fmod(a, b);
 }
 template<typename TI, typename TO>

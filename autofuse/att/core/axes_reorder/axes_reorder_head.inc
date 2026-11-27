@@ -185,6 +185,11 @@ struct AxesReorderSolverInput {
   double corenum_threshold = 0.4f;
   double perf_threshold = 0000.0f;
   bool preserve_reduce_store_penalty_seed = false;
+  bool balance_core_probes = false;
+  bool probe_aligned_core_tile = false;
+#if AF_AXES_EQUAL_ORDER
+  bool enable_local_core_refinement = false;
+#endif
   Variable **input_vars = nullptr;
   TilingVariable **tiling_vars = nullptr;
   TilingVariable **pure_mc_vars = nullptr;
@@ -248,6 +253,8 @@ public:
   ~AxesReorderSolver() {}
   bool Run(const bool is_trade_off, const bool block_loop_auto_tune, const bool enable_auto_tune,
            const bool enable_equal_order = false, const bool enable_core_search = true);
+  bool ProbeAlignedOuterTile(TilingVariable &var, int64_t alignment);
+  void ProbeSingleIterationTile();
   bool IsEmptyTensor() const { return is_empty_tensor_; }
 #if AF_AXES_EXPLICIT_EVAL
   const EvalContext &GetEvaluationContext() const { return eval_context_; }
@@ -343,6 +350,11 @@ private:
                                      const TilingVariable *local_buffer_vars) const;
   inline TilingVariable *FindWorkloadBalanceVar(TilingVariable *const *vars) const;
   inline bool WorkloadBalance();
+  bool SatisfyTileProbeConstraints();
+  bool CanProbeSingleIterationTile() const;
+  template <typename Probe>
+  void ProbeOtherCoreBudgets(uint32_t block_dim, bool enable_equal_order, const Probe &probe);
+  bool ProbeAlignedCoreTile(uint32_t block_dim);
   bool AutoTuning(bool has_threshold_seed, bool enable_equal_order);
   inline bool IsSatisfyCons(TilingVariable *var, int64_t value, ConstraintType cons_type, double ratio = 1.0);
   inline bool BinaryFindUpperBoundSatisfiedUBLimit(TilingVariable *var, int64_t lower_bound,

@@ -15,7 +15,9 @@
 #include "ascir_utils.h"
 #include "asc_graph_utils.h"
 #include "graph_utils.h"
+#define private public
 #include "task_generator/concat_schedule_case_generator.h"
+#undef private
 #include "task_generator/concat_group_partitioner.h"
 #include "task_generator/concat_score_function_generator.h"
 
@@ -1068,6 +1070,38 @@ TEST_F(ConcatScheduleCaseGeneratorTest, ConcatBackwardFusion_WithSameLoad) {
   }
   EXPECT_TRUE(checked_store_offset);
   EXPECT_TRUE(checked_segment_offset);
+}
+
+TEST_F(ConcatScheduleCaseGeneratorTest, AlignedEqualSlicesUseModeledScores) {
+  for (const auto width : {64, 65}) {
+    SCOPED_TRACE(width);
+    af::AscGraph graph("concat_slices");
+    std::vector<std::shared_ptr<Data>> data_ops;
+    std::vector<af::AscOpOutput> inputs;
+    for (size_t i = 0; i < 4U; ++i) {
+      auto data = std::make_shared<Data>(("input" + std::to_string(i)).c_str(), graph);
+      data->y.dtype = ge::DT_FLOAT;
+      *data->y.repeats = {af::Symbol(8), af::Symbol(width)};
+      inputs.emplace_back(data->y);
+      data_ops.emplace_back(std::move(data));
+    }
+    af::ascir_op::Concat concat("concat");
+    concat.x = inputs;
+    concat.y.dtype = ge::DT_FLOAT;
+    *concat.y.repeats = {af::Symbol(8), af::Symbol(4 * width)};
+
+    optimize::ConcatFusionCaseGenerator generator;
+    generator.concat_dim_ = 1;
+    const std::vector<ascir::ImplGraph> templates{graph, graph};
+    std::vector<std::string> scores;
+    ASSERT_EQ(generator.GenerateScoreFunctions(templates, 1, scores), af::SUCCESS);
+    if (width == 64) {
+      EXPECT_TRUE(scores.empty());
+    } else {
+      ASSERT_EQ(scores.size(), templates.size());
+      EXPECT_NE(scores.front().find("return 1;"), std::string::npos);
+    }
+  }
 }
 
 TEST_F(ConcatScheduleCaseGeneratorTest, ConcatScoreFunc) {

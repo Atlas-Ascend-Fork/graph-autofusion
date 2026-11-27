@@ -21,3 +21,15 @@ target_include_directories(att_gather PRIVATE "${AUTOFUSE_ROOT}/autofuse/v35/asc
 target_compile_options(att_gather PRIVATE $<$<COMPILE_LANGUAGE:ASC>:--npu-arch=${NPU_ARCH};-O2>)
 target_link_libraries(att_gather PRIVATE ascendcl ascendc_runtime tiling_api register platform unified_dlog dl m
     graph_base Threads::Threads)
+
+add_executable(att_ub_transpose2d transpose_2d.asc)
+target_include_directories(att_ub_transpose2d PRIVATE "${AUTOFUSE_ROOT}/autofuse/v35/ascendc/api_regbase")
+target_compile_options(att_ub_transpose2d PRIVATE $<$<COMPILE_LANGUAGE:ASC>:--npu-arch=${NPU_ARCH};-O2>)
+target_link_libraries(att_ub_transpose2d PRIVATE ascendcl ascendc_runtime tiling_api register platform unified_dlog dl m
+    graph_base Threads::Threads)
+
+add_executable(att_ub_transpose3d EXCLUDE_FROM_ALL transpose_3d.asc)
+target_include_directories(att_ub_transpose3d PRIVATE "${AUTOFUSE_ROOT}/autofuse/v35/ascendc/api_regbase")
+target_compile_options(att_ub_transpose3d PRIVATE $<$<COMPILE_LANGUAGE:ASC>:--npu-arch=${NPU_ARCH};-O2>)
+target_link_libraries(att_ub_transpose3d PRIVATE ascendcl ascendc_runtime tiling_api register platform unified_dlog dl m
+    graph_base Threads::Threads)

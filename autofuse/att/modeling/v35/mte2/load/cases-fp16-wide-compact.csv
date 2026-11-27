@@ -1,0 +1,12 @@
+factor_id,experiment,role,dtype,dtype_size,block_dim,api,dims,gm_or_input_strides,ub_or_output_strides,point_flush,packing_extra
+known_first_fp16,fp16_wide_compact_load,known,float16,2,54,LOAD,101x152,8658x1,152x1,1,0
+train_rows48,fp16_wide_compact_load,train,float16,2,48,LOAD,48x144,8192x1,144x1,1,0
+train_rows72,fp16_wide_compact_load,train,float16,2,52,LOAD,72x128,8704x1,128x1,1,0
+train_rows84,fp16_wide_compact_load,train,float16,2,54,LOAD,84x172,8448x1,172x1,1,0
+train_rows104,fp16_wide_compact_load,train,float16,2,56,LOAD,104x156,8960x1,156x1,1,0
+train_rows116,fp16_wide_compact_load,train,float16,2,50,LOAD,116x164,9216x1,164x1,1,0
+train_rows136,fp16_wide_compact_load,train,float16,2,56,LOAD,136x128,8064x1,128x1,1,0
+holdout_rows56,fp16_wide_compact_load,holdout,float16,2,50,LOAD,56x152,8384x1,152x1,1,0
+holdout_rows96,fp16_wide_compact_load,holdout,float16,2,54,LOAD,96x148,8640x1,148x1,1,0
+holdout_rows108,fp16_wide_compact_load,holdout,float16,2,56,LOAD,108x160,8824x1,160x1,1,0
+holdout_rows128,fp16_wide_compact_load,holdout,float16,2,52,LOAD,128x140,9056x1,140x1,1,0

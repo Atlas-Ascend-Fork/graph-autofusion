@@ -1,7 +1,11 @@
 /**
  * Copyright (c) 2026 Huawei Technologies Co., Ltd.
- * This program is free software, you can redistribute it and/or modify it under terms of
- * CANN Open Software License Agreement Version 2.0 of the License.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
  */
 
 #include "broadcast_last_axis_perf_v2.h"
@@ -614,6 +618,42 @@ af::Status BuildTailTree(const NodeDetail &node, const BroadcastTilingInfo &tili
   return af::SUCCESS;
 }
 
+af::Status CalibrateAlignedFp32Rows(const NodeDetail &node, const BroadcastTilingInfo &tiling, Expr &cycles,
+                                    TernaryOpMap &ternary_ops) {
+  constexpr int32_t kRank = 3;
+  if (node.input_dtype[0] != kFloat32 || node.output_dtype[0] != kFloat32 ||
+      node.broadcast_node_params.const_rank != kRank || tiling.original_rank != static_cast<size_t>(kRank)) {
+    return af::SUCCESS;
+  }
+  const auto &src = tiling.original_src_shape;
+  const auto &dst = tiling.original_dst_shape;
+  const auto &one = af::sym::kSymbolOne;
+  const auto &zero = af::sym::kSymbolZero;
+  if (af::SymbolicUtils::StaticCheckEq(src.front(), one) != af::TriBool::kTrue ||
+      af::SymbolicUtils::StaticCheckEq(src.back(), one) != af::TriBool::kTrue) {
+    return af::SUCCESS;
+  }
+  constexpr int32_t kMinRows = 72;
+  constexpr int32_t kMaxRows = 168;
+  constexpr int32_t kMinWidth = 32;
+  constexpr int32_t kMaxWidth = 40;
+  constexpr int32_t kAlignElements = 32 / sizeof(float);
+  constexpr double kHeadCycles = 18.37997610;
+  constexpr double kCyclesPerRow = 5.9969360064;
+  const auto outside = [&](const Expr &value, int32_t lower, int32_t upper) {
+    return af::sym::Max(zero, af::sym::Max(CreateExpr(lower) - value, value - CreateExpr(upper)));
+  };
+  const auto &rows = dst[1];
+  const auto &width = dst.back();
+  const Expr violation = af::sym::Abs(dst.front() - one) + af::sym::Abs(rows - src[1]) +
+                         outside(rows, kMinRows, kMaxRows) + outside(width, kMinWidth, kMaxWidth) +
+                         af::sym::Abs(af::sym::Mod(width, CreateExpr(kAlignElements)));
+  const Expr fitted = CreateExpr(kHeadCycles) + CreateExpr(kCyclesPerRow) * rows;
+  const Expr fallback = cycles;
+  return ascendcapi_v2::BuildBroadcastTernary("broadcast_fp32_aligned_rows", CondType::K_EQ, violation, zero, fitted,
+                                              fallback, ternary_ops, cycles);
+}
+
 }  // namespace
 
 LastAxisBranch GetLastAxisPerfBranch(const NodeDetail &node_info) {
@@ -666,6 +706,7 @@ af::Status BuildLastAxisPerf(const NodeDetail &node_info, const BroadcastTilingI
     GE_ASSERT_SUCCESS(AddRegularBranch(node_info, tiling, branch, acc));
     result = ascendcapi_v2::GetVfCost(acc);
   }
+  GE_ASSERT_SUCCESS(CalibrateAlignedFp32Rows(node_info, tiling, result, perf.ternary_ops));
   result.Simplify();
   perf.pipe_res[PipeType::AIV_VEC] = result;
   return af::SUCCESS;

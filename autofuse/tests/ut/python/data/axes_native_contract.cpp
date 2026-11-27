@@ -52,8 +52,9 @@ class NativeSolver : public Base {
 
 class CoreCostSolver : public AxesReorderSolver {
  public:
-  CoreCostSolver(const AxesReorderSolverInput &input, double core_cost, bool nonmonotone = false)
-      : AxesReorderSolver(input), core_cost_(core_cost), nonmonotone_(nonmonotone) {}
+  CoreCostSolver(const AxesReorderSolverInput &input, double core_cost, bool nonmonotone = false,
+                 bool narrow_minimum = false)
+      : AxesReorderSolver(input), core_cost_(core_cost), nonmonotone_(nonmonotone), narrow_minimum_(narrow_minimum) {}
   double Objective() {
     return GetPerf();
   }
@@ -61,6 +62,9 @@ class CoreCostSolver : public AxesReorderSolver {
     int64_t blocks = 0;
     CalRealUsedCoreNum(blocks);
     return blocks;
+  }
+  uint32_t InfeasibleObjectiveCalls() const {
+    return infeasible_objective_calls_;
   }
 
  protected:
@@ -81,6 +85,12 @@ class CoreCostSolver : public AxesReorderSolver {
     return true;
   }
   double GetPerf() override {
+    if (Blocks() > static_cast<int64_t>(input_.core_num)) {
+      ++infeasible_objective_calls_;
+    }
+    if (narrow_minimum_) {
+      return Blocks() == 13 ? 1.0 : 100.0 + std::abs(Blocks() - 16);
+    }
     if (nonmonotone_) {
       const auto blocks = Blocks();
       // Descriptor/model branches can separate a better basin from the initial local minimum.
@@ -98,6 +108,8 @@ class CoreCostSolver : public AxesReorderSolver {
  private:
   double core_cost_;
   bool nonmonotone_;
+  bool narrow_minimum_;
+  uint32_t infeasible_objective_calls_{0U};
 };
 
 void InitThresholdVariables(TilingVariable &tile, TilingVariable &loop, Variable **parents, bool nonmonotone) {
@@ -112,8 +124,23 @@ void InitThresholdVariables(TilingVariable &tile, TilingVariable &loop, Variable
   }
 }
 
+bool CheckRefinedSolution(CoreCostSolver &solver, const TilingVariable &tile, const TilingVariable &loop,
+                          int64_t expected_blocks, double max_objective) {
+  // Original threshold tiling uses 16 blocks and tile 4. Refinement must preserve legality and lower cost.
+  const bool valid = solver.InfeasibleObjectiveCalls() == 0U && solver.Blocks() == expected_blocks && tile.value > 0 &&
+                     tile.value <= 64 && solver.Objective() <= max_objective;
+  if (!valid) {
+    std::fprintf(stderr, "blocks=%ld expected=%ld tile=%ld loop=%ld objective=%g ceiling=%g infeasible=%u\n",
+                 solver.Blocks(), expected_blocks, tile.value, loop.value, solver.Objective(), max_objective,
+                 solver.InfeasibleObjectiveCalls());
+  }
+  return valid;
+}
+
 bool CheckThresholdObjectiveRefinement(bool enable_refinement, double core_cost, int64_t expected_blocks,
-                                       bool nonmonotone = false, bool preserve_penalty_seed = false) {
+                                       bool nonmonotone = false, bool preserve_penalty_seed = false,
+                                       bool narrow_minimum = false, bool equal_order = false,
+                                       bool enable_local_core_refinement = false) {
   TilingVariable tile;
   TilingVariable loop;
   Variable *parents[] = {&tile};
@@ -146,19 +173,17 @@ bool CheckThresholdObjectiveRefinement(bool enable_refinement, double core_cost,
   input.all_cons = constraints;
   input.all_cons_size = 1;
   input.preserve_reduce_store_penalty_seed = preserve_penalty_seed;
-  CoreCostSolver solver(input, core_cost, nonmonotone);
-  if (!solver.Run(true, false, enable_refinement, false)) {
+#if AF_AXES_EQUAL_ORDER
+  input.enable_local_core_refinement = enable_local_core_refinement;
+#else
+  (void)enable_local_core_refinement;
+#endif
+  CoreCostSolver solver(input, core_cost, nonmonotone, narrow_minimum);
+  if (!solver.Run(true, false, enable_refinement, equal_order)) {
     return false;
   }
-  // Original threshold tiling uses 16 blocks and tile 4. Refinement must preserve legality and lower cost.
-  const bool valid = solver.Blocks() == expected_blocks && tile.value > 0 && tile.value <= 64 &&
-                     solver.Objective() <= (nonmonotone ? 100.0 : core_cost * 16 + 4);
-  if (!valid) {
-    std::fprintf(stderr, "refine=%d cost=%g nonmonotone=%d blocks=%ld expected=%ld tile=%ld loop=%ld objective=%g\n",
-                 enable_refinement, core_cost, nonmonotone, solver.Blocks(), expected_blocks, tile.value, loop.value,
-                 solver.Objective());
-  }
-  return valid;
+  const auto max_objective = (nonmonotone || narrow_minimum) ? 100.0 : core_cost * 16 + 4;
+  return CheckRefinedSolution(solver, tile, loop, expected_blocks, max_objective);
 }
 
 class BalanceSeedSolver : public NativeSolver<AxesReorderSolver> {
@@ -239,19 +264,86 @@ bool CheckBalancedThresholdSeed(bool enable_refinement, int64_t expected_tile, b
   return true;
 }
 
-int main() {
-  if (!CheckBalancedThresholdSeed(false, 15) || !CheckBalancedThresholdSeed(true, 8) ||
-      !CheckBalancedThresholdSeed(true, 8, false) || !CheckBalancedThresholdSeed(false, 15, false) ||
-      !CheckBalancedThresholdSeed(true, 15, false, true) || !CheckBalancedThresholdSeed(true, 8, true, false, true)) {
-    return 5;
+bool CheckInfeasibleMidpointSkipped() {
+  TilingVariable tile;
+  tile.upper_bound = [](Variable **) -> int64_t { return 1; };
+  TilingVariable loop;
+  loop.upper_bound = [](Variable **) -> int64_t { return 64; };
+  TilingVariable *local[] = {&tile};
+  TilingVariable *multicore[] = {&loop};
+  TilingVariable *all[] = {&loop, &tile};
+  uint32_t order[] = {0};
+  AxesReorderSolverInput input;
+  input.core_num = 4;
+  input.ub_size = 1;
+  input.tiling_vars = all;
+  input.tiling_vars_size = 2;
+  input.pure_mc_vars = multicore;
+  input.pure_mc_vars_size = 1;
+  input.local_buffer_vars = local;
+  input.local_buffer_vars_size = 1;
+  input.ordered_local_buffer_vars = local;
+  input.ordered_to_canonical = order;
+  CoreCostSolver solver(input, 0.0);
+  if (!solver.Run(false, true, false, false, false) || solver.Blocks() != 4 || loop.value != 16 ||
+      solver.InfeasibleObjectiveCalls() != 0U) {
+    std::fprintf(stderr, "midpoint: blocks=%lld loop=%lld infeasible=%u\n", static_cast<long long>(solver.Blocks()),
+                 static_cast<long long>(loop.value), solver.InfeasibleObjectiveCalls());
+    return false;
   }
-  if (!CheckThresholdObjectiveRefinement(false, 8.0, 16) || !CheckThresholdObjectiveRefinement(true, 8.0, 3) ||
-      !CheckThresholdObjectiveRefinement(true, 0.0, 16) || !CheckThresholdObjectiveRefinement(false, 8.0, 16, true) ||
-      !CheckThresholdObjectiveRefinement(true, 8.0, 3, false, true) ||
-      !CheckThresholdObjectiveRefinement(true, 8.0, 1, true) ||
-      !CheckThresholdObjectiveRefinement(true, 8.0, 16, true, true)) {
-    return 4;
+  return true;
+}
+
+class SingleIterationSolver : public CoreCostSolver {
+ public:
+  SingleIterationSolver(const AxesReorderSolverInput &input, bool can_count_cores)
+      : CoreCostSolver(input, 0.0), can_count_cores_(can_count_cores) {}
+
+ protected:
+  bool CalRealUsedCoreNum(int64_t &value) override {
+    return can_count_cores_ && CoreCostSolver::CalRealUsedCoreNum(value);
   }
+
+  double GetPerf() override {
+    return static_cast<double>(input_.pure_mc_vars[0]->value);
+  }
+
+ private:
+  bool can_count_cores_;
+};
+
+bool CheckSingleIterationProbe(int64_t ub_limit, int64_t expected_tile, int64_t expected_loop,
+                               bool can_count_cores = true) {
+  TilingVariable tile;
+  TilingVariable loop;
+  Variable *parents[] = {&tile};
+  InitThresholdVariables(tile, loop, parents, false);
+  tile.value = 8;
+  tile.prompt_align = 8;
+  loop.value = 2;
+  TilingVariable *local[] = {&tile};
+  TilingVariable *multicore[] = {&loop};
+  Constraint ub;
+  ub.type = ConstraintType::LOCAL_BUFFER;
+  ub.rel_tiling_vars = local;
+  ub.rel_hw_spec = ub_limit;
+  ub.eval = [](TilingVariable **vars, Variable **, int64_t limit) { return vars[0]->value - limit; };
+  Constraint *constraints[] = {&ub};
+  AxesReorderSolverInput input;
+  input.core_num = 4;
+  input.pure_mc_vars = multicore;
+  input.pure_mc_vars_size = 1;
+  input.local_buffer_vars = local;
+  input.local_buffer_vars_size = 1;
+  input.ordered_local_buffer_vars = local;
+  input.all_cons = constraints;
+  input.all_cons_size = 1;
+  SingleIterationSolver solver(input, can_count_cores);
+  solver.ProbeSingleIterationTile();
+  return (!can_count_cores || solver.Blocks() == 4) && tile.value == expected_tile && loop.value == expected_loop;
+}
+
+int CheckLegacyAndPgoSolver() {
   TilingVariable variable;
   variable.value = 1;
   variable.upper_bound = [](Variable **) -> int64_t { return 16; };
@@ -288,4 +380,44 @@ int main() {
   variable.upper_bound = [](Variable **) -> int64_t { return 0; };
   NativeSolver<AxesReorderSolver> empty(input);
   return empty.Run(true, true, true, AF_AXES_EQUAL_ORDER) && empty.IsEmptyTensor() ? 0 : 3;
+}
+
+int CheckThresholdSearchVariants() {
+  if (!CheckBalancedThresholdSeed(false, 15) || !CheckBalancedThresholdSeed(true, 8) ||
+      !CheckBalancedThresholdSeed(true, 8, false) || !CheckBalancedThresholdSeed(false, 15, false) ||
+      !CheckBalancedThresholdSeed(true, 15, false, true) || !CheckBalancedThresholdSeed(true, 8, true, false, true)) {
+    return 5;
+  }
+  if (!CheckThresholdObjectiveRefinement(false, 8.0, 16) || !CheckThresholdObjectiveRefinement(true, 8.0, 3) ||
+      !CheckThresholdObjectiveRefinement(true, 0.0, 16) || !CheckThresholdObjectiveRefinement(false, 8.0, 16, true) ||
+      !CheckThresholdObjectiveRefinement(true, 8.0, 3, false, true) ||
+      !CheckThresholdObjectiveRefinement(true, 8.0, 1, true) ||
+      !CheckThresholdObjectiveRefinement(true, 8.0, 16, true, true)) {
+    return 4;
+  }
+  return 0;
+}
+
+int main() {
+  if (!CheckSingleIterationProbe(16, 16, 1) || !CheckSingleIterationProbe(12, 8, 2) ||
+      !CheckSingleIterationProbe(16, 8, 2, false)) {
+    return 8;
+  }
+  if (!CheckInfeasibleMidpointSkipped()) {
+    return 7;
+  }
+  // A coarse 16 -> 12 budget step jumps over the legal 13-block minimum.
+  // Ordinary and non-opted-in equal-order search keep their existing budgets.
+  if (!CheckThresholdObjectiveRefinement(false, 8.0, 16, false, false, true) ||
+      !CheckThresholdObjectiveRefinement(true, 8.0, 16, false, false, true)) {
+    return 6;
+  }
+#if AF_AXES_EQUAL_ORDER
+  if (!CheckThresholdObjectiveRefinement(true, 8.0, 16, false, false, true, true) ||
+      !CheckThresholdObjectiveRefinement(true, 8.0, 13, false, false, true, true, true)) {
+    return 6;
+  }
+#endif
+  const int threshold_result = CheckThresholdSearchVariants();
+  return threshold_result == 0 ? CheckLegacyAndPgoSolver() : threshold_result;
 }

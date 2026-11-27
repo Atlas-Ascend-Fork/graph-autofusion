@@ -10,6 +10,7 @@
 
 #include "generate_tiling_expr.h"
 #include <algorithm>
+#include <numeric>
 #include "arg_list_manager.h"
 #include "att_utils.h"
 #include "buf_occupy_expr.h"
@@ -38,6 +39,67 @@ af::Status UpdateLastTileAxisPromptAlign(const SubAxis *sub_axis, const AttAxis 
   }
   return af::SUCCESS;
 }
+bool GetPackedStoreExtents(const SubAxis &row_axis, const SubAxis &column_axis, uint32_t &rows, uint32_t &width) {
+  return row_axis.axis_type == AxisPosition::INNER && row_axis.orig_axis.size() == 1U &&
+         row_axis.orig_axis[0]->is_bind_multi_core && row_axis.orig_axis[0]->repeat.GetConstValue(rows) &&
+         column_axis.orig_axis.size() == 1U && column_axis.orig_axis[0]->repeat.GetConstValue(width) && width != 0U;
+}
+
+bool IsPackedStoreLayout(const Tensor &input, const Tensor &output) {
+  return input.data_type == "float32" && output.data_type == "float32" && output.data_type_size != 0U &&
+         output.dim_info.size() == 2U && output.repeat.size() == 2U && output.gm_stride.size() == 2U &&
+         input.stride.size() == 2U;
+}
+
+void ConfigurePackedStoreProbe(const NodeInfo &store, uint32_t line_bytes, CacheLineConfig &config) {
+  if (store.inputs.size() != 1U || store.outputs.size() != 1U || store.inputs[0] == nullptr ||
+      store.outputs[0] == nullptr) {
+    return;
+  }
+  const auto &input = *store.inputs[0];
+  const auto &output = *store.outputs[0];
+  if (!IsPackedStoreLayout(input, output)) {
+    return;
+  }
+  const auto &row_axis = *output.dim_info[0];
+  const auto &column_axis = *output.dim_info[1];
+  uint32_t width = 0U;
+  uint32_t rows = 0U;
+  if (!GetPackedStoreExtents(row_axis, column_axis, rows, width) || width >= line_bytes / output.data_type_size ||
+      (width * output.data_type_size) % kUBAlignValue == 0U ||
+      af::SymbolicUtils::StaticCheckEq(output.gm_stride[0], CreateExpr(width)) != af::TriBool::kTrue ||
+      af::SymbolicUtils::StaticCheckEq(output.gm_stride[1], af::sym::kSymbolOne) != af::TriBool::kTrue ||
+      af::SymbolicUtils::StaticCheckEq(input.stride[1], af::sym::kSymbolOne) != af::TriBool::kTrue) {
+    return;
+  }
+  const uint32_t alignment = line_bytes / std::gcd(line_bytes, width * output.data_type_size);
+  if (rows == 0U || rows % alignment != 0U) {
+    return;
+  }
+  config.packed_store_rows = ArgListManager::GetInstance().GetArgExpr(row_axis.name);
+  config.packed_store_cols = ArgListManager::GetInstance().GetArgExpr(column_axis.name);
+  config.packed_store_row_alignment = alignment;
+  config.packed_store_full_width = width;
+}
+
+void SetPackedStoreProbe(const TuningSpace &tuning_space, uint32_t line_bytes, std::vector<CacheLineConfig> &configs) {
+  if (line_bytes == 0U || !std::any_of(tuning_space.node_infos.begin(), tuning_space.node_infos.end(),
+                                       [](const NodeInfo &node) { return node.node_type == "Nddma"; })) {
+    return;
+  }
+  for (auto &config : configs) {
+    if (config.direction != CacheLineDirection::kUbToGm) {
+      continue;
+    }
+    const auto store =
+        std::find_if(tuning_space.node_infos.begin(), tuning_space.node_infos.end(),
+                     [&](const NodeInfo &node) { return node.node_type == kStore && node.name == config.node_name; });
+    if (store != tuning_space.node_infos.end()) {
+      ConfigurePackedStoreProbe(*store, line_bytes, config);
+    }
+  }
+}
+
 }  // namespace
 af::Status GenerateTilingExpr::GetBufConstraint(std::map<HardwareDef, Expr> &hardware_cons,
                                                 std::map<std::string, Expr> &container_exprs) {
@@ -640,6 +702,7 @@ af::Status GenerateTilingExpr::Generate(ModelInfo &model_info) {
   GE_ASSERT_SUCCESS(GetWorkSpaceSize(model_info.workspace_size_map), "Get workspace size failed.");
 
   GE_ASSERT_SUCCESS(GetSubAxisArgs(model_info.arg_list), "Get args list failed.");
+  SetPackedStoreProbe(*tuning_space_, GetCacheLineSize(), model_info.cache_line_config);
 
   GetAxisConstraints(model_info.eq_exprs, model_info.leq_exprs);
   GetOutputSize(model_info.output_size);

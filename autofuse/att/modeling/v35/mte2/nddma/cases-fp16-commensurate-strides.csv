@@ -1,0 +1,10 @@
+factor_id,experiment,role,dtype,dtype_size,block_dim,api,dims,gm_or_input_strides,ub_or_output_strides,point_flush,packing_extra
+ref,fp16_plane4stride,known,float16,2,56,NDDMA,118x36x4,13536x1x3384,144x4x1,0,0
+t1,fp16_plane4stride,train,float16,2,48,NDDMA,88x32x4,12288x1x3072,128x4x1,0,0
+t2,fp16_plane4stride,train,float16,2,51,NDDMA,104x34x4,12800x1x3200,136x4x1,0,0
+t3,fp16_plane4stride,train,float16,2,54,NDDMA,112x38x4,13824x1x3456,152x4x1,0,0
+t4,fp16_plane4stride,train,float16,2,56,NDDMA,128x40x4,14336x1x3584,160x4x1,0,0
+h1,fp16_plane4stride,holdout,float16,2,50,NDDMA,96x33x4,12544x1x3136,132x4x1,0,0
+h2,fp16_plane4stride,holdout,float16,2,52,NDDMA,108x37x4,13312x1x3328,148x4x1,0,0
+h3,fp16_plane4stride,holdout,float16,2,56,NDDMA,120x39x4,14016x1x3504,156x4x1,0,0
+h4,fp16_plane4stride,holdout,float16,2,55,NDDMA,124x36x4,13760x1x3440,144x4x1,0,0

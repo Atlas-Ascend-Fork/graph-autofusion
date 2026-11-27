@@ -315,6 +315,29 @@ TEST_F(TestAxesReorderSolverGen, GenSolverFuncImplAppliesRuntimeReorderOnceBefor
   EXPECT_NE(code.find("tiling_data.set_tail(input.local_buffer_vars[1]->value)"), std::string::npos);
 }
 
+TEST_F(TestAxesReorderSolverGen, PackedStoreProbeRequiresFullWidthAndEnabledSearch) {
+  const Expr rows = CreateExpr("rows");
+  const Expr cols = CreateExpr("cols");
+  CacheLineConfig config{"store", CreateExpr(36), 128, CacheLineDirection::kUbToGm};
+  config.packed_store_rows = rows;
+  config.packed_store_cols = cols;
+  config.packed_store_row_alignment = 32U;
+  config.packed_store_full_width = 9U;
+  const std::vector<CacheLineConfig> configs{config};
+  AxesReorderSolverGen solver("case_test", "TilingData");
+  solver.local_buffer_tiling_vars_ = {rows, cols};
+  solver.hardware_use_map_[HardwareDef::UB] = rows * cols;
+  solver.SetCacheLineConfig(&configs);
+  solver.enable_high_perf_ = true;
+  auto code = solver.GenSolverFuncImpl();
+  const auto probe = code.find("cols.value == 9 && !solver.ProbeAlignedOuterTile(rows, 32)");
+  ASSERT_NE(probe, std::string::npos);
+  EXPECT_GT(probe, code.find("solver.IsEmptyTensor()"));
+  EXPECT_LT(probe, code.find("tiling_data.set_rows"));
+  solver.SetEnableCoreSearch(false);
+  EXPECT_EQ(solver.GenSolverFuncImpl().find("ProbeAlignedOuterTile"), std::string::npos);
+}
+
 TEST_F(TestAxesReorderSolverGen, GenRuntimeReorderUsesCompletePermutationAndRejectsInvalidOrder) {
   Expr axis0 = CreateExpr("axis0");
   Expr axis1 = CreateExpr("axis1");
@@ -1581,4 +1604,57 @@ TEST_F(TestAxesReorderSolverGen, GenGetUbSizeStaticFunc_UsesBufferSemanticName) 
   EXPECT_NE(actual.find("auto tmp_buffer_size_max = Max(buffer_size_0"), std::string::npos) << actual;
   EXPECT_NE(actual.find("int64_t ub_size = tmp_buffer_size_max;"), std::string::npos) << actual;
   EXPECT_EQ(actual.find("auto tmp_buffer_size_0 ="), std::string::npos) << actual;
+}
+
+TEST_F(TestAxesReorderSolverGen, ObjectiveCacheUsesCompleteCanonicalArguments) {
+  AxesReorderSolverGen solver("cache", "TilingData");
+  solver.SetInputArgs({CreateExpr("shape"), CreateExpr("block_dim")});
+  solver.mc_args_ = {CreateExpr("core_tile")};
+  solver.local_buffer_tiling_vars_ = {CreateExpr("local_tile")};
+  solver.SetEnableCoreSearch(true);
+  solver.SetEnableEqualOrder(true);
+  solver.SetGroupNum(2UL);
+  EXPECT_EQ(solver.GetObjStaticInputParams(true),
+            (std::set<std::string>{"block_dim", "core_tile", "local_tile", "shape"}));
+  EXPECT_EQ(solver.GetObjStaticInputParams(false),
+            (std::set<std::string>{"double block_dim", "double core_tile", "double local_tile", "double shape"}));
+  const auto arguments = solver.GenGetObjStaticInputParam(true);
+  EXPECT_NE(solver.GenObjFunc().find("const double objective_key[] = {" + arguments + "};"), std::string::npos);
+}
+
+TEST_F(TestAxesReorderSolverGen, ObjectiveCachePreservesLocalSearchScopeAndResourceBudget) {
+  for (const bool search : {false, true}) {
+    for (const bool equal_order : {false, true}) {
+      for (const size_t groups : {1UL, 2UL}) {
+        for (const bool parallel : {false, true}) {
+          AxesReorderSolverGen solver("cache", "TilingData");
+          solver.SetEnableCoreSearch(search);
+          solver.SetEnableEqualOrder(equal_order);
+          solver.SetGroupNum(groups);
+          solver.SetEnableParallel(parallel);
+          const bool enabled = search && equal_order && groups > 1UL && !parallel;
+          EXPECT_EQ(solver.UseObjectiveCache(), enabled);
+          EXPECT_EQ(solver.GenObjFunc().find("objective_key") != std::string::npos, enabled);
+        }
+      }
+    }
+  }
+  AxesReorderSolverGen solver("cache", "TilingData");
+  solver.SetEnableCoreSearch(true);
+  solver.SetEnableEqualOrder(true);
+  solver.SetGroupNum(2UL);
+  std::vector<Expr> arguments;
+  for (uint32_t i = 0U; i < 17U; ++i) {
+    arguments.push_back(CreateExpr(("shape_" + std::to_string(i)).c_str()));
+  }
+  solver.SetInputArgs(arguments);
+  ExprExprMap input_align;
+  for (const auto &arg : arguments) {
+    input_align[arg] = CreateExpr(1);
+  }
+  solver.SetInputAlign(input_align);
+  EXPECT_TRUE(solver.NeedLocalCoreRefinement());
+  EXPECT_FALSE(solver.UseObjectiveCache());
+  EXPECT_EQ(solver.GenObjFunc().find("objective_key"), std::string::npos);
+  EXPECT_NE(solver.GenSolverFuncImpl().find("input.enable_local_core_refinement = true;"), std::string::npos);
 }

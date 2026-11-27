@@ -22,7 +22,7 @@ class VfPerfUtils {
   // 场景1，没有直接可以映射的指令，需要基于原有指令进行拼接，可以使用该接口拼接
   // 场景2，有直接可以映射的指令，可以直接调用该接口获取
   static af::Status GetVfInstructPerf(const std::string &micro_api_type, const std::string &data_type, Expr &latency,
-                                      Expr &throughput);
+                                      Expr &throughput, bool use_calibrated_rsqrt = true);
   static af::Status AddVfInstructPerf(const std::string &vf_instruct_type, const std::string &data_type, Expr &latency,
                                       Expr &throughput, Expr repeat_time);
   static af::Status GetVfInstructDtypeMappingPerf(const std::string &vf_instruct_type, const std::string &input_dtype,

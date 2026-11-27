@@ -15,6 +15,7 @@
 
 namespace {
 constexpr size_t kDmaMaxLen = 2U;
+constexpr int64_t kDmaBlockBytes = 32;
 constexpr size_t kFourAxisNum = 4U;
 constexpr size_t kFiveAxisNum = 5U;
 constexpr char kNormalPddingMode[] = "AscendC::PaddingMode::Normal";
@@ -367,6 +368,17 @@ Status BuildDataCopyApiParamInNormal(const TPipe &tpipe, CodegenApiParam &api_pa
   size_t total_len = data_copy_param.repeats.size();
   const Tensor &ub_tensor = copy_in ? dst : src;
   std::string padding_mode = GetPaddingMode(ub_tensor, data_copy_param, has_transpose);
+  if (!copy_in && padding_mode == kCompactPddingMode) {
+    const auto &row = data_copy_param.repeats.back();
+    const auto dtype_size = ge::GetSizeByDataType(src.dtype);
+    // A tile-dependent row can have a tail with a shorter block length but the same UB pitch.
+    // Aligned rows can use Normal Store to advance over the resulting UB gap.
+    if (!row.IsConstExpr() && dtype_size > 0 &&
+        af::SymbolicUtils::StaticCheckEq(af::sym::Mod(row * af::Symbol(dtype_size), af::Symbol(kDmaBlockBytes)),
+                                         af::sym::kSymbolZero) == af::TriBool::kTrue) {
+      padding_mode = kNormalPddingMode;
+    }
+  }
   api_param.template_params.emplace_back(padding_mode);
 
   BuildDataCopyBaseParams(tpipe, data_copy_param, dma_specific_params, copy_in);

@@ -278,6 +278,7 @@ void SolverPassManager::InitSolverGen(AxesReorderSolverGen &solver_gen) {
   solver_gen.SetCoreNumBudget(core_num_budget);
   solver_gen.SetEnableParallel(args_manager_.GetModelInfo().enable_group_parallel);
   solver_gen.SetGroupNum(group_num_);
+  solver_gen.SetHasMultipleGraphOutputs(args_manager_.GetModelInfo().output_nodes.size() > 1UL);
   solver_gen.SetTilingCaseIdent({args_manager_.GetModelInfo().schedule_group_ident,
                                  args_manager_.GetModelInfo().tiling_case_id,
                                  args_manager_.GetModelInfo().sub_case_tag});
@@ -332,9 +333,11 @@ std::string SolverPassManager::GenAxesReorderClass() {
   return codes;
 }
 
-std::pair<std::string, std::string> SolverPassManager::GenAxesReorderFunc(const std::string &arrange_code) {
+std::pair<std::string, std::string> SolverPassManager::GenAxesReorderFunc(const std::string &arrange_code,
+                                                                          bool single_tiling_case) {
   args_manager_.Process(false);
   AxesReorderSolverGen solver_gen = GenAxesReorderGen();
+  solver_gen.SetSingleTilingCase(single_tiling_case);
   solver_gen.SetArrangeCode(arrange_code);
   std::string impl_codes = solver_gen.GenSolverFuncImpl();
   std::string invoke_codes = solver_gen.GenSolverFuncInvoke();

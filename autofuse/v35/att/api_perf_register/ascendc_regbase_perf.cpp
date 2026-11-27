@@ -671,6 +671,257 @@ Expr GetAlignedShortTailGatherRepeats(const Expr &lanes, const Expr &stride, con
   return repeats;
 }
 
+Expr GetFp16Dim2GatherRepeats(const ascir_param::TransposeNodeParams &params, const Expr &lanes, const Expr &fallback,
+                              PerfOutputInfo &perf) {
+  if (params.input_strides.size() != 2U || params.output_strides.size() != 2U ||
+      af::SymbolicUtils::StaticCheckEq(params.input_strides.front(), kSymOne) != af::TriBool::kTrue ||
+      af::SymbolicUtils::StaticCheckEq(params.output_strides.back(), kSymOne) != af::TriBool::kTrue) {
+    return fallback;
+  }
+  // The measured FP16 Gather has one short vector per output row. See
+  // att/modeling/vector/transpose/results/v35/fp16-dim2-inner1/.
+  constexpr double kGatherStartup = 1.0408782961236014;
+  constexpr double kGatherCyclesPerLaneGroup = 0.9997189769446331;
+  const auto &zero = af::sym::kSymbolZero;
+  const Expr pitch = params.input_strides.back();
+  const Expr rows = params.output_dims.front();
+  const Expr alignment = CreateExpr(16U);
+  const Expr outside = af::sym::Max(zero, CreateExpr(512U) - pitch) + af::sym::Max(zero, pitch - CreateExpr(608U)) +
+                       af::sym::Mod(pitch, alignment) + af::sym::Max(zero, CreateExpr(120U) - rows) +
+                       af::sym::Max(zero, rows - pitch) + af::sym::Max(zero, alignment - lanes) +
+                       af::sym::Max(zero, lanes - CreateExpr(64U)) +
+                       af::sym::Abs(params.output_strides.front() - lanes);
+  const auto supported = af::SymbolicUtils::StaticCheckEq(outside, zero);
+  if (supported == af::TriBool::kFalse) {
+    return fallback;
+  }
+  // Dividing the aligned pitch and bank span by 16 leaves a two-test GCD.
+  const Expr groups = lanes * GetTransposeGatherStrideGcd(af::sym::Div(pitch, alignment), 4U, perf) / CreateExpr(4U);
+  const Expr calibrated = CreateExpr(kGatherStartup) + CreateExpr(kGatherCyclesPerLaneGroup) * groups;
+  if (supported == af::TriBool::kTrue) {
+    return calibrated;
+  }
+  Expr selected;
+  GetPerfVar("transpose_fp16_dim2_gather", selected, perf.ternary_ops);
+  TernaryOp guard(CondType::K_EQ, outside, zero, calibrated, fallback);
+  guard.SetVariable(selected);
+  perf.ternary_ops[selected] = std::move(guard);
+  return selected;
+}
+
+Expr ApplyFp32Dim2Inner1Model(const NodeDetail &node, const Expr &legacy, PerfOutputInfo &perf) {
+  const auto &p = node.transpose_node_params;
+  if (node.input_dtype[0] != kFloat32 || p.total_dim != 2U || p.inner_dim != 1U || p.output_dims.size() != 2U ||
+      p.input_strides.size() != 2U || p.output_strides.size() != 2U ||
+      af::SymbolicUtils::StaticCheckEq(p.input_strides[0], kSymOne) != af::TriBool::kTrue ||
+      af::SymbolicUtils::StaticCheckEq(p.output_strides[1], kSymOne) != af::TriBool::kTrue) {
+    return legacy;
+  }
+  const auto &zero = af::sym::kSymbolZero;
+  const auto &rows = p.output_dims[0];
+  const auto &columns = p.output_dims[1];
+  const auto &pitch = p.input_strides[1];
+  const auto outside = [&](const Expr &x, int32_t lo, int32_t hi) {
+    return af::sym::Max(zero, af::sym::Max(CreateExpr(lo) - x, x - CreateExpr(hi)));
+  };
+  const auto violation = outside(rows, 78, 264) + outside(columns, 32, 88) + outside(pitch, 80, 272) +
+                         af::sym::Max(zero, rows - pitch) + af::sym::Mod(pitch, CreateExpr(8)) +
+                         af::sym::Abs(p.output_strides[0] - af::sym::Ceiling(columns / CreateExpr(8)) * CreateExpr(8));
+  const auto supported = af::SymbolicUtils::StaticCheckEq(violation, zero);
+  if (supported == af::TriBool::kFalse) {
+    return legacy;
+  }
+  // TransposeExtend<1, 2> emits one Gather/Store per output row and vector.
+  // Only active tail lanes request banks. The startup remains the legacy API cost;
+  // the movement coefficient is fitted on independent descriptors, excluding known candidates.
+  constexpr double kMovementCyclesPerRepeat = 1.804167591830145;
+  const auto lanes = CreateExpr(kTransposeRegisterBytes / sizeof(float));
+  const auto groups = GetTransposeGatherStrideGcd(pitch, kTransposeBankSpanBytes / sizeof(float), perf);
+  const auto full = af::sym::Floor(af::sym::Div(columns, lanes));
+  const auto tail = af::sym::Mod(columns, lanes);
+  const auto gather = rows * (kSymTwo * groups * full + af::sym::Ceiling(tail * groups / CreateExpr(32)));
+  const auto repeats = rows * af::sym::Ceiling(af::sym::Div(columns, lanes));
+  const auto calibrated = (VfPerfUtils::GetVFHeadCost() + CreateExpr(kTransposeDim2Inner1MaxLatency) +
+                           CreateExpr(kMovementCyclesPerRepeat) * repeats + gather) *
+                          GetTransposeOuterCount(p);
+  if (supported == af::TriBool::kTrue) {
+    return calibrated;
+  }
+  Expr selected;
+  GetPerfVar("transpose_fp32_dim2_inner1", selected, perf.ternary_ops);
+  TernaryOp guard(CondType::K_EQ, violation, zero, calibrated, legacy);
+  guard.SetVariable(selected);
+  perf.ternary_ops[selected] = std::move(guard);
+  return selected;
+}
+
+Expr ApplyPackedDim2TransposeModel(const NodeDetail &node, const Expr &legacy, PerfOutputInfo &perf) {
+  const auto &p = node.transpose_node_params;
+  const bool fp32 = node.input_dtype[0] == kFloat32;
+  if ((!fp32 && node.input_dtype[0] != kFloat16) || p.total_dim != 2U || p.inner_dim != 2U ||
+      p.output_dims.size() != 2U || p.input_strides.size() != 2U || p.output_strides.size() != 2U ||
+      af::SymbolicUtils::StaticCheckEq(p.input_strides[0], kSymOne) != af::TriBool::kTrue ||
+      af::SymbolicUtils::StaticCheckEq(p.output_strides[1], kSymOne) != af::TriBool::kTrue) {
+    return legacy;
+  }
+  const auto &zero = af::sym::kSymbolZero;
+  const auto &rows = p.output_dims[0];
+  const auto &columns = p.output_dims[1];
+  const auto outside = [&](const Expr &x, int32_t lo, int32_t hi) {
+    return af::sym::Max(zero, af::sym::Max(CreateExpr(lo) - x, x - CreateExpr(hi)));
+  };
+  const auto violation = outside(rows, fp32 ? 96 : 32, fp32 ? 128 : 48) + outside(columns, fp32 ? 96 : 104, 128) +
+                         af::sym::Abs(p.input_strides[1] - rows) + af::sym::Abs(p.output_strides[0] - columns);
+  const auto supported = af::SymbolicUtils::StaticCheckEq(violation, zero);
+  if (supported == af::TriBool::kFalse) {
+    return legacy;
+  }
+  constexpr double kFp16Base = 20.951769106759663;
+  constexpr double kFp16Bank = 1.5796671147551762;
+  constexpr double kFp32Base = 19.65444799645191;
+  constexpr double kFp32Bank = 1.8540860590399637;
+  const uint64_t element_bytes = fp32 ? sizeof(uint32_t) : sizeof(uint16_t);
+  const auto groups = GetTransposeGatherStrideGcd(rows, kTransposeBankSpanBytes / element_bytes, perf);
+  const auto repeats = af::sym::Ceiling(rows * columns / CreateExpr(kTransposeRegisterBytes / element_bytes));
+  const auto cycles =
+      (CreateExpr(kTransposeDim3Inner2MaxLatency) +
+       repeats * (CreateExpr(fp32 ? kFp32Base : kFp16Base) + CreateExpr(fp32 ? kFp32Bank : kFp16Bank) * groups)) *
+      GetTransposeOuterCount(p);
+  if (supported == af::TriBool::kTrue) {
+    return cycles;
+  }
+  Expr selected;
+  GetPerfVar("transpose_packed_dim2", selected, perf.ternary_ops);
+  TernaryOp guard(CondType::K_EQ, violation, zero, cycles, legacy);
+  guard.SetVariable(selected);
+  perf.ternary_ops[selected] = std::move(guard);
+  return selected;
+}
+
+Expr ApplyFp32FourDimUnitAxisModel(const NodeDetail &node, const Expr &fallback, PerfOutputInfo &perf) {
+  const auto &p = node.transpose_node_params;
+  if (node.input_dtype[0] != kFloat32 || p.total_dim != 4U || p.inner_dim != 3U || p.output_dims.size() != 4U ||
+      p.input_strides.size() != 4U || p.output_strides.size() != 4U) {
+    return fallback;
+  }
+  const auto &zero = af::sym::kSymbolZero;
+  const auto &one = af::sym::kSymbolOne;
+  const auto rows_per_group = CreateExpr(16);
+  const auto columns = CreateExpr(48);
+  const auto line = rows_per_group * columns;
+  const auto equal = [](const Expr &a, const Expr &b) {
+    return af::SymbolicUtils::StaticCheckEq(a, b) == af::TriBool::kTrue;
+  };
+  const bool inner_contiguous = equal(p.input_strides[0], line) && equal(p.input_strides[1], one);
+  const bool outer_contiguous = equal(p.input_strides[0], one) && equal(p.input_strides[1], line);
+  if ((!inner_contiguous && !outer_contiguous) || !equal(p.input_strides[3], rows_per_group)) {
+    return fallback;
+  }
+
+  const auto &rows = p.output_dims[inner_contiguous ? 0 : 1];
+  const auto violation = af::sym::Abs(p.output_dims[inner_contiguous ? 1 : 0] - rows_per_group) +
+                         af::sym::Abs(p.output_dims[2] - one) + af::sym::Abs(p.output_dims[3] - columns) +
+                         af::sym::Abs(p.output_strides[0] - p.output_dims[1] * columns) +
+                         af::sym::Abs(p.output_strides[1] - columns) + af::sym::Abs(p.output_strides[3] - one) +
+                         af::sym::Max(zero, af::sym::Max(CreateExpr(8) - rows, rows - CreateExpr(24)));
+  const auto supported = af::SymbolicUtils::StaticCheckEq(violation, zero);
+  if (supported == af::TriBool::kFalse) {
+    return fallback;
+  }
+  // Each outer-loop traversal gathers 16 * 48 b32 elements in 12 vector
+  // repeats. The fitted head includes the measured index setup for this layout.
+  const auto cycles =
+      (CreateExpr(325.083333333333) + CreateExpr(33.8096354166667) * CreateExpr(12) * rows) * GetTransposeOuterCount(p);
+  if (supported == af::TriBool::kTrue) {
+    return cycles;
+  }
+  Expr selected;
+  GetPerfVar("transpose_fp32_four_dim_unit_axis", selected, perf.ternary_ops);
+  TernaryOp guard(CondType::K_EQ, violation, zero, cycles, fallback);
+  guard.SetVariable(selected);
+  perf.ternary_ops[selected] = std::move(guard);
+  return selected;
+}
+
+Expr ApplyFp32UnitMiddleTransposeModel(const NodeDetail &node, const Expr &legacy, const Expr &tail_repeat,
+                                       PerfOutputInfo &perf) {
+  const auto &p = node.transpose_node_params;
+  if (node.input_dtype[0] != kFloat32 || p.total_dim != 3U || p.inner_dim != 3U || p.output_dims.size() != 3U ||
+      p.input_strides.size() != 3U || p.output_strides.size() != 3U) {
+    return legacy;
+  }
+  const auto &zero = af::sym::kSymbolZero;
+  const auto &one = af::sym::kSymbolOne;
+  const auto &rows = p.output_dims[0];
+  const auto &width = p.output_dims[2];
+  const auto outside = [&](const Expr &value, int32_t min, int32_t max) {
+    return af::sym::Max(zero, af::sym::Max(CreateExpr(min) - value, value - CreateExpr(max)));
+  };
+  const Expr violation = af::sym::Abs(p.output_dims[1] - one) + af::sym::Abs(p.input_strides[0] - width) +
+                         af::sym::Abs(p.input_strides[1] - rows * width) + af::sym::Abs(p.input_strides[2] - one) +
+                         af::sym::Abs(p.output_strides[0] - width) + af::sym::Abs(p.output_strides[1] - width) +
+                         af::sym::Abs(p.output_strides[2] - one) + outside(rows, 8, 16) + outside(width, 960, 1089);
+  const auto supported = af::SymbolicUtils::StaticCheckEq(violation, zero);
+  if (supported == af::TriBool::kFalse) {
+    return legacy;
+  }
+  // TransposeExtend<3, 3> still generates indices for a unit middle axis.
+  // The operand-specific tail repeat residual covers the missing VEC instructions.
+  constexpr double kUnitMiddleTailCycles = 4.756748906050697;
+  const Expr calibrated = legacy + CreateExpr(kUnitMiddleTailCycles) * tail_repeat * GetTransposeOuterCount(p);
+  if (supported == af::TriBool::kTrue) {
+    return calibrated;
+  }
+  Expr selected;
+  GetPerfVar("transpose_fp32_unit_middle", selected, perf.ternary_ops);
+  TernaryOp guard(CondType::K_EQ, violation, zero, calibrated, legacy);
+  guard.SetVariable(selected);
+  perf.ternary_ops[selected] = std::move(guard);
+  return selected;
+}
+
+Expr GetFp16Dim3GatherRepeats(const ascir_param::TransposeNodeParams &params, const Expr &lanes, const Expr &fallback,
+                              PerfOutputInfo &perf) {
+  if (params.input_strides.size() != 3U || params.output_strides.size() != 3U ||
+      af::SymbolicUtils::StaticCheckEq(params.input_strides.front(), kSymOne) != af::TriBool::kTrue ||
+      af::SymbolicUtils::StaticCheckEq(params.output_strides.back(), kSymOne) != af::TriBool::kTrue) {
+    return fallback;
+  }
+  const auto &zero = af::sym::kSymbolZero;
+  const auto &rows = params.output_dims[0];
+  const auto &middle = params.output_dims[1];
+  const auto &pitch = params.input_strides[1];
+  const auto &stride = params.input_strides[2];
+  const auto alignment = CreateExpr(16);
+  const auto outside = [&](const Expr &value, int32_t lower, int32_t upper) {
+    return af::sym::Max(zero, af::sym::Max(CreateExpr(lower) - value, value - CreateExpr(upper)));
+  };
+  const Expr violation = outside(rows, 20, 44) + outside(middle, 24, 73) + outside(lanes, 2, 16) +
+                         outside(pitch, 32, 48) + af::sym::Mod(pitch, alignment) + af::sym::Max(rows - pitch, zero) +
+                         af::sym::Abs(stride - pitch * middle) + af::sym::Abs(params.output_strides[1] - alignment) +
+                         af::sym::Abs(params.output_strides[0] - alignment * middle);
+  const auto supported = af::SymbolicUtils::StaticCheckEq(violation, zero);
+  if (supported == af::TriBool::kFalse) {
+    return fallback;
+  }
+
+  // The two-outer-loop VF reuses one masked index vector. Calibration measures
+  // the inner Gather/Store loop; its existing Store term costs one cycle per row.
+  constexpr double kLoopFloor = 5.268012487018964;
+  constexpr double kSerialOverhead = 2.1440151100595544;
+  const Expr groups = lanes * GetTransposeGatherStrideGcd(af::sym::Div(stride, alignment), 4U, perf) / CreateExpr(4U);
+  const Expr gathers = af::sym::Max(CreateExpr(kLoopFloor - 1.0), groups + CreateExpr(kSerialOverhead - 1.0));
+  if (supported == af::TriBool::kTrue) {
+    return gathers;
+  }
+  Expr selected;
+  GetPerfVar("transpose_fp16_dim3_gather", selected, perf.ternary_ops);
+  TernaryOp select(CondType::K_EQ, violation, zero, gathers, fallback);
+  select.SetVariable(selected);
+  perf.ternary_ops[selected] = std::move(select);
+  return selected;
+}
+
 }  // namespace
 
 Expr GetTransposeGatherCount(const NodeDetail &node_info, const std::string &data_dtype, PerfOutputInfo &perf) {
@@ -708,6 +959,9 @@ Expr GetTransposeDim3GatherRepeats(const NodeDetail &node_info, const RepeatPara
                                    PerfOutputInfo &perf) {
   const auto &repeat_time = repeat_params.repeat_time;
   Expr gather_repeats = (use_bank_period ? cal_count / repeat_params.repeat_elm : repeat_time) * gather_count;
+  if (node_info.input_dtype[0] == kFloat16) {
+    return GetFp16Dim3GatherRepeats(node_info.transpose_node_params, cal_count, gather_repeats, perf);
+  }
   if (!use_bank_period) {
     gather_repeats = AdjustAlignedTransposeGather(node_info, cal_count, gather_repeats, perf);
   }
@@ -739,7 +993,9 @@ af::Status TransposePerf(const NodeDetail &node_info, PerfOutputInfo &perf) {
 
   if (params.total_dim == 2U && params.inner_dim == 1U) {
     // TransposeOneOuterDimExtendImpl passes the short-tail mask to Gather.
-    const Expr gather_per_repeat = AdjustAlignedTransposeGather(node_info, cal_count, gather_count, perf);
+    const Expr gather_per_repeat = input_dtype == kFloat16
+                                       ? GetFp16Dim2GatherRepeats(params, cal_count, gather_count, perf)
+                                       : AdjustAlignedTransposeGather(node_info, cal_count, gather_count, perf);
     GE_ASSERT_SUCCESS(AddTransposeDim2Inner1Perf(node_info, input_dtype, repeat_time, gather_per_repeat, max_latency,
                                                  all_vf_instruct_cost));
     latency = kTransposeDim2Inner1MaxLatency;
@@ -788,6 +1044,10 @@ af::Status TransposePerf(const NodeDetail &node_info, PerfOutputInfo &perf) {
 
   Expr res = (VfPerfUtils::GetVFHeadCost() + CreateExpr(latency) + all_vf_instruct_cost) * outer_count;
   res = ApplyTransposeUnitOuterModel(node_info, res, perf);
+  res = ApplyFp32Dim2Inner1Model(node_info, res, perf);
+  res = ApplyPackedDim2TransposeModel(node_info, res, perf);
+  res = ApplyFp32FourDimUnitAxisModel(node_info, res, perf);
+  res = ApplyFp32UnitMiddleTransposeModel(node_info, res, tail_repeat, perf);
   res.Simplify();
   perf.pipe_res[PipeType::AIV_VEC] = res;
 

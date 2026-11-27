@@ -63,6 +63,10 @@ class PerfParamTable {
   [[nodiscard]] virtual Expr GetOpHeadCost() const {
     return CreateExpr(0);
   }
+  [[nodiscard]] virtual const std::vector<VfInstructPerf> &GetVectorFunctionInstructPerfTable(
+      const std::string &micro_api_type) const {
+    return GetVfInstructPerfTable(micro_api_type);
+  }
 
  private:
   std::map<PipeType, PipeHeadPerfFunc> pipes_head_perf;

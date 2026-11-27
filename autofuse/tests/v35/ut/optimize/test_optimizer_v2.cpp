@@ -3899,6 +3899,34 @@ TEST_F(TestOptimizerV2, SumRCoreWithoutArgmaxDisablesWorkspaceAlignment) {
   }
 }
 
+TEST_F(TestOptimizerV2, FusedScalarSumRCoreAlignsPartialWorkspace) {
+  for (const auto rows : {1, 3}) {
+    SCOPED_TRACE(rows);
+    const auto extent = Sym(129280);
+    auto graph = AscGraphBuilder("fused_sum_workspace_alignment")
+                     .Loops({Sym(rows), extent})
+                     .Data("data", 0, af::DT_FLOAT)
+                     .Load("load", "data")
+                     .Op<af::ascir_op::Abs>("abs", {"load"}, {Sym(rows), extent}, {extent, One}, af::DT_FLOAT)
+                     .Sum("sum", "abs", {1})
+                     .Store("store", "sum")
+                     .Output("output", "store")
+                     .Build();
+    ascir::FusedScheduledResult fused_result;
+    ASSERT_EQ(optimizer.Optimize(graph, fused_result), af::SUCCESS);
+    size_t r_core_results = 0U;
+    for (const auto &node_results : fused_result.node_idx_to_scheduled_results) {
+      for (const auto &result : node_results) {
+        if (!result.var_relations.empty()) {
+          ++r_core_results;
+          EXPECT_EQ(result.enable_workspace_alignment, rows == 1);
+        }
+      }
+    }
+    EXPECT_GT(r_core_results, 0U);
+  }
+}
+
 TEST_F(TestOptimizerV2, ArgmaxAndSumRCoreEnableWorkspaceAlignment) {
   auto graph = AscGraphBuilder("argmax_sum_workspace_alignment")
                    .Loops({Sym(3), Sym(129280)})

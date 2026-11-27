@@ -8,6 +8,11 @@ file(GLOB_RECURSE CODEGEN_SRC_FILES "${CODE_ROOT_DIR}/v35/codegen/*.cpp")
 file(GLOB_RECURSE ATT_SRC_FILES "${CODE_ROOT_DIR}/v35/att/*.cpp")
 file(GLOB_RECURSE ATT_ST_FILES "${CMAKE_CURRENT_SOURCE_DIR}/st/att/*.cpp")
 file(GLOB_RECURSE ATT_UT_FILES "${CMAKE_CURRENT_SOURCE_DIR}/ut/att/*.cpp")
+# Replay physical descriptors through the registered v35 models in both host test builds.
+set(ATT_MODEL_SCENARIO_SOURCES
+        ${CMAKE_CURRENT_SOURCE_DIR}/att/gen_model_info/api_perf_register/test_calibrated_ascir_perf_v2.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/att/gen_model_info/api_perf_register/test_calibrated_nddma_model_v2.cpp
+)
 file(GLOB_RECURSE ASCIR_REG_FUNC_FILES "${CODE_ROOT_DIR}/v35/ascir/reg_func/*.cpp")
 
 target_sources(optimize_ut PRIVATE
@@ -117,10 +122,12 @@ target_sources(codegen PRIVATE
 
 target_sources(att_st PRIVATE
         ${ATT_ST_FILES}
+        ${ATT_MODEL_SCENARIO_SOURCES}
 )
 
 target_sources(att_ut PRIVATE
         ${ATT_UT_FILES}
+        ${ATT_MODEL_SCENARIO_SOURCES}
 )
 
 target_include_directories(codegen PRIVATE

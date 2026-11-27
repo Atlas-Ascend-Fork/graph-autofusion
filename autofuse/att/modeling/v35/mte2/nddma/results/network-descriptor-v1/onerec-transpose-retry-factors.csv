@@ -1,0 +1,15 @@
+factor_id,experiment,role,dtype,dtype_size,block_dim,api,api_rank,dims,gm_or_input_strides,ub_or_output_strides,bytes_per_call,input_span_bytes,output_span_bytes,point_flush,nd_dci,grid_cols,core_tiles,source_plane,grid_row_step_elements,store_pitch
+train_c32_m80_n96_gm768_store1536,transposed-padded-row-grid,train,float32,4,32,NDDMA,2,80x96,1x768,96x1,30720,292160,30720,0,0,16,10,73728,80,1536
+train_c40_m96_n112_gm896_store1536,transposed-padded-row-grid,train,float32,4,40,NDDMA,2,96x112,1x896,112x1,43008,398208,43008,0,0,13,10,100352,96,1536
+train_c48_m96_n104_gm1024_store2048,transposed-padded-row-grid,train,float32,4,48,NDDMA,2,96x104,1x1024,104x1,39936,422272,39936,0,0,19,10,106496,96,2048
+train_c52_m104_n128_gm1024_store2048,transposed-padded-row-grid,train,float32,4,52,NDDMA,2,104x128,1x1024,128x1,53248,520608,53248,0,0,16,10,131072,104,2048
+train_c56_m128_n96_gm1152_store2304,transposed-padded-row-grid,train,float32,4,56,NDDMA,2,128x96,1x1152,96x1,49152,438272,49152,0,0,24,10,110592,128,2304
+train_c48_m128_n120_gm1280_store2560,transposed-padded-row-grid,train,float32,4,48,NDDMA,2,128x120,1x1280,120x1,61440,609792,61440,0,0,21,10,153600,128,2560
+train_c56_m80_n136_gm1280_store2048,transposed-padded-row-grid,train,float32,4,56,NDDMA,2,80x136,1x1280,136x1,43520,691520,43520,0,0,15,10,174080,80,2048
+train_c40_m120_n88_gm768_store1536,transposed-padded-row-grid,train,float32,4,40,NDDMA,2,120x88,1x768,88x1,42240,267744,42240,0,0,17,10,67584,120,1536
+train_c52_m120_n112_gm1152_store2048,transposed-padded-row-grid,train,float32,4,52,NDDMA,2,120x112,1x1152,112x1,53760,511968,53760,0,0,18,10,129024,120,2048
+holdout_c36_m104_n96_gm896_store1536,transposed-padded-row-grid,holdout,float32,4,36,NDDMA,2,104x96,1x896,96x1,39936,340896,39936,0,0,16,10,86016,104,1536
+holdout_c44_m112_n120_gm1024_store2048,transposed-padded-row-grid,holdout,float32,4,44,NDDMA,2,112x120,1x1024,120x1,53760,487872,53760,0,0,17,10,122880,112,2048
+holdout_c50_m96_n128_gm1152_store2304,transposed-padded-row-grid,holdout,float32,4,50,NDDMA,2,96x128,1x1152,128x1,49152,585600,49152,0,0,18,10,147456,96,2304
+holdout_c56_m132_n108_gm1280_store2560,transposed-padded-row-grid,holdout,float32,4,56,NDDMA,2,132x108,1x1280,112x1,57024,548368,59120,0,0,23,10,138240,132,2560
+known_c54_m114_n114_gm1024_store2048,transposed-padded-row-grid,known,float32,4,54,NDDMA,2,114x114,1x1024,120x1,51984,463304,54696,0,0,17,10,116736,114,2048

@@ -1,0 +1,10 @@
+factor_id,experiment,role,dtype,dtype_size,block_dim,api,dims,gm_or_input_strides,ub_or_output_strides,point_flush,packing_extra,compact_packed
+ref,fp32_hw_loop,known,float32,4,56,LOAD_COMPACT_LOOP1,33x6x39,874458x8658x1,240x39x1,0,0,1
+t1,fp32_hw_loop,train,float32,4,48,LOAD_COMPACT_LOOP1,24x4x36,786432x8192x1,144x36x1,0,0,1
+t2,fp32_hw_loop,train,float32,4,52,LOAD_COMPACT_LOOP1,28x5x40,844800x8448x1,200x40x1,0,0,1
+t3,fp32_hw_loop,train,float32,4,54,LOAD_COMPACT_LOOP1,32x7x36,913920x8960x1,256x36x1,0,0,1
+t4,fp32_hw_loop,train,float32,4,56,LOAD_COMPACT_LOOP1,34x8x40,958464x9216x1,320x40x1,0,0,1
+h1,fp32_hw_loop,holdout,float32,4,50,LOAD_COMPACT_LOOP1,26x5x37,815360x8320x1,192x37x1,0,0,1
+h2,fp32_hw_loop,holdout,float32,4,53,LOAD_COMPACT_LOOP1,30x7x41,879104x8704x1,288x41x1,0,0,1
+h3,fp32_hw_loop,holdout,float32,4,56,LOAD_COMPACT_LOOP1,34x6x43,920448x9024x1,264x43x1,0,0,1
+ref_fast,fp32_hw_loop,known,float32,4,42,LOAD,33x234,874458x1,234x1,0,0,1

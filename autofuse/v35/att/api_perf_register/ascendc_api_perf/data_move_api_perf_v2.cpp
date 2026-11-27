@@ -284,7 +284,7 @@ Expr OutsideDmaCalibrationRange(const Expr &value, const Range &range) {
 }
 
 af::Status SelectDmaCalibration(const NodeDetail &node, const std::string &name, const std::vector<Expr> &violations,
-                                Expr &cycles, PerfOutputInfo &perf) {
+                                Expr &cycles, PerfOutputInfo &perf, const std::vector<Expr> &payload_dims = {}) {
   const auto &zero = af::sym::kSymbolZero;
   Expr violation = zero;
   for (const auto &part : violations) {
@@ -294,13 +294,99 @@ af::Status SelectDmaCalibration(const NodeDetail &node, const std::string &name,
     violation = violation + part;
   }
   Expr fitted;
-  GE_ASSERT_SUCCESS(GetPerf({name, node.input_dtype[0], node.output_dtype[0], node.input_dims, zero}, fitted));
+  GE_ASSERT_SUCCESS(GetPerf(
+      {name, node.input_dtype[0], node.output_dtype[0], payload_dims.empty() ? node.input_dims : payload_dims, zero},
+      fitted));
   Expr result = CreateExpr((name + "_small_dma_node").c_str());
   TernaryOp guard(CondType::K_EQ, violation, zero, fitted, cycles);
   guard.SetVariable(result);
   perf.ternary_ops[result] = std::move(guard);
   cycles = result;
   return af::SUCCESS;
+}
+
+template <typename Select>
+af::Status SelectAlignedStoreCalibrations(const NodeDetail &node, const Expr &rows, const Expr &width,
+                                          const Expr &cores, const Expr &bytes, const Select &select) {
+  using namespace dma_calibration_v2;
+  const auto &zero = af::sym::kSymbolZero;
+  const auto abs_value = [&](const Expr &value) { return af::sym::Max(value, zero - value); };
+  const Expr cacheline_elements = CreateExpr(GetCacheLineSize() / kFloat32Bytes);
+  const auto select_aligned_store = [&](const char *name, const PayloadDomain &aligned) {
+    return select(
+        name, {abs_value(rows - af::sym::kSymbolOne), abs_value(af::sym::Mod(width, cacheline_elements)),
+               abs_value(node.ub_stride), abs_value(node.gm_stride), OutsideDmaCalibrationRange(cores, aligned.cores),
+               OutsideDmaCalibrationRange(bytes, aligned.bytes)});
+  };
+  GE_ASSERT_SUCCESS(select_aligned_store("StoreAlignedMediumPayload", kStoreAlignedMediumPayload));
+  return select_aligned_store("StoreAlignedConcurrentPayload", kStoreAlignedConcurrentPayload);
+}
+
+template <typename Select>
+af::Status SelectWidePitchLoadCalibrations(const NodeDetail &node, const Expr &rows, const Expr &width,
+                                           const Expr &cores, const Expr &pitch, const Select &select) {
+  using namespace dma_calibration_v2;
+  const auto &zero = af::sym::kSymbolZero;
+  const auto abs_value = [&](const Expr &value) { return af::sym::Max(value, zero - value); };
+  // Independent whole-API samples retain the payload/bandwidth formula. The
+  // fitted aggregate bandwidth uses the measured 128-byte GM burst payload.
+  // Dense UB rows remain unchanged; single rows and smaller pitches retain their models.
+  GE_ASSERT_SUCCESS(select("LoadAlignedLargePitch",
+                           {OutsideDmaCalibrationRange(rows, kLoadAlignedLargeRows),
+                            OutsideDmaCalibrationRange(width, kLoadAlignedLargeWidth),
+                            OutsideDmaCalibrationRange(pitch, kLoadAlignedLargePitch),
+                            OutsideDmaCalibrationRange(cores, kLoadAlignedLargeCores), abs_value(node.ub_stride),
+                            abs_value(af::sym::Mod(width, CreateExpr(kAlignedRowElements))),
+                            abs_value(af::sym::Mod(pitch, CreateExpr(kLoadAlignedLargeBurstElements)))},
+                           {rows, af::sym::Ceiling(width / CreateExpr(kLoadAlignedLargeBurstElements)) *
+                                      CreateExpr(kLoadAlignedLargeBurstElements)}));
+  // For aligned rows without UB padding, use the measured cold bandwidth for wide GM pitches.
+  const auto outside_centered = [&](const Expr &value, int32_t center, int32_t radius) {
+    return af::sym::Max(zero, af::sym::Abs(value - CreateExpr(center)) - CreateExpr(radius));
+  };
+  // Only the two sampled row counts, 16 and 32, satisfy this guard.
+  const Expr rows_outside =
+      af::sym::Abs(af::sym::Abs(rows - CreateExpr(kLoadWideGapRowsCenter)) - CreateExpr(kLoadWideGapRowsDistance));
+  GE_ASSERT_SUCCESS(select("LoadAlignedWideGap",
+                           {af::sym::Abs(pitch - CreateExpr(kLoadWideGapPitch)), af::sym::Abs(node.ub_stride),
+                            rows_outside, outside_centered(width, kLoadWideGapWidthCenter, kLoadWideGapWidthRadius),
+                            outside_centered(cores, kLoadWideGapCoresCenter, kLoadWideGapCoresRadius),
+                            af::sym::Abs(af::sym::Mod(width, CreateExpr(kAlignedRowElements)))}));
+  return af::SUCCESS;
+}
+
+template <typename Select>
+af::Status SelectCompactLoadCalibrations(const NodeDetail &node, const Expr &rows, const Expr &width, const Expr &cores,
+                                         const Expr &bytes, const Select &select) {
+  using namespace dma_calibration_v2;
+  const auto &zero = af::sym::kSymbolZero;
+  const auto abs_value = [&](const Expr &value) { return af::sym::Max(value, zero - value); };
+  // Compact source rows: 128..1024 bytes, 2..18 rows and 256 B..16 KiB GM gaps.
+  // The fitted stride coefficient is zero in this domain; the legacy stride branch remains outside it.
+  GE_ASSERT_SUCCESS(select(
+      "LoadSmallPayloadCompact",
+      {abs_value(af::sym::Mod(width, CreateExpr(kAlignedRowElements))), abs_value(node.ub_stride),
+       OutsideDmaCalibrationRange(cores, kLoadSmallPayload.cores), OutsideDmaCalibrationRange(rows, kLoadCompactRows),
+       OutsideDmaCalibrationRange(width, kLoadCompactWidth), OutsideDmaCalibrationRange(bytes, kLoadSmallPayload.bytes),
+       OutsideDmaCalibrationRange(node.gm_stride, kLoadCompactGap)}));
+  const Expr pitch = width + node.gm_stride;
+  const Expr burst_elements = CreateExpr(kLoadAlignedLargeBurstElements);
+  GE_ASSERT_SUCCESS(select(
+      "LoadCompactMediumPayload",
+      {abs_value(af::sym::Mod(width, burst_elements)), abs_value(node.ub_stride),
+       abs_value(af::sym::Mod(pitch, burst_elements)), OutsideDmaCalibrationRange(cores, kLoadCompactMediumCores),
+       OutsideDmaCalibrationRange(rows, kLoadCompactMediumRows),
+       OutsideDmaCalibrationRange(width, kLoadCompactMediumWidth),
+       OutsideDmaCalibrationRange(pitch, kLoadCompactMediumPitch),
+       OutsideDmaCalibrationRange(bytes, kLoadCompactMediumBytes)}));
+  // FP32 rows of 128 bytes with a dense UB destination. The sampled GM pitches
+  // are multiples of 16 KiB from 16 to 64 KiB.
+  GE_ASSERT_SUCCESS(
+      select("LoadWidePitch128B",
+             {abs_value(width - CreateExpr(kLoadWidePitchWidth)), abs_value(node.ub_stride),
+              OutsideDmaCalibrationRange(rows, kLoadWidePitchRows), OutsideDmaCalibrationRange(pitch, kLoadWidePitch),
+              abs_value(af::sym::Mod(pitch, CreateExpr(kLoadWidePitchAlignment)))}));
+  return SelectWidePitchLoadCalibrations(node, rows, width, cores, pitch, select);
 }
 
 // Use calibrated bandwidth formulas only within their measured DMA domains.
@@ -316,53 +402,117 @@ af::Status SelectCalibratedDmaEstimate(const NodeDetail &node, bool is_load, Exp
   const Expr width = node.input_dims.back();
   const Expr bytes = rows * width * CreateExpr(kFloat32Bytes);
   const auto abs_value = [&](const Expr &value) { return af::sym::Max(value, zero - value); };
-  const auto select = [&](const std::string &name, const std::vector<Expr> &violations) {
-    return SelectDmaCalibration(node, name, violations, cycles, perf);
+  const auto select = [&](const std::string &name, const std::vector<Expr> &violations,
+                          const std::vector<Expr> &payload_dims = {}) {
+    return SelectDmaCalibration(node, name, violations, cycles, perf, payload_dims);
   };
   const auto &domain = is_load ? kLoadSmallPayload : kStoreSmallPayload;
   GE_ASSERT_SUCCESS(select(is_load ? "LoadSmallPayload" : "StoreSmallPayload",
                            {abs_value(af::sym::Mod(width, CreateExpr(kAlignedRowElements))), abs_value(node.ub_stride),
                             abs_value(node.gm_stride), OutsideDmaCalibrationRange(cores, domain.cores),
                             OutsideDmaCalibrationRange(bytes, domain.bytes)}));
-  if (is_load && node.input_dims.size() == kCodegenDmaMaxLen) {
-    // Compact source rows: 128..1024 bytes, 2..18 rows and 256 B..16 KiB GM gaps.
-    // The fitted stride coefficient is zero in this domain; the legacy stride branch remains outside it.
-    GE_ASSERT_SUCCESS(select(
-        "LoadSmallPayloadCompact",
-        {abs_value(af::sym::Mod(width, CreateExpr(kAlignedRowElements))), abs_value(node.ub_stride),
-         OutsideDmaCalibrationRange(cores, kLoadSmallPayload.cores), OutsideDmaCalibrationRange(rows, kLoadCompactRows),
-         OutsideDmaCalibrationRange(width, kLoadCompactWidth),
-         OutsideDmaCalibrationRange(bytes, kLoadSmallPayload.bytes),
-         OutsideDmaCalibrationRange(node.gm_stride, kLoadCompactGap)}));
-    const Expr pitch = width + node.gm_stride;
-    // FP32 rows of 128 bytes with a dense UB destination. The sampled GM pitches
-    // are multiples of 16 KiB from 16 to 64 KiB.
-    GE_ASSERT_SUCCESS(
-        select("LoadWidePitch128B",
-               {abs_value(width - CreateExpr(kLoadWidePitchWidth)), abs_value(node.ub_stride),
-                OutsideDmaCalibrationRange(rows, kLoadWidePitchRows), OutsideDmaCalibrationRange(pitch, kLoadWidePitch),
-                abs_value(af::sym::Mod(pitch, CreateExpr(kLoadWidePitchAlignment)))}));
-    // For aligned rows without UB padding, use the measured cold bandwidth for wide GM pitches.
-    const auto outside_centered = [&](const Expr &value, int32_t center, int32_t radius) {
-      return af::sym::Max(zero, af::sym::Abs(value - CreateExpr(center)) - CreateExpr(radius));
-    };
-    // Only the two sampled row counts, 16 and 32, satisfy this guard.
-    const Expr rows_outside =
-        af::sym::Abs(af::sym::Abs(rows - CreateExpr(kLoadWideGapRowsCenter)) - CreateExpr(kLoadWideGapRowsDistance));
-    GE_ASSERT_SUCCESS(select("LoadAlignedWideGap",
-                             {af::sym::Abs(pitch - CreateExpr(kLoadWideGapPitch)), af::sym::Abs(node.ub_stride),
-                              rows_outside, outside_centered(width, kLoadWideGapWidthCenter, kLoadWideGapWidthRadius),
-                              outside_centered(cores, kLoadWideGapCoresCenter, kLoadWideGapCoresRadius),
-                              af::sym::Abs(af::sym::Mod(width, CreateExpr(kAlignedRowElements)))}));
+  if (!is_load) {
+    return SelectAlignedStoreCalibrations(node, rows, width, cores, bytes, select);
+  }
+  if (node.input_dims.size() == kCodegenDmaMaxLen) {
+    return SelectCompactLoadCalibrations(node, rows, width, cores, bytes, select);
   }
   return af::SUCCESS;
 }
 
-af::Status SelectAlignedSingleRowLoad(const NodeDetail &node, const Expr &block_dim, Expr &cycles,
-                                      PerfOutputInfo &perf) {
-  if (node.input_dtype[0] != "float32" || node.output_dtype[0] != "float32" ||
-      node.input_dims.size() != kCodegenDmaMaxLen || !node.vectorized_shape.empty() ||
-      af::SymbolicUtils::StaticCheckEq(node.input_dims.front(), af::sym::kSymbolOne) == af::TriBool::kFalse) {
+af::Status SelectStridedPayloadLoad(const NodeDetail &node, const Expr &cores, Expr &cycles, PerfOutputInfo &perf) {
+  if ((node.input_dtype[0] != "float32" && node.input_dtype[0] != "uint8") ||
+      node.output_dtype[0] != node.input_dtype[0] || node.input_dims.size() != kCodegenDmaMaxLen ||
+      !node.vectorized_shape.empty()) {
+    return af::SUCCESS;
+  }
+  const auto &rows = node.input_dims.front();
+  const auto &width = node.input_dims.back();
+  const auto &zero = af::sym::kSymbolZero;
+  const auto pitch = width + node.gm_stride;
+  const auto aligned = CreateExpr(32) / kDataTypeSizeMap.at(node.input_dtype[0]);
+  // The measured physical descriptor family retains the original payload/bandwidth
+  // formula. Coefficients are fitted independently for each dtype; outer repeats
+  // remain charged by the caller, not folded into this per-call estimate.
+  const auto medium = OutsideDmaCalibrationRange(rows, {72, 108}) + OutsideDmaCalibrationRange(width, {64, 104}) +
+                      OutsideDmaCalibrationRange(pitch, {20352, 24576});
+  const auto violation = medium + OutsideDmaCalibrationRange(cores, {32, 56}) +
+                         af::sym::Abs(node.ub_stride - (af::sym::Ceiling(width / aligned) * aligned - width)) +
+                         af::sym::Abs(af::sym::Mod(pitch, aligned));
+  if (af::SymbolicUtils::StaticCheckGt(violation, zero) == af::TriBool::kTrue) {
+    return af::SUCCESS;
+  }
+  Expr fitted;
+  GE_ASSERT_SUCCESS(
+      GetPerf({"LoadStridedPayload", node.input_dtype[0], node.output_dtype[0], node.input_dims, zero}, fitted));
+  Expr selected;
+  GetPerfVar("load_strided_payload", selected, perf.ternary_ops);
+  TernaryOp guard(CondType::K_EQ, violation, zero, fitted, cycles);
+  guard.SetVariable(selected);
+  perf.ternary_ops[selected] = std::move(guard);
+  cycles = selected;
+  return af::SUCCESS;
+}
+
+af::Status SelectWideFp16CompactLoad(const NodeDetail &node, const Expr &block_dim, Expr &cycles,
+                                     PerfOutputInfo &perf) {
+  if (node.input_dtype[0] != "float16" || node.output_dtype[0] != "float16" ||
+      node.input_dims.size() != kCodegenDmaMaxLen || node.repeats.size() != kCodegenDmaMaxLen + 1U ||
+      node.block_count_idx == 0 || !node.vectorized_shape.empty()) {
+    return af::SUCCESS;
+  }
+  const auto &rows = node.input_dims.front();
+  const auto &width = node.input_dims.back();
+  const auto &zero = af::sym::kSymbolZero;
+  const auto outside = [](const Expr &value, int32_t lo, int32_t hi) {
+    return af::sym::Max(af::sym::kSymbolZero, af::sym::Max(CreateExpr(lo) - value, value - CreateExpr(hi)));
+  };
+  // The two DMA dimensions already describe one physical call. Outer repeats
+  // are charged by the caller and the contiguous row width is part of payload.
+  const Expr violation = outside(rows, 48, 136) + outside(width, 128, 172) +
+                         outside(width + node.gm_stride, 8064, 9216) + outside(block_dim, 48, 56) +
+                         af::sym::Abs(node.ub_stride);
+  if (af::SymbolicUtils::StaticCheckGt(violation, zero) == af::TriBool::kTrue) {
+    return af::SUCCESS;
+  }
+  Expr fitted;
+  GE_ASSERT_SUCCESS(
+      GetPerf({"LoadWideFp16Compact", node.input_dtype[0], node.output_dtype[0], node.input_dims, zero}, fitted));
+  Expr value = CreateExpr("LoadWideFp16Compact_dma_node");
+  TernaryOp select(CondType::K_EQ, violation, zero, fitted, cycles);
+  select.SetVariable(value);
+  perf.ternary_ops[value] = std::move(select);
+  cycles = value;
+  return af::SUCCESS;
+}
+
+struct SingleRowLoadCalibration {
+  Range width;
+  Range cores;
+  const char *model_suffix;
+  const char *variable_name;
+  bool allow_flattened;
+};
+
+constexpr SingleRowLoadCalibration kSingleRowLoad{kLoadSingleRowWidth, kLoadSingleRowCores, "AlignedSingleRow",
+                                                  "load_aligned_single_row_node", false};
+constexpr SingleRowLoadCalibration kFlattenedSingleRowLoad{kLoadFlattenedSingleRowWidth, kLoadFlattenedSingleRowCores,
+                                                           "AlignedSingleRow", "load_aligned_single_row_node", true};
+constexpr SingleRowLoadCalibration kSingleRowLowCoreLoad{kLoadSingleRowLowCoreWidth, kLoadSingleRowLowCores,
+                                                         "AlignedSingleRowLowCore",
+                                                         "load_aligned_single_row_low_core_node", true};
+constexpr Range kLoadSingleRowFewCores{1, 3};
+constexpr SingleRowLoadCalibration kSingleRowFewCoreLoad{kLoadSingleRowLowCoreWidth, kLoadSingleRowFewCores,
+                                                         "AlignedSingleRowFewCore",
+                                                         "load_aligned_single_row_few_core_node", true};
+
+af::Status SelectAlignedSingleRowLoad(const NodeDetail &node, const Expr &block_dim, Expr &cycles, PerfOutputInfo &perf,
+                                      const SingleRowLoadCalibration &calibration) {
+  const bool two_dimensional = node.input_dims.size() == kCodegenDmaMaxLen;
+  if (node.input_dtype[0] != "float32" || node.output_dtype[0] != "float32" || !node.vectorized_shape.empty() ||
+      (!two_dimensional && !(calibration.allow_flattened && node.input_dims.size() == 1U)) ||
+      (two_dimensional &&
+       af::SymbolicUtils::StaticCheckEq(node.input_dims.front(), af::sym::kSymbolOne) == af::TriBool::kFalse)) {
     return af::SUCCESS;
   }
 
@@ -374,26 +524,41 @@ af::Status SelectAlignedSingleRowLoad(const NodeDetail &node, const Expr &block_
   // Ternary conditions are solved as scalar expressions. All violations
   // are nonnegative, and their sum is zero exactly in the calibrated range.
   const Expr misalignment = af::sym::Mod(row, CreateExpr(kAlignedRowElements));
-  const Expr violation = OutsideDmaCalibrationRange(node.input_dims.front(), {1, 1}) +
-                         OutsideDmaCalibrationRange(row, kLoadSingleRowWidth) +
-                         OutsideDmaCalibrationRange(block_dim, kLoadSingleRowCores) +
-                         af::sym::Max(misalignment, zero - misalignment);
+  const auto &rows = two_dimensional ? node.input_dims.front() : af::sym::kSymbolOne;
+  Expr violation = OutsideDmaCalibrationRange(rows, {1, 1}) + OutsideDmaCalibrationRange(row, calibration.width) +
+                   OutsideDmaCalibrationRange(block_dim, calibration.cores) + af::sym::Abs(misalignment);
+  if (!two_dimensional) {
+    violation = violation + af::sym::Abs(node.gm_stride) + af::sym::Abs(node.ub_stride);
+  }
   if (af::SymbolicUtils::StaticCheckGt(violation, zero) == af::TriBool::kTrue) {
     return af::SUCCESS;
   }
 
   Expr fitted;
-  GE_ASSERT_SUCCESS(GetPerf(
-      {kMoveGmToUb + "AlignedSingleRow", node.input_dtype[0], node.output_dtype[0], {row}, af::sym::kSymbolZero},
-      fitted));
-  Expr result = CreateExpr("load_aligned_single_row_node");
+  const std::string model = kMoveGmToUb + calibration.model_suffix;
+  GE_ASSERT_SUCCESS(GetPerf({model, node.input_dtype[0], node.output_dtype[0], {row}, zero}, fitted));
+  Expr result = CreateExpr(calibration.variable_name);
   TernaryOp guard(CondType::K_EQ, violation, zero, fitted, cycles);
   guard.SetVariable(result);
   perf.ternary_ops[result] = std::move(guard);
   cycles = result;
   return af::SUCCESS;
 }
-af::Status SelectAlignedDenseLoad(const NodeDetail &node, Expr &cycles, PerfOutputInfo &perf, bool bulk = false) {
+struct DenseLoadCalibration {
+  const char *model;
+  PayloadDomain payload;
+  Range rows{};
+  Range width{};
+};
+
+constexpr DenseLoadCalibration kDenseLoad{"LoadAlignedDensePayload", kLoadAlignedDensePayload};
+constexpr DenseLoadCalibration kDenseBulkLoad{"LoadAlignedDenseBulkPayload", kLoadAlignedDenseBulkPayload,
+                                              kLoadDenseBulkRows, kLoadDenseBulkWidth};
+constexpr DenseLoadCalibration kDenseWideLoad{"LoadAlignedDenseWidePayload", kLoadAlignedDenseWidePayload,
+                                              kLoadDenseWideRows, kLoadDenseWideWidth};
+
+af::Status SelectAlignedDenseLoad(const NodeDetail &node, Expr &cycles, PerfOutputInfo &perf,
+                                  const DenseLoadCalibration &calibration) {
   if (node.input_dtype[0] != "float32" || node.output_dtype[0] != "float32" || !node.vectorized_shape.empty()) {
     return af::SUCCESS;
   }
@@ -407,11 +572,12 @@ af::Status SelectAlignedDenseLoad(const NodeDetail &node, Expr &cycles, PerfOutp
   if (dims.empty() || dims.size() > kCodegenDmaMaxLen) {
     return af::SUCCESS;
   }
-  if (bulk && dims.size() != kCodegenDmaMaxLen) {
+  const bool requires_rows = calibration.rows.lower > 0;
+  if (requires_rows && dims.size() != kCodegenDmaMaxLen) {
     return af::SUCCESS;
   }
-  const auto &domain = bulk ? kLoadAlignedDenseBulkPayload : kLoadAlignedDensePayload;
-  const std::string model = bulk ? "LoadAlignedDenseBulkPayload" : "LoadAlignedDensePayload";
+  const auto &domain = calibration.payload;
+  const std::string model = calibration.model;
   const auto &zero = af::sym::kSymbolZero;
   const Expr cores = CreateExpr("block_dim");
   const Expr bytes =
@@ -428,10 +594,14 @@ af::Status SelectAlignedDenseLoad(const NodeDetail &node, Expr &cycles, PerfOutp
     }
     violation = violation + part;
   }
-  if (bulk) {
-    // Narrow, zero-gap 2D DMA descriptors; hardware LoopMode and single-row loads keep their own models.
-    violation = violation + OutsideDmaCalibrationRange(dims.front(), kLoadDenseBulkRows) +
-                OutsideDmaCalibrationRange(dims.back(), kLoadDenseBulkWidth);
+  if (requires_rows) {
+    // A calibrated 2D call must have the measured row geometry.
+    const auto outside_geometry = OutsideDmaCalibrationRange(dims.front(), calibration.rows) +
+                                  OutsideDmaCalibrationRange(dims.back(), calibration.width);
+    if (af::SymbolicUtils::StaticCheckGt(outside_geometry, zero) == af::TriBool::kTrue) {
+      return af::SUCCESS;
+    }
+    violation = violation + outside_geometry;
   }
   // Use the measured bandwidth of each zero-gap domain. The small-payload model also accepts flattened inputs.
   Expr fitted;
@@ -448,9 +618,14 @@ af::Status SelectAlignedDenseLoad(const NodeDetail &node, Expr &cycles, PerfOutp
 static af::Status SelectCalibratedLoad(const NodeDetail &node, const Expr &block_dim, Expr &multi_core_branch,
                                        PerfOutputInfo &perf) {
   GE_ASSERT_SUCCESS(SelectCalibratedDmaEstimate(node, true, multi_core_branch, perf));
-  GE_ASSERT_SUCCESS(SelectAlignedSingleRowLoad(node, block_dim, multi_core_branch, perf));
-  GE_ASSERT_SUCCESS(SelectAlignedDenseLoad(node, multi_core_branch, perf, true));
-  GE_ASSERT_SUCCESS(SelectAlignedDenseLoad(node, multi_core_branch, perf));
+  GE_ASSERT_SUCCESS(SelectWideFp16CompactLoad(node, block_dim, multi_core_branch, perf));
+  GE_ASSERT_SUCCESS(SelectStridedPayloadLoad(node, block_dim, multi_core_branch, perf));
+  const auto &single_row = node.input_dims.size() == 1U ? kFlattenedSingleRowLoad : kSingleRowLoad;
+  GE_ASSERT_SUCCESS(SelectAlignedSingleRowLoad(node, block_dim, multi_core_branch, perf, single_row));
+  GE_ASSERT_SUCCESS(SelectAlignedSingleRowLoad(node, block_dim, multi_core_branch, perf, kSingleRowLowCoreLoad));
+  GE_ASSERT_SUCCESS(SelectAlignedDenseLoad(node, multi_core_branch, perf, kDenseWideLoad));
+  GE_ASSERT_SUCCESS(SelectAlignedDenseLoad(node, multi_core_branch, perf, kDenseBulkLoad));
+  GE_ASSERT_SUCCESS(SelectAlignedDenseLoad(node, multi_core_branch, perf, kDenseLoad));
   return af::SUCCESS;
 }
 
@@ -505,6 +680,7 @@ af::Status LoadPerf(const NodeDetail &node_info, PerfOutputInfo &perf) {
                                    std::move(single_core_case), std::move(multi_core_case));
   ternary_op.SetVariable(res);
   perf.ternary_ops[res] = ternary_op;
+  GE_ASSERT_SUCCESS(SelectAlignedSingleRowLoad(node_info, block_dim, res, perf, kSingleRowFewCoreLoad));
   perf.pipe_res[PipeType::AIV_MTE2] = res;
   return af::SUCCESS;
 }

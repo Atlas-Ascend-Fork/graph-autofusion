@@ -1,0 +1,16 @@
+factor_id,experiment,role,dtype,dtype_size,block_dim,api,dims,gm_or_input_strides,ub_or_output_strides,point_flush,packing_extra,compact_packed
+exact_new36,fp32_many_short_core_sweep,known,float32,4,36,LOAD,3072x3,144x1,3x1,1,0,1
+exact_new39,fp32_many_short_core_sweep,known,float32,4,39,LOAD,2304x3,144x1,3x1,1,0,1
+train_core1,fp32_many_short_core_sweep,train,float32,4,1,LOAD,2048x3,144x1,3x1,1,0,1
+train_core8,fp32_many_short_core_sweep,train,float32,4,8,LOAD,3200x3,128x1,3x1,1,0,1
+train_core16,fp32_many_short_core_sweep,train,float32,4,16,LOAD,1536x3,144x1,3x1,1,0,1
+train_core24,fp32_many_short_core_sweep,train,float32,4,24,LOAD,3072x3,168x1,3x1,1,0,1
+train_core32,fp32_many_short_core_sweep,train,float32,4,32,LOAD,512x3,144x1,3x1,1,0,1
+train_core40,fp32_many_short_core_sweep,train,float32,4,40,LOAD,3584x3,136x1,3x1,1,0,1
+holdout_core4,fp32_many_short_core_sweep,holdout,float32,4,4,LOAD,2304x3,152x1,3x1,1,0,1
+holdout_core20,fp32_many_short_core_sweep,holdout,float32,4,20,LOAD,1024x3,160x1,3x1,1,0,1
+holdout_core28,fp32_many_short_core_sweep,holdout,float32,4,28,LOAD,4224x3,144x1,3x1,1,0,1
+holdout_core36,fp32_many_short_core_sweep,holdout,float32,4,36,LOAD,2816x3,128x1,3x1,1,0,1
+holdout_core39,fp32_many_short_core_sweep,holdout,float32,4,39,LOAD,2048x3,168x1,3x1,1,0,1
+holdout_rows640,fp32_many_short_core_sweep,holdout,float32,4,48,LOAD,640x3,144x1,3x1,1,0,1
+control_below,fp32_many_short_core_sweep,control,float32,4,44,LOAD,256x3,144x1,3x1,1,0,1

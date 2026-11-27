@@ -237,6 +237,10 @@ struct CacheLineConfig {
   // candidates and is used to decide whether several cores can share one cache line.
   // Empty means the expression is unavailable.
   Expr whole_tensor_bytes;
+  Expr packed_store_rows;
+  Expr packed_store_cols;
+  uint32_t packed_store_row_alignment{1U};
+  uint32_t packed_store_full_width{0U};
   // Whether solver_cache_line_expr is a genuine single-burst criterion that changes with tiling.
   // When the burst is a compile-time constant below one cache line it cannot constrain tiling,
   // solver_cache_line_expr is overwritten with the develop criterion and this flag stays false.
@@ -293,11 +297,13 @@ class TilingScheduleConfigTable {
     return false;
   }
 
-  // When candidates straddle the UB utilization threshold, prefer higher utilization only if
-  // their objective gap divided by the smaller objective is within this limit.
+  // Prefer higher UB utilization only when the relative objective gap is within this limit.
   // A negative limit retains the absolute-only comparison.
-  [[nodiscard]] virtual double GetCrossUbThresholdMaxRelativeCostGap() const {
+  [[nodiscard]] virtual double GetUbPreferenceMaxRelativeCostGap() const {
     return -1.0;
+  }
+  [[nodiscard]] virtual bool EnableBalancedCoreProbe() const {
+    return false;
   }
 };
 

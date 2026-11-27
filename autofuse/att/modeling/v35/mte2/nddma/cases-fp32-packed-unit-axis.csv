@@ -1,0 +1,9 @@
+factor_id,experiment,role,dtype,dtype_size,block_dim,api,dims,gm_or_input_strides,ub_or_output_strides,point_flush,packing_extra
+dense_a_ref,dense_a,known,float32,4,54,NDDMA,24x16x48,768x1x16,768x48x1,1,0
+dense_b_ref,dense_b,known,float32,4,54,NDDMA,16x24x48,1x768x16,1152x48x1,1,0
+train_a_16,dense_a,train,float32,4,48,NDDMA,16x16x48,768x1x16,768x48x1,1,0
+train_a_28,dense_a,train,float32,4,56,NDDMA,28x16x48,768x1x16,768x48x1,1,0
+holdout_a_20,dense_a,holdout,float32,4,52,NDDMA,20x16x48,768x1x16,768x48x1,1,0
+train_b_16,dense_b,train,float32,4,48,NDDMA,16x16x48,1x768x16,768x48x1,1,0
+train_b_28,dense_b,train,float32,4,56,NDDMA,16x28x48,1x768x16,1344x48x1,1,0
+holdout_b_20,dense_b,holdout,float32,4,52,NDDMA,16x20x48,1x768x16,960x48x1,1,0

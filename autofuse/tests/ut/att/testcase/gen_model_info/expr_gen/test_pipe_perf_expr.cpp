@@ -642,6 +642,7 @@ TEST_F(TestPipePerfExpr, TestTailRepeatCase1) {
 
   TensorPtr tensor = std::make_shared<att::Tensor>();
   tensor->dim_info = {z0_size.get(), z1t_size.get()};
+  tensor->repeat = {z0size, z1tsize};
 
   std::map<Expr, TernaryOp, ExprCmp> ternary_ops;
   auto ret = GetTensorTailRepeat(tensor, ternary_ops);
@@ -673,12 +674,31 @@ TEST_F(TestPipePerfExpr, TestTailRepeatCase2) {
 
   TensorPtr tensor = std::make_shared<att::Tensor>();
   tensor->dim_info = {z0_size.get(), z1t_size.get()};
+  tensor->repeat = {z0size, z1tsize};
 
   std::map<Expr, TernaryOp, ExprCmp> ternary_ops;
   auto ret = GetTensorTailRepeat(tensor, ternary_ops);
   EXPECT_TRUE(ret.size() == 2);
   EXPECT_EQ(Str(ret[0]), "z0_size");
   EXPECT_EQ(Str(ret[1]), "1");
+}
+
+TEST_F(TestPipePerfExpr, BroadcastInputKeepsUnitRepeatOnSplitAxis) {
+  SubAxis parent;
+  parent.repeat = CreateExpr(100);
+  SubAxis split;
+  split.repeat = CreateExpr("tile");
+  split.axis_type = AxisPosition::INNER;
+  split.parent_axis = {&parent};
+
+  auto tensor = std::make_shared<Tensor>();
+  tensor->dim_info = {&split};
+  tensor->repeat = {af::sym::kSymbolOne};
+  std::map<Expr, TernaryOp, ExprCmp> ternary_ops;
+  const auto repeats = GetTensorTailRepeat(tensor, ternary_ops);
+  ASSERT_EQ(repeats.size(), 1U);
+  EXPECT_EQ(repeats.front(), af::sym::kSymbolOne);
+  EXPECT_TRUE(ternary_ops.empty());
 }
 
 TEST_F(TestPipePerfExpr, TestUpdatePipeHead) {
