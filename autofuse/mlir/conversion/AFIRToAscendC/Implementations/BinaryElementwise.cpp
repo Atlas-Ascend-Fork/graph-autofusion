@@ -202,6 +202,7 @@ struct BinaryElementwiseMapping {
   ascend::ExecutionSpec executionSpec{ascend::ProcessorType::AICore, ascend::AICoreUnit::Vector,
                                       ascend::ExecutionModel::SIMD, ascend::InstructionForm::MemoryBased};
   bool singletonBroadcast = false;
+  bool broadcastInline = false;
 };
 
 // 两个输入 + 一个目的地的类型，按生成顺序取出来而不是按 AFIR 操作数顺序：`lhs`
@@ -307,7 +308,7 @@ std::optional<BinaryOperandOrder> binaryOperandOrder(Operation *op, ScalarOperan
 // `recordedScalarReadEvents` 的属性，与 `materializeScalarOperand` 真正下降时的来源一致——
 // 否则门禁会在属性缺席、就地分析又非空时通过，而下降因属性读到空集合必然失败。
 elementwise::LocalViewCompatibility checkBinaryLocalViews(Operation *op, ScalarOperand form, bool allowInPlaceAnalysis,
-                                                          bool *wholeTensor = nullptr) {
+                                                          bool *wholeTensor = nullptr, bool broadcastInline = false) {
   auto scalar = scalarTensorInput(op, form);
   if (form != ScalarOperand::None) {
     if (auto singleton = singletonTrueDivInput(op)) {
@@ -327,7 +328,7 @@ elementwise::LocalViewCompatibility checkBinaryLocalViews(Operation *op, ScalarO
     scalars.push_back(*scalar);
   }
   elementwise::ElementwiseLocalView view;
-  auto result = elementwise::prepareElementwiseLocalView(op, scalars, false, view);
+  auto result = elementwise::prepareElementwiseLocalView(op, scalars, broadcastInline, view, false, broadcastInline);
   if (result == elementwise::LocalViewCompatibility::Compatible && wholeTensor) {
     *wholeTensor = !view.vectorPlan;
   }
@@ -389,19 +390,6 @@ class BinaryElementwiseCapabilityProvider final : public ascend::instruction::Ca
     if (!operation || !mapping_ || !elementwise::hasCanonicalDescriptors(operation)) {
       return CapabilitySupport::unsupported(CapabilityReason::MissingInformation);
     }
-    if (singletonTrueDivInput(operation).has_value() != mapping_->singletonBroadcast) {
-      return CapabilitySupport::unsupported(CapabilityReason::UnsupportedShape);
-    }
-    bool wholeTensor = true;
-    const elementwise::LocalViewCompatibility compatibility =
-        checkBinaryLocalViews(operation, mapping_->scalarOperand, /*allowInPlaceAnalysis=*/true, &wholeTensor);
-    if (compatibility == elementwise::LocalViewCompatibility::UnsupportedShape) {
-      return CapabilitySupport::unsupported(CapabilityReason::UnsupportedShape);
-    }
-    if (compatibility == elementwise::LocalViewCompatibility::MissingInformation) {
-      return CapabilitySupport::unsupported(CapabilityReason::MissingInformation);
-    }
-
     ascend::FeatureState executionSupport = context.target.getExecutionSupport(mapping_->executionSpec);
     if (executionSupport == ascend::FeatureState::Unavailable) {
       return CapabilitySupport::unsupported(CapabilityReason::TargetFeatureUnavailable);
@@ -409,6 +397,19 @@ class BinaryElementwiseCapabilityProvider final : public ascend::instruction::Ca
     if (executionSupport == ascend::FeatureState::Unknown) {
       return CapabilitySupport::undetermined(CapabilityReason::TargetFeatureNotModeled);
     }
+    if (singletonTrueDivInput(operation).has_value() != mapping_->singletonBroadcast) {
+      return CapabilitySupport::unsupported(CapabilityReason::UnsupportedShape);
+    }
+    bool wholeTensor = true;
+    const elementwise::LocalViewCompatibility compatibility = checkBinaryLocalViews(
+        operation, mapping_->scalarOperand, /*allowInPlaceAnalysis=*/true, &wholeTensor, mapping_->broadcastInline);
+    if (compatibility == elementwise::LocalViewCompatibility::UnsupportedShape) {
+      return CapabilitySupport::unsupported(CapabilityReason::UnsupportedShape);
+    }
+    if (compatibility == elementwise::LocalViewCompatibility::MissingInformation) {
+      return CapabilitySupport::unsupported(CapabilityReason::MissingInformation);
+    }
+
     if (std::optional<CapabilitySupport> family = elementwise::checkApiFamily(mapping_->family, context)) {
       return *family;
     }
@@ -481,8 +482,11 @@ class BinaryElementwiseCapabilityProvider final : public ascend::instruction::Ca
     return CapabilitySupport::unsupported(CapabilityReason::UnsupportedType);
   }
 
-  CapabilitySupport queryBroadcastInline(Operation *, const ascend::instruction::BroadcastInlineQuery &,
-                                         const ascend::instruction::QueryContext &) const override {
+  CapabilitySupport queryBroadcastInline(Operation *operation, const ascend::instruction::BroadcastInlineQuery &,
+                                         const ascend::instruction::QueryContext &context) const override {
+    if (mapping_->broadcastInline) {
+      return queryLowering(operation, context);
+    }
     // This lowering requires all tensor operands and the result to have the same shape.  AFIR's
     // broadcast semantics do not imply that this particular AscendC implementation supports inline broadcast.
     return CapabilitySupport::unsupported(CapabilityReason::UnsupportedShape);
@@ -501,9 +505,9 @@ struct BinaryOperandTiles {
 };
 
 template <typename SourceOp>
-LogicalResult checkConversionLocalViews(SourceOp op, ScalarOperand form) {
+LogicalResult checkConversionLocalViews(SourceOp op, ScalarOperand form, bool broadcastInline = false) {
   const elementwise::LocalViewCompatibility compatibility =
-      checkBinaryLocalViews(op, form, /*allowInPlaceAnalysis=*/false);
+      checkBinaryLocalViews(op, form, /*allowInPlaceAnalysis=*/false, nullptr, broadcastInline);
   if (compatibility != elementwise::LocalViewCompatibility::Compatible) {
     return failure();
   }
@@ -552,7 +556,7 @@ FailureOr<Value> applyBinaryVectorizedWindow(BinaryOperandTiles &tiles, const af
 template <typename SourceOp, typename OpAdaptor>
 FailureOr<BinaryOperandTiles> materializeOperandTiles(SourceOp op, OpAdaptor adaptor, BinaryOperandOrder order,
                                                       ConversionPatternRewriter &rewriter, ScalarOperand form,
-                                                      bool compactTail) {
+                                                      bool compactTail, bool broadcastInline = false) {
   Value operands[kBinaryInputCount] = {adaptor.getLhs(), adaptor.getRhs()};
   FailureOr<std::optional<unsigned>> scalarIndex = materializeScalarOperand(op, operands, rewriter, form);
   if (failed(scalarIndex)) {
@@ -567,7 +571,7 @@ FailureOr<BinaryOperandTiles> materializeOperandTiles(SourceOp op, OpAdaptor ada
     scalarIndices.push_back(**scalarIndex);
   }
   elementwise::ElementwiseLocalView view;
-  if (elementwise::prepareElementwiseLocalView(op, scalarIndices, compactTail, view) !=
+  if (elementwise::prepareElementwiseLocalView(op, scalarIndices, compactTail, view, false, broadcastInline) !=
       elementwise::LocalViewCompatibility::Compatible) {
     return failure();
   }
@@ -621,12 +625,12 @@ class BinaryElementwiseConversionPattern final : public OpConversionPattern<Sour
     if (!order) {
       return rewriter.notifyMatchFailure(op, "the selected implementation expects a different operand form");
     }
-    if (failed(checkConversionLocalViews(op, mapping_->scalarOperand))) {
+    if (failed(checkConversionLocalViews(op, mapping_->scalarOperand, mapping_->broadcastInline))) {
       return rewriter.notifyMatchFailure(op, "incompatible elementwise local views");
     }
 
-    FailureOr<BinaryOperandTiles> tiles =
-        materializeOperandTiles(op, adaptor, *order, rewriter, mapping_->scalarOperand, compactTail_);
+    FailureOr<BinaryOperandTiles> tiles = materializeOperandTiles(
+        op, adaptor, *order, rewriter, mapping_->scalarOperand, compactTail_, mapping_->broadcastInline);
     if (failed(tiles)) {
       return rewriter.notifyMatchFailure(op, "cannot build a supported AFIR elementwise plan");
     }
@@ -1002,14 +1006,16 @@ template <typename SourceOp, typename TargetOp, ScalarOperand Scalar = ScalarOpe
           TmpBufferUse Tmp = TmpBufferUse::None>
 LogicalResult registerBinary(ImplementationRegistry &registry, llvm::StringRef id, ApiFamily family,
                              uint32_t elementTypes = kArithmeticElementTypes,
-                             ResultElementRule resultElementType = ResultElementRule::Same) {
+                             ResultElementRule resultElementType = ResultElementRule::Same,
+                             bool broadcastInline = false) {
   if (failed(elementwise::checkFamilyMatchesHeader<TargetOp>(family))) {
     return failure();
   }
   elementwise::recordRegisteredFamily(SourceOp::getOperationName(), id, family, elementTypes);
+  BinaryElementwiseMapping mapping{family, Scalar, resultElementType, elementTypes, schedulerGivesTmpBuffer(Tmp)};
+  mapping.broadcastInline = broadcastInline;
   return registry.registerImplementation<SourceOp, BinaryElementwiseMapping, BinaryElementwiseCapabilityProvider>(
-      ascend::instruction::ImplementationKind::AscendC, ascend::instruction::ImplementationId{id.str()},
-      BinaryElementwiseMapping{family, Scalar, resultElementType, elementTypes, schedulerGivesTmpBuffer(Tmp)},
+      ascend::instruction::ImplementationKind::AscendC, ascend::instruction::ImplementationId{id.str()}, mapping,
       createPatternRegistration<SourceOp, TargetOp, Scalar, Tmp>());
 }
 
@@ -1780,10 +1786,38 @@ LogicalResult registerGreaterEqualCompareImplementations(ImplementationRegistry 
   return success();
 }
 
+// Legacy BrcInlineTemplateV2 restricts broadcast inputs to RemovePad's types.
+// Reuse continuous RegBased APIs inside the common vector loop plan: outer
+// broadcast axes carry zero input strides, including alternating/bilateral axes.
+// Do not use the MemBased mask/repeat wrapper on register-based targets.
+LogicalResult registerRegBasedBroadcastInlineImplementations(ImplementationRegistry &registry) {
+  constexpr uint32_t types = kArithmeticElementTypes | kUI16 | kUI32 | kBF16;
+  if (failed(registerBinary<AddOp, ascendc::AddL2Op>(registry, "add.broadcast_inline.reg_base", ApiFamily::RegBased,
+                                                     types, ResultElementRule::Same, true)) ||
+      failed(registerBinary<MulOp, ascendc::MulL2Op>(registry, "mul.broadcast_inline.reg_base", ApiFamily::RegBased,
+                                                     types & ~kUI16, ResultElementRule::Same, true)) ||
+      failed(registerBinary<MinimumOp, ascendc::MinL2Op>(registry, "minimum.broadcast_inline.reg_base",
+                                                         ApiFamily::RegBased, types, ResultElementRule::Same, true)) ||
+      failed(registerBinary<MaximumOp, ascendc::MaxL2Op>(registry, "maximum.broadcast_inline.reg_base",
+                                                         ApiFamily::RegBased, types, ResultElementRule::Same, true)) ||
+      failed(registerBinary<SubOp, ascendc::SubExtendRegBaseOp>(
+          registry, "sub.broadcast_inline.reg_base", ApiFamily::RegBased, types, ResultElementRule::Same, true)) ||
+      failed(registerBinary<DivOp, ascendc::DivExtendRegBaseOp>(registry, "div.broadcast_inline.reg_base",
+                                                                ApiFamily::RegBased, kF16 | kF32,
+                                                                ResultElementRule::Same, true)) ||
+      failed(registerBinary<TrueDivOp, ascendc::DivExtendRegBaseOp>(registry, "truediv.broadcast_inline.reg_base",
+                                                                    ApiFamily::RegBased, kF16 | kF32 | kBF16,
+                                                                    ResultElementRule::Same, true))) {
+    return failure();
+  }
+  return success();
+}
+
 LogicalResult registerBinaryElementwiseImplementations(ImplementationRegistry &registry,
                                                        ascend::instruction::SelectionPolicyRegistry *) {
-  // 注册体按算子族拆成上面这组 helper；调用顺序与拆分前的单一函数完全一致。
-  if (failed(registerArithmeticBinaryImplementations(registry)) ||
+  // 广播与同形 tensor 注册通过 local-view 门禁互斥；其余注册保持原有优先级。
+  if (failed(registerRegBasedBroadcastInlineImplementations(registry)) ||
+      failed(registerArithmeticBinaryImplementations(registry)) ||
       failed(registerBitwiseAndDivisionImplementations(registry)) || failed(registerSubDivImplementations(registry)) ||
       failed(registerLogicalBinaryImplementations(registry)) ||
       failed(registerRegOnlyBinaryImplementations(registry)) ||

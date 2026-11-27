@@ -14,6 +14,8 @@
 // 因此直接下降 Autofuse 算子集，上游代码仅作结构参考。
 
 #include "conversion/AFIRToAscendC/AFIRToAscendCPasses.h"
+#include "conversion/AFIRToAscendC/Implementations/ElementwiseLocalView.h"
+#include "conversion/AFIRToAscendC/VectorizedLoops.h"
 
 #include <memory>
 #include <optional>
@@ -32,6 +34,7 @@
 #include "mlir/Dialect/Index/IR/IndexOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/Pass/Pass.h"
 
@@ -159,6 +162,12 @@ llvm::ArrayRef<RegOpMapping> regOpMappings() {
   static const RegOpMapping mappings[] = {
       {afir::AddOp::getOperationName(), RegOpArity::kBinary, RegOpElementTypes::kUniform, RegOpResult::kValue,
        kNoPredicateOperand, kRegOpAllElementTypes, buildBinaryRegOp<ascendc::AddRegOp>},
+      {afir::SubOp::getOperationName(), RegOpArity::kBinary, RegOpElementTypes::kUniform, RegOpResult::kValue,
+       kNoPredicateOperand, kRegOpAllElementTypes, buildBinaryRegOp<ascendc::SubRegOp>},
+      {afir::MinimumOp::getOperationName(), RegOpArity::kBinary, RegOpElementTypes::kUniform, RegOpResult::kValue,
+       kNoPredicateOperand, kRegOpAllElementTypes, buildBinaryRegOp<ascendc::MinRegOp>},
+      {afir::MaximumOp::getOperationName(), RegOpArity::kBinary, RegOpElementTypes::kUniform, RegOpResult::kValue,
+       kNoPredicateOperand, kRegOpAllElementTypes, buildBinaryRegOp<ascendc::MaxRegOp>},
       {afir::DivOp::getOperationName(), RegOpArity::kBinary, RegOpElementTypes::kUniform, RegOpResult::kValue,
        kNoPredicateOperand, kRegOpFloatElementTypes, buildBinaryRegOp<ascendc::DivRegOp>},
       // reg 侧 truediv 与 div 均使用 DivExtend，与 legacy reg_api_name 一致。
@@ -558,6 +567,40 @@ LogicalResult lowerVectorFunc(afir::VectorFuncOp op) {
   const Location loc = op.getLoc();
   MLIRContext *ctx = builder.getContext();
   Value destination = op.getDsts().front();
+  SmallVector<Value> sources(op.getSrcs());
+  Value windowCount;
+  // Scheduled VF boundaries carry the same local views as standalone operations.
+  // Segment before loading registers so a broadcast source keeps its zero stride
+  // and padded rows do not become a single flat register loop.
+  if (succeeded(elementwise::getDestinationDescriptor(op))) {
+    elementwise::ElementwiseLocalView view;
+    auto compatible = elementwise::prepareElementwiseLocalView(op, {}, true, view);
+    if (compatible != elementwise::LocalViewCompatibility::Compatible) {
+      compatible = elementwise::prepareElementwiseLocalView(op, {}, true, view, false, true);
+    }
+    if (compatible != elementwise::LocalViewCompatibility::Compatible) {
+      return afir::emitCapabilityShortfall(loc) << "UnsupportedOperation: incompatible vector function local views";
+    }
+    if (view.vectorPlan) {
+      auto ordered = orderTilesForPlan(*view.vectorPlan, sources, destination);
+      if (failed(ordered)) {
+        return failure();
+      }
+      auto window = materializeVectorizedSegments(op, builder, *view.vectorPlan, view.extentSource, *ordered,
+                                                  view.apiWindowSize, view.physicalSpan);
+      if (failed(window) || window->extents.size() != 1) {
+        return failure();
+      }
+      windowCount = window->extents.front();
+      for (auto [tensor, tile] : llvm::zip(view.vectorPlan->tensors, window->tiles)) {
+        if (tensor.side == afir::VectorTensor::Side::Destination) {
+          destination = tile;
+        } else {
+          sources[tensor.index] = tile;
+        }
+      }
+    }
+  }
   const Type destinationType = cast<ShapedType>(destination.getType()).getElementType();
   // lane 的宽度由 VF 里最宽的元素类型定，不由 destination 定——跨 dtype 的 VF 里
   // destination 可能是窄的那一侧（`cast_abs` 那一类：half 进、half 出，中间走 float）。
@@ -569,7 +612,7 @@ LogicalResult lowerVectorFunc(afir::VectorFuncOp op) {
   // 那块的元素类型，撑不撑进宽槽位是 `dist` 的事。
   SmallVector<Value> sourceAddresses;
   sourceAddresses.reserve(op.getSrcs().size());
-  for (Value src : op.getSrcs()) {
+  for (Value src : sources) {
     FailureOr<Value> address = makeUbufAddress(builder, loc, src, cast<ShapedType>(src.getType()).getElementType());
     if (failed(address)) {
       return failure();
@@ -582,7 +625,9 @@ LogicalResult lowerVectorFunc(afir::VectorFuncOp op) {
   }
 
   const Type indexType = builder.getIndexType();
-  Value elementCount = builder.create<ascendc::LocalTensorGetSizeOp>(loc, indexType, destination).getResult();
+  Value elementCount = windowCount
+                           ? windowCount
+                           : builder.create<ascendc::LocalTensorGetSizeOp>(loc, indexType, destination).getResult();
   Value vectorLength = builder.create<ascendc::GetVecLenOp>(loc, indexType).getResult();
   Value elementBytes = builder.create<arith::ConstantIndexOp>(loc, ascendc::getTypeSize(widest)).getResult();
   // 一段 lane 装多少个元素 = GetVecLen() / sizeof(最宽的那个)。与 legacy 的
@@ -657,7 +702,7 @@ LogicalResult lowerVectorFunc(afir::VectorFuncOp op) {
           .getResult();
   Value offset = builder.create<arith::MulIOp>(loc, loop.getInductionVar(), elementsPerVector).getResult();
 
-  for (auto [src, address, reg] : llvm::zip(op.getSrcs(), sourceAddresses, sourceRegs)) {
+  for (auto [src, address, reg] : llvm::zip(sources, sourceAddresses, sourceRegs)) {
     Value sourcePointer =
         builder.create<emitasc::PtrOffsetOp>(loc, address.getType(), address, IntegerAttr{}, offset).getResult();
     // `dist` 由（边界 dtype, lane 宽度）定；等宽时不带（缺席即 `DIST_NORM`，与 M1 的产物
@@ -716,7 +761,7 @@ LogicalResult lowerVectorFunc(afir::VectorFuncOp op) {
   builder.create<emitasc::YieldOp>(loc);
 
   // 结果就是那块 destination：下游按结果值串依赖，而数据已经由上面的 store 写进去了。
-  op.getResult(0).replaceAllUsesWith(destination);
+  op.getResult(0).replaceAllUsesWith(op.getDsts().front());
   op.erase();
   return success();
 }
@@ -736,7 +781,7 @@ struct AFIRVectorFuncToRegBasePass : public PassWrapper<AFIRVectorFuncToRegBaseP
 
   void getDependentDialects(DialectRegistry &registry) const final {
     registry.insert<afir::AFIRDialect, arith::ArithDialect, ascendc::AscendCDialect, emitasc::EmitAscDialect,
-                    func::FuncDialect, index::IndexDialect, memref::MemRefDialect>();
+                    func::FuncDialect, index::IndexDialect, memref::MemRefDialect, scf::SCFDialect>();
   }
 
   void runOnOperation() final {

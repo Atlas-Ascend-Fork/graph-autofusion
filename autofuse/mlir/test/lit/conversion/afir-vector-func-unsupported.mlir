@@ -23,25 +23,15 @@
 #in = #afir.tensor_desc<axis = [0], role = <input>>
 #out = #afir.tensor_desc<axis = [0], role = <compute>>
 
-// 一、region 里的算子没有寄存器形态。挑 `afir.sub`：`Reg::Sub` 本身是有的
-// （`Basic/OpReg.td:33`），所以这一格钉的是「表外就是能力不足」，不是「这个 API 不存在」。
-//
-// 这一格换过两次：原先是 `afir.neg`，M2 之后那一行按「加一行要带一格用例」补上了
-// （`load_abs_neg_reg_base_store`）；接着换成 `afir.mul`，M4 又把它补上了
-// （`load_mul_abs_reg_base_store`）。所以这一格每次都换成下一个还没进表的。
-//
-// 与前两次不同的是：`afir.sub` 不是实测命中的。HEAD 的 reg 侧接管表（200 格）里，
-// 首因落在这一层的只有 `afir.eq`（M3 收了）与 `afir.mul`（M4 收了），没有第三个。所以
-// 这一格今天是手写判据，与第三格（cast trait 表外）同一性质——它是判据，不是已命中
-// 的桶。
-// CHECK: UnsupportedOperation: 'afir.sub' has no register-form lowering
+// 一、region 中的 Pow 尚无寄存器映射，应报告能力不足。
+// CHECK: UnsupportedOperation: 'afir.pow' has no register-form lowering
 func.func @no_register_form(%a: !ascendc.local_tensor<?xf32>, %b: !ascendc.local_tensor<?xf32>,
                             %y: !ascendc.local_tensor<?xf32>) {
   %0 = afir.vector_func srcs(%a, %b) dsts(%y) attributes {
     afir.operand_descs = [#in, #in], afir.destination_descs = [#out], afir.result_descs = [#out]
   } {
   ^bb0(%la: tensor<?xf32>, %lb: tensor<?xf32>):
-    %res = afir.sub %la, %lb {afir.operand_descs = [#in, #in], afir.result_descs = [#out]}
+    %res = afir.pow %la, %lb {afir.operand_descs = [#in, #in], afir.result_descs = [#out]}
         : (tensor<?xf32>, tensor<?xf32>) -> tensor<?xf32>
     afir.vector_func_yield %res : tensor<?xf32>
   } : (!ascendc.local_tensor<?xf32>, !ascendc.local_tensor<?xf32>, !ascendc.local_tensor<?xf32>)
