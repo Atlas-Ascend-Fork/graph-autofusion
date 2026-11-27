@@ -540,6 +540,16 @@ af::Status SetLoweringMetadata(const af::AscNodePtr &node, const IndirectLoadLow
 af::Status GetLoweringMetadata(const af::AscNodePtr &node, IndirectLoadLoweringMetadata &metadata);
 bool HasLoweringMetadata(const af::AscNodePtr &node);
 af::Status FinalizeLoweringMetadata(const af::AscNodePtr &node, bool &is_supported);
+// [共享 side-input 外部 store] 调度侧 SIMT 区域折叠：输出链侧节点被 IL 前向闭包外直连
+// Store 消费（融合 kernel 的另一路输出）且该 Store 消费者全部为 Output（kernel 输出汇聚
+// 点）时，连同其生产链纳入区域。相交基 = terminal_stores 各生产链的求值器节点并集，随
+// 折叠链扩张（真不动点）；纳入判定与 lowering 侧收链（CollectSimtSharedValueStoreBuilds）
+// 共用公共谓词，两侧互为充要。生产链与基不相交的独立输出保持普通调度发射。
+// region 为 in/out：既跳过已入区域的 Store（含 IL 输出各终态 Store），也把折叠的
+// Store 与其生产链并入。
+void FoldSimtSharedValueStores(const af::AscNodePtr &indirect_load, const af::AscNodePtr &index_root,
+                               const std::vector<af::AscNodePtr> &terminal_stores,
+                               std::unordered_set<const af::AscNode *> &region);
 af::Status AnalyzeIndirectLoadAccess(const af::AscNodePtr &node, const TemplateLogicalView &logical_view,
                                      IndirectLoadAccessInfo &info);
 af::Status SetImplementation(const af::AscNodePtr &node, Implementation implementation);

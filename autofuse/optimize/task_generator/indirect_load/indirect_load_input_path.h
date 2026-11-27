@@ -32,10 +32,12 @@ void CollectSimtOutputConsumerClosure(const af::AscNodePtr &indirect_load, NodeS
 // 静默丢弃会导致目标 buffer 永不写入，必须整候选淘汰。合法消费者集 = IndirectLoad
 // 自身 ∪ 融合区域（index 链与输出链的 backward 闭包——含经多输入算子合流进输出链
 // 的 side-input，如 embedding+reduce 图中消费 index load 的 Ge/Select）∪ IL 输出的
-// 前向闭包（post-Reduce 普通调度链）；守卫只扫 index 链子集，不扫全融合区域。
+// 前向闭包（post-Reduce 普通调度链）∪ 区域内 Store 的 Output 汇聚点。守卫默认扫
+// index 链子集；scan_set 非空时按给定集合审计（单 gather 无 post-Reduce 形态传入
+// 全区域——多分支 fan-out 下输出链节点的消费者同样需要供值审计）。
 bool FoldSimtIndexChainExternalStores(const af::AscNodePtr &indirect_load, const af::AscNodePtr &index_root,
                                       NodeSet &region, const NodeSet &group_exempt,
-                                      const NodeSet *pre_index_chain = nullptr);
+                                      const NodeSet *pre_index_chain = nullptr, const NodeSet *scan_set = nullptr);
 
 void CollectSimtFusedRegionMembers(const af::AscNodePtr &indirect_load, const RewrittenGraphAnalysis &analysis,
                                    NodeSet &region);

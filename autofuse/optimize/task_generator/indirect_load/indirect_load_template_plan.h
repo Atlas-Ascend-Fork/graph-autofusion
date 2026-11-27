@@ -58,9 +58,15 @@ af::Status CollectSimtNormalScheduleNodes(const af::AscNodePtr &indirect_load, c
 af::Status AnnotateSimtMainOutputPath(const af::AscNodePtr &indirect_load, const af::AscNodePtr &selected_root,
                                       const NodeSet &selected, const NodeSet &normal_schedule_nodes);
 
+// [fanout side-input 闭包] fanout 分支节点生产链的角色标注；upgrade_inline_transform
+// （无 post-Reduce 形态传 true）允许把区域标注的 kSimtInlineTransform 升级为 fanout
+// 分支角色——多分支区域扩容会把分支侧 side-input 生产者先标为 InlineTransform，不升级
+// 则 UB 生命周期被无谓保留且与分支其余节点角色割裂；post-Reduce 形态禁止升级（0159
+// 语义：区域内成员角色是 DirectPostReduceKeepsParallelSimtOutputRoles 的断言对象）。
+// 缺省 false：组员 mixed 路径（已下线）保持既有行为。
 af::Status AnnotateSimtSideInputClosure(const af::AscNodePtr &branch_node, const af::AscNodePtr &indirect_load,
-                                        const NodeSet &selected, const NodeSet &normal_schedule_nodes,
-                                        NodeSet &visited);
+                                        const NodeSet &selected, const NodeSet &normal_schedule_nodes, NodeSet &visited,
+                                        bool upgrade_inline_transform = false);
 
 af::Status AnnotateSimtFanoutBranches(const af::AscNodePtr &indirect_load, const RewrittenGraphAnalysis &analysis,
                                       NodeSet &normal_schedule_nodes);

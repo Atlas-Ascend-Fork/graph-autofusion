@@ -239,9 +239,18 @@ af::Status AnnotateSimtMainOutputPath(const af::AscNodePtr &indirect_load, const
   return af::SUCCESS;
 }
 
+// [fanout side-input 闭包] fanout 分支节点的生产链标注：Load 收为 GM 边界，其余标注
+// fanout 分支角色（skips_ub_lifecycle——分支 tensor 由求值器折叠、永不物化，跳过 UB
+// 生命周期）。upgrade_inline_transform（无 post-Reduce 形态）允许把 kSimtInlineTransform
+// 升级为分支角色：多分支 fan-out 的区域扩容（CollectSimtFusedRegionMembers 以全部
+// Store 终态为锚点）会把分支侧 side-input 生产者先纳入区域标注为 InlineTransform，
+// 若不升级则其 UB 生命周期被无谓保留，且与 fanout 分支其余节点的角色割裂。
+// post-Reduce 形态禁止升级：区域成员可能同时落在 normal schedule 依赖闭包内
+// （如直连 IL 输出又汇入 post Reduce 输入的 Broadcast），其 InlineTransform 角色是
+// 0159 语义（DirectPostReduceKeepsParallelSimtOutputRoles）的断言对象，保持不动。
 af::Status AnnotateSimtSideInputClosure(const af::AscNodePtr &branch_node, const af::AscNodePtr &indirect_load,
-                                        const NodeSet &selected, const NodeSet &normal_schedule_nodes,
-                                        NodeSet &visited) {
+                                        const NodeSet &selected, const NodeSet &normal_schedule_nodes, NodeSet &visited,
+                                        bool upgrade_inline_transform) {
   NodePath pending;
   for (const auto &producer_node : branch_node->GetInDataNodes()) {
     const auto producer = std::dynamic_pointer_cast<af::AscNode>(producer_node);
@@ -263,8 +272,11 @@ af::Status AnnotateSimtSideInputClosure(const af::AscNodePtr &branch_node, const
     const auto side_role = af::ops::IsOps<af::ascir_op::Load>(producer)
                                ? ascgen_utils::indirect_load::TemplateRole::kSimtDirectGmBoundary
                                : ascgen_utils::indirect_load::TemplateRole::kSimtFanoutBranch;
-    if (role == ascgen_utils::indirect_load::TemplateRole::kNone ||
-        role == ascgen_utils::indirect_load::TemplateRole::kSimtFanoutBranch) {
+    const bool upgradable =
+        role == ascgen_utils::indirect_load::TemplateRole::kNone ||
+        role == ascgen_utils::indirect_load::TemplateRole::kSimtFanoutBranch ||
+        (upgrade_inline_transform && role == ascgen_utils::indirect_load::TemplateRole::kSimtInlineTransform);
+    if (upgradable) {
       GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::SetTemplateRole(producer, side_role));
     }
     for (const auto &upstream_node : producer->GetInDataNodes()) {
@@ -329,8 +341,8 @@ af::Status AnnotateSimtFanoutBranches(const af::AscNodePtr &indirect_load, const
              static_cast<int64_t>(ascgen_utils::indirect_load::TemplateRole::kSimtFanoutBranch));
       GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::SetTemplateRole(
           node, ascgen_utils::indirect_load::TemplateRole::kSimtFanoutBranch));
-      GE_ASSERT_SUCCESS(
-          AnnotateSimtSideInputClosure(node, indirect_load, selected, normal_schedule_nodes, side_visited));
+      GE_ASSERT_SUCCESS(AnnotateSimtSideInputClosure(node, indirect_load, selected, normal_schedule_nodes, side_visited,
+                                                     analysis.post_reduce == nullptr));
     }
     if (ScheduleUtils::IsStore(node) || ScheduleUtils::IsReduce(node)) {
       stop = true;

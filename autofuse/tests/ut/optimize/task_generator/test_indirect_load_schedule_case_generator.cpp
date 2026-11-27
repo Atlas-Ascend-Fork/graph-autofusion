@@ -761,6 +761,56 @@ bool AddSimtFanoutTopology(af::AscGraph &graph) {
              ge::GRAPH_SUCCESS;
 }
 
+// [共享 side-input 外部 store] 给 fanout 分支的 side-input 生产者（coverage_side_pre）
+// 增加第二个消费者：独立物化 Store → Output（BST 位置编码 broadcast 侧输入被独立物化
+// 的多输出形态）。该 Store 不在 IL 前向闭包内，由 FoldSimtSharedValueStores 折叠进区域、
+// lowering 侧 CollectSimtSharedValueStoreBuilds 收为额外输出链。
+bool AddSimtSharedSideInputStoreTopology(af::AscGraph &graph) {
+  const auto side_pre = graph.FindNode("coverage_side_pre");
+  if (side_pre == nullptr || side_pre->outputs().empty()) {
+    return false;
+  }
+  const auto &view_attr = side_pre->outputs()[0]->attr;
+  af::ascir_op::Store shared_store("coverage_shared_store");
+  shared_store.attr.api.compute_type = af::ComputeType::kComputeStore;
+  SetNodeView(shared_store, af::DT_FLOAT16, view_attr.axis, view_attr.repeats, view_attr.strides);
+  graph.AddNode(shared_store);
+  af::ascir_op::Output shared_output("coverage_shared_output");
+  shared_output.ir_attr.SetIndex(2);
+  SetNodeView(shared_output, af::DT_FLOAT16, view_attr.axis, view_attr.repeats, view_attr.strides);
+  graph.AddNode(shared_output);
+  const auto shared_store_node = graph.FindNode("coverage_shared_store");
+  const auto shared_output_node = graph.FindNode("coverage_shared_output");
+  return shared_store_node != nullptr && shared_output_node != nullptr &&
+         af::GraphUtils::AddEdge(side_pre->GetOutDataAnchor(0), shared_store_node->GetInDataAnchor(0)) ==
+             ge::GRAPH_SUCCESS &&
+         af::GraphUtils::AddEdge(shared_store_node->GetOutDataAnchor(0), shared_output_node->GetInDataAnchor(0)) ==
+             ge::GRAPH_SUCCESS;
+}
+
+// [边界化降级形态] 在首个 Store 的主链（IL→main_transform→store）上插入无 V2 标量
+// 实现的算子（Fmod），触发 FindUnemittableSimtEvaluatorNode 降级判定。
+bool AddSimtUnemittableMainChain(af::AscGraph &graph) {
+  const auto main_transform = graph.FindNode("coverage_main_transform");
+  const auto store = graph.FindNode("store");
+  const auto side_load = graph.FindNode("coverage_side_load");
+  if (main_transform == nullptr || store == nullptr || side_load == nullptr || main_transform->outputs().empty()) {
+    return false;
+  }
+  const auto &view_attr = main_transform->outputs()[0]->attr;
+  af::ascir_op::Fmod fmod("coverage_main_fmod");
+  SetNodeView(fmod, af::DT_FLOAT16, view_attr.axis, view_attr.repeats, view_attr.strides);
+  SetVectorApi(fmod);
+  graph.AddNode(fmod);
+  const auto fmod_node = graph.FindNode("coverage_main_fmod");
+  return fmod_node != nullptr &&
+         af::GraphUtils::AddEdge(main_transform->GetOutDataAnchor(0), fmod_node->GetInDataAnchor(0)) ==
+             ge::GRAPH_SUCCESS &&
+         af::GraphUtils::AddEdge(side_load->GetOutDataAnchor(0), fmod_node->GetInDataAnchor(1)) == ge::GRAPH_SUCCESS &&
+         af::GraphUtils::ReplaceEdgeSrc(main_transform->GetOutDataAnchor(0), store->GetInDataAnchor(0),
+                                        fmod_node->GetOutDataAnchor(0)) == ge::GRAPH_SUCCESS;
+}
+
 void SetStridedInputPath(af::AscGraph &graph) {
   const std::vector<af::Expression> strides = {af::Symbol(64), af::Symbol(2)};
   for (const char *name : {"data0", "load0", "data1", "load1", "x_copy_sign"}) {
@@ -2310,7 +2360,6 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, SimtFanoutAnnotatesMainPathAndSideIn
   ge::PlatformContext::GetInstance().SetPlatform("3510");
   auto graph = BuildIndirectLoadGraph(2);
   ASSERT_TRUE(AddSimtFanoutTopology(graph));
-
   optimize::IndirectLoadScheduleCaseGenerator generator;
   std::vector<af::AscGraph> graphs;
   std::vector<std::string> score_functions;
@@ -2333,6 +2382,101 @@ TEST(IndirectLoadScheduleCaseGeneratorTest, SimtFanoutAnnotatesMainPathAndSideIn
             ascgen_utils::indirect_load::TemplateRole::kSimtFanoutBranch);
   EXPECT_EQ(ascgen_utils::indirect_load::GetTemplateRole(side_branch),
             ascgen_utils::indirect_load::TemplateRole::kSimtFanoutBranch);
+}
+
+// [多分支 fan-out + 共享 side-input 外部 store] BST 多输出形态回归：fanout 分支的
+// side-input 生产者被额外物化 Store 消费（kernel 另一路输出）时——
+// - 折叠进区域（kSimtDirectGmBoundary，跳过普通调度发射）；
+// - side closure 把区域内标注的 kSimtInlineTransform 升级为 fanout 分支角色；
+// - lowering 收为额外输出链（链值 = side_pre 生产链已求出的标量表达式）。
+TEST(IndirectLoadScheduleCaseGeneratorTest, SimtSharedSideInputStoreFoldsIntoRegionAndBuildsChain) {
+  PlatformContextReset platform_reset;
+  ge::PlatformContext::GetInstance().Reset();
+  ge::PlatformContext::GetInstance().SetPlatform("3510");
+  auto graph = BuildIndirectLoadGraph(2);
+  ASSERT_TRUE(AddSimtFanoutTopology(graph));
+  ASSERT_TRUE(AddSimtSharedSideInputStoreTopology(graph));
+  // 共享 store 的目标 tensor 与主/side 链互异，链去重按 target 判定。
+  const auto shared_store_node = graph.FindNode("coverage_shared_store");
+  ASSERT_NE(shared_store_node, nullptr);
+  shared_store_node->outputs()[0]->attr.mem.tensor_id = 200;
+  const auto side_pre_node = graph.FindNode("coverage_side_pre");
+  ASSERT_NE(side_pre_node, nullptr);
+
+  optimize::IndirectLoadScheduleCaseGenerator generator;
+  std::vector<af::AscGraph> graphs;
+  std::vector<std::string> score_functions;
+  ASSERT_EQ(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
+  const auto simt = FindGeneratedGraphByTemplate(graphs, ascir::TemplateId::kIndirectLoadSimt);
+  ASSERT_NE(simt, graphs.end());
+  const auto shared_store = simt->FindNode("coverage_shared_store");
+  const auto side_pre = simt->FindNode("coverage_side_pre");
+  ASSERT_NE(shared_store, nullptr);
+  ASSERT_NE(side_pre, nullptr);
+  EXPECT_EQ(ascgen_utils::indirect_load::GetTemplateRole(shared_store),
+            ascgen_utils::indirect_load::TemplateRole::kSimtDirectGmBoundary);
+  EXPECT_EQ(ascgen_utils::indirect_load::GetTemplateRole(side_pre),
+            ascgen_utils::indirect_load::TemplateRole::kSimtFanoutBranch);
+
+  const auto indirect_load = simt->FindNode("indirect_load");
+  ASSERT_NE(indirect_load, nullptr);
+  ascgen_utils::indirect_load::IndirectLoadLoweringMetadata metadata;
+  ASSERT_EQ(ascgen_utils::indirect_load::GetLoweringMetadata(indirect_load, metadata), af::SUCCESS);
+  ASSERT_GE(metadata.simt.output_chains.size(), 3UL);
+  const auto shared_chain = std::find_if(
+      metadata.simt.output_chains.begin(), metadata.simt.output_chains.end(), [&shared_store](const auto &chain) {
+        return chain.target_tensor_id == shared_store->outputs()[0]->attr.mem.tensor_id;
+      });
+  ASSERT_NE(shared_chain, metadata.simt.output_chains.end());
+  EXPECT_EQ(shared_chain->result_tensor_id, side_pre->outputs()[0]->attr.mem.tensor_id);
+  EXPECT_EQ(shared_chain->dtype, af::DT_FLOAT16);
+}
+
+// [边界化降级区域重算] 首个 Store 主链含不可标量发射算子（Fmod）时 SIMT 候选降级为
+// gather-only 边界化形态：区域按 index 链整体重算（组员同构），输出侧节点全部恢复普通
+// 调度发射——共享 side-input store 与 fanout 分支不残留 skip 角色，lowering 计划只含
+// value 直写 UB 局部目标。
+TEST(IndirectLoadScheduleCaseGeneratorTest, SimtBoundaryFusionShrinksRegionToIndexChain) {
+  PlatformContextReset platform_reset;
+  ge::PlatformContext::GetInstance().Reset();
+  ge::PlatformContext::GetInstance().SetPlatform("3510");
+  auto graph = BuildIndirectLoadGraph(2);
+  ASSERT_TRUE(AddSimtFanoutTopology(graph));
+  ASSERT_TRUE(AddSimtSharedSideInputStoreTopology(graph));
+  ASSERT_TRUE(AddSimtUnemittableMainChain(graph));
+
+  optimize::IndirectLoadScheduleCaseGenerator generator;
+  std::vector<af::AscGraph> graphs;
+  std::vector<std::string> score_functions;
+  ASSERT_EQ(generator.Generate(graph, graphs, score_functions), af::SUCCESS);
+  const auto simt = FindGeneratedGraphByTemplate(graphs, ascir::TemplateId::kIndirectLoadSimt);
+  ASSERT_NE(simt, graphs.end());
+  const auto indirect_load = simt->FindNode("indirect_load");
+  ASSERT_NE(indirect_load, nullptr);
+  EXPECT_TRUE(ascgen_utils::indirect_load::IsSimtBoundaryFusion(indirect_load));
+
+  // 输出侧节点恢复普通调度（无 SIMT 角色），index 链边界保持 GM 直读角色。
+  const auto side_branch = simt->FindNode("coverage_side_branch");
+  const auto shared_store = simt->FindNode("coverage_shared_store");
+  const auto main_fmod = simt->FindNode("coverage_main_fmod");
+  const auto index_load = simt->FindNode("index_load");
+  ASSERT_NE(side_branch, nullptr);
+  ASSERT_NE(shared_store, nullptr);
+  ASSERT_NE(main_fmod, nullptr);
+  ASSERT_NE(index_load, nullptr);
+  EXPECT_EQ(ascgen_utils::indirect_load::GetTemplateRole(side_branch),
+            ascgen_utils::indirect_load::TemplateRole::kNone);
+  EXPECT_EQ(ascgen_utils::indirect_load::GetTemplateRole(shared_store),
+            ascgen_utils::indirect_load::TemplateRole::kNone);
+  EXPECT_EQ(ascgen_utils::indirect_load::GetTemplateRole(main_fmod), ascgen_utils::indirect_load::TemplateRole::kNone);
+  EXPECT_EQ(ascgen_utils::indirect_load::GetTemplateRole(index_load),
+            ascgen_utils::indirect_load::TemplateRole::kSimtDirectGmBoundary);
+
+  // lowering 计划：边界化形态仅 value 直写 UB 局部目标（单一 local target 链）。
+  ascgen_utils::indirect_load::IndirectLoadLoweringMetadata metadata;
+  ASSERT_EQ(ascgen_utils::indirect_load::GetLoweringMetadata(indirect_load, metadata), af::SUCCESS);
+  ASSERT_EQ(metadata.simt.output_chains.size(), 1UL);
+  EXPECT_TRUE(metadata.simt.output_chains[0].local_target);
 }
 
 TEST(IndirectLoadScheduleCaseGeneratorTest, SimdNormalizesNonExpandedGraph) {

@@ -98,21 +98,56 @@ void CollectSimtOutputConsumerClosure(const af::AscNodePtr &indirect_load, NodeS
   (void)TraverseOutputConsumers(roots, closure, visit);
 }
 
-// [index 链外部 store] index 生产链尾部张量的区域外直连 store 会被 lowering 收为
-// 额外输出链（链值 = Index() 求值器结果），此处将其纳入 SIMT 融合区域（获得
-// kSimtDirectGmBoundary 角色，跳过普通调度发射）；index 链其余无法供值的外部消费者
-// 静默丢弃会导致目标 buffer 永不写入，必须整候选淘汰。合法消费者集 = IndirectLoad
-// 自身 ∪ 融合区域（index 链与输出链的 backward 闭包——含经多输入算子合流进输出链
-// 的 side-input，如 embedding+reduce 图中消费 index load 的 Ge/Select）∪ IL 输出的
-// 前向闭包（post-Reduce 普通调度链）；守卫只扫 index 链子集，不扫全融合区域。
+// [index 链外部 store] 供值审计的单消费者裁决（独立成函数控制审计主循环的圈复杂度）：
+// - kLegal：消费者已可由求值器/普通调度链供值——IL 自身、融合区域成员（index 链与
+//   输出链的 backward 闭包——含经多输入算子合流进输出链的 side-input，如
+//   embedding+reduce 图中消费 index load 的 Ge/Select）、IL 输出的前向闭包
+//   （post-Reduce 普通调度链）、跨成员豁免（同组另一成员的 SIMT index 链——由该
+//   成员的 evaluator 逐元素消费，寄存器级，不要求向量侧物化 tensor）、区域内 Store
+//   的 Output 汇聚点（kernel 输出标记，非计算节点）。
+// - kFoldIndexStore：index_root 尾部张量的区域外直连 store——由 lowering 收为额外
+//   输出链（链值 = Index() 求值器结果），审计方将其纳入融合区域（获得
+//   kSimtDirectGmBoundary 角色，跳过普通调度发射）。
+// - kIllegal：其余无法供值的外部消费者——静默丢弃会导致目标 buffer 永不写入，整
+//   候选淘汰。
+enum class SimtExternalConsumerKind { kLegal, kFoldIndexStore, kIllegal };
+
+SimtExternalConsumerKind ClassifySimtExternalConsumer(const af::AscNodePtr &node, const af::AscNodePtr &consumer,
+                                                      const af::AscNodePtr &indirect_load,
+                                                      const af::AscNodePtr &index_root, const NodeSet &region,
+                                                      const NodeSet &output_consumers, const NodeSet &group_exempt,
+                                                      const ascir::TensorId &index_tensor_id) {
+  if (consumer == nullptr || consumer == indirect_load || region.count(consumer.get()) != 0UL ||
+      output_consumers.count(consumer.get()) != 0UL) {
+    return SimtExternalConsumerKind::kLegal;
+  }
+  if (group_exempt.count(consumer.get()) != 0UL) {
+    return SimtExternalConsumerKind::kLegal;
+  }
+  if (node == index_root && af::ops::IsOps<af::ascir_op::Store>(consumer) && !consumer->inputs().empty() &&
+      consumer->inputs()[0]->attr.mem.tensor_id == index_tensor_id) {
+    return SimtExternalConsumerKind::kFoldIndexStore;
+  }
+  if (af::ops::IsOps<af::ascir_op::Store>(node) && af::ops::IsOps<af::ascir_op::Output>(consumer)) {
+    return SimtExternalConsumerKind::kLegal;
+  }
+  return SimtExternalConsumerKind::kIllegal;
+}
+
+// [index 链外部 store] SIMT 融合区域的供值守卫：审计扫描集内每个节点的消费者，无法
+// 供值的外部消费者整候选淘汰（静默丢弃会导致目标 buffer 永不写入）。守卫默认扫
+// index 链子集；scan_set 非空时按给定集合审计（单 gather 无 post-Reduce 的多分支
+// fan-out 形态传入全区域——输出链节点的消费者同样需要供值审计）。
 bool FoldSimtIndexChainExternalStores(const af::AscNodePtr &indirect_load, const af::AscNodePtr &index_root,
-                                      NodeSet &region, const NodeSet &group_exempt, const NodeSet *pre_index_chain) {
+                                      NodeSet &region, const NodeSet &group_exempt, const NodeSet *pre_index_chain,
+                                      const NodeSet *scan_set) {
   NodeSet index_chain;
   if (pre_index_chain != nullptr) {
     index_chain = *pre_index_chain;
   } else if (!CollectSimtBackwardRegion({index_root}, indirect_load, index_chain)) {
     return false;
   }
+  const NodeSet &scan_nodes = scan_set != nullptr ? *scan_set : index_chain;
   NodeSet output_consumers;
   CollectSimtOutputConsumerClosure(indirect_load, output_consumers);
   const auto owner_graph = indirect_load->GetOwnerComputeGraph();
@@ -126,48 +161,100 @@ bool FoldSimtIndexChainExternalStores(const af::AscNodePtr &indirect_load, const
   const ascir::TensorId index_tensor_id = inputs[ascgen_utils::indirect_load::kIndexTensorIndex]->attr.mem.tensor_id;
   for (const auto &graph_node : owner_graph->GetDirectNode()) {
     const auto node = std::dynamic_pointer_cast<af::AscNode>(graph_node);
-    if (node == nullptr || index_chain.count(node.get()) == 0UL) {
+    if (node == nullptr || scan_nodes.count(node.get()) == 0UL) {
       continue;
     }
     for (const auto &out_node : node->GetOutDataNodes()) {
       const auto consumer = std::dynamic_pointer_cast<af::AscNode>(out_node);
-      if (consumer == nullptr || consumer == indirect_load || region.count(consumer.get()) != 0UL ||
-          output_consumers.count(consumer.get()) != 0UL) {
-        continue;
-      }
-      // [跨成员豁免] 消费者在同组另一成员的 SIMT index 链里——由该成员的 evaluator
-      // 逐元素消费（寄存器级），不要求向量侧物化 tensor，不是真正外部消费者。
-      if (group_exempt.count(consumer.get()) != 0UL) {
-        continue;
-      }
-      if (node == index_root && af::ops::IsOps<af::ascir_op::Store>(consumer) && !consumer->inputs().empty() &&
-          consumer->inputs()[0]->attr.mem.tensor_id == index_tensor_id) {
+      const auto kind = ClassifySimtExternalConsumer(node, consumer, indirect_load, index_root, region,
+                                                     output_consumers, group_exempt, index_tensor_id);
+      if (kind == SimtExternalConsumerKind::kFoldIndexStore) {
         region.emplace(consumer.get());
         continue;
       }
-      GELOGI("[IndirectLoad] Reject SIMT candidate: index chain node[%s] has unsupported external consumer[%s, %s].",
-             node->GetNamePtr(), consumer->GetNamePtr(), consumer->GetTypePtr());
-      return false;
+      if (kind != SimtExternalConsumerKind::kLegal) {
+        GELOGI("[IndirectLoad] Reject SIMT candidate: fused region node[%s] has unsupported external consumer[%s, %s].",
+               node->GetNamePtr(), consumer->GetNamePtr(), consumer->GetTypePtr());
+        return false;
+      }
     }
   }
   return true;
 }
+
+// 汇集 IL 输出前向闭包内的全部 Store 终态节点（含物化分支与计算分支——多分支
+// fan-out 形态下两者地位相同，analysis.output_store 只是遍历序命中的首个）。
+void CollectSimtOutputStoreTerminals(const af::AscNodePtr &indirect_load, NodePath &terminals) {
+  NodePath roots;
+  for (const auto &out_node : indirect_load->GetOutDataNodes()) {
+    const auto consumer = std::dynamic_pointer_cast<af::AscNode>(out_node);
+    if (consumer != nullptr) {
+      roots.emplace_back(consumer);
+    }
+  }
+  NodeSet visited{indirect_load.get()};
+  const auto visit = [&terminals](const af::AscNodePtr &node, bool &stop) -> af::Status {
+    if (af::ops::IsOps<af::ascir_op::Store>(node)) {
+      terminals.emplace_back(node);
+      stop = true;
+    }
+    return af::SUCCESS;
+  };
+  (void)TraverseOutputConsumers(roots, visited, visit);
+}
+
+// [共享 side-input 外部 store] 输出链侧节点可能同时被 IL 前向闭包外直连 Store 消费
+// （融合 kernel 的另一路输出，如 embedding 查表融合图中位置编码 broadcast 侧输入被独立
+// 物化）。该 Store 由 SIMT 求值器按额外输出链供值，连同一生产链纳入区域获得 skip
+// 角色；纳入判定与 lowering 侧收链共用公共谓词（TryCollectSimtSharedValueChain）与
+// 相交基构造/不动点扩张语义，实现与机制说明见
+// ascgen_utils::indirect_load::FoldSimtSharedValueStores（common/indirect_load_utils.cpp）。
 
 void CollectSimtFusedRegionMembers(const af::AscNodePtr &indirect_load, const RewrittenGraphAnalysis &analysis,
                                    NodeSet &region) {
   region.clear();
   const af::AscNodePtr index_root =
       ascgen_utils::indirect_load::GetInputProducer(indirect_load, ascgen_utils::indirect_load::kIndexTensorIndex);
-  const af::AscNodePtr output_terminal =
-      analysis.post_reduce == nullptr ? analysis.output_store
-                                      : ascgen_utils::indirect_load::GetSimtPostReduceLocalProducer(indirect_load);
-  if (index_root == nullptr || output_terminal == nullptr) {
+  if (index_root == nullptr) {
     return;
   }
-  if (!CollectSimtBackwardRegion({index_root, output_terminal}, indirect_load, region)) {
+  NodePath roots{index_root};
+  if (analysis.post_reduce != nullptr) {
+    const af::AscNodePtr output_terminal = ascgen_utils::indirect_load::GetSimtPostReduceLocalProducer(indirect_load);
+    if (output_terminal == nullptr) {
+      return;
+    }
+    roots.emplace_back(output_terminal);
+  } else if (analysis.output_store != nullptr) {
+    // 无 post-Reduce 多分支形态：IL 输出的全部 Store 分支都是求值器消费链。只按首个
+    // Store（analysis.output_store）建区域时，与首个分支合流共享的 index 链节点（如
+    // mask 复用 ge）会被其余分支消费而误判为外部消费者，且其余分支的 side-input 外部
+    // store 不会被纳入区域（普通调度读不到已折叠的生产者）。
+    NodePath terminals;
+    CollectSimtOutputStoreTerminals(indirect_load, terminals);
+    if (terminals.empty()) {
+      return;
+    }
+    roots.insert(roots.end(), terminals.begin(), terminals.end());
+    if (!CollectSimtBackwardRegion(roots, indirect_load, region)) {
+      region.clear();
+      return;
+    }
+    ascgen_utils::indirect_load::FoldSimtSharedValueStores(indirect_load, index_root, terminals, region);
+    if (!FoldSimtIndexChainExternalStores(indirect_load, index_root, region, NodeSet{}, nullptr, &region)) {
+      region.clear();
+    }
+    return;
+  } else {
+    return;
+  }
+  if (!CollectSimtBackwardRegion(roots, indirect_load, region)) {
     region.clear();
     return;
   }
+  // post-Reduce 形态守卫保持既有扫描面（index 链子集）：区域的输出侧闭包与普通调度
+  // 链存在既有衔接形态（如直连 IL 输出又汇入 post Reduce 输入的 Broadcast），语义
+  // 不随本改动变化。
   if (!FoldSimtIndexChainExternalStores(indirect_load, index_root, region, NodeSet{})) {
     region.clear();
   }

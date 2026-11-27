@@ -1044,6 +1044,137 @@ af::Status CollectSimtIndexChainStoreBuilds(const NodePath &graph_nodes, const a
   return af::SUCCESS;
 }
 
+// [共享 side-input 外部 store walk] 与 CollectSimtLoweringBackwardNodes 同边界语义的
+// 优雅回溯（后者对无输入非边界节点硬断言，适用于已校验链；本回溯面对任意外部
+// store，不可收集时返回 false，调用方跳过、由调度侧供值守卫拒绝候选）。边界集合一致
+// 是两侧相交判定同构的前提：Nddma / Data / Scalar / ScalarData / Arange / IndexExpr
+// 均为终止点，任何一侧都不越过 Nddma。
+bool TryCollectSimtSharedValueBackwardNodes(const af::AscNodePtr &root, const af::AscNodePtr &indirect_load,
+                                            NodeSet &nodes) {
+  NodePath pending = {root};
+  for (size_t cursor = 0UL; cursor < pending.size(); ++cursor) {
+    const af::AscNodePtr current = pending[cursor];
+    if (current == nullptr || current == indirect_load || !nodes.emplace(current.get()).second) {
+      continue;
+    }
+    if (IsSimtDirectGmBoundary(current) || af::ops::IsOps<af::ascir_op::Nddma>(current) ||
+        af::ops::IsOps<af::ascir_op::Data>(current) || af::ops::IsOps<af::ascir_op::Scalar>(current) ||
+        af::ops::IsOps<af::ascir_op::ScalarData>(current) || af::ops::IsOps<af::ascir_op::Arange>(current) ||
+        af::ops::IsOps<af::ascir_op::IndexExpr>(current)) {
+      continue;
+    }
+    if (current->inputs.Size() == 0UL) {
+      return false;
+    }
+    for (size_t i = 0UL; i < current->inputs.Size(); ++i) {
+      const auto producer = GetInputProducer(current, i);
+      if (producer == nullptr) {
+        return false;
+      }
+      pending.emplace_back(producer);
+    }
+  }
+  return true;
+}
+
+// [共享 side-input 外部 store] Store 自身消费者是否全部为 Output（kernel 输出汇聚点）。
+bool SimtStoreConsumersAreOutputsOnly(const af::AscNodePtr &node) {
+  for (const auto &out_node : node->GetOutDataNodes()) {
+    const auto consumer = std::dynamic_pointer_cast<af::AscNode>(out_node);
+    if (consumer == nullptr || !af::ops::IsOps<af::ascir_op::Output>(consumer)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// [共享 side-input 外部 store] 候选判定与生产链收集（调度侧区域折叠与 lowering 侧收链
+// 共用，保证两侧纳入判定逐谓词一致）：Store 且自身消费者全部为 Output（再往下的普通
+// 调度链无法消费求值器标量值，不收、由调度侧供值守卫拒绝候选）；生产者有效且非 IL /
+// index_root（IL 直连 Store 属值侧链、index_root 直连 Store 属 index 链外部 store，各自
+// 有专门收链路径，本判定不重复承担）；生产链按与值侧链相同的边界语义可回溯收集。
+// chain_nodes 只含生产链节点（不含 Store 自身）。
+bool TryCollectSimtSharedValueChain(const af::AscNodePtr &store, const af::AscNodePtr &indirect_load,
+                                    const af::AscNodePtr &index_root, NodeSet &chain_nodes) {
+  if (!af::ops::IsOps<af::ascir_op::Store>(store) || !SimtStoreConsumersAreOutputsOnly(store)) {
+    return false;
+  }
+  const auto producer = GetInputProducer(store, 0UL);
+  if (producer == nullptr || producer == indirect_load || producer == index_root) {
+    return false;
+  }
+  return TryCollectSimtSharedValueBackwardNodes(producer, indirect_load, chain_nodes);
+}
+
+// [共享 side-input 外部 store] 收链元数据：链值 = 生产者输出 tensor，目标视图取自
+// Store 自身（含 offset），与 CollectSimtOutputChainBuilds 的填充口径一致。
+af::Status FillSimtSharedValueChainMetadata(const af::AscNodePtr &store, SimtOutputChainBuild &chain) {
+  const auto producer = GetInputProducer(store, 0UL);
+  GE_ASSERT_NOTNULL(producer, "IndirectLoad SIMT shared value terminal[%s] has no producer.", store->GetNamePtr());
+  const size_t producer_output_index = GetProducerOutputIndex(store);
+  GE_ASSERT_TRUE(producer_output_index < producer->outputs().size(),
+                 "IndirectLoad SIMT shared value terminal[%s] producer output index[%zu] is invalid.",
+                 store->GetNamePtr(), producer_output_index);
+  chain.metadata.result_tensor_id = producer->outputs()[producer_output_index]->attr.mem.tensor_id;
+  chain.metadata.target_tensor_id = store->outputs()[0]->attr.mem.tensor_id;
+  chain.metadata.dtype = producer->outputs()[producer_output_index]->attr.dtype;
+  const auto &target_attr = store->outputs()[0]->attr;
+  chain.metadata.target_sizes = target_attr.repeats;
+  chain.metadata.target_strides = target_attr.strides;
+  af::Expression store_offset = af::ops::Zero;
+  if (store->attr.ir_attr != nullptr) {
+    (void)store->attr.ir_attr->GetAttrValue("offset", store_offset);
+  }
+  chain.metadata.target_offset = store_offset;
+  return af::SUCCESS;
+}
+
+// [共享 side-input 外部 store] 输出链消费的节点可能被 IL 前向闭包外直连 Store 消费
+// （融合 kernel 的另一路输出，如 embedding 查表融合图中位置编码 broadcast 侧输入被
+// 独立物化）。该 Store 收为输出链：链值 = 该节点在输出链求值中已产出的标量表达式
+// （values 按 result_tensor_id 解析）。纳入判定与调度侧 FoldSimtSharedValueStores 逐
+// 谓词一致（共用 TryCollectSimtSharedValueChain 与同样的相交基构造/扩张语义——节点名
+// 跨图副本稳定）：链 backward 可收集且与既有求值器节点（值侧链）相交——独立链保持
+// 普通调度发射。注意 SIMT 模板 pass 会把输出链 broadcast 改写为 backward_broadcast
+// 新节点（原节点只保留给本类 store），相交判定必须沿生产链回溯，不能只查直连
+// producer。
+af::Status CollectSimtSharedValueStoreBuilds(const NodePath &graph_nodes, const af::AscNodePtr &indirect_load,
+                                             const af::AscNodePtr &index_root,
+                                             std::vector<SimtOutputChainBuild> &chains) {
+  NodeSet evaluator_nodes;
+  std::unordered_set<ascir::TensorId> collected_targets;
+  for (const auto &chain : chains) {
+    evaluator_nodes.insert(chain.nodes.begin(), chain.nodes.end());
+    collected_targets.emplace(chain.metadata.target_tensor_id);
+  }
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (const af::AscNodePtr &node : graph_nodes) {
+      if (!af::ops::IsOps<af::ascir_op::Store>(node) ||
+          collected_targets.count(node->outputs()[0]->attr.mem.tensor_id) != 0UL) {
+        continue;
+      }
+      SimtOutputChainBuild chain;
+      if (!TryCollectSimtSharedValueChain(node, indirect_load, index_root, chain.nodes)) {
+        continue;
+      }
+      const bool connected = std::any_of(
+          chain.nodes.begin(), chain.nodes.end(),
+          [&evaluator_nodes](const af::AscNode *chain_node) { return evaluator_nodes.count(chain_node) != 0UL; });
+      if (!connected) {
+        continue;
+      }
+      GE_ASSERT_SUCCESS(FillSimtSharedValueChainMetadata(node, chain));
+      evaluator_nodes.insert(chain.nodes.begin(), chain.nodes.end());
+      collected_targets.emplace(node->outputs()[0]->attr.mem.tensor_id);
+      chains.emplace_back(std::move(chain));
+      changed = true;
+    }
+  }
+  return af::SUCCESS;
+}
+
 af::Status ValidateSimtLoweringNode(const af::AscNodePtr &node) {
   // IndexExpr 无输入，值来自 ir_attr.expr 的运行期标量求值，无需 scalar evaluator 角色展开。
   if (IsSimtDirectGmBoundary(node) || af::ops::IsOps<af::ascir_op::Scalar>(node) ||
@@ -1516,6 +1647,11 @@ af::Status CollectSimtLoweringSets(const af::AscNodePtr &indirect_load, const No
     GE_ASSERT_SUCCESS(CollectSimtOutputChainBuilds(graph_nodes, indirect_load, sets.chain_builds));
     GE_ASSERT_SUCCESS(
         CollectSimtIndexChainStoreBuilds(graph_nodes, index_root, simt.index_result_tensor_id, sets.chain_builds));
+    if (!simt.has_post_reduce) {
+      // 共享 side-input 外部 store 仅在全链折叠（无 post-Reduce）形态收链：post-Reduce
+      // 形态下调度侧不将其纳入区域（普通调度发射），值侧链收集会与父图发射双写冲突。
+      GE_ASSERT_SUCCESS(CollectSimtSharedValueStoreBuilds(graph_nodes, indirect_load, index_root, sets.chain_builds));
+    }
   }
   sets.keep_chain.assign(sets.chain_builds.size(), true);
   for (size_t chain_index = 0UL; chain_index < sets.chain_builds.size(); ++chain_index) {
@@ -1681,6 +1817,57 @@ af::Status BuildSimtLoweringMetadata(const af::AscNodePtr &indirect_load, Indire
   return af::SUCCESS;
 }
 }  // namespace
+
+// [共享 side-input 外部 store] 调度侧区域折叠：输出链侧节点被 IL 前向闭包外直连
+// Store 消费（融合 kernel 的另一路输出，如 embedding 查表融合图中位置编码 broadcast
+// 侧输入被独立物化）且该 Store 消费者全部为 Output 时，连同其生产链纳入 SIMT 区域
+// （获得 skip 角色、跳过普通调度发射）；不纳入则其普通 VectorFunc 读不到生产者
+// tensor（已被求值器折叠），目标 buffer 永不写入。
+// 相交基 = IL 输出各 Store 终态生产链的求值器节点并集（与 lowering 侧
+// CollectSimtSharedValueStoreBuilds 的 evaluator_nodes 初始构造同源：同样的回溯边界、
+// 同样的从各值侧链生产者起步），并随每次折叠的生产链扩张实现真不动点（链式共享
+// store 逐路命中）——两侧纳入判定互为充要，杜绝"调度侧折叠而 lowering 不收链"（目标
+// buffer 静默丢写）与反向（无 scalar 角色断言/与父图双写）。生产链与基不相交的独立
+// 输出保持普通调度发射。
+void FoldSimtSharedValueStores(const af::AscNodePtr &indirect_load, const af::AscNodePtr &index_root,
+                               const std::vector<af::AscNodePtr> &terminal_stores,
+                               std::unordered_set<const af::AscNode *> &region) {
+  const auto owner_graph = indirect_load->GetOwnerComputeGraph();
+  if (owner_graph == nullptr) {
+    return;
+  }
+  NodeSet shared_base;
+  for (const auto &terminal : terminal_stores) {
+    NodeSet chain_nodes;
+    if (TryCollectSimtSharedValueChain(terminal, indirect_load, index_root, chain_nodes)) {
+      shared_base.insert(chain_nodes.begin(), chain_nodes.end());
+    }
+  }
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (const auto &graph_node : owner_graph->GetDirectNode()) {
+      const auto node = std::dynamic_pointer_cast<af::AscNode>(graph_node);
+      if (node == nullptr || region.count(node.get()) != 0UL) {
+        continue;
+      }
+      NodeSet chain_nodes;
+      if (!TryCollectSimtSharedValueChain(node, indirect_load, index_root, chain_nodes)) {
+        continue;
+      }
+      const bool connected =
+          std::any_of(chain_nodes.begin(), chain_nodes.end(),
+                      [&shared_base](const af::AscNode *chain_node) { return shared_base.count(chain_node) != 0UL; });
+      if (!connected) {
+        continue;
+      }
+      region.insert(chain_nodes.begin(), chain_nodes.end());
+      region.emplace(node.get());
+      shared_base.insert(chain_nodes.begin(), chain_nodes.end());
+      changed = true;
+    }
+  }
+}
 
 // [SK窗口可行性] 现场判定 index 源头收敛性（不依赖候选流程构建的 AccessInfo attr——
 // attr 写在先跑的 SIMD/SIMT 候选图副本上，SK 候选副本从原图拷贝时为空，跨副本读取

@@ -38,9 +38,11 @@ af::Status CollectSimtNormalScheduleNodes(const af::AscNodePtr &indirect_load, c
 af::Status AnnotateSimtMainOutputPath(const af::AscNodePtr &indirect_load, const af::AscNodePtr &selected_root,
                                       const NodeSet &selected, const NodeSet &normal_schedule_nodes);
 
+// upgrade_inline_transform 语义与边界说明（含缺省值）见 indirect_load_template_plan.h
+// （同一函数的两处声明保持同步，缺省参数只在 template_plan.h 给出）。
 af::Status AnnotateSimtSideInputClosure(const af::AscNodePtr &branch_node, const af::AscNodePtr &indirect_load,
-                                        const NodeSet &selected, const NodeSet &normal_schedule_nodes,
-                                        NodeSet &visited);
+                                        const NodeSet &selected, const NodeSet &normal_schedule_nodes, NodeSet &visited,
+                                        bool upgrade_inline_transform);
 
 af::Status AnnotateSimtFanoutBranches(const af::AscNodePtr &indirect_load, const RewrittenGraphAnalysis &analysis,
                                       NodeSet &normal_schedule_nodes);
