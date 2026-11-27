@@ -35,7 +35,6 @@
 namespace optimize {
 namespace semantic = ascgen_utils::template_semantic;
 namespace {
-size_t TWO = 2;
 size_t NODE_COUNT_AFTER_REDUCE = 4UL;
 constexpr int64_t kBroadcastTailRepeatWorkspaceThreshold = 22500L;
 // reduce 场景首轴 B 扩展的 workspace 收益门槛(首轴须为常量并大于该阈值)
@@ -1162,17 +1161,26 @@ Status ReducePartitionCaseGenerator::ReducePartitionPostFusion(ascir::ImplGraph 
 bool ReducePartitionCaseGenerator::IsInputNodePartitioned(const std::shared_ptr<af::Node> &start,
                                                           const std::shared_ptr<af::Node> &node) {
   // 向前找 start 节点，如找到则未经过切分，到根节点未找到则已切分或不需要切分
+  // 原实现沿输入方向递归枚举全部路径, 在门控菱形等汇聚结构串联时路径数指数增长。
+  // 语义等价于"沿输入方向是否能回溯到 start", 用带 visited 的遍历一次即可, 结果完全一致。
   if (node == start) {
     return false;
   }
-  bool partitioned = true;
-  if (node->GetInNodes().empty()) {
-    return partitioned;
+  std::set<af::Node *> visited{node.get()};
+  std::vector<af::NodePtr> pending{node};
+  while (!pending.empty()) {
+    const auto cur_node = pending.back();
+    pending.pop_back();
+    for (const auto &in_node : cur_node->GetInNodes()) {
+      if (in_node == start) {
+        return false;
+      }
+      if (visited.insert(in_node.get()).second) {
+        pending.emplace_back(in_node);
+      }
+    }
   }
-  for (const auto &in_node : node->GetInNodes()) {
-    partitioned = partitioned && IsInputNodePartitioned(start, in_node);
-  }
-  return partitioned;
+  return true;
 }
 
 std::vector<std::pair<af::AscNodePtr, af::AscNodePtr>> ReducePartitionCaseGenerator::FindNormLoops(
@@ -1271,35 +1279,75 @@ Status ReducePartitionCaseGenerator::FindNormLoop(const af::AscNodePtr &start, s
   return ge::GRAPH_SUCCESS;
 }
 
-void ReducePartitionCaseGenerator::FindAllPath(const af::AscNodePtr &start, const af::AscNodePtr &end,
-                                               std::vector<af::AscNodePtr> &path,
-                                               std::vector<std::vector<af::AscNodePtr>> &all_paths) {
-  // 需保证图为有向无环图
-  path.emplace_back(start);
-  if (start == end) {
-    all_paths.emplace_back(path);
-  }
-  for (const auto &out_node : start->GetOutNodes()) {
-    const auto asc_node = std::dynamic_pointer_cast<af::AscNode>(out_node);
-    FindAllPath(asc_node, end, path, all_paths);
-  }
-  path.pop_back();
-}
-
 bool ReducePartitionCaseGenerator::IsNorm(const af::AscNodePtr &start, const af::AscNodePtr &end) {
-  std::vector<af::AscNodePtr> path;
-  std::vector<std::vector<af::AscNodePtr>> all_paths;
-  FindAllPath(start, end, path, all_paths);
-  bool is_norm = false;
-  std::set<af::AscNodePtr> end_in_nodes;
-  for (const auto &path_temp : all_paths) {
-    for (const auto &node : path_temp) {
-      if (ScheduleUtils::IsReduce(node)) {
-        is_norm = true;
-        break;
+  // 功能: 判定 start/end 是否构成 norm 环路, 即同时满足
+  //   1. 存在一条 start->end 的路径, 其上包含 reduce 节点(is_norm);
+  //   2. end 在这些路径上的直接前驱个数大于 1(end_in_nodes.size() > 1)。
+  // 原实现通过 FindAllPath 枚举 start->end 的全部路径再逐一检查, 在门控菱形等汇聚结构
+  // 串联的图上路径数呈指数增长, 导致 schedule 耗时爆炸。上述两个结论均可由前向/后向
+  // 可达性分析在 O(V+E) 内得到, 无需枚举路径。
+  //
+  // 前向遍历: reachable 收集从 start 沿出边能到达的全部节点(含 start 自身)。它是
+  // start->end 路径节点的超集——既包含到不了 end 的死胡同分支, 也包含 end 下游的节点;
+  // 集合按节点去重, 不记录路径条数, 因此与路径数量无关。visited 去重同时保证有环时
+  // 也能终止, 且每个节点只展开一次。
+  std::set<af::NodePtr> reachable{start};
+  std::vector<af::AscNodePtr> pending{start};
+  while (!pending.empty()) {
+    const auto cur_node = pending.back();
+    pending.pop_back();
+    for (const auto &out_node : cur_node->GetOutNodes()) {
+      const auto asc_node = std::dynamic_pointer_cast<af::AscNode>(out_node);
+      // insert 的 second 表示是否新插入(此前未访问), 仅新节点才继续展开
+      if ((asc_node != nullptr) && reachable.insert(out_node).second) {
+        pending.emplace_back(asc_node);
       }
     }
-    end_in_nodes.insert(path_temp.at(path_temp.size() - TWO));
+  }
+  // end 不可达时不存在 start->end 路径, 与原实现空 all_paths 的行为一致
+  if (reachable.find(end) == reachable.end()) {
+    return false;
+  }
+
+  // 后向遍历: can_reach_end 收集从 end 沿入边反向可达的全部节点(含 end 自身)。
+  // 与 reachable 求交后, 交集恰好是所有 start->end 路径上的节点:
+  //   n 既在 reachable 又在 can_reach_end 中, 等价于存在 start->...->n->...->end 的路径;
+  //  reachable 中的死胡同分支与 end 下游节点都会被该交集剔除。
+  std::set<af::NodePtr> can_reach_end{end};
+  pending = {end};
+  while (!pending.empty()) {
+    const auto cur_node = pending.back();
+    pending.pop_back();
+    for (const auto &in_node : cur_node->GetInNodes()) {
+      const auto asc_node = std::dynamic_pointer_cast<af::AscNode>(in_node);
+      if ((asc_node != nullptr) && can_reach_end.insert(in_node).second) {
+        pending.emplace_back(asc_node);
+      }
+    }
+  }
+
+  // is_norm: 交集(即 start->end 路径上的节点)中是否存在 reduce 节点
+  bool is_norm = false;
+  for (const auto &node : reachable) {
+    if (can_reach_end.count(node) == 0) {
+      continue;
+    }
+    const auto asc_node = std::dynamic_pointer_cast<af::AscNode>(node);
+    if ((asc_node != nullptr) && ScheduleUtils::IsReduce(asc_node)) {
+      is_norm = true;
+      break;
+    }
+  }
+
+  // end_in_nodes: end 的入边前驱中能从 start 到达的节点集合。前驱 p 满足 p 在 reachable
+  // 中且存在边 p->end, 则 start->...->p->end 必为一条路径, 即 p 是某条路径上 end 的
+  // 直接前驱, 与原实现逐路径取 path[size-2] 的集合一致。
+  std::set<af::AscNodePtr> end_in_nodes;
+  for (const auto &in_node : end->GetInNodes()) {
+    const auto asc_node = std::dynamic_pointer_cast<af::AscNode>(in_node);
+    if ((asc_node != nullptr) && (reachable.count(in_node) > 0UL)) {
+      end_in_nodes.insert(asc_node);
+    }
   }
   return is_norm && end_in_nodes.size() > 1;
 }

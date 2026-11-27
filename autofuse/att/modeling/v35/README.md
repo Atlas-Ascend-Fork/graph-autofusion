@@ -34,6 +34,8 @@ modeling/v35/
 
 采集与拟合代码统一放在 [Autofuse 建模工具](../../../tools/modeling/README.md)。公共开销见 [GetOpHeadCost](common/op_head_cost/design.md)。
 
+A5 Store 的原始标定及小块连续 Store 增补见 [MTE3 Store 归档](mte3/store/README.md)；A3 归档位于 [V1 Store](../v1/mte3/store/README.md)。
+
 ## 模型归档
 
 每个模型按需补充以下文件：

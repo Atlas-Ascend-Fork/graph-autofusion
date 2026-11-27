@@ -3534,10 +3534,16 @@ class MinimumAscIrCodegenImplV2 : public AscIrCodegenV2 {
   [[nodiscard]] bool IsSimtScalarSupported(const AscNode &node) const override {
     return HasSameSimtBinaryArithmeticDtype(node);
   }
-  [[nodiscard]] ge::graphStatus GenerateSimtScalarExpr([[maybe_unused]] const AscNode &node,
-                                                       const std::vector<std::string> &inputs,
+  [[nodiscard]] ge::graphStatus GenerateSimtScalarExpr(const AscNode &node, const std::vector<std::string> &inputs,
                                                        std::string &expr) const override {
-    expr = "(" + inputs[0] + " < " + inputs[1] + " ? " + inputs[0] + " : " + inputs[1] + ")";
+    // torch.minimum 语义要求 NaN 传播：裸三目 (x < y ? x : y) 在首输入为 NaN 时会静默取第二输入。
+    // 浮点先判 (x != x) 保 NaN；整型无 NaN，保持原三目避免多余比较。
+    if (IsSimtFloatDtype(GetSimtOutputDtype(node))) {
+      expr = "((" + inputs[0] + " != " + inputs[0] + ") || (" + inputs[0] + " < " + inputs[1] + ")) ? " + inputs[0] +
+             " : " + inputs[1];
+    } else {
+      expr = "(" + inputs[0] + " < " + inputs[1] + " ? " + inputs[0] + " : " + inputs[1] + ")";
+    }
     return ge::GRAPH_SUCCESS;
   }
   [[nodiscard]] bool IsInplaceSupported(const AscNode &minimum_node) const override {
@@ -3596,10 +3602,16 @@ class MaximumAscIrCodegenImplV2 : public AscIrCodegenV2 {
   [[nodiscard]] bool IsSimtScalarSupported(const AscNode &node) const override {
     return HasSameSimtBinaryArithmeticDtype(node);
   }
-  [[nodiscard]] ge::graphStatus GenerateSimtScalarExpr([[maybe_unused]] const AscNode &node,
-                                                       const std::vector<std::string> &inputs,
+  [[nodiscard]] ge::graphStatus GenerateSimtScalarExpr(const AscNode &node, const std::vector<std::string> &inputs,
                                                        std::string &expr) const override {
-    expr = "(" + inputs[0] + " > " + inputs[1] + " ? " + inputs[0] + " : " + inputs[1] + ")";
+    // torch.maximum 语义要求 NaN 传播：裸三目 (x > y ? x : y) 在首输入为 NaN 时会静默取第二输入。
+    // 浮点先判 (x != x) 保 NaN；整型无 NaN，保持原三目避免多余比较。
+    if (IsSimtFloatDtype(GetSimtOutputDtype(node))) {
+      expr = "((" + inputs[0] + " != " + inputs[0] + ") || (" + inputs[0] + " > " + inputs[1] + ")) ? " + inputs[0] +
+             " : " + inputs[1];
+    } else {
+      expr = "(" + inputs[0] + " > " + inputs[1] + " ? " + inputs[0] + " : " + inputs[1] + ")";
+    }
     return ge::GRAPH_SUCCESS;
   }
   [[nodiscard]] bool IsInplaceSupported(const AscNode &maximum_node) const override {

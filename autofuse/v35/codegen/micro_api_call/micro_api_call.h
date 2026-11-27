@@ -107,6 +107,14 @@ class MicroApiCall {
     return inputs_[index].second;
   }
 
+  // 校正 UB 输入的 tensor id：生产者输出 id 被重定向（如 IndirectLoad post-Reduce）时，
+  // boundary Load 须改用根图侧解析到的最终 id。
+  void RewriteUbInputTensorId(uint32_t index, ascir::TensorId id) {
+    if (index < inputs_.size() && inputs_[index].first == TensorType::UB_TENSOR) {
+      inputs_[index].second = id;
+    }
+  }
+
   // 调用者保证index合法性
   ascir::TensorId GetOutputTensorIdByIndex(uint32_t index) const {
     return outputs_[index].second;

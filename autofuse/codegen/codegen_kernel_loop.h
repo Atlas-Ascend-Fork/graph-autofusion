@@ -130,6 +130,8 @@ class ApiCall {
   // Public Member Variables
   std::string api_name_;
   ascir::AxisId axis;
+  // Non-owning; assigned when added to the loop tree.
+  const Loop *owner_loop{nullptr};
   std::string type;  // ascir type
   int64_t depth;
   ascir::ComputeUnit unit;

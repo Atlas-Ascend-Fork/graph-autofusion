@@ -132,6 +132,15 @@ Register::Register() {
   const std::string kAscendcFloorDivRegBaseStr = {
 #include "floor_div_reg_base.h"
   };
+  const std::string kAscendcScalarAddRegBaseStr = {
+#include "scalar_add_reg_base.h"
+  };
+  const std::string kAscendcScalarMaximumRegBaseStr = {
+#include "scalar_maximum_reg_base.h"
+  };
+  const std::string kAscendcScalarMinimumRegBaseStr = {
+#include "scalar_minimum_reg_base.h"
+  };
   const std::string kAscendcSignRegBaseStr = {
 #include "sign_reg_base.h"
   };
@@ -474,6 +483,9 @@ Register::Register() {
       {"reduce_init_reg_base.h", kAscendcReduce_initRegBase},
       {"reduce_extend_reg_base.h", kAscendcReduceExtendRegBase},
       {"floor_div_reg_base.h", kAscendcFloorDivRegBaseStr},
+      {"scalar_add_reg_base.h", kAscendcScalarAddRegBaseStr},
+      {"scalar_maximum_reg_base.h", kAscendcScalarMaximumRegBaseStr},
+      {"scalar_minimum_reg_base.h", kAscendcScalarMinimumRegBaseStr},
       {"sign_reg_base.h", kAscendcSignRegBaseStr},
       {"where_reg_base.h", kAscendcWhereRegBaseStr},
       {"gather_reg_base.h", kAscendcGatherRegBaseStr},

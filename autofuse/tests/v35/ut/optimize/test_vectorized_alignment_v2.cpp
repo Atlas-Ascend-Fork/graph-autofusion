@@ -23,6 +23,7 @@
 #include "platform_context.h"
 #include "platformv2.h"
 #include "un_alignment_strategy.h"
+#include "indirect_load_utils.h"
 
 using namespace std;
 using namespace ascir;
@@ -800,5 +801,162 @@ TEST_F(VectorizedAlignmentUTV2, tail_brc_remove_pad_unique_name_for_fanout) {
   EXPECT_EQ(rp2->GetInDataAnchor(0)->GetPeerOutAnchor()->GetOwnerNode()->GetName(), "load");
   EXPECT_EQ(rp1->GetOutDataAnchor(0)->GetPeerInDataAnchors().at(0)->GetOwnerNode()->GetName(), "brc1");
   EXPECT_EQ(rp2->GetOutDataAnchor(0)->GetPeerInDataAnchors().at(0)->GetOwnerNode()->GetName(), "brc2");
+}
+
+// 构造链输入 Data+Load：紧凑布局；set_vectorized 同时写 vectorized_strides（用于验证垫整只
+// 作用于 post-reduce 链成员、不回溯上游）。Load 移动构造不可用，由调用方构造、此处引用填充。
+void CreateChainInputLoad(af::AscGraph &graph, af::ascir_op::Load &load, const char *name, ge::DataType dtype,
+                          int32_t index, const std::vector<af::AxisId> &axes,
+                          const std::vector<af::Expression> &chain_repeats,
+                          const std::vector<af::Expression> &compact_strides, const bool set_vectorized) {
+  af::ascir_op::Data data(name, graph);
+  data.y.dtype = dtype;
+  data.ir_attr.SetIndex(index);
+  *data.y.axis = axes;
+  *data.y.repeats = chain_repeats;
+  *data.y.strides = compact_strides;
+
+  load.x = data.y;
+  SetTwoDimNodeAttrV2(load, dtype, af::ComputeType::kComputeLoad, axes, chain_repeats, compact_strides);
+  if (set_vectorized) {
+    *load.y.vectorized_strides = compact_strides;
+  }
+}
+
+// 构造链尾输出：with_reduce 时尾轴 reduce（输出尾轴 stride==0 是 kNotAligned 对齐回传的源头，
+// Reduce 下游节点不属于存储链，保持自身布局）后 Store；否则直接 Store 保持紧凑布局。
+void CreateChainOutput(const af::ascir_op::Asin &asin_op, const std::vector<af::AxisId> &axes,
+                       const std::vector<af::Expression> &chain_repeats,
+                       const std::vector<af::Expression> &compact_strides, const af::Expression &outer,
+                       const bool with_reduce) {
+  if (with_reduce) {
+    af::ascir_op::Sum sum("sum");
+    sum.x = asin_op.y;
+    SetTwoDimNodeAttrV2(sum, af::DT_FLOAT, af::ComputeType::kComputeReduce, axes, {outer, One}, {One, Zero});
+    *sum.y.vectorized_strides = {One, Zero};
+
+    af::ascir_op::Store store("store");
+    store.x = sum.y;
+    SetTwoDimNodeAttrV2(store, af::DT_FLOAT, af::ComputeType::kComputeStore, axes, {outer, One}, {One, Zero});
+    *store.y.vectorized_strides = {One, Zero};
+  } else {
+    af::ascir_op::Store store("store");
+    store.x = asin_op.y;
+    SetTwoDimNodeAttrV2(store, af::DT_FLOAT, af::ComputeType::kComputeStore, axes, chain_repeats, compact_strides);
+    *store.y.vectorized_strides = compact_strides;
+  }
+}
+
+// IndirectLoad SIMT 后置 Reduce 链（E2E 精度缺陷形态）：kSimtOp 的 IL value 写 UB local
+// target 后由后置 Reduce 消费，Store/Reduce 按 SizeAlign(inner, 32/sizeof(dtype)) 的
+// 对齐行距读写；尾轴 reduce 的对齐推导（Reduce 输出尾轴 stride==0 判 kNotAligned）
+// 沿链回传生成紧凑 vectorized_strides，buffer 预算按紧凑 span 计算，行数 > 1 时
+// Store/Reduce 读写越过 buffer 末端。链上成员（IL 输出至 Reduce 输入）需统一垫整。
+af::AscGraph BuildSimtPostReduceChainGraph(const bool with_reduce) {
+  af::AscGraph graph("simt_post_reduce_chain");
+  const af::Expression outer = af::Symbol(6);
+  const af::Expression inner = af::Symbol(10);
+  auto z0 = graph.CreateAxis("z0", outer);
+  auto z1 = graph.CreateAxis("z1", inner);
+  const std::vector<af::AxisId> axes = {z0.id, z1.id};
+  const std::vector<af::Expression> chain_repeats = {outer, inner};
+  // 紧凑布局：尾轴 stride==1、次内维 stride==尾轴 repeat（10 * 4B = 40B 非 32B 对齐）
+  const std::vector<af::Expression> compact_strides = {inner, One};
+
+  // IL 输入侧同设紧凑布局，验证垫整只作用于 post-reduce 链成员（不回溯上游）
+  af::ascir_op::Load x_load("x_load");
+  CreateChainInputLoad(graph, x_load, "x", af::DT_FLOAT, 0, axes, chain_repeats, compact_strides, true);
+  af::ascir_op::Load idx_load("idx_load");
+  CreateChainInputLoad(graph, idx_load, "idx", af::DT_INT32, 1, axes, chain_repeats, compact_strides, false);
+
+  af::ascir_op::IndirectLoad indirect_load("indirect_load");
+  indirect_load.x1 = x_load.y;
+  indirect_load.x2 = idx_load.y;
+  indirect_load.ir_attr.SetAxis(0);
+  indirect_load.y.dtype = af::DT_FLOAT;
+  indirect_load.attr.sched.axis = axes;
+  indirect_load.attr.api.compute_type = af::ComputeType::kComputeLoad;
+  *indirect_load.y.axis = axes;
+  *indirect_load.y.repeats = chain_repeats;
+  *indirect_load.y.strides = compact_strides;
+  *indirect_load.y.vectorized_axis = axes;
+  *indirect_load.y.vectorized_strides = compact_strides;
+
+  af::ascir_op::Floor floor_op("floor_op");
+  floor_op.x = indirect_load.y;
+  SetTwoDimNodeAttrV2(floor_op, af::DT_FLOAT, af::ComputeType::kComputeElewise, axes, chain_repeats, compact_strides);
+  *floor_op.y.vectorized_strides = compact_strides;
+
+  af::ascir_op::Asin asin_op("asin_op");
+  asin_op.x = floor_op.y;
+  SetTwoDimNodeAttrV2(asin_op, af::DT_FLOAT, af::ComputeType::kComputeElewise, axes, chain_repeats, compact_strides);
+  *asin_op.y.vectorized_strides = compact_strides;
+
+  CreateChainOutput(asin_op, axes, chain_repeats, compact_strides, outer, with_reduce);
+  return graph;
+}
+
+TEST_F(VectorizedAlignmentUTV2, simt_post_reduce_chain_pads_static_unaligned_row_stride) {
+  af::AscGraph graph = BuildSimtPostReduceChainGraph(true);
+  auto il_node = graph.FindNode("indirect_load");
+  ASSERT_NE(il_node, nullptr);
+  ASSERT_EQ(ascgen_utils::indirect_load::SetTemplateRole(il_node, ascgen_utils::indirect_load::TemplateRole::kSimtOp),
+            af::SUCCESS);
+
+  optimize::UnAlignmentStrategy strategy;
+  ASSERT_EQ(strategy.ModifyVectorizedStrides(graph), af::SUCCESS);
+
+  // inner=10 float：10 * 4B = 40B 非 32B 对齐，行距垫整到 Align(10, 32/4) = 16
+  const std::vector<af::Expression> padded = {af::Symbol(16), One};
+  for (const char *name : {"indirect_load", "floor_op", "asin_op"}) {
+    SCOPED_TRACE(name);
+    const auto node = graph.FindNode(name);
+    ASSERT_NE(node, nullptr);
+    EXPECT_EQ(node->outputs[0].attr.vectorized_strides, padded);
+  }
+  // Reduce 输出（尾轴 stride==0）与其下游不在存储链上，保持原布局
+  EXPECT_EQ(graph.FindNode("sum")->outputs[0].attr.vectorized_strides, (std::vector<af::Expression>{One, Zero}));
+  EXPECT_EQ(graph.FindNode("store")->outputs[0].attr.vectorized_strides, (std::vector<af::Expression>{One, Zero}));
+  // IL 上游输入侧不受链垫整影响
+  EXPECT_EQ(graph.FindNode("x_load")->outputs[0].attr.vectorized_strides,
+            (std::vector<af::Expression>{af::Symbol(10), One}));
+}
+
+TEST_F(VectorizedAlignmentUTV2, simt_chain_without_reduce_keeps_compact_strides) {
+  af::AscGraph graph = BuildSimtPostReduceChainGraph(false);
+  auto il_node = graph.FindNode("indirect_load");
+  ASSERT_NE(il_node, nullptr);
+  ASSERT_EQ(ascgen_utils::indirect_load::SetTemplateRole(il_node, ascgen_utils::indirect_load::TemplateRole::kSimtOp),
+            af::SUCCESS);
+
+  optimize::UnAlignmentStrategy strategy;
+  ASSERT_EQ(strategy.ModifyVectorizedStrides(graph), af::SUCCESS);
+
+  // 无后置 Reduce 消费者时没有行对齐写回契约，链上保持紧凑布局
+  const std::vector<af::Expression> compact = {af::Symbol(10), One};
+  for (const char *name : {"indirect_load", "floor_op", "asin_op", "store"}) {
+    SCOPED_TRACE(name);
+    const auto node = graph.FindNode(name);
+    ASSERT_NE(node, nullptr);
+    EXPECT_EQ(node->outputs[0].attr.vectorized_strides, compact);
+  }
+}
+
+TEST_F(VectorizedAlignmentUTV2, non_simt_indirect_load_keeps_compact_strides) {
+  af::AscGraph graph = BuildSimtPostReduceChainGraph(true);
+  auto il_node = graph.FindNode("indirect_load");
+  ASSERT_NE(il_node, nullptr);
+
+  optimize::UnAlignmentStrategy strategy;
+  ASSERT_EQ(strategy.ModifyVectorizedStrides(graph), af::SUCCESS);
+
+  // 非 kSimtOp 角色（默认 kNone）的 IL 不在行对齐写回链上，保持紧凑布局
+  const std::vector<af::Expression> compact = {af::Symbol(10), One};
+  for (const char *name : {"indirect_load", "floor_op", "asin_op"}) {
+    SCOPED_TRACE(name);
+    const auto node = graph.FindNode(name);
+    ASSERT_NE(node, nullptr);
+    EXPECT_EQ(node->outputs[0].attr.vectorized_strides, compact);
+  }
 }
 }  // namespace optimize

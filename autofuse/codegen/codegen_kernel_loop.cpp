@@ -9,6 +9,7 @@
  */
 
 #include "codegen_kernel_loop.h"
+#include <algorithm>
 #include <functional>
 #include "codegen_kernel.h"
 #include "codegen_kernel_utils.h"
@@ -61,6 +62,43 @@ ApiCall *FindIndirectLoadOpCall(Loop *loop, bool require_direct_gm) {
         return body.call;
       }
     } else if (ApiCall *call = FindIndirectLoadOpCall(body.loop, require_direct_gm); call != nullptr) {
+      return call;
+    }
+  }
+  return nullptr;
+}
+
+// [SIMT 融合组·hoist 点 primary 优先] FindIndirectLoadOpCall 返回循环树 DFS 序中第一个
+// 行为合格的 IndirectLoad 调用，不校验其是否融合组 primary。设计假设“成员按拓扑序位于
+// primary 之后”在多 gather 水平融合场景下不成立（成员可在 DFS 序中先于 primary）：
+// 成员 Generate 仅输出注释，且 evaluator_owns_output 判其为 true 触发提前 return，
+// primary 的 fused 调用与输出链全部丢失（空内核）。此处在 hoist 点按已找到调用所属
+// 融合组定位其 primary 并优先提升，替换需同时满足：
+// 1) 可提升谓词 uses_direct_gm_pipeline && skips_ub_lifecycle——post-Reduce/边界化使
+//    primary 的 kSimtOp 行为整体复位（GetTemplateBehavior 清零，见 indirect_load_utils），
+//    该形态按契约留在循环体逐 tile 发射，不得提升；
+// 2) 组归属一致——候选 primary 的成员名表（SetSimtFusedPrimary 写入、primary 为首
+//    成员）须包含已找到调用的节点名；多组/混合图（裸 SIMT gather）中不属于该组的
+//    primary 不替换，保持通用查找结果。
+static ApiCall *FindSimtHoistableFusedPrimaryOf(Loop *loop, const std::string &member_node_name) {
+  if (loop == nullptr) {
+    return nullptr;
+  }
+  for (const auto &body : loop->bodys) {
+    if (body.type == LoopType::CALL) {
+      if (body.call != nullptr) {
+        const auto node_ptr = std::dynamic_pointer_cast<af::AscNode>(body.call->node);
+        if (node_ptr != nullptr && af::ops::IsOps<af::ascir_op::IndirectLoad>(node_ptr) &&
+            ascgen_utils::indirect_load::IsSimtFusedPrimary(node_ptr)) {
+          const auto behavior = ascgen_utils::indirect_load::GetTemplateBehavior(node_ptr);
+          const auto member_names = ascgen_utils::indirect_load::GetSimtFusedMemberNames(node_ptr);
+          if (behavior.uses_direct_gm_pipeline && behavior.skips_ub_lifecycle &&
+              std::find(member_names.begin(), member_names.end(), member_node_name) != member_names.end()) {
+            return body.call;
+          }
+        }
+      }
+    } else if (ApiCall *call = FindSimtHoistableFusedPrimaryOf(body.loop, member_node_name); call != nullptr) {
       return call;
     }
   }
@@ -258,6 +296,22 @@ Status ConnectApiCallInputs(const ascir::NodeView &node, const std::map<ascir::T
   return af::SUCCESS;
 }
 
+// Sibling loop instances may use the same axis id, but their queue allocations
+// execute independently. Only a common loop nest can keep an allocation alive.
+bool IsSameLoopNest(const Loop *left, const Loop *right) {
+  for (auto loop = left; loop != nullptr; loop = loop->parent) {
+    if (loop == right) {
+      return true;
+    }
+  }
+  for (auto loop = right; loop != nullptr; loop = loop->parent) {
+    if (loop == left) {
+      return true;
+    }
+  }
+  return left == right;
+}
+
 Status UpdateQueueOutputReuse(const af::AscTensor *output, size_t output_index, ApiCall &call, TPipe &tpipe,
                               ConstructState &state) {
   const auto &attr = output->attr;
@@ -281,13 +335,15 @@ Status UpdateQueueOutputReuse(const af::AscTensor *output, size_t output_index, 
   last_share[attr.mem.reuse_id] = &call.outputs[output_index];
   const auto reused_tensor = state.que_last_use.find(attr.que.id);
   if (reused_tensor != state.que_last_use.end() &&
-      reused_tensor->second->reuse_id != call.outputs[output_index].reuse_id) {
+      reused_tensor->second->reuse_id != call.outputs[output_index].reuse_id &&
+      IsSameLoopNest(reused_tensor->second->write->owner_loop, call.owner_loop)) {
     reused_tensor->second->reuse_next = &call.outputs[output_index];
     call.outputs[output_index].reuse_from = reused_tensor->second;
     GELOGI("Que[%ld] reuse id[%ld] tensor id[%ld] reuse from tensor id[%ld] reuse id[%ld]", attr.que.id,
            attr.mem.reuse_id, call.outputs[output_index].id, reused_tensor->second->id,
            reused_tensor->second->reuse_id);
-  } else if (reused_tensor != state.que_last_use.end()) {
+  } else if (reused_tensor != state.que_last_use.end() &&
+             reused_tensor->second->reuse_id == call.outputs[output_index].reuse_id) {
     GELOGI("Que[%ld] reuse id[%ld] tensor id[%ld] share with last same que tensor", attr.que.id, attr.mem.reuse_id,
            call.outputs[output_index].id, reused_tensor->second->id);
   }
@@ -342,6 +398,7 @@ void Loop::AddLoop(Loop *loop) {
 }
 
 void Loop::AddCall(ApiCall *call) {
+  call->owner_loop = this;
   LoopBody tmp;
   tmp.type = LoopType::CALL;
   tmp.call = call;
@@ -1098,6 +1155,18 @@ Status Loop::GenerateLoop(const Tiler &tiler, const TPipe &tpipe, std::vector<as
       auto peer = tiler.GetAxis(axis.split_pair_other_id);
       ss << "int32_t block_dim_offset = " << peer.Str() << " * " << tiler.Size(axis.size) << ";" << std::endl;
       ApiCall *call = FindIndirectLoadOpCall(this, true);
+      // [SIMT 融合组·hoist 点 primary 优先] 通用查找按 DFS 序取第一个行为合格的
+      // IndirectLoad，不校验是否融合组 primary：非 primary 成员先于 primary 时其
+      // Generate 仅输出注释，且 evaluator_owns_output 判“非 primary”为 true 触发提前
+      // return，primary 的 fused 调用与输出链全部丢失（空内核）。改为按已找到调用
+      // 所属融合组定位可提升 primary（可提升谓词 + 成员名表归属，见
+      // FindSimtHoistableFusedPrimaryOf）：命中即替换——找到的本身是 primary 时为
+      // 自匹配（名表含 primary 自身），行为不变；裸 SIMT gather / 复位态 primary
+      // （post-Reduce/边界化，契约须逐 tile）不替换，保持通用查找结果。
+      ApiCall *fused_primary_call = call != nullptr ? FindSimtHoistableFusedPrimaryOf(this, call->node_name) : nullptr;
+      if (fused_primary_call != nullptr) {
+        call = fused_primary_call;
+      }
       // 融合发射的 UB 归并（register_merge=false 且无 post-Reduce）不做提升：成员 value 只驻留
       // 单 tile 的 UB 目标，调用须在 tile 循环体内发射——逐 tile actual_size/offset 中的 tile 变量
       // 才在作用域内，且与后置向量链的迭代空间一致。
@@ -1195,8 +1264,8 @@ Status Loop::GenerateLoop(const Tiler &tiler, const TPipe &tpipe, std::vector<as
       ss << axis.loop_size.AsArg() << " = 1;" << std::endl;
     }
     std::string reduce_dim_a = "reduce_dim_a";
-    ss << "for (" << axis.AsArg() << " = 0; " << axis << " < " << axis.loop_size.Str() << "; " << axis << "++) "
-       << "{" << std::endl;
+    ss << "for (" << axis.AsArg() << " = 0; " << axis << " < " << axis.loop_size.Str() << "; " << axis << "++) " << "{"
+       << std::endl;
     if (tpipe.cv_fusion_type != ascir::CubeTemplateType::kUBFuse) {
       ss << tiler.CalcFromAxis(axis.id);
     }
@@ -1279,9 +1348,8 @@ Status Loop::GenerateLoop(const Tiler &tiler, const TPipe &tpipe, std::vector<as
         }
       }
       ss << ");" << std::endl;
-      ss << "Muls(" << reduce_dst_tensor->Str() << ", " << reduce_dst_tensor->Str() << ", "
-         << "dimr_recip, " << KernelUtils::SizeAlign() << "(" << reduce_dim_a << ", 32 / sizeof(" << dtype_name
-         << ")));" << std::endl;
+      ss << "Muls(" << reduce_dst_tensor->Str() << ", " << reduce_dst_tensor->Str() << ", " << "dimr_recip, "
+         << KernelUtils::SizeAlign() << "(" << reduce_dim_a << ", 32 / sizeof(" << dtype_name << ")));" << std::endl;
     }
   }
   current_axis.pop_back();

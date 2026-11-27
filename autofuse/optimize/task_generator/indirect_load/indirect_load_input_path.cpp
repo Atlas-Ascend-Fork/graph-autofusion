@@ -448,10 +448,15 @@ af::Status AnalyzeInputPath(const af::AscNodePtr &indirect_load, size_t input_id
                    ascgen_utils::indirect_load::IndirectLoadLayoutKind::kStrided,
                    physical_attr.repeats};
   } else {
+    // 转置稠密+零步长广播轴的混合布局仅对 SIMT 放行：SIMT 直读 GM 按 strides 寻址
+    // （置换视图片 kStrided 寻址既有支持），零步长轴等价于重复读同一物理元素；SIMD 的
+    // UB staging 与 SK workspace 的 store 段按行主序批量搬运，不接受该混合布局。
+    // 既有"单调+零步长"容忍分支（allow_non_overlapping_zero_stride）语义不变，SK 照旧。
     GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::ClassifyIndirectLoadLayout(
         view, plan.layout,
         (template_id == ascir::TemplateId::kIndirectLoadSimt || template_id == ascir::TemplateId::kIndirectLoadSK) &&
-            has_broadcast));
+            has_broadcast,
+        template_id == ascir::TemplateId::kIndirectLoadSimt && has_broadcast));
     if (template_id == ascir::TemplateId::kIndirectLoadSK && has_broadcast &&
         plan.layout.kind == ascgen_utils::indirect_load::IndirectLoadLayoutKind::kStrided) {
       plan.layout.physical_repeats = physical_attr.repeats;
@@ -650,6 +655,60 @@ af::Status ApplyTemplatePathLayouts(const af::AscNodePtr &indirect_load, ascir::
   return af::SUCCESS;
 }
 
+// 折叠与搬移互相暴露输入：Broadcast 折叠后 Cast 才成为直接生产者（Cast→Bc 交错），
+// Cast 搬走后 Broadcast 才成为直接生产者（Bc→Cast 交错）。收敛保证：每个 Broadcast
+// 最多被折一次（不可逆删节点）+ 节点只从 IL 上游单向移到下游（不可能回移）
+// => 轮数 <= 链上 Broadcast 数 + 1。仅 SIMT 需要多轮（SIMD/SK 的折叠是一次性的，
+// RewriteInputPreNodes 单次即可搬完可搬链）。命中上限且 boundary 仍非 Load 时 WARN。
+af::Status RewriteInputChainToFixpoint(af::AscGraph &graph, const af::AscNodePtr &indirect_load,
+                                       ascir::TemplateId template_id, PhysicalViewPreparation &preparation,
+                                       RewrittenGraphAnalysis &analysis, bool &is_candidate_legal) {
+  constexpr size_t kMaxRewritePasses = 8UL;
+  bool hit_cap = false;
+  for (size_t pass = 0UL; pass < kMaxRewritePasses; ++pass) {
+    const auto producer_before =
+        ascgen_utils::indirect_load::GetInputProducer(indirect_load, ascgen_utils::indirect_load::kInputTensorIndex);
+    // pass>0 时按当前图重新收集输入路径（pass0 已在 PreparePhysicalViews 收集过）。
+    // load_transpose/layout 等派生字段不重置（SIMT 保留 Transpose 形态下
+    // GetLoadTransposeSource 会在 CollectRewrittenBoundaries 兜底，不受影响）。
+    if (pass > 0UL) {
+      preparation.input.path.clear();
+      preparation.index.path.clear();
+      CollectInputPaths(indirect_load, template_id, preparation);
+    }
+    GE_ASSERT_SUCCESS(RewriteBroadcastPaths(indirect_load, template_id, preparation, analysis, is_candidate_legal));
+    if (!is_candidate_legal) {
+      return af::SUCCESS;
+    }
+    // RewriteInputPreNodes 末尾有 TopologicalSorting（幂等），多轮冗余但安全；
+    // 排序只在最后一轮被 CollectRewrittenRegion 消费，如需优化可参数化控制时机。
+    GE_ASSERT_SUCCESS(RewriteInputPreNodes(graph, indirect_load, template_id));
+    // SIMD/SK 折叠一次性完成，无需多轮。
+    if (template_id != ascir::TemplateId::kIndirectLoadSimt) {
+      break;
+    }
+    if (ascgen_utils::indirect_load::GetInputProducer(indirect_load, ascgen_utils::indirect_load::kInputTensorIndex) ==
+        producer_before) {
+      break;
+    }
+    if (pass + 1UL == kMaxRewritePasses) {
+      hit_cap = true;
+    }
+  }
+  // 仅 SIMT 且真正跑满上限时 WARN（早退不刷；ValidateSimtTemplateRegion 的 INFO
+  // 已覆盖通用拒绝，此处只补"循环尽了仍没收敛"的诊断信号）。
+  if (template_id == ascir::TemplateId::kIndirectLoadSimt && hit_cap) {
+    const auto final_boundary =
+        ascgen_utils::indirect_load::GetInputProducer(indirect_load, ascgen_utils::indirect_load::kInputTensorIndex);
+    if (final_boundary != nullptr && !af::ops::IsOps<af::ascir_op::Load>(final_boundary) &&
+        GetLoadTransposeSource(final_boundary) == nullptr) {
+      GELOGW("[IndirectLoad] SIMT boundary[%s(%s)] is not Load after rewrite loop cap.", final_boundary->GetNamePtr(),
+             final_boundary->GetTypePtr());
+    }
+  }
+  return af::SUCCESS;
+}
+
 af::Status AnalyzeRewrittenGraph(af::AscGraph &graph, const af::AscNodePtr &indirect_load,
                                  ascir::TemplateId template_id, bool &is_candidate_legal,
                                  RewrittenGraphAnalysis &analysis) {
@@ -674,9 +733,8 @@ af::Status AnalyzeRewrittenGraph(af::AscGraph &graph, const af::AscNodePtr &indi
   analysis.index_load_transposed = preparation.index.load_transpose != nullptr;
   analysis.simd_index_uses_output_inner_axis = preparation.index.simd_index_uses_output_inner_axis;
 
-  // SK 跳过 input-pre 搬移；SIMD/SIMT 将 input-pre 单目元素链搬到 IndirectLoad 之后。
-  GE_ASSERT_SUCCESS(RewriteInputPreNodes(graph, indirect_load, template_id));
-  GE_ASSERT_SUCCESS(RewriteBroadcastPaths(indirect_load, template_id, preparation, analysis, is_candidate_legal));
+  GE_ASSERT_SUCCESS(
+      RewriteInputChainToFixpoint(graph, indirect_load, template_id, preparation, analysis, is_candidate_legal));
   if (!is_candidate_legal) {
     return af::SUCCESS;
   }

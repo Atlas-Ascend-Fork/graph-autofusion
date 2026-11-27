@@ -145,6 +145,60 @@ af::Status CollectIndirectLoadEntry(const ascir::HintGraph &graph, af::AscNodePt
   return af::SUCCESS;
 }
 
+namespace {
+// [L2 降级预判] 在候选图副本上走完整链（SetTemplateId → 归一化 →
+// FinalizeLoweringMetadata → PlanSimtEmission），预测结构性 L2 候选是否降级。
+// 契约：pre_judged 仅在 PlanSimtEmission 真正执行后置 true——任何早退分支
+// （归一化失败/元数据失败）保持 false + GELOGW，调用方据此回退正常计算，
+// 绝不将零值 plan 当真 plan 复用（SimtEmissionPlan{} 的 register_merge=false
+// 恰好是合法 L4 档位，静默复用会把 L2 主路径打到 L4）。
+af::Status PreJudgeL2Degradation(const af::AscGraph &graph, const std::vector<af::AscNodePtr> &members,
+                                 const ascgen_utils::indirect_load::SimtFusedMergeInfo &merge_info,
+                                 ascir::TemplateId template_id, SimtEmissionPlan &early_plan, bool &will_degrade,
+                                 bool &pre_judged) {
+  will_degrade = false;
+  pre_judged = false;
+  ascir::ImplGraph pre_graph(graph.GetName().c_str());
+  GE_ASSERT_TRUE(pre_graph.CopyFrom(graph), "Failed to copy graph for L2 degradation pre-judgment.");
+  std::vector<af::AscNodePtr> pre_members;
+  for (const af::AscNodePtr &member : members) {
+    const af::AscNodePtr pre_member = pre_graph.FindNode(member->GetName().c_str());
+    GE_ASSERT_NOTNULL(pre_member, "Pre-judgment member[%s] not found in copy.", member->GetNamePtr());
+    GE_ASSERT_SUCCESS(::ascir::SetTemplateId(pre_member, template_id));
+    pre_members.emplace_back(pre_member);
+  }
+  bool pre_legal = true;
+  GE_ASSERT_SUCCESS(NormalizeSimtAxesForGroupTemplate(pre_graph, pre_members, nullptr, pre_legal, 0UL));
+  if (!pre_legal) {
+    GELOGW("[IndirectLoad] Pre-judge bailed: normalization failed, falling back to normal plan.");
+    return af::SUCCESS;
+  }
+  bool pre_all_u32 = true;
+  for (const af::AscNodePtr &pre_member : pre_members) {
+    bool metadata_ok = false;
+    GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::FinalizeLoweringMetadata(pre_member, metadata_ok));
+    if (!metadata_ok) {
+      GELOGW("[IndirectLoad] Pre-judge bailed: metadata failed for node[%s], falling back to normal plan.",
+             pre_member->GetNamePtr());
+      return af::SUCCESS;
+    }
+    ascgen_utils::indirect_load::IndirectLoadLoweringMetadata metadata;
+    GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::GetLoweringMetadata(pre_member, metadata));
+    if (metadata.simt.policy.offset_width != ascgen_utils::indirect_load::SimtOffsetWidth::kUint32) {
+      pre_all_u32 = false;
+      break;
+    }
+  }
+  GE_ASSERT_SUCCESS(PlanSimtEmission(merge_info, pre_all_u32, early_plan));
+  will_degrade = !early_plan.register_merge;
+  pre_judged = true;
+  GELOGI("[IndirectLoad] L2 degradation pre-judgment: will_degrade=%s (N=%zu, demand=%llu).",
+         will_degrade ? "true" : "false", static_cast<size_t>(merge_info.member_count),
+         static_cast<unsigned long long>(early_plan.demand));
+  return af::SUCCESS;
+}
+}  // namespace
+
 // 多 gather 水平融合候选流水：逐 IL 复用单 gather 的分析/校验/标注/元数据机制，仅轴归一化
 // 改为共享模板轴（NormalizeSimdAxesForGroupTemplate / NormalizeSimtAxesForGroupTemplate）。
 // G≥R、复合 Norm 等输出侧校验对组内各路判定必然一致（axis 相同、输出边界相同），逐 IL 执行
@@ -296,6 +350,9 @@ af::Status ApplyGraphPassGroup(af::AscGraph &graph, const IndirectLoadGroup &gro
   // 其后仍有保留轴）时与单 gather 同口径拒绝本候选，由其余候选/回退承接。post_reduce 在
   // 下方组员计划收窄处置空，故先保存。
   af::AscNodePtr group_post_reduce = nullptr;
+  bool l2_will_degrade = false;
+  SimtEmissionPlan early_emission_plan = {};
+  bool l2_pre_judged = false;
   if (is_simt) {
     group_post_reduce = analyses.front().post_reduce;
     if (group_post_reduce != nullptr) {
@@ -441,12 +498,14 @@ af::Status ApplyGraphPassGroup(af::AscGraph &graph, const IndirectLoadGroup &gro
     // 取 boundary=rank-1（outer=行/批、inner=最内轴），与边界化单 gather 同形态，避免整空间
     // 布局导致调用被提升、输出链脱离循环。其它形态（L2 结构候选、有 Reduce 的组）不变。
     const size_t group_output_rank = members.front()->outputs()[0]->attr.axis.size();
-    // 判据不含 forward_node_count：空链组（value 直出 Store）同样按逐 tile 布局发射，
-    // 与有链组统一，Store 由普通调度发射，行为正确且无需特判。
-    const bool l3_no_reduce_layout =
-        !merge_info.l2_structural && (group_post_reduce == nullptr) && (group_output_rank > 1UL);
+    if (merge_info.l2_structural && group_post_reduce == nullptr) {
+      GE_ASSERT_SUCCESS(PreJudgeL2Degradation(graph, members, merge_info, template_id, early_emission_plan,
+                                              l2_will_degrade, l2_pre_judged));
+    }
+    const bool use_l3_layout =
+        (group_post_reduce == nullptr) && (group_output_rank > 1UL) && (!merge_info.l2_structural || l2_will_degrade);
     GE_ASSERT_SUCCESS(NormalizeSimtAxesForGroupTemplate(graph, members, group_post_reduce, is_candidate_legal,
-                                                        l3_no_reduce_layout ? (group_output_rank - 1UL) : 0UL));
+                                                        use_l3_layout ? (group_output_rank - 1UL) : 0UL));
     if (!is_candidate_legal) {
       return af::SUCCESS;
     }
@@ -455,7 +514,7 @@ af::Status ApplyGraphPassGroup(af::AscGraph &graph, const IndirectLoadGroup &gro
     // 下游视图与模板轴系失配（Reduce 对齐推断读到不在本张量轴列表里的轴 id）。成员 value
     // tensor 的视图播种（actual_size 的直接来源）同位补齐——单 gather 靠输出重定向的 id
     // 绑定隐式完成，组路径必须显式播种。无共享 Reduce 的组保持原行为。
-    if (group_post_reduce != nullptr || l3_no_reduce_layout) {
+    if (group_post_reduce != nullptr || use_l3_layout) {
       if (group_post_reduce != nullptr) {
         GE_ASSERT_SUCCESS(SeedPostReduceInputVectorizedView(members.front(), group_post_reduce));
       }
@@ -530,7 +589,11 @@ af::Status ApplyGraphPassGroup(af::AscGraph &graph, const IndirectLoadGroup &gro
     }
     // [发射计划落定] 形态/压力/线程档一次性判定（单一真值源，见 PlanSimtEmission）。
     SimtEmissionPlan emission_plan;
-    GE_ASSERT_SUCCESS(PlanSimtEmission(merge_info, all_offset_uint32, emission_plan));
+    if (l2_pre_judged) {
+      emission_plan = early_emission_plan;
+    } else {
+      GE_ASSERT_SUCCESS(PlanSimtEmission(merge_info, all_offset_uint32, emission_plan));
+    }
     use_fused_emission = emission_plan.use_fused;
     merge_info.register_merge = emission_plan.register_merge;
     merge_info.max_thread_tier = emission_plan.max_thread_tier;

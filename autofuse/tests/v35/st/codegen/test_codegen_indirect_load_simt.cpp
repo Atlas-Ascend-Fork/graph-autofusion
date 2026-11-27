@@ -31,6 +31,8 @@
 #include "platform_context.h"
 #include "runtime_stub.h"
 #include "v35/codegen/reg_api_call/reg_indirect_load_api_call.h"
+#include "v35/codegen/vec_func_call/vec_func_call.h"
+#include "graph/utils/node_utils_ex.h"
 
 namespace {
 using namespace af::ops;
@@ -1116,6 +1118,57 @@ TEST(CodegenIndirectLoadSimtSt, EmbeddingStaticKeepsSingleBody) {
 
 // [ST 覆盖·kStrided 基线] 动态 kStrided（rank2/axis1 尾轴 gather）非 embedding 门控：
 // 覆盖双发判定的 kStrided 尾段拒绝路径（rank==3/axis==1 才 eligible），保持单 body。
+// [ST 覆盖·转置输入发射] 输入逻辑视图为非单调（转置）strides 时，SIMT 发射端生成
+// 单 body 的 strided 寻址（坐标按维独立乘加，不依赖单调性）。图复用 kStrided 基线
+// （rank2），仅输入视图改标转置 strides；转置+零步长广播轴的分类语义由 UT 分类
+// 用例锁定，零步长轴 repeats=1 的发射消费由 E2E 端到端覆盖。
+void AnnotateStSimtTransposedStridedTemplate(af::AscGraph &graph) {
+  auto il = graph.FindNode("indirect_load");
+  ASSERT_NE(il, nullptr);
+  ASSERT_EQ(::ascir::SetTemplateId(il, ::ascir::TemplateId::kIndirectLoadSimt), af::SUCCESS);
+  ASSERT_EQ(SetImplementation(il, Implementation::kDefault), af::SUCCESS);
+  const auto input_load = graph.FindNode("x_load");
+  const auto index_load = graph.FindNode("idx_load");
+  const auto store = graph.FindNode("store");
+  ASSERT_NE(input_load, nullptr);
+  ASSERT_NE(index_load, nullptr);
+  ASSERT_NE(store, nullptr);
+  ASSERT_EQ(SetTemplateRole(input_load, TemplateRole::kSimtInputBoundary), af::SUCCESS);
+  ASSERT_EQ(SetTemplateRole(index_load, TemplateRole::kSimtDirectGmBoundary), af::SUCCESS);
+  ASSERT_EQ(SetTemplateRole(store, TemplateRole::kSimtDirectGmBoundary), af::SUCCESS);
+
+  auto axes = graph.GetAllAxis();
+  af::AxisId outer_id = af::kIdNone;
+  for (const auto &axis : axes) {
+    if (axis == nullptr) continue;
+    if (axis->name == "z2z3") outer_id = axis->id;
+  }
+  ASSERT_NE(outer_id, af::kIdNone);
+  TemplateAxes t{outer_id, af::kIdNone, af::kIdNone};
+  ASSERT_EQ(SetTemplateAxes(il, t), af::SUCCESS);
+
+  const af::Expression One = af::sym::kSymbolOne;
+  TemplateLogicalView view;
+  // 转置视图：dim0 stride=1、dim1 stride=s0（行主序单调性在 dim0 违例，倍数链 1→s0 证明）。
+  view.input.axis_ids = {axes[0]->id, axes[1]->id};
+  view.input.sizes = {graph.FindAxis(axes[0]->id)->size, graph.FindAxis(axes[1]->id)->size};
+  view.input.strides = {One, graph.FindAxis(axes[0]->id)->size};
+  view.index.axis_ids = {axes[2]->id, axes[3]->id};
+  view.index.sizes = {graph.FindAxis(axes[2]->id)->size, graph.FindAxis(axes[3]->id)->size};
+  view.index.strides = {graph.FindAxis(axes[3]->id)->size, One};
+  view.output.axis_ids = {axes[2]->id, axes[3]->id};
+  view.output.sizes = {graph.FindAxis(axes[2]->id)->size, graph.FindAxis(axes[3]->id)->size};
+  view.output.strides = {graph.FindAxis(axes[3]->id)->size, One};
+  // 纯转置（无广播轴）的倍数链证明是既有能力：默认参数即判 kStrided（回归见 UT
+  // ClassifiesTransposedDenseLayoutAsStrided）。此处按 AnalyzeInputPath 的 SIMT
+  // 调用参数分类并断言 kStrided，使发射端走 strided 路径；转置+零步长广播轴的
+  // 分类语义由 UT 分类用例锁定。
+  ASSERT_EQ(ClassifyIndirectLoadLayout(view.input, view.input, false, true), af::SUCCESS);
+  ASSERT_EQ(view.input.kind, IndirectLoadLayoutKind::kStrided);
+  ASSERT_EQ(ClassifyIndirectLoadLayout(view.index, view.index), af::SUCCESS);
+  ASSERT_EQ(SetTemplateLogicalView(il, view), af::SUCCESS);
+}
+
 TEST(CodegenIndirectLoadSimtSt, StridedDynamicKeepsSingleBody) {
   IndirectLoadSimtStContext context;
   IndirectLoadSimtStGraph g("st_simt_strided_dynamic");
@@ -1146,6 +1199,39 @@ TEST(CodegenIndirectLoadSimtSt, StridedDynamicKeepsSingleBody) {
   EXPECT_EQ(definition.find("IndirectLoadSimtBody_indirect_load_u32"), std::string::npos)
       << "rank2/axis1 strided must not dual emit.";
   EXPECT_EQ(definition.find("use_u32"), std::string::npos) << "strided must not emit a runtime width switch.";
+}
+
+// 转置（非单调 strides）输入视图：分类为 kStrided 后，SIMT 发射端按维独立乘加寻址
+// 生成单 body，不依赖 strides 单调性。
+TEST(CodegenIndirectLoadSimtSt, TransposedStridedInputEmitsSingleBody) {
+  IndirectLoadSimtStContext context;
+  IndirectLoadSimtStGraph g("st_simt_transposed_strided_dynamic");
+  BuildStSimtStridedGraph(g);
+  AnnotateStSimtTransposedStridedTemplate(g.graph);
+
+  Tiler tiler;
+  SetupIndirectLoadStTiler(g.graph, tiler);
+  TPipe tpipe("tpipe", tiler);
+  tpipe.CollectQues(g.graph);
+  auto il_node = g.graph.FindNode("indirect_load");
+  ASSERT_NE(il_node, nullptr);
+  IndirectLoadRegApiCall call("IndirectLoadRegApiCall");
+  ASSERT_EQ(call.Init(il_node), af::SUCCESS);
+  ApiTensor x1, x2;
+  x1.id = il_node->inputs[0].attr.mem.tensor_id;
+  x2.id = il_node->inputs[1].attr.mem.tensor_id;
+  call.inputs.push_back(&x1);
+  call.inputs.push_back(&x2);
+  tpipe.AddTensor(il_node->inputs[0]);
+  tpipe.AddTensor(il_node->inputs[1]);
+
+  std::stringstream ss;
+  ASSERT_EQ(call.GenerateFuncDefinition(tpipe, tiler, ss), af::SUCCESS);
+  const std::string definition = ss.str();
+  EXPECT_NE(definition.find("struct IndirectLoadSimtBody_indirect_load"), std::string::npos)
+      << "the transposed strided path must keep a single body.";
+  EXPECT_EQ(definition.find("use_u32"), std::string::npos)
+      << "transposed strided must not emit a runtime width switch.";
 }
 
 // [ST 覆盖·post-Reduce] 定义路径双发（定义/调用共用 DecideDualOffsetBody 唯一入口，
@@ -1191,4 +1277,161 @@ TEST(CodegenIndirectLoadSimtSt, EmbeddingPostReduceStillDualEmits) {
   // 此处翻转 prepass_active 重求值走排除臂并触发漂移可见日志（GELOGW 属预期日志噪音），
   // 返回值仍须为缓存首答（定义/调用物理一致的关键）。
   EXPECT_TRUE(call.DecideDualOffsetBody(true)) << "the cached first answer must survive prepass flip.";
+}
+
+// ==================== post-Reduce 输出重定向 × VF boundary Load ====================
+
+// VF 子图链 sub_x -> sub_load -> abs -> sub_store -> sub_output：单轴 z2，
+// boundary Load 形态与分区器产物同构（sub_x 经 vf 根输入映射到根图生产者边）。
+void BuildStVfBoundarySubGraph(af::AscGraph &sub_graph, const af::AxisId z2, const af::Expression &s2) {
+  Data sub_x_op("sub_x", sub_graph);
+  sub_x_op.ir_attr.SetIndex(0);
+  sub_x_op.attr.api.unit = af::ComputeUnit::kUnitNone;
+  Load sub_load_op("sub_load");
+  Abs abs_op("abs");
+  Store sub_store_op("sub_store");
+  Output sub_output_op("sub_output");
+  sub_output_op.ir_attr.SetIndex(0);
+  sub_output_op.attr.api.unit = af::ComputeUnit::kUnitNone;
+
+  sub_load_op.x = sub_x_op.y;
+  sub_load_op.attr.sched.axis = {z2};
+  sub_load_op.attr.sched.loop_axis = -1;
+  *sub_load_op.y.axis = {z2};
+  *sub_load_op.y.repeats = {s2};
+  *sub_load_op.y.strides = {af::sym::kSymbolOne};
+
+  abs_op.x = sub_load_op.y;
+  abs_op.attr.sched.axis = {z2};
+  abs_op.attr.sched.loop_axis = -1;
+  *abs_op.y.axis = {z2};
+  *abs_op.y.repeats = {s2};
+  *abs_op.y.strides = {af::sym::kSymbolOne};
+
+  sub_store_op.x = abs_op.y;
+  sub_store_op.attr.sched.axis = {z2};
+  sub_store_op.attr.sched.loop_axis = -1;
+  *sub_store_op.y.axis = {z2};
+  *sub_store_op.y.repeats = {s2};
+  *sub_store_op.y.strides = {af::sym::kSymbolOne};
+
+  sub_output_op.x = sub_store_op.y;
+}
+
+// 根图挂 VectorFunc 消费链 vf -> store2 -> y2；il 的输出边作 vf 输入（图边 tensor
+// 保持分区快照语义）。il 句柄由图节点重建（Build 函数内的 op 句柄已析构）。
+void AttachStVfBoundaryRoot(IndirectLoadSimtStGraph &g, VectorFunc &vf_op, Store &store_op, Output &y_op) {
+  IndirectLoad il_handle("indirect_load");
+  const auto il_node = g.graph.FindNode("indirect_load");
+  ASSERT_NE(il_node, nullptr);
+  ASSERT_EQ(af::NodeUtilsEx::SetNodeToOperator(il_handle, il_node), ge::GRAPH_SUCCESS);
+  g.graph.AddNode(store_op);
+  g.graph.AddNode(y_op);
+  af::AscGraph vf_sub_graph("vf_boundary_sub");
+  BuildStVfBoundarySubGraph(vf_sub_graph, g.z2.id, g.s2);
+  g.graph.AddSubGraph(vf_sub_graph);
+  vf_op.SetAttr("sub_graph_name", "vf_boundary_sub");
+  vf_op.InstanceOutputy(1);
+  vf_op.x = {il_handle.y};
+  *vf_op.y[0].axis = {g.z2.id};
+  *vf_op.y[0].repeats = {g.s2};
+  *vf_op.y[0].strides = {af::sym::kSymbolOne};
+
+  store_op.x = vf_op.y[0];
+  store_op.ir_attr.SetOffset(af::ops::Zero);
+  *store_op.y.axis = {g.z2.id};
+  *store_op.y.repeats = {g.s2};
+  *store_op.y.strides = {af::sym::kSymbolOne};
+
+  y_op.ir_attr.SetIndex(1);
+  y_op.x = store_op.y;
+  y_op.y.dtype = ge::DT_FLOAT16;
+}
+
+// vf/store2 节点输出 attr：vf 输出注册为新 UB 队列 tensor，子图计算节点输出按
+// 分区中间态补齐 position/tensor id。
+void SetStVfBoundaryTensorAttrs(IndirectLoadSimtStGraph &g) {
+  auto set_vec_in = [](const af::AscNodePtr &node, const af::AxisId z2, const int64_t tensor_id) {
+    node->outputs[0].attr.vectorized_axis = {z2};
+    node->outputs[0].attr.vectorized_strides = {af::sym::kSymbolOne};
+    node->outputs[0].attr.dtype = ge::DT_FLOAT16;
+    node->outputs[0].attr.mem.position = af::Position::kPositionVecIn;
+    node->outputs[0].attr.mem.tensor_id = tensor_id;
+  };
+  af::AscGraph vf_sub_graph("vf_boundary_sub");
+  ASSERT_EQ(g.graph.FindSubGraph("vf_boundary_sub", vf_sub_graph), af::SUCCESS);
+  auto sub_load = vf_sub_graph.FindNode("sub_load");
+  ASSERT_NE(sub_load, nullptr);
+  sub_load->attr.sched.loop_axis = -1;
+  set_vec_in(sub_load, g.z2.id, 12);
+  auto abs = vf_sub_graph.FindNode("abs");
+  ASSERT_NE(abs, nullptr);
+  abs->attr.sched.loop_axis = -1;
+  set_vec_in(abs, g.z2.id, 13);
+  auto sub_store = vf_sub_graph.FindNode("sub_store");
+  ASSERT_NE(sub_store, nullptr);
+  sub_store->attr.sched.loop_axis = -1;
+  set_vec_in(sub_store, g.z2.id, 14);
+
+  auto vf = g.graph.FindNode("vf");
+  ASSERT_NE(vf, nullptr);
+  vf->attr.sched.loop_axis = -1;
+  vf->outputs[0].attr.vectorized_axis = {g.z2.id};
+  vf->outputs[0].attr.vectorized_strides = {af::sym::kSymbolOne};
+  vf->outputs[0].attr.dtype = ge::DT_FLOAT16;
+  vf->outputs[0].attr.mem.position = af::Position::kPositionVecIn;
+  vf->outputs[0].attr.mem.tensor_id = 10;
+  vf->outputs[0].attr.mem.alloc_type = af::AllocType::kAllocTypeQueue;
+  vf->outputs[0].attr.que.id = 6;
+  vf->outputs[0].attr.opt.merge_scope = af::kIdNone;
+}
+
+// post-Reduce 输出重定向后，IL ApiCall 输出 id 与图边快照 id 不同源；VF 消费该边时
+// 函数定义必须把 boundary Load 校正到重定向后的 id（与签名/实参同源），否则函数体
+// 引用无写入也无声明的旧 buffer。覆盖 VfCall boundary 改写映射构建、递归改写与
+// UB 输入 id 校正的完整路径（ST_report 增量行覆盖）。
+TEST(CodegenIndirectLoadSimtSt, EmbeddingPostReduceRedirectsVfBoundaryLoad) {
+  IndirectLoadSimtStContext context;
+  IndirectLoadSimtStGraph g("st_simt_post_reduce_vf_boundary");
+  BuildStSimtEmbeddingPostReduceGraph(g);
+  AnnotateStSimtEmbeddingPostReduceTemplate(g.graph);
+
+  Tiler tiler;
+  SetupIndirectLoadStTiler(g.graph, tiler);
+  TPipe tpipe("tpipe", tiler);
+  tpipe.CollectQues(g.graph);
+  auto il_node = g.graph.FindNode("indirect_load");
+  ASSERT_NE(il_node, nullptr);
+  IndirectLoadRegApiCall il_call("IndirectLoadRegApiCall");
+  ASSERT_EQ(il_call.Init(il_node), af::SUCCESS);
+  // post-Reduce 候选在 Init 内改写输出 id：ApiCall 输出指向合成链 result tensor。
+  ASSERT_EQ(il_call.outputs[0].id, 6) << "post-reduce must redirect the output id.";
+
+  VectorFunc vf_op("vf");
+  Store store_op("store2");
+  Output y_op("y2");
+  AttachStVfBoundaryRoot(g, vf_op, store_op, y_op);
+  SetStVfBoundaryTensorAttrs(g);
+  tpipe.AddTensor(g.graph.FindNode("output_transform")->outputs[0]);
+  tpipe.AddTensor(g.graph.FindNode("vf")->outputs[0]);
+
+  VfCall vf_call;
+  ASSERT_EQ(vf_call.Init(g.graph.FindNode("vf")), af::SUCCESS);
+  vf_call.inputs.push_back(&il_call.outputs[0]);
+  std::stringstream ss;
+  ASSERT_EQ(vf_call.GenerateFuncDefinition(tpipe, tiler, ss), af::SUCCESS);
+  const std::string definition = ss.str();
+
+  const auto load_align_offset = definition.find("LoadAlign");
+  ASSERT_NE(load_align_offset, std::string::npos) << definition;
+  const auto line_begin = definition.rfind('\n', load_align_offset);
+  const auto line_end = definition.find('\n', load_align_offset);
+  const auto load_align_line =
+      definition.substr(line_begin == std::string::npos ? 0UL : line_begin + 1UL,
+                        line_end == std::string::npos ? std::string::npos : line_end - line_begin - 1UL);
+  EXPECT_NE(load_align_line.find("local_6"), std::string::npos)
+      << "the boundary Load must read the redirected tensor: " << load_align_line;
+  EXPECT_EQ(load_align_line.find("local_1"), std::string::npos)
+      << "the boundary Load must not read the stale edge tensor: " << load_align_line;
+  EXPECT_NE(definition.find("local_6_addr"), std::string::npos) << "the signature must use the redirected tensor.";
 }

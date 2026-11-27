@@ -110,7 +110,8 @@ class AscBackendGraph {
 // 接尾轴 Sum 共享 AR 后置 Reduce（L3 UB 归并 + 逐 tile 调用形态）。
 std::shared_ptr<af::AscGraph> BuildSharedIndexDualGatherGraph(const bool with_post_reduce = false,
                                                               const bool single_node_chain = false,
-                                                              const bool long_broadcast_chain = false) {
+                                                              const bool long_broadcast_chain = false,
+                                                              const bool reverse_member_creation = false) {
   auto graph = std::make_shared<af::AscGraph>("fused_group_codegen_ut_graph");
   const af::Expression rows = graph->CreateSizeVar(8L);
   const af::Expression width = graph->CreateSizeVar(16L);
@@ -140,67 +141,79 @@ std::shared_ptr<af::AscGraph> BuildSharedIndexDualGatherGraph(const bool with_po
   *index_load.y.repeats = output;
   *index_load.y.strides = output_strides;
 
-  af::ascir_op::Data input0("input0", *graph);
-  input0.ir_attr.SetIndex(0);
-  input0.y.dtype = ge::DT_FLOAT16;
-  input0.attr.sched.axis = axes;
-  *input0.y.axis = axes;
-  *input0.y.repeats = table_repeats;
-  *input0.y.strides = table_strides;
+  const auto build_member0 = [&]() {
+    af::ascir_op::Data input0("input0", *graph);
+    input0.ir_attr.SetIndex(0);
+    input0.y.dtype = ge::DT_FLOAT16;
+    input0.attr.sched.axis = axes;
+    *input0.y.axis = axes;
+    *input0.y.repeats = table_repeats;
+    *input0.y.strides = table_strides;
 
-  af::ascir_op::Load input0_load("input0_load");
-  graph->AddNode(input0_load);
-  input0_load.x = input0.y;
-  input0_load.y.dtype = ge::DT_FLOAT16;
-  input0_load.attr.sched.axis = axes;
-  *input0_load.y.axis = axes;
-  *input0_load.y.repeats = table_repeats;
-  *input0_load.y.strides = table_strides;
+    af::ascir_op::Load input0_load("input0_load");
+    graph->AddNode(input0_load);
+    input0_load.x = input0.y;
+    input0_load.y.dtype = ge::DT_FLOAT16;
+    input0_load.attr.sched.axis = axes;
+    *input0_load.y.axis = axes;
+    *input0_load.y.repeats = table_repeats;
+    *input0_load.y.strides = table_strides;
 
-  af::ascir_op::IndirectLoad indirect_load0("indirect_load0");
-  graph->AddNode(indirect_load0);
-  indirect_load0.x1 = input0_load.y;
-  indirect_load0.x2 = index_load.y;
-  indirect_load0.ir_attr.SetAxis(1);
-  indirect_load0.ir_attr.SetNegative_index_support(true);
-  indirect_load0.ir_attr.SetNeed_check_bound(true);
-  indirect_load0.ir_attr.SetMax(input_width);
-  indirect_load0.y.dtype = ge::DT_FLOAT16;
-  indirect_load0.attr.sched.axis = axes;
-  *indirect_load0.y.axis = axes;
-  *indirect_load0.y.repeats = output;
-  *indirect_load0.y.strides = output_strides;
+    af::ascir_op::IndirectLoad indirect_load0("indirect_load0");
+    graph->AddNode(indirect_load0);
+    indirect_load0.x1 = input0_load.y;
+    indirect_load0.x2 = index_load.y;
+    indirect_load0.ir_attr.SetAxis(1);
+    indirect_load0.ir_attr.SetNegative_index_support(true);
+    indirect_load0.ir_attr.SetNeed_check_bound(true);
+    indirect_load0.ir_attr.SetMax(input_width);
+    indirect_load0.y.dtype = ge::DT_FLOAT16;
+    indirect_load0.attr.sched.axis = axes;
+    *indirect_load0.y.axis = axes;
+    *indirect_load0.y.repeats = output;
+    *indirect_load0.y.strides = output_strides;
+  };
+  const auto build_member1 = [&]() {
+    af::ascir_op::Data input1("input1", *graph);
+    input1.ir_attr.SetIndex(1);
+    input1.y.dtype = ge::DT_FLOAT16;
+    input1.attr.sched.axis = axes;
+    *input1.y.axis = axes;
+    *input1.y.repeats = table_repeats;
+    *input1.y.strides = table_strides;
 
-  af::ascir_op::Data input1("input1", *graph);
-  input1.ir_attr.SetIndex(1);
-  input1.y.dtype = ge::DT_FLOAT16;
-  input1.attr.sched.axis = axes;
-  *input1.y.axis = axes;
-  *input1.y.repeats = table_repeats;
-  *input1.y.strides = table_strides;
+    af::ascir_op::Load input1_load("input1_load");
+    graph->AddNode(input1_load);
+    input1_load.x = input1.y;
+    input1_load.y.dtype = ge::DT_FLOAT16;
+    input1_load.attr.sched.axis = axes;
+    *input1_load.y.axis = axes;
+    *input1_load.y.repeats = table_repeats;
+    *input1_load.y.strides = table_strides;
 
-  af::ascir_op::Load input1_load("input1_load");
-  graph->AddNode(input1_load);
-  input1_load.x = input1.y;
-  input1_load.y.dtype = ge::DT_FLOAT16;
-  input1_load.attr.sched.axis = axes;
-  *input1_load.y.axis = axes;
-  *input1_load.y.repeats = table_repeats;
-  *input1_load.y.strides = table_strides;
-
-  af::ascir_op::IndirectLoad indirect_load1("indirect_load1");
-  graph->AddNode(indirect_load1);
-  indirect_load1.x1 = input1_load.y;
-  indirect_load1.x2 = index_load.y;
-  indirect_load1.ir_attr.SetAxis(1);
-  indirect_load1.ir_attr.SetNegative_index_support(true);
-  indirect_load1.ir_attr.SetNeed_check_bound(true);
-  indirect_load1.ir_attr.SetMax(input_width);
-  indirect_load1.y.dtype = ge::DT_FLOAT16;
-  indirect_load1.attr.sched.axis = axes;
-  *indirect_load1.y.axis = axes;
-  *indirect_load1.y.repeats = output;
-  *indirect_load1.y.strides = output_strides;
+    af::ascir_op::IndirectLoad indirect_load1("indirect_load1");
+    graph->AddNode(indirect_load1);
+    indirect_load1.x1 = input1_load.y;
+    indirect_load1.x2 = index_load.y;
+    indirect_load1.ir_attr.SetAxis(1);
+    indirect_load1.ir_attr.SetNegative_index_support(true);
+    indirect_load1.ir_attr.SetNeed_check_bound(true);
+    indirect_load1.ir_attr.SetMax(input_width);
+    indirect_load1.y.dtype = ge::DT_FLOAT16;
+    indirect_load1.attr.sched.axis = axes;
+    *indirect_load1.y.axis = axes;
+    *indirect_load1.y.repeats = output;
+    *indirect_load1.y.strides = output_strides;
+  };
+  // [成员建图序] 默认成员 0 先建（GetAllNodes 序决定组 primary=IL_0）；反转时成员 1
+  // 先建（primary=IL_1）——供 hoist 点 primary 选择的正向覆盖用例复用同一构造器。
+  if (reverse_member_creation) {
+    build_member1();
+    build_member0();
+  } else {
+    build_member0();
+    build_member1();
+  }
 
   af::ascir_op::Scalar scale("scale", *graph);
   scale.ir_attr.SetValue("0.5");
@@ -234,7 +247,8 @@ std::shared_ptr<af::AscGraph> BuildSharedIndexDualGatherGraph(const bool with_po
       chain_tail = graph->FindNode(name.c_str());
     }
     graph->AddNode(scale_mul);
-    scale_mul.x1 = indirect_load0.y;
+    af::Operator member0_long_op = af::OpDescUtils::CreateOperatorFromNode(graph->FindNode("indirect_load0"));
+    scale_mul.x1 = af::AscOpOutput(&member0_long_op, 0U);
     af::Operator tail_op = af::OpDescUtils::CreateOperatorFromNode(chain_tail);
     scale_mul.x2 = af::AscOpOutput(&tail_op, 0U);
     scale_mul.y.dtype = ge::DT_FLOAT16;
@@ -252,7 +266,8 @@ std::shared_ptr<af::AscGraph> BuildSharedIndexDualGatherGraph(const bool with_po
     *scale_broadcast.y.strides = output_strides;
 
     graph->AddNode(scale_mul);
-    scale_mul.x1 = indirect_load0.y;
+    af::Operator member0_op = af::OpDescUtils::CreateOperatorFromNode(graph->FindNode("indirect_load0"));
+    scale_mul.x1 = af::AscOpOutput(&member0_op, 0U);
     scale_mul.x2 = scale_broadcast.y;
     scale_mul.y.dtype = ge::DT_FLOAT16;
     scale_mul.attr.sched.axis = axes;
@@ -263,8 +278,10 @@ std::shared_ptr<af::AscGraph> BuildSharedIndexDualGatherGraph(const bool with_po
 
   af::ascir_op::Add add("add");
   graph->AddNode(add);
-  add.x1 = (single_node_chain && !long_broadcast_chain) ? indirect_load0.y : scale_mul.y;
-  add.x2 = indirect_load1.y;
+  af::Operator member0_add_op = af::OpDescUtils::CreateOperatorFromNode(graph->FindNode("indirect_load0"));
+  add.x1 = (single_node_chain && !long_broadcast_chain) ? af::AscOpOutput(&member0_add_op, 0U) : scale_mul.y;
+  af::Operator member1_op = af::OpDescUtils::CreateOperatorFromNode(graph->FindNode("indirect_load1"));
+  add.x2 = af::AscOpOutput(&member1_op, 0U);
   add.y.dtype = ge::DT_FLOAT16;
   add.attr.sched.axis = axes;
   *add.y.axis = axes;
@@ -549,3 +566,38 @@ TEST(IndirectLoadCodegenFusedGroupTest, Form1LongBroadcastChainFoldsToRegisterMe
 }
 
 }  // namespace
+
+TEST(IndirectLoadCodegenFusedGroupTest, HoistPrefersFusedPrimaryWhenMemberPrecedesPrimary) {
+  // [hoist 点 primary 优先] 多 gather 水平融合的循环树 DFS 序中非 primary 成员可先于
+  // primary 出现（baize gather_fusion_095/096/026/132 实测形态）：通用查找选中成员时其
+  // Generate 仅输出注释，evaluator_owns_output 判“非 primary”为 true 触发提前 return，
+  // primary 的 fused 调用与输出链全部丢失（空内核）。本用例构造成员建图序反转
+  // （primary 为后建的 IL_1）、add 左操作数挂在先建成员 IL_0 链上：正向锁“成员建图/组
+  // 标记顺序不影响融合发射（fused 调用 + 寄存器归并形态不变）”，并覆盖提升选择
+  // 新增的可提升谓词与同组名表归属校验不误伤正常路径；DFS 序成员先于 primary 的
+  // 问题本身由板级 baize 回归（gather_fusion_095/096/026/132）锁定。
+  PlatformContextReset platform_reset;
+  ge::PlatformContext::GetInstance().Reset();
+  ge::PlatformInfo platform_info;
+  platform_info.soc_ver = "3510";
+  platform_info.ub_size = 256 * 1024;
+  platform_info.aiv_num = 48;
+  ge::PlatformContext::GetInstance().SetPlatformInfo(platform_info);
+
+  AscBackendGraph backend("fused_group_member_first_ut_host", {ge::DT_FLOAT16, ge::DT_FLOAT16, ge::DT_INT32},
+                          {ge::DT_FLOAT16});
+  const auto graph = backend.Finalize(BuildSharedIndexDualGatherGraph(false, false, false, true));
+  ASSERT_NE(graph, nullptr);
+  optimize::Optimizer optimizer(optimize::OptimizerOptions{.graph_type = optimize::GraphType::kFusedAscBackend});
+  ascir::FusedScheduledResult scheduled_result;
+  ASSERT_EQ(optimizer.Optimize(graph, scheduled_result), af::SUCCESS);
+
+  codegen::Codegen codegen(codegen::CodegenOptions{});
+  codegen::CodegenResult result;
+  ASSERT_EQ(codegen.Generate({}, scheduled_result, result), af::SUCCESS);
+  EXPECT_NE(result.kernel.find("// IndirectLoad SIMT Fused"), std::string::npos)
+      << "member-before-primary order must still hoist the fused primary invocation.";
+  EXPECT_NE(result.kernel.find("register merge"), std::string::npos);
+  const auto call_pos = result.kernel.find("AscendC::IndirectLoadSimtFused<FusedBody>(ftgt, fctx");
+  ASSERT_NE(call_pos, std::string::npos);
+}

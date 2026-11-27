@@ -1,0 +1,105 @@
+{
+  "platform": "a3",
+  "model_family": "v1",
+  "applicable_implementation": "v1",
+  "api": "Store",
+  "unit": "cycle_per_core_per_call",
+  "source": {
+    "implementation": [
+      "autofuse/att/gen_model_info/api_perf_register/v1/perf_param_v1.cpp",
+      "autofuse/att/gen_model_info/api_perf_register/v1/ascendc_api_perf_v1.cpp"
+    ],
+    "collection_implementation_revision": null,
+    "data": ["A3/mte3_ub2gm_continuous/", "A3/mte3_ub2gm_uncontinuous/", "A3/scripts/mte3_analysis.ipynb"],
+    "measurement_note": "A3 data retains the collection index only; the collection implementation revision is unrecorded, and V1 calibration against these data is not established"
+  },
+  "formula": {
+    "Store": "S / (9.96 + 3.79 / CoreNum) + 12.09",
+    "StoreStride": "0.02 * BlockCount * (Stride % 256)",
+    "pipe_head": "497.36"
+  },
+  "parameters": {
+    "Store": {
+      "model_type": "LoadStoreFunc",
+      "dtype_parameters": {
+        "int64toint64": {"h": 12.09, "a": 9.96, "b": 3.79, "hl": 0, "data_type_size": 8},
+        "float16tofloat16": {"h": 12.09, "a": 9.96, "b": 3.79, "hl": 0, "data_type_size": 2},
+        "float32tofloat32": {"h": 12.09, "a": 9.96, "b": 3.79, "hl": 0, "data_type_size": 4},
+        "uint8touint8": {"h": 12.09, "a": 9.96, "b": 3.79, "hl": 0, "data_type_size": 1},
+        "bfloat16tobfloat16": {"h": 12.09, "a": 9.96, "b": 3.79, "hl": 0, "data_type_size": 2}
+      }
+    },
+    "StoreStride": {
+      "model_type": "LoadStoreStrideFunc",
+      "dtype_parameters": {
+        "int64toint64": {"k": 0.02},
+        "float16tofloat16": {"k": 0.02},
+        "float32tofloat32": {"k": 0.02},
+        "uint8touint8": {"k": 0.02},
+        "bfloat16tobfloat16": {"k": 0.02}
+      }
+    },
+    "StoreLargeBlk": {
+      "model_type": "LoadStoreFunc",
+      "dtype_parameters": {
+        "int64toint64": {"h": 12.09, "a": 9.96, "b": 3.79, "hl": 1, "data_type_size": 8},
+        "float16tofloat16": {"h": 12.09, "a": 9.96, "b": 3.79, "hl": 1, "data_type_size": 2},
+        "float32tofloat32": {"h": 12.09, "a": 9.96, "b": 3.79, "hl": 1, "data_type_size": 4},
+        "uint8touint8": {"h": 12.09, "a": 9.96, "b": 3.79, "hl": 1, "data_type_size": 1},
+        "bfloat16tobfloat16": {"h": 12.09, "a": 9.96, "b": 3.79, "hl": 1, "data_type_size": 2}
+      }
+    },
+    "StoreMiddleBlk": {
+      "model_type": "LoadStoreFunc",
+      "dtype_parameters": {
+        "int64toint64": {"h": 1.3, "a": 2, "b": 0, "hl": 0, "data_type_size": 8},
+        "float16tofloat16": {"h": 1.3, "a": 2, "b": 0, "hl": 0, "data_type_size": 2},
+        "float32tofloat32": {"h": 1.3, "a": 2, "b": 0, "hl": 0, "data_type_size": 4},
+        "uint8touint8": {"h": 1.3, "a": 2, "b": 0, "hl": 0, "data_type_size": 1},
+        "bfloat16tobfloat16": {"h": 1.3, "a": 2, "b": 0, "hl": 0, "data_type_size": 2}
+      }
+    },
+    "StoreSmallBlk": {
+      "model_type": "StoreFunc",
+      "dtype_parameters": {
+        "int64toint64": {"ak": -0.101, "ab": -2.2, "bk": 8.89, "bb": 96.24, "h": 12.09, "data_type_size": 8},
+        "float16tofloat16": {"ak": -0.101, "ab": -2.2, "bk": 8.89, "bb": 96.24, "h": 12.09, "data_type_size": 2},
+        "float32tofloat32": {"ak": -0.101, "ab": -2.2, "bk": 8.89, "bb": 96.24, "h": 12.09, "data_type_size": 4},
+        "uint8touint8": {"ak": -0.101, "ab": -2.2, "bk": 8.89, "bb": 96.24, "h": 12.09, "data_type_size": 1},
+        "bfloat16tobfloat16": {"ak": -0.101, "ab": -2.2, "bk": 8.89, "bb": 96.24, "h": 12.09, "data_type_size": 2}
+      }
+    },
+    "pipe_head": {"value": 497.36, "source": "PerfParamTableV1::GetMte3PipeHead"}
+  },
+  "v35_snapshot": {
+    "applicable_implementation": "v35 only",
+    "parameter_status": "historical_snapshot_not_v1_parameters",
+    "archive_revision": "cdc88a04740e1ca6988eabaa05f8920c1c017b29",
+    "archive_note": "This is the historical v35 base-model snapshot cited by the archive. It predates the current StoreSmallPayload branch and does not describe that branch.",
+    "formula": {
+      "large": "S / (11.774 + 10.265 / CoreNum) + 160",
+      "multiple": "(S / (11.774 + 10.265 / CoreNum) + 160) * ApiCount + 571",
+      "stride_gm": "0.0049922306718019 * BlockCount * min(Stride * dtype_size, 4096)",
+      "stride_ub": null
+    },
+    "parameters": {
+      "large_scale": {"h": 160, "H": 571, "T": {"a": 11.774, "b": 10.265, "form": "T = a + b / CoreNum"}},
+      "small_scale": {"snapshot_model": "historical v35 Store base formula; no StoreSmallPayload entry in the archived revision", "h": 160, "H": 571},
+      "stride_gm": {"dtype": "uint8", "k": 0.0049922306718019, "u": 4096, "penalty_coeff": 0.0},
+      "stride_ub": null
+    },
+    "source": {
+      "implementation": [
+        "autofuse/v35/att/api_perf_register/perf_param_v2.cpp",
+        "autofuse/att/gen_model_info/api_perf_register/utils/api_perf_utils.cpp",
+        "autofuse/v35/att/api_perf_register/ascendc_api_perf/data_move_api_perf_v2.cpp"
+      ]
+    }
+  },
+  "coverage": {
+    "core_num": "1-48; continuous data is missing cores 9 and 43",
+    "shape_B": "512-196608 for continuous data; only 512B is indexed as the small-scale point",
+    "stages": ["continuous", "headcost", "uncontinuous"],
+    "coverage_note": "32B-512B small-payload data is not archived; A3 collection implementation revision is unknown"
+  }
+}

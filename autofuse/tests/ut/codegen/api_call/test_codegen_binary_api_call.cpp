@@ -1340,21 +1340,52 @@ TEST(CodegenKernel, MinWithSecondInputIsScalar) {
   EXPECT_EQ(result, std::string{"AscendC::Mins(local_2[0], local_0[0], (half)1.0, local_0_actual_size);\n"});
 }
 
-TEST(CodegenKernel, brc_inline_apicall_test) {
-  af::AscGraph graph("test_graph");
+namespace {
+// 配置 BrcInline 用例中的 Load 输出张量属性
+void ConfigBrcInlineLoadNode(const af::AscNodePtr &node, af::AxisId z0, af::AxisId z1,
+                             std::vector<af::Expression> vec_strides, int64_t tensor_id, int64_t que_id) {
+  node->attr.api.compute_type = af::ComputeType::kComputeLoad;
+  node->attr.api.type = af::ApiType::kAPITypeCompute;
+  node->attr.api.unit = af::ComputeUnit::kUnitMTE2;
+  node->attr.sched.loop_axis = z0;
+  node->outputs[0].attr.vectorized_axis = {z0, z1};
+  node->outputs[0].attr.vectorized_strides = vec_strides;
+  node->outputs[0].attr.dtype = ge::DT_FLOAT;
+  node->outputs[0].attr.mem.position = af::Position::kPositionVecIn;
+  node->outputs[0].attr.mem.tensor_id = tensor_id;
+  node->outputs[0].attr.mem.alloc_type = af::AllocType::kAllocTypeQueue;
+  node->outputs[0].attr.que.id = que_id;
+  node->outputs[0].attr.opt.merge_scope = af::kIdNone;
+}
 
-  auto s0 = graph.CreateSizeVar("s0");
-  auto s1 = graph.CreateSizeVar("s1");
-
+// 配置 BrcInline 用例中的 Add 输出张量属性
+void ConfigBrcInlineAddNode(const af::AscNodePtr &node, af::AxisId z0, af::AxisId z1,
+                            std::vector<af::Expression> vec_strides, int64_t tensor_id, int64_t que_id) {
+  node->attr.api.unit = af::ComputeUnit::kUnitVector;
+  node->outputs[0].attr.vectorized_axis = {z0, z1};
+  node->outputs[0].attr.vectorized_strides = vec_strides;
+  node->outputs[0].attr.dtype = ge::DT_FLOAT;
+  node->outputs[0].attr.mem.position = af::Position::kPositionVecOut;
+  node->outputs[0].attr.mem.tensor_id = tensor_id;
+  node->outputs[0].attr.mem.alloc_type = af::AllocType::kAllocTypeQueue;
+  node->outputs[0].attr.que.id = que_id;
+  node->outputs[0].attr.opt.merge_scope = af::kIdNone;
+}
+// 构建 BrcInline 用例的整图（含 Load/Add 的输入输出轴与步长）
+void BuildBrcInlineApicallGraph(af::AscGraph &graph, af::Expression &s0, af::Expression &s1, af::AxisId &z0_id,
+                                af::AxisId &z1_id) {
+  s0 = graph.CreateSizeVar("s0");
+  s1 = graph.CreateSizeVar("s1");
   auto z0 = graph.CreateAxis("z0", s0);
   auto z1 = graph.CreateAxis("z1", s1);
+  z0_id = z0.id;
+  z1_id = z1.id;
 
   Data x1_op("x1", graph);
   Data x2_op("x2", graph);
   Load load_op1("load1");
   Load load_op2("load2");
   af::ascir_op::Add add_op("add");
-
   graph.AddNode(load_op1);
   graph.AddNode(load_op2);
   graph.AddNode(add_op);
@@ -1377,58 +1408,33 @@ TEST(CodegenKernel, brc_inline_apicall_test) {
   *add_op.y.axis = {z0.id, z1.id};
   *add_op.y.repeats = {s0, s1};
   *add_op.y.strides = {s1, One};
+}
+}  // namespace
+
+TEST(CodegenKernel, brc_inline_apicall_test) {
+  af::AscGraph graph("test_graph");
+  af::Expression s0, s1;
+  af::AxisId z0_id = af::kIdNone, z1_id = af::kIdNone;
+  BuildBrcInlineApicallGraph(graph, s0, s1, z0_id, z1_id);
 
   auto load1 = graph.FindNode("load1");
-  load1->attr.api.compute_type = af::ComputeType::kComputeLoad;
-  load1->attr.api.type = af::ApiType::kAPITypeCompute;
-  load1->attr.api.unit = af::ComputeUnit::kUnitMTE2;
-  load1->attr.sched.loop_axis = z0.id;
-  load1->outputs[0].attr.vectorized_axis = {z0.id, z1.id};
-  load1->outputs[0].attr.vectorized_strides = {s1, One};
-  load1->outputs[0].attr.dtype = ge::DT_FLOAT;
-  load1->outputs[0].attr.mem.position = af::Position::kPositionVecIn;
-  load1->outputs[0].attr.mem.tensor_id = 0;
-  load1->outputs[0].attr.mem.position = af::Position::kPositionVecIn;
-  load1->outputs[0].attr.mem.alloc_type = af::AllocType::kAllocTypeQueue;
-  load1->outputs[0].attr.que.id = 1;
-  load1->outputs[0].attr.opt.merge_scope = af::kIdNone;
+  ConfigBrcInlineLoadNode(load1, z0_id, z1_id, {s1, One}, 0, 1);
 
   auto load2 = graph.FindNode("load2");
-  load2->attr.api.compute_type = af::ComputeType::kComputeLoad;
-  load2->attr.api.type = af::ApiType::kAPITypeCompute;
-  load2->attr.api.unit = af::ComputeUnit::kUnitMTE2;
-  load2->attr.sched.loop_axis = z0.id;
-  load2->outputs[0].attr.vectorized_axis = {z0.id, z1.id};
-  load2->outputs[0].attr.vectorized_strides = {One};
-  load2->outputs[0].attr.dtype = ge::DT_FLOAT;
-  load2->outputs[0].attr.mem.position = af::Position::kPositionVecIn;
-  load2->outputs[0].attr.mem.tensor_id = 2;
-  load2->outputs[0].attr.mem.position = af::Position::kPositionVecIn;
-  load2->outputs[0].attr.mem.alloc_type = af::AllocType::kAllocTypeQueue;
-  load2->outputs[0].attr.que.id = 2;
-  load2->outputs[0].attr.opt.merge_scope = af::kIdNone;
+  ConfigBrcInlineLoadNode(load2, z0_id, z1_id, {One}, 2, 2);
 
   auto add = graph.FindNode("add");
-  add->attr.api.unit = af::ComputeUnit::kUnitVector;
-  add->outputs[0].attr.vectorized_axis = {z0.id, z1.id};
-  add->outputs[0].attr.vectorized_strides = {s1, One};
-  add->outputs[0].attr.dtype = ge::DT_FLOAT;
-  add->outputs[0].attr.mem.position = af::Position::kPositionVecOut;
-  add->outputs[0].attr.mem.tensor_id = 3;
-  add->outputs[0].attr.mem.alloc_type = af::AllocType::kAllocTypeQueue;
-  add->outputs[0].attr.que.id = 3;
-  add->outputs[0].attr.opt.merge_scope = af::kIdNone;
+  ConfigBrcInlineAddNode(add, z0_id, z1_id, {s1, One}, 3, 3);
 
   codegen::Tiler tiler;
   codegen::TPipe tpipe("tpipe", tiler);
   tpipe.CollectQues(graph);
-
   EXPECT_EQ(tpipe.AddTensor(load1->outputs[0]), 0);
   EXPECT_EQ(tpipe.AddTensor(load2->outputs[0]), 0);
   EXPECT_EQ(tpipe.AddTensor(add->outputs[0]), 0);
 
-  tiler.AddAxis(z0);
-  tiler.AddAxis(z1);
+  tiler.AddAxis(*graph.FindAxis(z0_id));
+  tiler.AddAxis(*graph.FindAxis(z1_id));
   tiler.AddSizeVar(af::SizeVar(s0));
   tiler.AddSizeVar(af::SizeVar(s1));
 
@@ -1445,6 +1451,17 @@ TEST(CodegenKernel, brc_inline_apicall_test) {
   EXPECT_EQ(call.Generate(tpipe, vector<af::AxisId>{}, result), 0);
   EXPECT_EQ(result, std::string{"BinaryBrcInlineApiWithTwoVectorizedAxisV2<float>(local_3[0], local_0[0], "
                                 "local_2[0], t->s0, t->s1, 1, 0, t->s1, &AscendC::Add<float, false>);\n"});
+
+  // 尾块场景: 内层轴运行期 actual_size 与 tile 尺寸不同。
+  // first_axis_v_stride 是缓冲行距, 必须与其它算子寻址一致按 tile 尺寸(Size)计算;
+  // 若误用 ActualSize(尾块) 会按错误行距访问 buffer。shape1 是本次处理长度, 仍取 ActualSize。
+  auto actual_size_s1 = graph.CreateSizeVar("actual_size_s1");
+  tiler.actual_sizes.emplace_back(s1, actual_size_s1);
+  std::string tail_result;
+  EXPECT_EQ(call.Generate(tpipe, vector<af::AxisId>{}, tail_result), 0);
+  EXPECT_EQ(tail_result,
+            std::string{"BinaryBrcInlineApiWithTwoVectorizedAxisV2<float>(local_3[0], local_0[0], "
+                        "local_2[0], t->s0, actual_size_s1, 1, 0, t->s1, &AscendC::Add<float, false>);\n"});
 }
 
 TEST(CodegenKernel, BinaryApiCallLogicalOrWhenBothAreTensor) {

@@ -27,6 +27,9 @@ set(ascendc_api_regbase_extend_src
         bitwise_xor.h
         bitwise_not.h
         floor_div.h
+        scalar_add.h
+        scalar_maximum.h
+        scalar_minimum.h
         pow.h
         polygamma.h
         random.h
