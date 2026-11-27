@@ -17,6 +17,7 @@
 #include <set>
 
 #include "utils/axis_utils.h"
+#include "ascir_ops.h"
 
 namespace optimize::task_generator {
 namespace {
@@ -184,6 +185,77 @@ void PrependPostReduceTileAxis(const af::AscNodePtr &indirect_load, const ascir:
 
 }  // namespace
 
+// 取模板轴表并收集合并轴集合（outer/inner），用于 vectorized_axis 两级重映射；
+// 轴表同时输出给调用方，供 post-Reduce tile-inner 传播判定复用（tile_inner_axis/
+// outer_axis），避免重复查询。
+af::Status GetSyncTemplateAxes(const af::AscNodePtr &indirect_load, std::set<ascir::AxisId> &merged_axis_ids,
+                               ascgen_utils::indirect_load::TemplateAxes &template_axes) {
+  GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::GetTemplateAxes(indirect_load, template_axes));
+  for (const auto axis_id : {template_axes.outer_axis, template_axes.inner_axis}) {
+    if (axis_id != af::kIdNone) {
+      merged_axis_ids.insert(axis_id);
+    }
+  }
+  return af::SUCCESS;
+}
+
+// [Arange 视图同步豁免] Arange 的 SIMT 标量发射（EmitSimtArangeExpr）以
+// "原始视图首个非零 stride 轴在模板逻辑视图内"为合约，坐标分解的 stride/size
+// 均取自 TemplateLogicalView；物理 tiling split 对 Arange 无消费方（零输入，
+// 不参与 GM 寻址/向量发射/UB 驻留）。若把行轴 split 同步进 Arange 视图，其
+// 唯一 varying 轴会分裂为 outer/inner 多个非零 stride 轴，破坏
+// ArangeAscIrCodegenImplV2::IsSimtScalarSupported 的"单一 varying 轴"前提，
+// 调度通过但发射期断言失败（codegen 硬挂）。Arange 保持原始视图，直接跳过 split。
+// 其余节点：按调度实际执行的 (outer, inner) 逐层 split，使 view 状态与被
+// 完整调度的普通节点等价。
+void SyncSimtViewSplitOutputs(const af::AscNodePtr &node,
+                              const std::vector<std::pair<af::AxisPtr, af::AxisPtr>> &tiled_axes_list) {
+  if (af::ops::IsOps<af::ascir_op::Arange>(node)) {
+    return;
+  }
+  for (auto &output : node->outputs()) {
+    if (output == nullptr) {
+      continue;
+    }
+    for (const auto &tiled_axes : tiled_axes_list) {
+      if (tiled_axes.first == nullptr || tiled_axes.second == nullptr || tiled_axes.first->from.size() != 1UL) {
+        continue;
+      }
+      GELOGD("[IndirectLoad] SIMT role node[%s] sync tensor view split axis[%ld] to [outer:%ld, inner:%ld].",
+             node->GetNamePtr(), tiled_axes.first->from[0], tiled_axes.first->id, tiled_axes.second->id);
+      SplitOutputView(*output, tiled_axes.first, tiled_axes.second);
+    }
+  }
+}
+
+// vectorized_axis 重映射：旧轴 ->（合并轴 ->）inner 轴。
+void RemapSimtViewVectorizedAxes(af::AscGraph &graph, const af::AscNodePtr &node,
+                                 const std::set<ascir::AxisId> &merged_axis_ids,
+                                 const std::vector<std::pair<af::AxisPtr, af::AxisPtr>> &tiled_axes_list) {
+  for (auto &output : node->outputs()) {
+    if (output == nullptr) {
+      continue;
+    }
+    RemapOutputVectorizedAxes(graph, node, *output, merged_axis_ids, tiled_axes_list);
+  }
+}
+
+// 只有 SIMT 后接 AR Reduce 的可求解 tile 才需要将动态生成的 tile-inner 作为多行
+// vectorized 轴传播（前置校验在调用方）；此处找到 outer 对应的 tile 分裂对，把
+// inner 轴前置补入 post-Reduce 链的向量化视图。
+void PrependSolvedTileInnerToPostReduce(const af::AscNodePtr &indirect_load,
+                                        const std::vector<std::pair<af::AxisPtr, af::AxisPtr>> &tiled_axes_list,
+                                        const ascgen_utils::indirect_load::TemplateAxes &template_axes) {
+  for (const auto &tiled_axes : tiled_axes_list) {
+    if (tiled_axes.first == nullptr || tiled_axes.second == nullptr || tiled_axes.first->from.size() != 1UL ||
+        tiled_axes.first->from[0] != template_axes.outer_axis) {
+      continue;
+    }
+    PrependPostReduceTileAxis(indirect_load, tiled_axes.second->id);
+    break;
+  }
+}
+
 af::Status SyncSimtBoundaryViews(af::AscGraph &graph,
                                  const std::vector<std::pair<af::AxisPtr, af::AxisPtr>> &tiled_axes_list) {
   if (tiled_axes_list.empty()) {
@@ -196,55 +268,23 @@ af::Status SyncSimtBoundaryViews(af::AscGraph &graph,
   // 模板合并轴集合（outer/inner），用于 vectorized_axis 两级重映射
   std::set<ascir::AxisId> merged_axis_ids;
   ascgen_utils::indirect_load::TemplateAxes template_axes;
-  GE_ASSERT_SUCCESS(ascgen_utils::indirect_load::GetTemplateAxes(indirect_load, template_axes));
-  for (const auto axis_id : {template_axes.outer_axis, template_axes.inner_axis}) {
-    if (axis_id != af::kIdNone) {
-      merged_axis_ids.insert(axis_id);
-    }
-  }
+  GE_ASSERT_SUCCESS(GetSyncTemplateAxes(indirect_load, merged_axis_ids, template_axes));
 
   for (const auto &node : graph.GetAllNodes()) {
     if (node == nullptr || !IsSimtViewSyncRole(ascgen_utils::indirect_load::GetTemplateRole(node))) {
       continue;
     }
-    for (auto &output : node->outputs()) {
-      if (output == nullptr) {
-        continue;
-      }
-      // 1) tensor view split 同步：按调度实际执行的 (outer, inner) 逐层 split，
-      //    使 view 状态与被完整调度的普通节点等价
-      for (const auto &tiled_axes : tiled_axes_list) {
-        if (tiled_axes.first == nullptr || tiled_axes.second == nullptr || tiled_axes.first->from.size() != 1UL) {
-          continue;
-        }
-        GELOGD("[IndirectLoad] SIMT role node[%s] sync tensor view split axis[%ld] to [outer:%ld, inner:%ld].",
-               node->GetNamePtr(), tiled_axes.first->from[0], tiled_axes.first->id, tiled_axes.second->id);
-        SplitOutputView(*output, tiled_axes.first, tiled_axes.second);
-      }
-    }
-    // 2) vectorized_axis 重映射：旧轴 ->（合并轴 ->）inner 轴
-    for (auto &output : node->outputs()) {
-      if (output == nullptr) {
-        continue;
-      }
-      RemapOutputVectorizedAxes(graph, node, *output, merged_axis_ids, tiled_axes_list);
-    }
+    SyncSimtViewSplitOutputs(node, tiled_axes_list);
+    RemapSimtViewVectorizedAxes(graph, node, merged_axis_ids, tiled_axes_list);
   }
-  // 只有 SIMT 后接 AR Reduce 的可求解 tile 才需要将动态生成的 tile-inner
-  // 作为多行 vectorized 轴传播。SIMD 和固定 tile 的 SIMT 均保持原有视图，
-  // 避免把固定 tile-inner 错当作 featuret 插入 Reduce 输入。
+  // SIMD 和固定 tile 的 SIMT（tile_inner_axis 已预建）保持原有视图，避免把固定
+  // tile-inner 错当作 featuret 插入 Reduce 输入；仅 SIMT 后接 AR Reduce 的可求解
+  // tile 需要传播动态生成的 tile-inner。
   if (ascir::GetTemplateIdOrDefault(*indirect_load) != ascir::TemplateId::kIndirectLoadSimt ||
       template_axes.tile_inner_axis != af::kIdNone) {
     return af::SUCCESS;
   }
-  for (const auto &tiled_axes : tiled_axes_list) {
-    if (tiled_axes.first == nullptr || tiled_axes.second == nullptr || tiled_axes.first->from.size() != 1UL ||
-        tiled_axes.first->from[0] != template_axes.outer_axis) {
-      continue;
-    }
-    PrependPostReduceTileAxis(indirect_load, tiled_axes.second->id);
-    break;
-  }
+  PrependSolvedTileInnerToPostReduce(indirect_load, tiled_axes_list, template_axes);
   return af::SUCCESS;
 }
 

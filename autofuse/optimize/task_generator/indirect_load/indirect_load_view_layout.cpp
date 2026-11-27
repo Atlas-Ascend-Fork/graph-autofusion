@@ -586,8 +586,11 @@ bool CanEmitSimtScalar(const af::AscNodePtr &node) {
 
 // [边界化判定] 扫描 SIMT 标量求值器消费集（输出链 backward 闭包，含汇入链中的
 // side-input）内节点的可发射性。豁免集与发射期 EmitSimtEvaluatorNodes 的专用路径
-// 分流保持一致（单一事实源）：Load（GM 直读）/Scalar/ScalarData/Arange/Store/
-// Transpose 均有专用发射路径；其余节点与 EmitSimtScalarExpr 共用同一 V2 支持查询
+// 分流保持一致（单一事实源）：Load（GM 直读）/Scalar/ScalarData/Store/Transpose 的
+// 专用发射路径无条件成立，直接豁免；Arange 的专用路径 EmitSimtArangeExpr 有前置
+// 条件（ArangeAscIrCodegenImplV2::IsSimtScalarSupported：零输入、int32/int64、
+// 单一 varying 轴），可发射性必须真实查询，不可发射时调度期即降级/拒绝，避免
+// 调度通过、codegen 硬挂。其余节点与 EmitSimtScalarExpr 共用同一 V2 支持查询
 // （CanEmitSimtScalar）。返回首个不可发射节点（nullptr = 全部可发射）。
 af::AscNodePtr FindUnemittableSimtEvaluatorNode(const af::AscGraph &graph, const NodeSet &evaluator_nodes) {
   for (const af::AscNodePtr &node : graph.GetAllNodes()) {
@@ -600,8 +603,7 @@ af::AscNodePtr FindUnemittableSimtEvaluatorNode(const af::AscGraph &graph, const
     // 同样豁免——输出链检测必须与 ValidateSimtTemplateRegion 的 index 链口径保持一致。
     if (af::ops::IsOps<af::ascir_op::IndirectLoad>(node) || af::ops::IsOps<af::ascir_op::Load>(node) ||
         af::ops::IsOps<af::ascir_op::Scalar>(node) || af::ops::IsOps<af::ascir_op::ScalarData>(node) ||
-        af::ops::IsOps<af::ascir_op::Arange>(node) || af::ops::IsOps<af::ascir_op::Store>(node) ||
-        af::ops::IsOps<af::ascir_op::Transpose>(node) ||
+        af::ops::IsOps<af::ascir_op::Store>(node) || af::ops::IsOps<af::ascir_op::Transpose>(node) ||
         node->attr.api.compute_type == af::ComputeType::kComputeReduce) {
       continue;
     }
