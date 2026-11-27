@@ -27,6 +27,7 @@
 #include <sys/stat.h>
 #include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "bridge/AfirBuilder/AfirBuilder.h"
@@ -510,17 +511,18 @@ mlir::LogicalResult AppendWorkspacePlan(const ascir::FusedScheduledResult &fused
   return mlir::success();
 }
 
-mlir::FailureOr<TensorValueDTO> InitializeTensorValue(const af::AscTensorAttr &attr, mlir::afir::Role role,
-                                                      mlir::Location loc, int64_t lifeTimeAxisId) {
-  std::optional<std::string> dtype = detail::DTypeStr(attr.dtype);
+mlir::FailureOr<TensorValueDTO> InitializeTensorValue(const af::AscTensorAttr &attr, ge::DataType storageDtype,
+                                                      mlir::afir::Role role, mlir::Location loc,
+                                                      int64_t lifeTimeAxisId) {
+  std::optional<std::string> dtype = detail::DTypeStr(storageDtype);
   if (!dtype) {
     // 能力不足，不是坏了。 调度收的 dtype 比 AFIR 建模的多（`bool` 就是其中一个，
     // 它在这里是 12），这件事的性质是「还没建模」，legacy 收得了，应当整图干净回落。
     // 此前这里报的是硬失败：那让一批图在缺省那一档也红，而它们本可以回落。
     return mlir::afir::emitCapabilityShortfall(loc) << "UnsupportedOperation: scheduler dtype value "
-                                                    << static_cast<int>(attr.dtype) << " is not modeled by AFIR";
+                                                    << static_cast<int>(storageDtype) << " is not modeled by AFIR";
   }
-  if (!detail::IsAfirModeledDType(attr.dtype)) {
+  if (!detail::IsAfirModeledDType(storageDtype)) {
     // Bridge 叫得出名字不等于 AFIR 表达得了：bf16 这一类 `DTypeStr` 给得出规范拼写，
     // 但 ODS 的类型域收不了（`Elementwise.td` 的 `defvar` 与实现注册处那两份支持表），
     // 真正拦住它的是算子的类型约束——那是 verifier 失败，也就是硬失败。这件事同样
@@ -539,10 +541,10 @@ mlir::FailureOr<TensorValueDTO> InitializeTensorValue(const af::AscTensorAttr &a
                          << static_cast<int>(attr.mem.alloc_type);
     return mlir::failure();
   }
-  std::optional<int64_t> elementBytes = ElementByteWidth(attr.dtype);
+  std::optional<int64_t> elementBytes = ElementByteWidth(storageDtype);
   if (!elementBytes) {
     mlir::emitError(loc) << "InvalidDescriptor: cannot determine element byte width for dtype "
-                         << static_cast<int>(attr.dtype);
+                         << static_cast<int>(storageDtype);
     return mlir::failure();
   }
   TensorValueDTO value;
@@ -613,12 +615,14 @@ mlir::LogicalResult AppendTensorFacts(const af::AscTensorAttr &attr, TensorValue
 }
 
 mlir::FailureOr<TensorValueDTO> ToTensorValueDTO(const af::AscTensorAttr &attr, mlir::afir::Role role,
-                                                 mlir::Location loc, int64_t lifeTimeAxisId = -1) {
-  mlir::FailureOr<TensorValueDTO> value = InitializeTensorValue(attr, role, loc, lifeTimeAxisId);
+                                                 mlir::Location loc, int64_t lifeTimeAxisId = -1,
+                                                 std::optional<ge::DataType> dtypeOverride = std::nullopt) {
+  const ge::DataType storageDtype = dtypeOverride.value_or(attr.dtype);
+  mlir::FailureOr<TensorValueDTO> value = InitializeTensorValue(attr, storageDtype, role, loc, lifeTimeAxisId);
   if (mlir::failed(value)) {
     return mlir::failure();
   }
-  const int64_t elementBytes = *ElementByteWidth(attr.dtype);
+  const int64_t elementBytes = *ElementByteWidth(storageDtype);
   if (mlir::failed(AppendTensorFacts(attr, *value, elementBytes, loc))) {
     return mlir::failure();
   }
@@ -638,34 +642,6 @@ mlir::FailureOr<int64_t> GetIoIndex(const af::AscNodePtr &node, mlir::Location l
     return mlir::emitError(loc) << "invalid IO index on node " << node->GetName();
   }
   return index;
-}
-
-mlir::FailureOr<std::vector<IoTensor>> ToIoTensors(const af::AscNodePtr &node, mlir::afir::Role role,
-                                                   mlir::Location loc,
-                                                   const std::map<int64_t, int64_t> &tmpBufferLifetimes) {
-  std::vector<IoTensor> tensors;
-  auto outputs = node->outputs();
-  tensors.reserve(outputs.size());
-  mlir::FailureOr<int64_t> ioIndex = GetIoIndex(node, loc);
-  if (mlir::failed(ioIndex)) {
-    return mlir::failure();
-  }
-  for (auto [index, output] : llvm::enumerate(outputs)) {
-    int64_t lifeTimeAxisId = -1;
-    if (output->attr.mem.position == af::Position::kPositionVecCalc &&
-        output->attr.mem.alloc_type == af::AllocType::kAllocTypeBuffer) {
-      auto lifetime = tmpBufferLifetimes.find(output->attr.buf.id);
-      if (lifetime != tmpBufferLifetimes.end()) {
-        lifeTimeAxisId = lifetime->second;
-      }
-    }
-    mlir::FailureOr<TensorValueDTO> info = ToTensorValueDTO(output->attr, role, loc, lifeTimeAxisId);
-    if (mlir::failed(info)) {
-      return mlir::failure();
-    }
-    tensors.push_back({ResultValueName(node->GetName(), index, outputs.size()), std::move(*info), *ioIndex});
-  }
-  return tensors;
 }
 
 // `space` 必须进 key：`bufferId` 在这里是两个互不相干的 id 空间叠在一起的——UB 侧取的是
@@ -1052,6 +1028,7 @@ mlir::FailureOr<std::map<int64_t, int64_t>> CollectTmpBufferLifetimes(const Grap
 struct TemplateNodeContext {
   std::unordered_map<int64_t, std::string> producerByTensor;
   std::unordered_map<int64_t, TensorValueDTO> descriptorByTensor;
+  std::unordered_set<int64_t> comparisonBytesByTensor;
   const std::map<int64_t, int64_t> &tmpBufferLifetimes;
   size_t templateId;
   mlir::Location loc;
@@ -1088,6 +1065,31 @@ mlir::afir::Role NodeOutputRole(llvm::StringRef nodeType) {
   return mlir::afir::Role::Compute;
 }
 
+// 比较族的六个节点类型。真实前端给的比较结果是 bool，而 bool 不在 AFIR 的供给表上，所以这几位的
+// 输出按 ui8 建（一个字节，真 1 假 0）。
+//
+// 名单手工维护，对应 bridge 算子注册表里由 ODS `AFIR_CompareOp` 定义的那六行。今天没有可以推导的
+// 地方：注册表不带类别，那个 ODS 类又只在 TableGen 里。漏一个的后果是那一格整图回落，不会算错。
+constexpr llvm::StringRef kComparisonNodeTypes[] = {"Eq", "Ne", "Lt", "Le", "Gt", "Ge"};
+
+// 与下面两个一起，划出了这条归一化的全部范围。
+bool IsComparisonNodeType(llvm::StringRef nodeType) {
+  return llvm::is_contained(kComparisonNodeTypes, nodeType);
+}
+
+// `Store` / `Output` 原样转发归一化后的 bool 那一个字节，所以顺着它们传下去的输出也按 ui8 建。
+bool ForwardsComparisonBytes(const af::AscNodePtr &node, llvm::StringRef nodeType, const TemplateNodeContext &ctx) {
+  const auto inputs = node->inputs();
+  return (nodeType == "Store" || nodeType == "Output") && inputs.size() == 1U &&
+         ctx.comparisonBytesByTensor.count((*inputs.begin())->attr.mem.tensor_id) != 0U;
+}
+
+// 这条输出声明成 bool，而且是比较结果的存储：比较节点自己的输出，或者顺着 Store / Output
+// 传下来的那一份。这样的张量按 ui8 而不是 bool 建。
+bool IsBoolComparisonBytes(const af::AscTensorAttr &attr, bool isComparison, bool forwardsComparisonBytes) {
+  return attr.dtype == ge::DT_BOOL && (isComparison || forwardsComparisonBytes);
+}
+
 mlir::LogicalResult AppendNodeOutputs(const af::AscNodePtr &node, NodeInfo &nodeInfo, TemplateNodeContext &ctx) {
   mlir::Location loc = ctx.loc;
   auto outputs = node->outputs();
@@ -1095,6 +1097,9 @@ mlir::LogicalResult AppendNodeOutputs(const af::AscNodePtr &node, NodeInfo &node
     return mlir::success();
   }
   mlir::afir::Role role = NodeOutputRole(nodeInfo.type);
+  const bool isComparison = IsComparisonNodeType(nodeInfo.type);
+  const bool forwardsComparisonBytes = ForwardsComparisonBytes(node, nodeInfo.type, ctx);
+
   nodeInfo.outputs.reserve(outputs.size());
   nodeInfo.output_names.reserve(outputs.size());
   for (auto [index, outputAnchor] : llvm::enumerate(outputs)) {
@@ -1106,7 +1111,12 @@ mlir::LogicalResult AppendNodeOutputs(const af::AscNodePtr &node, NodeInfo &node
         lifeTimeAxisId = lifetime->second;
       }
     }
-    mlir::FailureOr<TensorValueDTO> output = ToTensorValueDTO(outputAnchor->attr, role, loc, lifeTimeAxisId);
+    std::optional<ge::DataType> storageDtype;
+    if (IsBoolComparisonBytes(outputAnchor->attr, isComparison, forwardsComparisonBytes)) {
+      storageDtype = ge::DT_UINT8;
+    }
+    mlir::FailureOr<TensorValueDTO> output =
+        ToTensorValueDTO(outputAnchor->attr, role, loc, lifeTimeAxisId, storageDtype);
     if (mlir::failed(output)) {
       return mlir::failure();
     }
@@ -1121,6 +1131,9 @@ mlir::LogicalResult AppendNodeOutputs(const af::AscNodePtr &node, NodeInfo &node
     nodeInfo.output_names.push_back(ResultValueName(nodeInfo.name, index, outputs.size()));
     ctx.producerByTensor[outputAnchor->attr.mem.tensor_id] = nodeInfo.output_names.back();
     ctx.descriptorByTensor[outputAnchor->attr.mem.tensor_id] = nodeInfo.outputs.back();
+    if (storageDtype || (forwardsComparisonBytes && outputAnchor->attr.dtype == ge::DT_UINT8)) {
+      ctx.comparisonBytesByTensor.insert(outputAnchor->attr.mem.tensor_id);
+    }
   }
   nodeInfo.output = nodeInfo.outputs.front();
   return mlir::success();
@@ -1132,16 +1145,14 @@ mlir::LogicalResult AppendNodeIo(const af::AscNodePtr &node, NodeInfo &nodeInfo,
   // 把两者放在同一个按 `index` 排形参的循环里）。差别只在它按值传，由 `by_value` 记。
   const bool isScalarData = nodeInfo.type == "ScalarData";
   if (nodeInfo.type == "Data" || nodeInfo.type == "Output" || isScalarData) {
-    mlir::afir::Role role = nodeInfo.type == "Output" ? mlir::afir::Role::Output : mlir::afir::Role::Input;
-    mlir::FailureOr<std::vector<IoTensor>> tensors = ToIoTensors(node, role, ctx.loc, ctx.tmpBufferLifetimes);
-    if (mlir::failed(tensors)) {
+    mlir::FailureOr<int64_t> ioIndex = GetIoIndex(node, ctx.loc);
+    if (mlir::failed(ioIndex)) {
       return mlir::failure();
     }
-    for (IoTensor &tensor : *tensors) {
-      tensor.by_value = isScalarData;
-    }
     auto &target = nodeInfo.type == "Output" ? info.outputs : info.inputs;
-    for (IoTensor &tensor : *tensors) {
+    for (auto [index, output] : llvm::enumerate(nodeInfo.outputs)) {
+      IoTensor tensor{nodeInfo.output_names[index], output, *ioIndex};
+      tensor.by_value = isScalarData;
       auto existing = std::find_if(target.begin(), target.end(), [&](const IoTensor &input) {
         return nodeInfo.type != "Output" && input.index == tensor.index;
       });
@@ -1242,6 +1253,21 @@ constexpr const char *kVectorFuncNodeType = "VectorFunc";
 // 子图内的计算节点与父图共用同一条翻译路径，所以要前向声明它。
 mlir::LogicalResult AppendTemplateNode(const af::AscNodePtr &node, TemplateInfo &info, TemplateNodeContext &ctx);
 
+// `VectorFunc` 的边界收哪些 dtype。按 `support/AfirElementTypes.h` 支持表的位来写：bridge 传下去的
+// dtype 名字就是那张表的 builder 列，这里不重写拼写，判定时按表查。哪些位放进来是量出来的，成因见
+// `CheckVectorFuncBoundaryDtypes` 上面那段说明。
+constexpr uint32_t kVectorFuncBoundaryElementTypes = afir::kAfirBitF32 | afir::kAfirBitF16 | afir::kAfirBitBF16 |
+                                                     afir::kAfirBitUI8 | afir::kAfirBitI16 | afir::kAfirBitI8;
+
+bool IsVectorFuncBoundaryDtype(llvm::StringRef dtype) {
+  for (const afir::AfirElementTypePosition &position : afir::afirElementTypePositions()) {
+    if (position.builderSpelling == dtype) {
+      return (position.bit & kVectorFuncBoundaryElementTypes) != 0U;
+    }
+  }
+  return false;
+}
+
 // 子图的边界要在这一层解掉，不能原样翻成 AFIR 算子。
 //
 // 子图的边界形状是 `Data` + `Load`（入）、`Store` + `Output`（出），这两对表达的是
@@ -1251,97 +1277,116 @@ mlir::LogicalResult AppendTemplateNode(const af::AscNodePtr &node, TemplateInfo 
 //
 // 产物是两张按序号配对的边界表（见 `VectorFuncBodyDTO`）：序号取调度给的
 // `vf_root_input_index` 与 `Output` 的 `index`，**不按容器顺序、不按名字猜**。
-template <typename GraphT>
-mlir::LogicalResult AppendVectorFuncBody(const af::AscNodePtr &vfNode, NodeInfo &vfInfo, const GraphT &graph,
-                                         const TemplateNodeContext &parentCtx) {
-  mlir::Location loc = parentCtx.loc;
-  const std::string *subGraphName = af::AttrUtils::GetStr(vfNode->GetOpDescBarePtr(), "sub_graph_name");
-  if (subGraphName == nullptr) {
-    // 图自称有二次融合却没说子图在哪 —— **产生方坏了，不是能力不足**：回落会把它藏起来。
-    return mlir::emitError(loc) << "InvalidDescriptor: VectorFunc node '" << vfInfo.name
-                                << "' carries no sub_graph_name attribute";
-  }
-  af::AscGraph subGraph("af_vector_func_body");
-  if (graph.FindSubGraph(*subGraphName, subGraph) != af::SUCCESS) {
-    return mlir::emitError(loc) << "InvalidDescriptor: VectorFunc node '" << vfInfo.name << "' names subgraph '"
-                                << *subGraphName << "', which is not on this graph";
-  }
+//
+// 这次转换分几步，下面一步一个函数；`AppendVectorFuncBody` 只负责按顺序把它们走完。
 
-  // **dtype 白名单，M1 只收 f16 / f32。**
-  //
-  // 这一条不是「这一期懒得做」，它是在守一个不变量：VF 这道门禁此前替一批图挡着，
-  // 那些图里还有别的没接的东西（bf16 / i8 / ui8 / bool 的类型域、1 维形状的 load 下降）。
-  // 放它们进来之后，拦住它们的是 ODS 的类型约束与 conversion——那两种都是硬失败，
-  // 而硬失败会把本来干净回落的图变成红的。实测：不加这一条，reg 侧接管表的
-  // hard-failure 从 79 涨到 89。
-  //
-  // 判据按边界与子图节点的 dtype 来，而不是按「这个 op 支不支持」：dtype 的缺口在
-  // AFIR 的支持表上（功能需求 3），与 VF 无关；VF 这一侧能做的是不要把它们放进来。
-  //
-  // 这道门禁今天仍然必要，而且理由要收窄。 2026-10-20 那一轮的说法是「bf16 / uint8 /
-  // int16 卡的是同一个缺口，放开后都变硬失败」，依据是那条
-  //
-  //     'afir.store' op transfer source and destination must have the same element type
-  //
-  // 但那一轮量在 `6a525700`（补 12 个 bf16 用例样板漏设的 `Output` dtype）之前，所以
-  // 那个数不能直接用。2026-10-26 把 bf16 / uint8 放开重量了一遍，结论是部分成立——
-  // 接管表上「只差 VF」那 8 格，放开后各自落在：
-  //
-  //   | 用例 | 放开后 | 真实首因 |
-  //   |---|---|---|
-  //   | `abs_bf16` / `add_exp_bf16` / `truediv_bf16` / `relu_uint8` | **硬失败** | 上面那条 `afir.store` |
-  //   | `abs_fma_bf16` | 回落 | `Fma` 这个节点类型 bridge 没接（功能需求 5） |
-  //   | `abs_uint8` | 回落 | VF 边界上还有 **int16** 这一位 |
-  //   | `abs_brc_add` / `load_compare_scalar_where_store` | 回落 | VF 子图里的 `Scalar` 没建模 |
-  //
-  // 所以：4 格确实是「搬运能不能换 dtype」，那一条修好它们才进得来，这道门禁替它们挡着
-  // 硬失败；另外 2 格的卡点压根不是 dtype（一个是 op、一个是 int16），拿这道门禁当它们的
-  // 原因会把活排错层。
-  //
-  // 订正（2026-10-28）：`abs_fma_bf16` 那一行只写对了第一因。 `Fma` 接通之后实测它不是
-  // 回落而是硬失败，诊断就是上面那条 `afir.store`——legacy 调度出的签名是
-  // `%output: f32`，而 store 的源经 `DtypeConsistency` 插回的 Cast 是 bf16。所以它属于上表
-  // 第一行那一类（4 格变 5 格），不属于「卡点不是 dtype」那两格；接 `Fma` 这件事已因此退回，
-  // 见工作总表 step 3 那一节。
-  //
-  // 探针那一侧的剖面与接管表不同，别混着读：同样放开之后探针 reg 侧 `ok` +17、硬失败
-  // +5，而那 5 格的诊断是 `DescriptorCountMismatch: 'afir.destination_descs' expected 2
-  // element but found 1`——全是 T5c（菱形两消费者）融出来的双输出 VF，bridge 只挂了一个
-  // destination desc。那是 VF 这条路自己的缺陷，与搬运换 dtype 无关。
-  const auto isModeledDtype = [](const std::string &dtype) {
-    return dtype == "float32" || dtype == "float16" || dtype == "bfloat16" || dtype == "uint8" || dtype == "int16";
-  };
+// **dtype 白名单，M1 只收 f16 / f32。**
+//
+// 这一条不是「这一期懒得做」，它是在守一个不变量：VF 这道门禁此前替一批图挡着，
+// 那些图里还有别的没接的东西（bf16 / i8 / ui8 / bool 的类型域、1 维形状的 load 下降）。
+// 放它们进来之后，拦住它们的是 ODS 的类型约束与 conversion——那两种都是硬失败，
+// 而硬失败会把本来干净回落的图变成红的。实测：不加这一条，reg 侧接管表的
+// hard-failure 从 79 涨到 89。
+//
+// 判据按边界与子图节点的 dtype 来，而不是按「这个 op 支不支持」：dtype 的缺口在
+// AFIR 的支持表上（功能需求 3），与 VF 无关；VF 这一侧能做的是不要把它们放进来。
+//
+// 这道门禁今天仍然必要，而且理由要收窄。 2026-10-20 那一轮的说法是「bf16 / uint8 /
+// int16 卡的是同一个缺口，放开后都变硬失败」，依据是那条
+//
+//     'afir.store' op transfer source and destination must have the same element type
+//
+// 但那一轮量在 `6a525700`（补 12 个 bf16 用例样板漏设的 `Output` dtype）之前，所以
+// 那个数不能直接用。2026-10-26 把 bf16 / uint8 放开重量了一遍，结论是部分成立——
+// 接管表上「只差 VF」那 8 格，放开后各自落在：
+//
+//   | 用例 | 放开后 | 真实首因 |
+//   |---|---|---|
+//   | `abs_bf16` / `add_exp_bf16` / `truediv_bf16` / `relu_uint8` | **硬失败** | 上面那条 `afir.store` |
+//   | `abs_fma_bf16` | 回落 | `Fma` 这个节点类型 bridge 没接（功能需求 5） |
+//   | `abs_uint8` | 回落 | VF 边界上还有 **int16** 这一位 |
+//   | `abs_brc_add` / `load_compare_scalar_where_store` | 回落 | VF 子图里的 `Scalar` 没建模 |
+//
+// 所以：4 格确实是「搬运能不能换 dtype」，那一条修好它们才进得来，这道门禁替它们挡着
+// 硬失败；另外 2 格的卡点压根不是 dtype（一个是 op、一个是 int16），拿这道门禁当它们的
+// 原因会把活排错层。
+//
+// 订正（2026-10-28）：`abs_fma_bf16` 那一行只写对了第一因。 `Fma` 接通之后实测它不是
+// 回落而是硬失败，诊断就是上面那条 `afir.store`——legacy 调度出的签名是
+// `%output: f32`，而 store 的源经 `DtypeConsistency` 插回的 Cast 是 bf16。所以它属于上表
+// 第一行那一类（4 格变 5 格），不属于「卡点不是 dtype」那两格；接 `Fma` 这件事已因此退回，
+// 见工作总表 step 3 那一节。
+//
+// 探针那一侧的剖面与接管表不同，别混着读：同样放开之后探针 reg 侧 `ok` +17、硬失败
+// +5，而那 5 格的诊断是 `DescriptorCountMismatch: 'afir.destination_descs' expected 2
+// element but found 1`——全是 T5c（菱形两消费者）融出来的双输出 VF，bridge 只挂了一个
+// destination desc。那是 VF 这条路自己的缺陷，与搬运换 dtype 无关。
+mlir::LogicalResult CheckVectorFuncBoundaryDtypes(const NodeInfo &vfInfo, mlir::Location loc) {
   for (const TensorValueDTO &boundary : vfInfo.inputs) {
-    if (!isModeledDtype(boundary.tensor.dtype)) {
+    if (!IsVectorFuncBoundaryDtype(boundary.tensor.dtype)) {
       return mlir::afir::emitCapabilityShortfall(loc)
              << "UnsupportedOperation: VectorFunc node '" << vfInfo.name << "' reads '" << boundary.tensor.dtype
              << "', which the register-form lowering does not model yet";
     }
   }
   for (const TensorValueDTO &boundary : vfInfo.outputs) {
-    if (!isModeledDtype(boundary.tensor.dtype)) {
+    if (!IsVectorFuncBoundaryDtype(boundary.tensor.dtype)) {
       return mlir::afir::emitCapabilityShortfall(loc)
              << "UnsupportedOperation: VectorFunc node '" << vfInfo.name << "' writes '" << boundary.tensor.dtype
              << "', which the register-form lowering does not model yet";
     }
   }
+  return mlir::success();
+}
 
-  auto body = std::make_shared<VectorFuncBodyDTO>();
-  body->boundary_input_names.assign(vfInfo.input_names.size(), std::string());
-  body->boundary_output_names.assign(vfInfo.outputs.size(), std::string());
+// 解一条输入边界的 `Data`：分区器保证它的唯一消费者就是它那个 `Load`，`Load` 的结果名就是 region 的
+// 块参数。其余形状报能力不足——bridge 只建模分区器插的那一条边界 `Load`。
+mlir::LogicalResult AppendVectorFuncBoundaryLoad(const af::AscNodePtr &subNode, size_t parentIndex,
+                                                 VectorFuncBodyDTO &body, TemplateNodeContext &bodyCtx,
+                                                 llvm::DenseSet<const void *> &boundaryLoads) {
+  mlir::Location loc = bodyCtx.loc;
+  const auto consumers = subNode->GetOutDataNodes();
+  if (consumers.size() != 1U) {
+    return mlir::afir::emitCapabilityShortfall(loc)
+           << "UnsupportedOperation: VectorFunc subgraph boundary '" << subNode->GetName() << "' feeds "
+           << consumers.size() << " nodes; the bridge models the single boundary load the partitioner inserts";
+  }
+  auto loadNode = std::dynamic_pointer_cast<af::AscNode>(consumers.at(0U));
+  if (loadNode == nullptr || loadNode->GetType() != "Load") {
+    return mlir::afir::emitCapabilityShortfall(loc)
+           << "UnsupportedOperation: VectorFunc subgraph boundary '" << subNode->GetName()
+           << "' is not consumed by a boundary load, which the bridge does not model";
+  }
+  auto loadOutputs = loadNode->outputs();
+  if (loadOutputs.size() != 1U) {
+    return mlir::afir::emitCapabilityShortfall(loc)
+           << "UnsupportedOperation: VectorFunc boundary load '" << loadNode->GetName() << "' has "
+           << loadOutputs.size() << " outputs";
+  }
+  // 这个名字就是 region 的块参数：下游算子按它引用这段数据，所以边界表记它，并且注册进
+  // 子图自己的 producer 表，让下游的 `input_names` 解析得到。
+  const std::string valueName = ResultValueName(loadNode->GetName(), 0, 1);
+  body.boundary_input_names[parentIndex] = valueName;
+  const auto outputAnchor = *loadOutputs.begin();
+  mlir::FailureOr<TensorValueDTO> descriptor = ToTensorValueDTO(outputAnchor->attr, mlir::afir::Role::Compute, loc, -1);
+  if (mlir::failed(descriptor)) {
+    return mlir::failure();
+  }
+  bodyCtx.producerByTensor[outputAnchor->attr.mem.tensor_id] = valueName;
+  bodyCtx.descriptorByTensor[outputAnchor->attr.mem.tensor_id] = *descriptor;
+  boundaryLoads.insert(static_cast<const void *>(loadNode.get()));
+  return mlir::success();
+}
 
-  TemplateInfo bodyInfo;
-  // 子图内是 tensor 形态：没有 destination，也就没有存储——VF 的中间结果在寄存器里，
-  // 一块 UB 都没分配过。
-  bodyInfo.buffer_form = false;
-  TemplateNodeContext bodyCtx{{}, {}, parentCtx.tmpBufferLifetimes, parentCtx.templateId, loc};
-
-  // 边界靠边配对，不靠 tensor id。 分区器是成对插入 `Data` + `Load` 的
-  // （`InsertDataAndLoadNode`），而那个 `Data` 的输出 attr 只设了 dtype——**没有
-  // tensor id；`Load` 的输出 attr 则是从父图的生产者整份抄过来的，所以带的是父图**
-  // 的 tensor id。于是「按 id 把 Data 和 Load 串起来」这条路走不通（实测 src #0 找不到
-  // 边界就是这么来的），而「Data 的唯一消费者就是它那个 Load」是分区器的结构保证。
-  llvm::DenseSet<const void *> boundaryLoads;
+// 边界靠边配对，不靠 tensor id。 分区器是成对插入 `Data` + `Load` 的
+// （`InsertDataAndLoadNode`），而那个 `Data` 的输出 attr 只设了 dtype——**没有
+// tensor id；`Load` 的输出 attr 则是从父图的生产者整份抄过来的，所以带的是父图**
+// 的 tensor id。于是「按 id 把 Data 和 Load 串起来」这条路走不通（实测 src #0 找不到
+// 边界就是这么来的），而「Data 的唯一消费者就是它那个 Load」是分区器的结构保证。
+mlir::LogicalResult ResolveVectorFuncBoundaryInputs(const af::AscGraph &subGraph, VectorFuncBodyDTO &body,
+                                                    TemplateNodeContext &bodyCtx,
+                                                    llvm::DenseSet<const void *> &boundaryLoads) {
+  mlir::Location loc = bodyCtx.loc;
   for (const auto &subNode : subGraph.GetAllNodes()) {
     if (subNode == nullptr || subNode->GetType() != "Data") {
       continue;
@@ -1358,113 +1403,129 @@ mlir::LogicalResult AppendVectorFuncBody(const af::AscNodePtr &vfNode, NodeInfo 
       parentIndex = *boundaryIndex;
     }
     // 外来下标作数组下标之前必须校验（编码红线 2）。越界是产生方与这里对不上，属坏了。
-    if (parentIndex < 0 || static_cast<size_t>(parentIndex) >= body->boundary_input_names.size()) {
+    if (parentIndex < 0 || static_cast<size_t>(parentIndex) >= body.boundary_input_names.size()) {
       return mlir::emitError(loc) << "InvalidDescriptor: VectorFunc subgraph boundary '" << subNode->GetName()
                                   << "' maps to parent input " << parentIndex << ", which is out of range ("
-                                  << body->boundary_input_names.size() << " srcs)";
+                                  << body.boundary_input_names.size() << " srcs)";
     }
-
-    const auto consumers = subNode->GetOutDataNodes();
-    if (consumers.size() != 1U) {
-      return mlir::afir::emitCapabilityShortfall(loc)
-             << "UnsupportedOperation: VectorFunc subgraph boundary '" << subNode->GetName() << "' feeds "
-             << consumers.size() << " nodes; the bridge models the single boundary load the partitioner inserts";
-    }
-    auto loadNode = std::dynamic_pointer_cast<af::AscNode>(consumers.at(0U));
-    if (loadNode == nullptr || loadNode->GetType() != "Load") {
-      return mlir::afir::emitCapabilityShortfall(loc)
-             << "UnsupportedOperation: VectorFunc subgraph boundary '" << subNode->GetName()
-             << "' is not consumed by a boundary load, which the bridge does not model";
-    }
-    auto loadOutputs = loadNode->outputs();
-    if (loadOutputs.size() != 1U) {
-      return mlir::afir::emitCapabilityShortfall(loc)
-             << "UnsupportedOperation: VectorFunc boundary load '" << loadNode->GetName() << "' has "
-             << loadOutputs.size() << " outputs";
-    }
-    // 这个名字就是 region 的块参数：下游算子按它引用这段数据，所以边界表记它，并且注册进
-    // 子图自己的 producer 表，让下游的 `input_names` 解析得到。
-    const std::string valueName = ResultValueName(loadNode->GetName(), 0, 1);
-    body->boundary_input_names[static_cast<size_t>(parentIndex)] = valueName;
-    const auto outputAnchor = *loadOutputs.begin();
-    mlir::FailureOr<TensorValueDTO> descriptor =
-        ToTensorValueDTO(outputAnchor->attr, mlir::afir::Role::Compute, loc, -1);
-    if (mlir::failed(descriptor)) {
+    if (mlir::failed(
+            AppendVectorFuncBoundaryLoad(subNode, static_cast<size_t>(parentIndex), body, bodyCtx, boundaryLoads))) {
       return mlir::failure();
     }
-    bodyCtx.producerByTensor[outputAnchor->attr.mem.tensor_id] = valueName;
-    bodyCtx.descriptorByTensor[outputAnchor->attr.mem.tensor_id] = *descriptor;
-    boundaryLoads.insert(static_cast<const void *>(loadNode.get()));
   }
+  return mlir::success();
+}
 
+// 边界 Store：把它的来源直接记成「产出这条输出的那个名字」，Store 本身不翻。
+mlir::LogicalResult ForwardVectorFuncBoundaryStore(const af::AscNodePtr &subNode, TemplateNodeContext &bodyCtx) {
+  mlir::Location loc = bodyCtx.loc;
+  const std::string subName = subNode->GetName();
+  auto inputs = subNode->inputs();
+  if (inputs.size() != 1U) {
+    return mlir::afir::emitCapabilityShortfall(loc)
+           << "UnsupportedOperation: VectorFunc boundary store '" << subName << "' has " << inputs.size() << " inputs";
+  }
+  const int64_t sourceTensor = (*inputs.begin())->attr.mem.tensor_id;
+  auto producer = bodyCtx.producerByTensor.find(sourceTensor);
+  if (producer == bodyCtx.producerByTensor.end()) {
+    return mlir::emitError(loc) << "InvalidDescriptor: VectorFunc boundary store '" << subName << "' reads tensor "
+                                << sourceTensor << ", which has no producer in the subgraph";
+  }
+  for (const auto &outputAnchor : subNode->outputs()) {
+    bodyCtx.producerByTensor[outputAnchor->attr.mem.tensor_id] = producer->second;
+    auto descriptor = bodyCtx.descriptorByTensor.find(sourceTensor);
+    if (descriptor != bodyCtx.descriptorByTensor.end()) {
+      bodyCtx.descriptorByTensor[outputAnchor->attr.mem.tensor_id] = descriptor->second;
+    }
+  }
+  return mlir::success();
+}
+
+// 边界 `Output`：它唯一的输入就是这条输出的生产者，边界表记下那个名字，`Output` 本身不翻。
+mlir::LogicalResult AppendVectorFuncBoundaryOutput(const af::AscNodePtr &subNode, VectorFuncBodyDTO &body,
+                                                   TemplateNodeContext &bodyCtx) {
+  mlir::Location loc = bodyCtx.loc;
+  const std::string subName = subNode->GetName();
+  mlir::FailureOr<int64_t> outputIndex = GetIoIndex(subNode, loc);
+  if (mlir::failed(outputIndex)) {
+    return mlir::failure();
+  }
+  if (*outputIndex < 0 || static_cast<size_t>(*outputIndex) >= body.boundary_output_names.size()) {
+    return mlir::emitError(loc) << "InvalidDescriptor: VectorFunc subgraph output '" << subName
+                                << "' maps to parent output " << *outputIndex << ", which is out of range ("
+                                << body.boundary_output_names.size() << " dsts)";
+  }
+  auto inputs = subNode->inputs();
+  if (inputs.size() != 1U) {
+    return mlir::emitError(loc) << "InvalidDescriptor: VectorFunc subgraph output '" << subName << "' has "
+                                << inputs.size() << " inputs";
+  }
+  auto producer = bodyCtx.producerByTensor.find((*inputs.begin())->attr.mem.tensor_id);
+  if (producer == bodyCtx.producerByTensor.end()) {
+    return mlir::emitError(loc) << "InvalidDescriptor: VectorFunc subgraph output '" << subName
+                                << "' has no producer in the subgraph";
+  }
+  body.boundary_output_names[static_cast<size_t>(*outputIndex)] = producer->second;
+  return mlir::success();
+}
+
+// 子图里的边界四类在这里解掉，不翻成算子：`Data` 随它那个 `Load` 在解输入边界时已经解过；`Load`
+// 只认边界的那一条；`Store` / `Output` 只做名字的转写。返回这个节点是不是边界——是，就已经处理
+// 完；不是，才轮到子图内的计算节点。
+mlir::FailureOr<bool> AppendVectorFuncBoundaryNode(const af::AscNodePtr &subNode, VectorFuncBodyDTO &body,
+                                                   TemplateNodeContext &bodyCtx,
+                                                   const llvm::DenseSet<const void *> &boundaryLoads) {
+  mlir::Location loc = bodyCtx.loc;
+  const std::string subType = subNode->GetType();
+  const std::string subName = subNode->GetName();
+  if (subType == "Data") {
+    return true;
+  }
+  if (subType == "Load") {
+    if (boundaryLoads.contains(static_cast<const void *>(subNode.get()))) {
+      return true;
+    }
+    // 不是边界的 Load 意味着子图自己从 GM 搬东西，与「VF 只在片上算」这个前提矛盾。
+    return mlir::afir::emitCapabilityShortfall(loc)
+           << "UnsupportedOperation: VectorFunc subgraph load '" << subName
+           << "' does not read a subgraph boundary, which the bridge does not model";
+  }
+  if (subType == "Store") {
+    if (mlir::failed(ForwardVectorFuncBoundaryStore(subNode, bodyCtx))) {
+      return mlir::failure();
+    }
+    return true;
+  }
+  if (subType == "Output") {
+    if (mlir::failed(AppendVectorFuncBoundaryOutput(subNode, body, bodyCtx))) {
+      return mlir::failure();
+    }
+    return true;
+  }
+  return false;
+}
+
+// 遍历子图的节点。边界四类交给 `AppendVectorFuncBoundaryNode`；其余是子图内的计算节点，过两道
+// 守卫之后走与父图节点相同的那条翻译路径。
+mlir::LogicalResult AppendVectorFuncSubGraphNodes(const af::AscGraph &subGraph, llvm::StringRef subGraphName,
+                                                  VectorFuncBodyDTO &body, TemplateInfo &bodyInfo,
+                                                  TemplateNodeContext &bodyCtx,
+                                                  const llvm::DenseSet<const void *> &boundaryLoads) {
+  mlir::Location loc = bodyCtx.loc;
   for (const auto &subNode : subGraph.GetAllNodes()) {
     if (subNode == nullptr) {
-      return mlir::emitError(loc) << "InvalidDescriptor: VectorFunc subgraph '" << *subGraphName
+      return mlir::emitError(loc) << "InvalidDescriptor: VectorFunc subgraph '" << subGraphName
                                   << "' contains a null node";
+    }
+    mlir::FailureOr<bool> isBoundary = AppendVectorFuncBoundaryNode(subNode, body, bodyCtx, boundaryLoads);
+    if (mlir::failed(isBoundary)) {
+      return mlir::failure();
+    }
+    if (*isBoundary) {
+      continue;
     }
     const std::string subType = subNode->GetType();
     const std::string subName = subNode->GetName();
-
-    // 边界的 `Data` 与它那个 `Load` 已经在上一趟解掉了。
-    if (subType == "Data") {
-      continue;
-    }
-    if (subType == "Load") {
-      if (boundaryLoads.contains(static_cast<const void *>(subNode.get()))) {
-        continue;
-      }
-      // 不是边界的 Load 意味着子图自己从 GM 搬东西，与「VF 只在片上算」这个前提矛盾。
-      return mlir::afir::emitCapabilityShortfall(loc)
-             << "UnsupportedOperation: VectorFunc subgraph load '" << subName
-             << "' does not read a subgraph boundary, which the bridge does not model";
-    }
-
-    if (subType == "Store") {
-      // 边界 Store：把它的来源直接记成「产出这条输出的那个名字」，Store 本身不翻。
-      auto inputs = subNode->inputs();
-      if (inputs.size() != 1U) {
-        return mlir::afir::emitCapabilityShortfall(loc) << "UnsupportedOperation: VectorFunc boundary store '"
-                                                        << subName << "' has " << inputs.size() << " inputs";
-      }
-      const int64_t sourceTensor = (*inputs.begin())->attr.mem.tensor_id;
-      auto producer = bodyCtx.producerByTensor.find(sourceTensor);
-      if (producer == bodyCtx.producerByTensor.end()) {
-        return mlir::emitError(loc) << "InvalidDescriptor: VectorFunc boundary store '" << subName << "' reads tensor "
-                                    << sourceTensor << ", which has no producer in the subgraph";
-      }
-      for (const auto &outputAnchor : subNode->outputs()) {
-        bodyCtx.producerByTensor[outputAnchor->attr.mem.tensor_id] = producer->second;
-        auto descriptor = bodyCtx.descriptorByTensor.find(sourceTensor);
-        if (descriptor != bodyCtx.descriptorByTensor.end()) {
-          bodyCtx.descriptorByTensor[outputAnchor->attr.mem.tensor_id] = descriptor->second;
-        }
-      }
-      continue;
-    }
-
-    if (subType == "Output") {
-      mlir::FailureOr<int64_t> outputIndex = GetIoIndex(subNode, loc);
-      if (mlir::failed(outputIndex)) {
-        return mlir::failure();
-      }
-      if (*outputIndex < 0 || static_cast<size_t>(*outputIndex) >= body->boundary_output_names.size()) {
-        return mlir::emitError(loc) << "InvalidDescriptor: VectorFunc subgraph output '" << subName
-                                    << "' maps to parent output " << *outputIndex << ", which is out of range ("
-                                    << body->boundary_output_names.size() << " dsts)";
-      }
-      auto inputs = subNode->inputs();
-      if (inputs.size() != 1U) {
-        return mlir::emitError(loc) << "InvalidDescriptor: VectorFunc subgraph output '" << subName << "' has "
-                                    << inputs.size() << " inputs";
-      }
-      auto producer = bodyCtx.producerByTensor.find((*inputs.begin())->attr.mem.tensor_id);
-      if (producer == bodyCtx.producerByTensor.end()) {
-        return mlir::emitError(loc) << "InvalidDescriptor: VectorFunc subgraph output '" << subName
-                                    << "' has no producer in the subgraph";
-      }
-      body->boundary_output_names[static_cast<size_t>(*outputIndex)] = producer->second;
-      continue;
-    }
 
     // 子图内的缓存守卫（`exec_condition` 不是 `kNoCache`）本阶段不收。
     //
@@ -1490,18 +1551,63 @@ mlir::LogicalResult AppendVectorFuncBody(const af::AscNodePtr &vfNode, NodeInfo 
       return mlir::failure();
     }
   }
+  return mlir::success();
+}
 
-  for (auto [index, name] : llvm::enumerate(body->boundary_input_names)) {
+// 两张边界表都要填满：空着的一格说明父图的这个 src / dst 在子图里没有对应的边界。
+mlir::LogicalResult CheckVectorFuncBoundariesResolved(const NodeInfo &vfInfo, const VectorFuncBodyDTO &body,
+                                                      mlir::Location loc) {
+  for (auto [index, name] : llvm::enumerate(body.boundary_input_names)) {
     if (name.empty()) {
       return mlir::emitError(loc) << "InvalidDescriptor: VectorFunc node '" << vfInfo.name << "' src #" << index
                                   << " has no boundary in the subgraph";
     }
   }
-  for (auto [index, name] : llvm::enumerate(body->boundary_output_names)) {
+  for (auto [index, name] : llvm::enumerate(body.boundary_output_names)) {
     if (name.empty()) {
       return mlir::emitError(loc) << "InvalidDescriptor: VectorFunc node '" << vfInfo.name << "' dst #" << index
                                   << " has no boundary in the subgraph";
     }
+  }
+  return mlir::success();
+}
+
+// 顺序就是诊断的先后：dtype 门禁、解输入边界、遍历节点、核对边界表，不要调。
+template <typename GraphT>
+mlir::LogicalResult AppendVectorFuncBody(const af::AscNodePtr &vfNode, NodeInfo &vfInfo, const GraphT &graph,
+                                         const TemplateNodeContext &parentCtx) {
+  mlir::Location loc = parentCtx.loc;
+  const std::string *subGraphName = af::AttrUtils::GetStr(vfNode->GetOpDescBarePtr(), "sub_graph_name");
+  if (subGraphName == nullptr) {
+    // 图自称有二次融合却没说子图在哪 —— **产生方坏了，不是能力不足**：回落会把它藏起来。
+    return mlir::emitError(loc) << "InvalidDescriptor: VectorFunc node '" << vfInfo.name
+                                << "' carries no sub_graph_name attribute";
+  }
+  af::AscGraph subGraph("af_vector_func_body");
+  if (graph.FindSubGraph(*subGraphName, subGraph) != af::SUCCESS) {
+    return mlir::emitError(loc) << "InvalidDescriptor: VectorFunc node '" << vfInfo.name << "' names subgraph '"
+                                << *subGraphName << "', which is not on this graph";
+  }
+  if (mlir::failed(CheckVectorFuncBoundaryDtypes(vfInfo, loc))) {
+    return mlir::failure();
+  }
+
+  auto body = std::make_shared<VectorFuncBodyDTO>();
+  body->boundary_input_names.assign(vfInfo.input_names.size(), std::string());
+  body->boundary_output_names.assign(vfInfo.outputs.size(), std::string());
+
+  TemplateInfo bodyInfo;
+  // 子图内是 tensor 形态：没有 destination，也就没有存储——VF 的中间结果在寄存器里，
+  // 一块 UB 都没分配过。
+  bodyInfo.buffer_form = false;
+  TemplateNodeContext bodyCtx{{}, {}, {}, parentCtx.tmpBufferLifetimes, parentCtx.templateId, loc};
+
+  // 哪几条 `Load` 是边界：解输入边界时记下，按节点地址认，遍历节点时据此放行。
+  llvm::DenseSet<const void *> boundaryLoads;
+  if (mlir::failed(ResolveVectorFuncBoundaryInputs(subGraph, *body, bodyCtx, boundaryLoads)) ||
+      mlir::failed(AppendVectorFuncSubGraphNodes(subGraph, *subGraphName, *body, bodyInfo, bodyCtx, boundaryLoads)) ||
+      mlir::failed(CheckVectorFuncBoundariesResolved(vfInfo, *body, loc))) {
+    return mlir::failure();
   }
 
   body->nodes = std::move(bodyInfo.nodes);
@@ -1613,7 +1719,7 @@ mlir::FailureOr<TemplateInfo> ToTemplateInfo(const GraphT &graph, const ascir::S
   if (mlir::failed(lifetimes)) {
     return mlir::failure();
   }
-  TemplateNodeContext nodeCtx{{}, {}, *lifetimes, templateId, loc};
+  TemplateNodeContext nodeCtx{{}, {}, {}, *lifetimes, templateId, loc};
   for (const auto &node : graph.GetAllNodes()) {
     if (mlir::failed(AppendTemplateNode(node, info, nodeCtx))) {
       return mlir::failure();
