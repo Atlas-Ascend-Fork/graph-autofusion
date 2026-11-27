@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <gtest/gtest.h>
 #include "autofuse_tiling_data.h"
 #include "Case.h"
@@ -29,6 +30,10 @@ float Reference(float lhs, float rhs) {
     case 4:
       return lhs - rhs;
     default:
+      if (rhs == 0.0F) {
+        ADD_FAILURE() << "Reference division requires a nonzero rhs";
+        return std::numeric_limits<float>::quiet_NaN();
+      }
       return lhs / rhs;
   }
 }

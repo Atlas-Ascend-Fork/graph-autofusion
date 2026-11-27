@@ -1258,9 +1258,7 @@ LogicalResult registerBinaryBrcInline(ImplementationRegistry &registry, llvm::St
       });
 }
 
-}  // namespace
-
-LogicalResult registerArithmeticBinaryImplementations(ImplementationRegistry &registry) {
+LogicalResult registerArithmeticTensorImplementations(ImplementationRegistry &registry) {
   // 这四个 op 的 tensor-tensor 形态在两套 API 家族上是同一个 `AscendC::` 调用，都不要
   // tmp buffer，也不查任何 feature。dtype 供给两侧不同（mem 只收 f16/f32/i16/i32）：
   // 主行保持 `Any`、只收两列交集（与拆行前逐字相同）；reg 侧多出的位（含第二波扩表的
@@ -1289,6 +1287,10 @@ LogicalResult registerArithmeticBinaryImplementations(ImplementationRegistry &re
     return failure();
   }
 
+  return success();
+}
+
+LogicalResult registerArithmeticBroadcastInlineImplementations(ImplementationRegistry &registry) {
   // 内联广播（brc_inline，第三批，设计见
   // docs/development/2026-11-10-afir-broadcast-inline-design.md）：`afir.add` /
   // `afir.mul` / `afir.minimum` / `afir.maximum` 的行广播 implementation，只在两个输入满足
@@ -1303,6 +1305,10 @@ LogicalResult registerArithmeticBinaryImplementations(ImplementationRegistry &re
     return failure();
   }
 
+  return success();
+}
+
+LogicalResult registerArithmeticScalarImplementations(ImplementationRegistry &registry) {
   // tensor-scalar 形态：右操作数是一个标量 SSA 值，建的是 `Adds` / `Muls` / `Maxs` /
   // `Mins`。同一个 AFIR op 的第二个 implementation——选哪个由操作数形态定死，两者的
   // 判据互斥（见 `getTensorTypes`），不靠优先级。
@@ -1321,6 +1327,17 @@ LogicalResult registerArithmeticBinaryImplementations(ImplementationRegistry &re
           registry, "maximum.tensor_scalar.reg_base", ApiFamily::RegBased, kUI8 | kBF16 | kI64 | kI8 | kUI64)) ||
       failed(registerBinary<MinimumOp, ascendc::MinsL2Op, ScalarOperand::Any>(
           registry, "minimum.tensor_scalar.reg_base", ApiFamily::RegBased, kUI8 | kBF16 | kI64 | kI8 | kUI64))) {
+    return failure();
+  }
+  return success();
+}
+
+}  // namespace
+
+LogicalResult registerArithmeticBinaryImplementations(ImplementationRegistry &registry) {
+  if (failed(registerArithmeticTensorImplementations(registry)) ||
+      failed(registerArithmeticBroadcastInlineImplementations(registry)) ||
+      failed(registerArithmeticScalarImplementations(registry))) {
     return failure();
   }
   return success();
