@@ -73,8 +73,6 @@ class ReducePartitionCaseGenerator : public FusionCaseGenerator {
   // 上限三个条件时返回 1 分强制选择本模板, 否则 0 分交由其余模板竞争; 动态轴经
   // kGroupTilingDataPlaceholder 引用本组 tiling data 的运行期值, 常量轴发射期折叠为字面量
   Status GenerateNormRecomputeScoreFunc(ascir::ImplGraph &impl_graph, std::string &score_func);
-  void FindAllPath(const af::AscNodePtr &start, const af::AscNodePtr &end, std::vector<af::AscNodePtr> &path,
-                   std::vector<std::vector<af::AscNodePtr>> &all_paths);
   static bool HasReduce(const ascir::ImplGraph &impl_graph);
   static bool HasArgReduce(const ScheduleTask &task);
   static bool HasArgReduceMultiRAxisReduce(const ascir::ImplGraph &impl_graph);

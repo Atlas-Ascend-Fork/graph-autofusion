@@ -1062,27 +1062,52 @@ std::vector<af::AscNodePtr> GetChildNodes(const af::AscNodePtr &node) {
   return childNodes;
 }
 
-static bool DfsReduceNodeBetweenBA(const af::AscNodePtr &current, const af::AscNodePtr &target, bool hasReduce) {
-  if (ScheduleUtils::IsReduce(current)) {
-    hasReduce = true;
-  }
-
-  if (current == target) {
-    return hasReduce;
-  }
-
-  const auto parents = GetParentNodes(current);
-  for (const auto &parent : parents) {
-    if (DfsReduceNodeBetweenBA(parent, target, hasReduce)) {
-      return true;
+// 收集 node 沿输入方向可达的全部祖先节点(含 node 自身)。visited 去重保证每个节点
+// 只展开一次, 即使存在汇聚菱形或环也不会重复遍历。
+static std::unordered_set<af::AscNodePtr> CollectAncestorNodes(const af::AscNodePtr &node) {
+  std::unordered_set<af::AscNodePtr> ancestors{node};
+  std::vector<af::AscNodePtr> pending{node};
+  while (!pending.empty()) {
+    const auto current = pending.back();
+    pending.pop_back();
+    for (const auto &parent : GetParentNodes(current)) {
+      if (ancestors.insert(parent).second) {
+        pending.emplace_back(parent);
+      }
     }
   }
-
-  return false;
+  return ancestors;
 }
 
 bool HasReduceNodeOnPath(const af::AscNodePtr &b, const af::AscNodePtr &a) {
-  return DfsReduceNodeBetweenBA(b, a, false);
+  // 功能: 判断是否存在一条 b->a 的路径(沿输入方向), 其上(含 b/a 自身)有 reduce 节点。
+  // 原实现 DfsReduceNodeBetweenBA 无 visited 递归枚举 b->a 的全部路径, 在门控菱形等
+  // 汇聚结构串联、且途中没有 reduce 可提前返回时, 路径数呈指数增长。
+  // 节点 n 位于某条 b->a 路径上, 当且仅当:
+  //   1. n 能从 b 沿输入方向到达, 即 n 是 b 的祖先;
+  //   2. n 能沿输入方向到达 a, 即 n 是 a 的下游(从 a 沿出边可达)。
+  // 分别求 b 的祖先集合与 a 的下游集合求交即可, 无需枚举路径。
+  const auto b_ancestors = CollectAncestorNodes(b);
+  if (b_ancestors.count(a) == 0UL) {
+    return false;
+  }
+  std::unordered_set<af::AscNodePtr> a_descendants{a};
+  std::vector<af::AscNodePtr> pending{a};
+  while (!pending.empty()) {
+    const auto current = pending.back();
+    pending.pop_back();
+    for (const auto &child : GetChildNodes(current)) {
+      if (a_descendants.insert(child).second) {
+        pending.emplace_back(child);
+      }
+    }
+  }
+  for (const auto &node : b_ancestors) {
+    if ((a_descendants.count(node) != 0UL) && ScheduleUtils::IsReduce(node)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 bool ScheduleUtils::IsLastAxisReduce(const ascir::ImplGraph &impl_graph) {
