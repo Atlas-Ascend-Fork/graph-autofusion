@@ -2374,7 +2374,7 @@ TEST_F(TestOptimizerV2, LargeTailBrcToNddmaLowScoreFunc_Dynaminc) {
   const auto score_func = nddma_template->GetScoreFunc(graph, impl_graphs[2].scheduled_graph);
   const auto res =
       "int32_t CalcScore(const AutofuseTilingData &tiling_data) {\n"
-      "  const auto tail_size = static_cast<int64_t>((4 * tiling_data.s1));\n"
+      "  const auto tail_size = static_cast<int64_t>((4 * tiling_data.__AUTOFUSE_GROUP_TILING_DATA__.s1));\n"
       "  if (tail_size > 4096) { return -1; }\n"
       "  return 0;\n"
       "}\n";
@@ -2434,7 +2434,7 @@ TEST_F(TestOptimizerV2, NddmaScoreFuncTailAxisSplitted_Dynamic) {
   const auto score_func = nddma_template->GetScoreFunc(graph, impl_graphs[3].scheduled_graph);
   const auto res =
       "int32_t CalcScore(const AutofuseTilingData &tiling_data) {\n"
-      "  const auto tail_size = static_cast<int64_t>((4 * tiling_data.s1));\n"
+      "  const auto tail_size = static_cast<int64_t>((4 * tiling_data.__AUTOFUSE_GROUP_TILING_DATA__.s1));\n"
       "  if (tail_size > 4096) { return -1; }\n"
       "  return 0;\n"
       "}\n";
@@ -2618,8 +2618,8 @@ TEST_F(TestOptimizerV2, NddmaScoreFuncTailAxisBacktrackFallback) {
 
   const auto nddma_template = af::ComGraphMakeUnique<NddmaTemplate>();
   const auto score_func = nddma_template->GetScoreFunc(graph, sched_graph);
-  EXPECT_NE(score_func.find("tiling_data.z1t_size"), std::string::npos);
-  EXPECT_EQ(score_func.find("tiling_data.s1"), std::string::npos);
+  EXPECT_NE(score_func.find("tiling_data.__AUTOFUSE_GROUP_TILING_DATA__.z1t_size"), std::string::npos);
+  EXPECT_EQ(score_func.find("tiling_data.__AUTOFUSE_GROUP_TILING_DATA__.s1"), std::string::npos);
 }
 
 TEST_F(TestOptimizerV2, LoadBrcToNddmaAlignLowScoreFunc) {
@@ -2797,7 +2797,7 @@ TEST_F(TestOptimizerV2, LoadBrcToNddmaAlignScoreFunc_Dynamic) {
   const auto score_func = nddma_template->GetScoreFunc(graph, impl_graphs[2].scheduled_graph);
   const auto res =
       "int32_t CalcScore(const AutofuseTilingData &tiling_data) {\n"
-      "  const auto tail_size = static_cast<int64_t>((2 * tiling_data.s1));\n"
+      "  const auto tail_size = static_cast<int64_t>((2 * tiling_data.__AUTOFUSE_GROUP_TILING_DATA__.s1));\n"
       "  if (tail_size % 32 == 0) { return -1; }\n"
       "  if (tail_size > 4096) { return -1; }\n"
       "  return 0;\n"
@@ -2919,7 +2919,7 @@ TEST_F(TestOptimizerV2, LoadBrcToNddmaHighScoreFunc_Dynamic) {
   const auto score_func = nddma_template->GetScoreFunc(graph, impl_graphs[2].scheduled_graph);
   const auto res =
       "int32_t CalcScore(const AutofuseTilingData &tiling_data) {\n"
-      "  const auto tail_size = static_cast<int64_t>((4 * tiling_data.s1));\n"
+      "  const auto tail_size = static_cast<int64_t>((4 * tiling_data.__AUTOFUSE_GROUP_TILING_DATA__.s1));\n"
       "  return 0;\n"
       "}\n";
   EXPECT_EQ(score_func, res);

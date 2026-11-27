@@ -549,6 +549,31 @@ __aicore__ inline void CopyIndirectLoadSimdEmbeddingSliceGeneral(const LocalTens
   IndirectLoadSimdCopyContiguous<X>(y, x, copy_count, source_offset, output_local_offset);
 }
 
+// —— 跨执行单元可见性同步（S↔V）——
+// 3510/9201/9202 上队列机制独占固定事件号，运行期申请的事件号若与固定号冲突，硬件以
+// set/wait 配对失配报核错误，故改用排空全部流水线的屏障（不占事件号）；其余架构用
+// HardEvent 事件。后续新增架构仅需维护这两个入口，勿在调用点内联展开条件。
+__aicore__ inline void IndirectLoadSimdEnsureVtoS() {
+#if defined(__NPU_ARCH__) && ((__NPU_ARCH__ == 3510) || (__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202))
+  AscendC::PipeBarrier<PIPE_ALL>();
+#else
+  const int32_t event_id = static_cast<int32_t>(GetTPipePtr()->FetchEventID(AscendC::HardEvent::V_S));
+  AscendC::SetFlag<AscendC::HardEvent::V_S>(event_id);
+  AscendC::WaitFlag<AscendC::HardEvent::V_S>(event_id);
+#endif
+}
+
+// S 管道（标量）写 UB 后被 VEC 读取前的可见性同步，架构约束同上。
+__aicore__ inline void IndirectLoadSimdEnsureStoV() {
+#if defined(__NPU_ARCH__) && ((__NPU_ARCH__ == 3510) || (__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202))
+  AscendC::PipeBarrier<PIPE_ALL>();
+#else
+  const int32_t event_id = static_cast<int32_t>(GetTPipePtr()->FetchEventID(AscendC::HardEvent::S_V));
+  AscendC::SetFlag<AscendC::HardEvent::S_V>(event_id);
+  AscendC::WaitFlag<AscendC::HardEvent::S_V>(event_id);
+#endif
+}
+
 template <typename X, typename Index, int32_t Rank, int32_t Axis, typename... ShapeArgs>
 __aicore__ inline bool TryIndirectLoadSimdEmbedding(const LocalTensor<X> &x, const LocalTensor<Index> &index,
                                                     const LocalTensor<X> &y, uint32_t logical_size,
@@ -737,6 +762,10 @@ __aicore__ inline void BuildIndirectLoadSimdStridedOffsets(const LocalTensor<Ind
   }
   // —— 通用路径：逐元素坐标折叠（非尾轴 gather 含 inner 残留 / 跨 slice / index
   // 跨步等形态，无法塌缩为常量仿射基址）。
+  // index 可能由同核 VEC 流水生产写入 UB（融合图内联生产，TBuf 无队列事件保护），
+  // 通用路径标量 GetValue 跨执行单元读取程序序不可见，须先建立 V→S 依赖等待向
+  // 量写落地；仿射快路径经 VEC Cast 读索引（V 管道内有序），无需该同步。
+  IndirectLoadSimdEnsureVtoS();
   for (uint32_t i = 0; i < ctx.logical_size; ++i) {
     const int64_t global_idx = ctx.output_offset + static_cast<int64_t>(i);
     const int64_t index_offset = GetIndirectLoadSimdStridedIndexOffset<Rank, Axis>(global_idx, ctx);
@@ -777,6 +806,9 @@ __aicore__ inline void ScatterIndirectLoadSimdStridedOutput(const LocalTensor<X>
   }
   // Gather writes packed logical values first. Repack from the end so padding lanes do not
   // overwrite a source value that is still needed by the supported compact output layouts.
+  // Gather（VEC）写入 y 后下方逐元素重排为标量读写，跨执行单元程序序不可见，
+  // 同样需建立 V→S 依赖；恒等布局快路径已提前返回，不受影响。
+  IndirectLoadSimdEnsureVtoS();
   for (int64_t i = static_cast<int64_t>(ctx.logical_size) - 1; i >= 0; --i) {
     const int64_t output_offset = GetIndirectLoadSimdStridedOutputOffset<Rank, Axis>(ctx.output_offset + i, ctx);
     y.SetValue(output_offset, y.GetValue(i));
@@ -796,17 +828,9 @@ __aicore__ inline void IndirectLoadSimdStridedImpl(const LocalTensor<X> &x, cons
   const auto context = MakeIndirectLoadSimdStridedContext<Rank, Axis>(shape, params);
   LocalTensor<uint32_t> offsets = tmp.template ReinterpretCast<uint32_t>();
   BuildIndirectLoadSimdStridedOffsets<X, Index, Rank, Axis>(index, offsets, context);
-#if defined(__NPU_ARCH__) && ((__NPU_ARCH__ == 3510) || (__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202))
   // 偏移表由标量循环（S 管道）写入 UB，随后的 Gather 为 VEC 指令，跨执行单元读取
-  // 程序序不可见，必须显式同步；这些架构上队列机制独占固定事件号，运行时申请的
-  // 事件号若与固定号冲突，硬件以 set/wait 配对失配报核错误，故改用排空全部流水线
-  // 的屏障，不占用事件号。
-  AscendC::PipeBarrier<PIPE_ALL>();
-#else
-  int32_t offset_event_id = static_cast<int32_t>(GetTPipePtr()->FetchEventID(AscendC::HardEvent::S_V));
-  AscendC::SetFlag<AscendC::HardEvent::S_V>(offset_event_id);
-  AscendC::WaitFlag<AscendC::HardEvent::S_V>(offset_event_id);
-#endif
+  // 程序序不可见，必须显式同步（架构约束见 IndirectLoadSimdEnsureStoV）。
+  IndirectLoadSimdEnsureStoV();
   Gather(y, x, offsets, static_cast<uint32_t>(0), context.logical_size);
   ScatterIndirectLoadSimdStridedOutput<X, Rank, Axis>(y, context);
 }

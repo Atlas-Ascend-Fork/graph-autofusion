@@ -1056,8 +1056,15 @@ std::string GetDynamicScoreFunc(const af::AscGraph &nddma_graph, const af::AscNo
   std::vector<std::pair<af::Expression, af::Expression>> replacements;
   for (const auto &size_var : nddma_graph.GetAllSizeVar()) {
     if (!size_var->expr.IsConstExpr()) {
-      replacements.emplace_back(size_var->expr,
-                                af::Symbol((std::string("tiling_data.") + size_var->expr.Str().get()).c_str()));
+      // 打分函数体由 GenCalcScore 按 schedule_group_ident 绑定组子结构：多调度组
+      // 模型的 ks 符号字段位于 graphX_resultY_gZ_tiling_data 嵌套结构中，直接发射
+      // tiling_data.<sym> 会因顶层结构无该成员而编译失败（动态图 host 编译报 no
+      // member named 'ksN' in 'AutofuseTilingData'）；统一经组占位符发射，由
+      // SubstituteGroupTilingDataPlaceholder 绑定（单组时绑回 tiling_data 本身）。
+      replacements.emplace_back(
+          size_var->expr, af::Symbol((std::string("tiling_data.") + ascgen_utils::kGroupTilingDataPlaceholder + "." +
+                                      size_var->expr.Str().get())
+                                         .c_str()));
     }
   }
   const auto &output_attr = nddma_node->outputs[0].attr;

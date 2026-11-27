@@ -679,7 +679,7 @@ TEST_F(OptimizerStV2, NddmaScoreFuncTailAxisSplitted_Dynamic) {
   // 尾轴表达式应引用原始轴变量 s1 而非切分内轴 z1t_size
   const auto res =
       "int32_t CalcScore(const AutofuseTilingData &tiling_data) {\n"
-      "  const auto tail_size = static_cast<int64_t>((2 * tiling_data.s1));\n"
+      "  const auto tail_size = static_cast<int64_t>((2 * tiling_data.__AUTOFUSE_GROUP_TILING_DATA__.s1));\n"
       "  if (tail_size % 32 == 0) { return -1; }\n"
       "  if (tail_size > 4096) { return -1; }\n"
       "  return 0;\n"
