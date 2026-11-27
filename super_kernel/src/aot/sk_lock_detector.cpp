@@ -20,6 +20,7 @@
 #include "super_kernel.h"
 #include <functional>
 #include <map>
+#include <mutex>
 
 int64_t LockDetector::deviceRealCubeNum = 0;
 int64_t LockDetector::deviceRealVecNum = 0;
@@ -64,27 +65,26 @@ void LockDetector::Init(SuperKernelGraph &graph) {
   skStreamIds.clear();
   graph_ = &graph;
 
-  if (deviceRealCubeNum == 0 && deviceRealVecNum == 0) {
-    GetDeviceCores();
-  } else {
-    SK_LOGD("[lock detector] LockDetector::Init: Using cached device cores: cube=%lu, vec=%lu", deviceRealCubeNum,
-            deviceRealVecNum);
-  }
+  GetDeviceCores();
 }
 
 aclError LockDetector::GetDeviceCores() {
-  if (deviceRealCubeNum != 0 && deviceRealVecNum != 0) {
-    return ACL_SUCCESS;
-  }
+  static std::once_flag deviceCoresInitFlag;
+  static aclError deviceCoresInitResult = ACL_ERROR_FAILURE;
+  std::call_once(deviceCoresInitFlag, []() {
+    int64_t cubeNum = 0;
+    int64_t vecNum = 0;
+    deviceCoresInitResult = GetDeviceCoreNums(cubeNum, vecNum);
+    if (deviceCoresInitResult != ACL_SUCCESS) {
+      SK_LOGE("[lock detector] GetDeviceCores failed, ret=%d", deviceCoresInitResult);
+      return;
+    }
 
-  aclError ret = GetDeviceCoreNums(deviceRealCubeNum, deviceRealVecNum);
-  if (ret != ACL_SUCCESS) {
-    SK_LOGE("[lock detector] GetDeviceCores failed, ret=%d", ret);
-    return ret;
-  }
-
-  SK_LOGI("[lock detector] GetDeviceCores success, cube=%ld, vec=%ld", deviceRealCubeNum, deviceRealVecNum);
-  return ACL_SUCCESS;
+    deviceRealCubeNum = cubeNum;
+    deviceRealVecNum = vecNum;
+    SK_LOGI("[lock detector] GetDeviceCores success, cube=%ld, vec=%ld", deviceRealCubeNum, deviceRealVecNum);
+  });
+  return deviceCoresInitResult;
 }
 
 std::pair<uint64_t, uint64_t> LockDetector::GetAvailableCores(bool isSuperKernel) const {
@@ -1375,9 +1375,6 @@ void LockDetector::SetNotifyNodesExpandNumForScope(SuperKernelScopeInfo &scope, 
   std::unordered_set<uint32_t> scopeStreams;
   // Collect notify nodes and stream information using the current deadlock-check candidate.
   for (const auto *node : scope.GetNodes()) {
-    if (node == nullptr) {
-      continue;
-    }
     if (node->GetNodeType() == SkNodeType::NODE_NOTIFY) {
       notifyNodes.push_back(const_cast<SuperKernelBaseNode *>(node));
     }
@@ -1399,9 +1396,6 @@ void LockDetector::SetNotifyNodesExpandNumForScope(SuperKernelScopeInfo &scope, 
 
 void LockDetector::ResetNotifyExpandNumForScope(SuperKernelScopeInfo &scope) {
   for (auto *node : scope.GetNodes()) {
-    if (node == nullptr) {
-      continue;
-    }
     if (node->GetNodeType() == SkNodeType::NODE_NOTIFY) {
       node->SetNotifyExpandVecNum(0);
       node->SetNotifyExpandCubeNum(0);

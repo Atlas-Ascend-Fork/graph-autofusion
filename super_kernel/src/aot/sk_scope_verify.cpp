@@ -73,17 +73,17 @@ class ScopeVerifyRunner {
       return ret;
     }
 
+    ret = LockDetector::GetDeviceCores();
+    if (ret != ACL_SUCCESS) {
+      SK_DLOGE("aclskScopeVerify GetDeviceCores failed, ret=%d", ret);
+      return ret;
+    }
+
     // Match the original SuperKernel scope refinement order: run full-core ScheMode first,
     // then deadlock on refined scopes.
     if (!RunScopeVerifyScheModeSplitPass(graph_, scopes_, splitRecords_)) {
       SK_DLOGE("aclskScopeVerify ScheModeKernelSplitPass failed");
       return ACL_ERROR_FAILURE;
-    }
-
-    ret = LockDetector::GetDeviceCores();
-    if (ret != ACL_SUCCESS) {
-      SK_DLOGE("aclskScopeVerify GetDeviceCores failed, ret=%d", ret);
-      return ret;
     }
 
     SuperKernelOptionsManager opts;

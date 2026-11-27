@@ -27,6 +27,7 @@
 #include <acl/acl_rt.h>
 #include <nlohmann/json.hpp>
 
+#include <exception>
 #include <fstream>
 #include <sstream>
 #include <unordered_map>
@@ -633,6 +634,7 @@ bool DumpGraphJsonToFile(Json graphJson, const SuperKernelOptionsManager &opts, 
     InjectSkInfos(graphJson, *scopeInfos);
   }
   graphJson["options"] = opts.ToJson();
+  std::string serializedJson = graphJson.dump(2);  // Pretty print with 2-space indentation
 
   std::string fullFilename = filename + ".json";
   std::string testJsonPath = metaDir + "/" + fullFilename;
@@ -642,7 +644,7 @@ bool DumpGraphJsonToFile(Json graphJson, const SuperKernelOptionsManager &opts, 
     return false;
   }
 
-  testJsonFile << graphJson.dump(2);  // Pretty print with 2-space indentation
+  testJsonFile << serializedJson;
   testJsonFile.close();
   SK_LOGI("Successfully dumped graph to %s: %s", fullFilename.c_str(), testJsonPath.c_str());
   return true;
@@ -781,7 +783,12 @@ bool DumpGraphJson(aclmdlRI model, const std::string &modelId, const SuperKernel
   }
   SK_LOGI("End creating temp graph for %s dump", filename.c_str());
 
-  return DumpGraphJsonToFile(tempGraph.ToJson(), opts, metaDir, filename, scopeInfos);
+  try {
+    return DumpGraphJsonToFile(tempGraph.ToJson(), opts, metaDir, filename, scopeInfos);
+  } catch (const std::exception &e) {
+    SK_LOGE("Failed to dump graph JSON for %s: %s", filename.c_str(), e.what());
+    return false;
+  }
 }
 
 bool DumpGraphJson(const SuperKernelGraph &graph, const SuperKernelOptionsManager &opts, const std::string &metaDir,
@@ -795,5 +802,10 @@ bool DumpGraphJson(const SuperKernelGraph &graph, const SuperKernelOptionsManage
     return false;
   }
 
-  return DumpGraphJsonToFile(graph.ToJson(), opts, metaDir, filename, scopeInfos);
+  try {
+    return DumpGraphJsonToFile(graph.ToJson(), opts, metaDir, filename, scopeInfos);
+  } catch (const std::exception &e) {
+    SK_LOGE("Failed to dump graph JSON for %s: %s", filename.c_str(), e.what());
+    return false;
+  }
 }
