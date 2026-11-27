@@ -44,9 +44,7 @@ af::Status CopyPerf(const std::string &op_type, uint32_t data_type_size, const s
   GE_ASSERT_TRUE(it != kBandwidthMap.end(), "Op_type[%s] not found in kBandwidthMap", op_type.c_str());
   auto cycles = Div(data_size, it->second);
   Expr dens = Sub(Mul(dims.back(), kInitA), kInitB);
-  if (dens == 0) {
-    dens = CreateExpr(1);
-  }
+  dens = af::sym::Max(dens, CreateExpr(1));
   auto weight = Div(kSymPowerofEight, dens);
   res = Mul(cycles, weight);
   return af::SUCCESS;
@@ -69,9 +67,7 @@ af::Status MoveGmtoL1Api([[maybe_unused]] const std::vector<TensorShapeInfo> &in
   auto cycles = Div(data_size, it->second);
   cycles = Add(cycles, kNd2NzStartCost);
   Expr dens = Sub(Mul(dims.back(), kInitA), kInitB);
-  if (dens == 0) {
-    dens = CreateExpr(1);
-  }
+  dens = af::sym::Max(dens, CreateExpr(1));
   auto weight = Div(kSymPowerofEight, dens);
   perf_res.pipe_res[PipeType::AICORE_MTE2] = Mul(cycles, weight);
   return af::SUCCESS;
@@ -100,9 +96,7 @@ af::Status MovefromL1Perf(const std::string &op_type, uint32_t data_type_size, c
   auto cycles = Div(data_size, it->second);
   cycles = Add(cycles, kMte1StartCost);
   Expr dens = Sub(Mul(dims.back(), kInitA), kInitB);
-  if (dens == 0) {
-    dens = CreateExpr(1);
-  }
+  dens = af::sym::Max(dens, CreateExpr(1));
   auto weight = Div(kSymPowerofEight, dens);
   res = Mul(cycles, weight);
   return af::SUCCESS;
@@ -1140,7 +1134,7 @@ af::Status GatherApi([[maybe_unused]] const std::vector<TensorShapeInfo> &input_
   GE_ASSERT_SUCCESS(UpdateTenary(load_perf0, perf_res));
   GE_ASSERT_SUCCESS(UpdateTenary(load_perf1, perf_res));
   perf_res.pipe_res[PipeType::AIV_MTE2] =
-      GetPipeCost(load_perf0, PipeType::AIV_MTE2) + GetPipeCost(load_perf0, PipeType::AIV_MTE2);
+      GetPipeCost(load_perf0, PipeType::AIV_MTE2) + GetPipeCost(load_perf1, PipeType::AIV_MTE2);
   perf_res.pipe_res[PipeType::AIV_VEC] = GetPipeCost(cast_perf, PipeType::AIV_VEC) +
                                          GetPipeCost(muls_perf, PipeType::AIV_VEC) +
                                          GetPipeCost(gather_perf, PipeType::AIV_VEC);

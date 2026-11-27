@@ -2833,7 +2833,7 @@ af::Status TilingCodeGenImpl::GenAllSameScoreTilingCases(
   for (const auto &assemble_args_name : ordered_assemble_args_name) {
     auto &same_args_graphs = same_args_name_to_graphs[assemble_args_name];
     std::sort(same_args_graphs.begin(), same_args_graphs.end(), [](const ModelInfo *a, const ModelInfo *b) -> bool {
-      return (a->tiling_case_id < b->tiling_case_id) || (a->sub_case_tag < b->sub_case_tag);
+      return std::tie(a->tiling_case_id, a->sub_case_tag) < std::tie(b->tiling_case_id, b->sub_case_tag);
     });
     if (is_first_same_args_graph) {
       std::string kInitVar = R"(    TilingCaseImpl *tilingCaseImplPtr;
@@ -3596,6 +3596,7 @@ void TilingCodeGenImpl::GenPGOSearchTilingKeyUniqGroupBatch() {
   tiling_func_.AddLine("  for (const auto &tiling_data_perf : tiling_data_list) {");
   tiling_func_.AddLine("    uint64_t workspaceSizeTmp = 0U;");
   tiling_func_.AddLine("    if (!GetWorkspaceSize(tiling_data_perf.tiling_data, workspaceSizeTmp)) {");
+  tiling_func_.AddLine("      free(memory);");
   tiling_func_.AddLine("      return false;");
   tiling_func_.AddLine("    }");
   tiling_func_.AddLine("    if (workspaceSizeTmp > workspaceSize) {");
@@ -3604,6 +3605,7 @@ void TilingCodeGenImpl::GenPGOSearchTilingKeyUniqGroupBatch() {
   tiling_func_.AddLine("  }");
   tiling_func_.AddLine("  if (__builtin_add_overflow(workspaceSize, 16ULL * 1024ULL * 1024ULL, &workspaceSize)) {");
   tiling_func_.AddLine("    OP_LOGE(OP_NAME, \"Workspace size overflow in PGO batch profiling.\");");
+  tiling_func_.AddLine("    free(memory);");
   tiling_func_.AddLine("    return false;");
   tiling_func_.AddLine("  }");
   tiling_func_.AddLine("  if (PgoConfig::Instance().batch_callback != nullptr) {");

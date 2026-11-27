@@ -7838,7 +7838,7 @@ TEST_F(UTestAscendcApiPerf, TestGatherFloat16) {
   EXPECT_EQ(Str(res1), "354.892294883728");
   auto ternary_ops = perf_res.ternary_ops;
   EXPECT_TRUE(ternary_ops.empty());
-  EXPECT_EQ(Str(res2), "((32768 / (((7.30999994277954 / (block_dim)) + 7.90520000457764))) + 54.0200004577637)");
+  EXPECT_EQ(Str(res2), "((17408 / (((7.30999994277954 / (block_dim)) + 7.90520000457764))) + 54.0200004577637)");
 }
 
 // 测试 GatherAPI - float32类型
@@ -7874,7 +7874,9 @@ TEST_F(UTestAscendcApiPerf, TestGather32) {
   EXPECT_EQ(Str(res1), "333.16509604454");
   auto ternary_ops = perf_res.ternary_ops;
   EXPECT_TRUE(ternary_ops.empty());
-  EXPECT_EQ(Str(res2), "((65536 / (((15.8959999084473 / (block_dim)) + 9.90740013122559))) + 54.0200004577637)");
+  EXPECT_EQ(Str(res2),
+            "((256 / (((7.30999994277954 / (block_dim)) + 7.90520000457764))) + (32768 / (((15.8959999084473 / "
+            "(block_dim)) + 9.90740013122559))) + 54.0200004577637)");
 }
 
 // 测试输入形状为空的边界情况
@@ -7963,4 +7965,25 @@ TEST_F(UTestAscendcApiPerf, TestRemovePadEmptyInputShapes) {
   node.node_ptr = GraphConstructUtils::ConstructSingleOp(op_type, 1, 1);
   auto result = perf(input_shapes, output_shapes, node, perf_res);
   EXPECT_NE(result, af::SUCCESS);
+}
+
+// 覆盖 CopyPerf / MoveGmtoL1 / MovefromL1 的 dens 计算（含尾维边界）
+TEST_F(UTestAscendcApiPerf, TestDataMoveApiPerf) {
+  const std::vector<std::string> op_types = {"T_LoadTscm", "CopyL2ToL1",  "T_LoadA",
+                                             "T_LoadB",    "CopyL0CToL2", "T_FixPipeTrans"};
+  for (const auto &op_type : op_types) {
+    std::vector<att::TensorShapeInfo> input_shapes(1);
+    std::vector<att::TensorShapeInfo> output_shapes(1);
+    input_shapes[0].data_type = "float16";
+    input_shapes[0].data_type_size = 2;
+    input_shapes[0].dims = {CreateExpr(64), CreateExpr(128)};
+    output_shapes[0].data_type = "float16";
+    output_shapes[0].data_type_size = 2;
+    output_shapes[0].dims = {CreateExpr(64), CreateExpr(128)};
+    PerfOutputInfo perf_res;
+    NodeInfo node;
+    auto perf = GetPerfFunc(op_type);
+    ASSERT_NE(perf, nullptr);
+    EXPECT_EQ(perf(input_shapes, output_shapes, node, perf_res), af::SUCCESS);
+  }
 }

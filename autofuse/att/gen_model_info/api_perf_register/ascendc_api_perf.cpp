@@ -805,9 +805,7 @@ af::Status VectorCompute([[maybe_unused]] const std::vector<TensorShapeInfo> &in
   Expr data_size = Mul(dim_product, CreateExpr(data_type_size));
   auto cycles = Div(data_size, kSymPowerofSeven);
   Expr dens = Sub(Mul(dims.back(), kInitA), kInitB);
-  if (dens == 0) {
-    dens = CreateExpr(1);
-  }
+  dens = af::sym::Max(dens, CreateExpr(1));
   auto weight = Div(kSymPowerofEight, dens);
   cycles = Mul(cycles, weight);
   const auto kHeadCost = CreateExpr(4U);
