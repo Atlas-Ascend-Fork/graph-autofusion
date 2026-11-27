@@ -23,6 +23,7 @@ add_executable(super_kernel_aot_utest
     ${CMAKE_CURRENT_SOURCE_DIR}/test_sk_node.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_sk_common.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_sk_scope_split.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_sk_scope_recommendation.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_node_scope_tagging.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_scope_range.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_sk_lock_detector.cpp
@@ -52,6 +53,7 @@ add_executable(super_kernel_aot_utest
     ${GRAPH_AUTOFUSION_ROOT_DIR}/super_kernel/src/aot/sk_verify_graph.cpp
     ${GRAPH_AUTOFUSION_ROOT_DIR}/super_kernel/src/aot/sk_verify_scope_split.cpp
     ${GRAPH_AUTOFUSION_ROOT_DIR}/super_kernel/src/aot/sk_scope_split.cpp
+    ${GRAPH_AUTOFUSION_ROOT_DIR}/super_kernel/src/aot/sk_scope_recommendation.cpp
     ${GRAPH_AUTOFUSION_ROOT_DIR}/super_kernel/src/aot/sk_scope_split_result_reporter.cpp
     ${GRAPH_AUTOFUSION_ROOT_DIR}/super_kernel/src/aot/sk_lock_detector.cpp
     ${GRAPH_AUTOFUSION_ROOT_DIR}/super_kernel/src/aot/sk_node.cpp
