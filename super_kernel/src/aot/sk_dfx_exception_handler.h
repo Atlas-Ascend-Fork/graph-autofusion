@@ -26,7 +26,6 @@
 #include "acl/acl.h"
 #include "sk_common.h"
 #include "runtime/rt_external_kernel.h"
-#include "runtime/base.h"
 #include "dump/adump_pub.h"
 
 namespace sk {

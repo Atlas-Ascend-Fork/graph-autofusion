@@ -24,7 +24,6 @@
 #include "sk_common.h"
 #include "sk_event_recorder.h"
 #include "runtime/rt_external_kernel.h"
-#include "runtime/kernel.h"
 
 // COND register index in errReg[] for different architectures
 // DAV_2201: errReg[20] is low 32 bits, errReg[21] is high 32 bits
