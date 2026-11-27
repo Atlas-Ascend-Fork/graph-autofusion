@@ -68,13 +68,41 @@ void PrintTaskNodesDetail(const std::vector<SuperKernelBaseNode *> &nodes, const
     SK_LOGI("  [%zu] %s", i, node->Format().c_str());
   }
 }
+
+bool GroupCustomEventsByOwner(
+    const std::vector<std::unique_ptr<SuperKernelBaseNode>> &eventNodes,
+    std::unordered_map<uint64_t, std::vector<SuperKernelBaseNode *>> &tasksWithTrailingCustomEvents) {
+  for (const auto &event : eventNodes) {
+    if (event == nullptr) {
+      SK_LOGE("cannot schedule custom events: null event node");
+      return false;
+    }
+    const auto type = event->GetNodeType();
+    const auto streamIdx = event->GetStreamIdxInGraph();
+    if (type != SkNodeType::NODE_NOTIFY && type != SkNodeType::NODE_RESET) {
+      SK_LOGE("cannot schedule custom event: unsupported type=%d, eventId=%lu, streamIdx=%u", static_cast<int>(type),
+              event->GetNodeId(), streamIdx);
+      return false;
+    }
+    const auto ownerNodeId = event->GetPreNodeId();
+    if (ownerNodeId == INVALID_TASK_ID) {
+      SK_LOGE("cannot schedule custom event: invalid owner, eventId=%lu, streamIdx=%u", event->GetNodeId(), streamIdx);
+      return false;
+    }
+    tasksWithTrailingCustomEvents[ownerNodeId].push_back(event.get());
+  }
+  return true;
+}
+
 }  // namespace
 
-bool SuperKernelOptimizer::ExtractIntraStreamDependencies(const std::vector<SuperKernelBaseNode *> &taskNodes) const {
+bool SuperKernelOptimizer::BuildScopeDependencies(const std::vector<SuperKernelBaseNode *> &taskNodes,
+                                                  const std::vector<std::unique_ptr<SuperKernelBaseNode>> &eventNodes,
+                                                  SuperKernelGraph &graph) const {
   std::unordered_map<uint32_t, SuperKernelBaseNode *> lastNodeByStream;
   for (auto *node : taskNodes) {
     if (node == nullptr) {
-      SK_LOGE("null node while extracting intra-stream dependencies");
+      SK_LOGE("null node while building scope dependencies");
       return false;
     }
     auto it = lastNodeByStream.find(node->GetStreamIdxInGraph());
@@ -84,6 +112,16 @@ bool SuperKernelOptimizer::ExtractIntraStreamDependencies(const std::vector<Supe
       node->receiveNodeId.insert(previous->GetNodeId());
     }
     lastNodeByStream[node->GetStreamIdxInGraph()] = node;
+  }
+  for (const auto &event : eventNodes) {
+    auto *owner = graph.GetNodeById(event->GetPreNodeId());
+    if (owner == nullptr) {
+      SK_LOGE("synthetic event owner disappeared: eventId=%lu, ownerNodeId=%lu", event->GetNodeId(),
+              event->GetPreNodeId());
+      return false;
+    }
+    owner->sendToNodeId.insert(event->GetNodeId());
+    event->receiveNodeId.insert(owner->GetNodeId());
   }
   return true;
 }
@@ -186,26 +224,57 @@ std::vector<SuperKernelBaseNode *> SuperKernelOptimizer::ReorderWaitNodesForTask
   return reorderedTaskNodes;
 }
 
-void SuperKernelOptimizer::ConnectLastKernelsToFirstEvent(const std::vector<SuperKernelBaseNode *> &taskNodes,
-                                                          SuperKernelBaseNode *firstEvent) const {
-  if (firstEvent == nullptr) {
-    return;
+bool SuperKernelOptimizer::BuildTaskListWithCustomEvents(
+    const std::vector<SuperKernelBaseNode *> &taskNodes,
+    const std::vector<std::unique_ptr<SuperKernelBaseNode>> &eventNodes,
+    std::vector<SuperKernelBaseNode *> &tasks) const {
+  if (eventNodes.empty()) {
+    tasks = taskNodes;
+    return true;
   }
-
-  std::unordered_map<uint32_t, SuperKernelBaseNode *> lastKernelByStream;
-  for (auto *node : taskNodes) {
-    if (node != nullptr && node->GetNodeType() == SkNodeType::NODE_KERNEL) {
-      lastKernelByStream[node->GetStreamIdxInGraph()] = node;
+  std::unordered_map<uint64_t, std::vector<SuperKernelBaseNode *>> tasksWithTrailingCustomEvents;
+  if (!GroupCustomEventsByOwner(eventNodes, tasksWithTrailingCustomEvents)) {
+    return false;
+  }
+  std::vector<SuperKernelBaseNode *> scheduled;
+  scheduled.reserve(taskNodes.size() + eventNodes.size());
+  for (auto *task : taskNodes) {
+    scheduled.push_back(task);
+    const auto it = tasksWithTrailingCustomEvents.find(task->GetNodeId());
+    if (it == tasksWithTrailingCustomEvents.end()) {
+      continue;
     }
+    auto &events = it->second;
+    for (const auto *event : events) {
+      // An empty stream keeps the scope-tail anchor used before early release.
+      if (event->GetStreamIdxInGraph() != task->GetStreamIdxInGraph() &&
+          (task != taskNodes.back() ||
+           std::any_of(taskNodes.begin(), taskNodes.end(), [event](const SuperKernelBaseNode *node) {
+             return node->GetStreamIdxInGraph() == event->GetStreamIdxInGraph();
+           }))) {
+        SK_LOGE(
+            "cannot schedule custom event: owner is on a different stream, eventId=%lu, streamIdx=%u, ownerNodeId=%lu",
+            event->GetNodeId(), event->GetStreamIdxInGraph(), task->GetNodeId());
+        return false;
+      }
+    }
+    // Place notifies before resets while preserving the relative order within each type.
+    if (events.size() > 1U) {
+      std::stable_partition(events.begin(), events.end(), [](const SuperKernelBaseNode *event) {
+        return event->GetNodeType() == SkNodeType::NODE_NOTIFY;
+      });
+    }
+    scheduled.insert(scheduled.end(), events.begin(), events.end());
+    tasksWithTrailingCustomEvents.erase(it);
   }
-
-  const uint64_t firstEventId = firstEvent->GetNodeId();
-  for (const auto &[streamIdx, kernel] : lastKernelByStream) {
-    kernel->sendToNodeId.insert(firstEventId);
-    firstEvent->receiveNodeId.insert(kernel->GetNodeId());
-    SK_LOGI("connect last kernel to first event: streamIdx=%u, kernelNodeId=%lu, eventNodeId=%lu", streamIdx,
-            kernel->GetNodeId(), firstEventId);
+  if (!tasksWithTrailingCustomEvents.empty()) {
+    const auto *event = tasksWithTrailingCustomEvents.begin()->second.front();
+    SK_LOGE("cannot schedule custom event: owner is absent from task list, eventId=%lu, streamIdx=%u, ownerNodeId=%lu",
+            event->GetNodeId(), event->GetStreamIdxInGraph(), event->GetPreNodeId());
+    return false;
   }
+  tasks = std::move(scheduled);
+  return true;
 }
 
 bool SuperKernelOptimizer::ShouldReorderWaitNodesForTaskBuild() const {
@@ -302,23 +371,20 @@ bool SuperKernelOptimizer::Schedule(SuperKernelScopeInfo &scopeInfo, SuperKernel
     return false;
   }
 
-  if (!ExtractIntraStreamDependencies(reorderedTaskNodes)) {
-    SK_LOGE("failed to extract intra-stream graph dependencies");
-    return false;
-  }
-
   std::string skFuncName = GetSkFuncName(reorderedTaskNodes, scopeInfo.GetScopeId(), scopeInfo.GetExtInfo().scopeName);
   PrintTaskNodesDetail(reorderedTaskNodes, "reordered task nodes");
 
   const auto &eventNodes = scopeInfo.GetExtInfo().eventNodes;
-  if (!eventNodes.empty()) {
-    ConnectLastKernelsToFirstEvent(reorderedTaskNodes, eventNodes.front().get());
+  std::vector<SuperKernelBaseNode *> tasks;
+  if (!BuildTaskListWithCustomEvents(reorderedTaskNodes, eventNodes, tasks)) {
+    SK_LOGE("failed to build task list with custom events: scopeId=%u", scopeInfo.GetScopeId());
+    return false;
   }
 
-  std::vector<SuperKernelBaseNode *> tasks = reorderedTaskNodes;
-  tasks.reserve(reorderedTaskNodes.size() + eventNodes.size());
-  for (const auto &eventNode : eventNodes) {
-    tasks.emplace_back(eventNode.get());
+  // Events must be validated first; only original tasks participate in same-stream chaining.
+  if (!BuildScopeDependencies(reorderedTaskNodes, eventNodes, graph)) {
+    SK_LOGE("failed to build scope dependencies: scopeId=%u", scopeInfo.GetScopeId());
+    return false;
   }
 
   SkTaskIR taskIR;
@@ -341,7 +407,7 @@ bool SuperKernelOptimizer::Schedule(SuperKernelScopeInfo &scopeInfo, SuperKernel
     SK_LOGE("SkProfiling failed");
     return false;
   }
-  if (!DumpProfilingDetail(reorderedTaskNodes, launchInfo, scopeInfo, graph)) {
+  if (!DumpProfilingDetail(tasks, launchInfo, scopeInfo, graph)) {
     SK_LOGE("Dump sk time profiling detail failed");
     return false;
   }

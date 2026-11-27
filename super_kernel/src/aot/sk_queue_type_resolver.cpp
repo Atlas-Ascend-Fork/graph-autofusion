@@ -162,7 +162,9 @@ bool SkQueueTypeResolver::Resolve(const std::vector<SuperKernelBaseNode *> &task
     }
   }
 
-  std::unordered_map<uint64_t, const SuperKernelBaseNode *> cache;
+  // WAIT resolves toward the next kernel; other events resolve toward the previous kernel.
+  std::unordered_map<uint64_t, const SuperKernelBaseNode *> previousKernelCache;
+  std::unordered_map<uint64_t, const SuperKernelBaseNode *> nextKernelCache;
   const SuperKernelBaseNode *previousScheduledKernel = nullptr;
   for (size_t i = 0; i < tasks.size(); ++i) {
     const auto *node = tasks[i];
@@ -172,6 +174,7 @@ bool SkQueueTypeResolver::Resolve(const std::vector<SuperKernelBaseNode *> &task
     }
     const bool searchPrevious = node->GetNodeType() != SkNodeType::NODE_WAIT;
     const uint64_t anchor = searchPrevious ? node->GetPreNodeId() : node->GetNextNodeId();
+    auto &cache = searchPrevious ? previousKernelCache : nextKernelCache;
     const auto *kernel = FindKernelNodeInDirection(
         anchor, graph_, searchPrevious ? SearchDirection::PREV : SearchDirection::NEXT, cache);
     if (kernel == nullptr) {

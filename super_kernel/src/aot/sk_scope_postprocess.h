@@ -20,6 +20,7 @@
 #include "sk_scope_split.h"
 #include <deque>
 #include <memory>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -51,7 +52,8 @@ class SuperKernelScopePostProcessor {
                                   std::vector<StreamPostPlan> &plans, uint32_t &needFrontWaitCount);
   bool ProcessSubStreamSyncEvents(SuperKernelScopeInfo &scopeInfo, ScopeExtInfo &tempExtInfo,
                                   std::vector<StreamPostPlan> &plans, uint32_t mainStreamIdx,
-                                  const std::vector<uint32_t> &subStreamOrder, uint32_t needFrontWaitCount);
+                                  const std::vector<uint32_t> &subStreamOrder, uint32_t needFrontWaitCount,
+                                  const std::unordered_map<uint32_t, uint64_t> &lastTaskByStreamAfterFilter);
   bool FinalizePostProcess(SuperKernelScopeInfo &scopeInfo, ScopeExtInfo &tempExtInfo,
                            std::vector<SuperKernelBaseNode *> &needUpdateNodes);
 
