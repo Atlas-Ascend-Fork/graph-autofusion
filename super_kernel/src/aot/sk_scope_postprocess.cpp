@@ -17,6 +17,7 @@
 #include "securec.h"
 #include "sk_resource_manager.h"
 #include "sk_scope_postprocess.h"
+#include <unordered_map>
 
 namespace {
 
@@ -164,10 +165,15 @@ bool EnsureStreamCapacity(const ScopeStreamInfo &streamInfo, const std::vector<a
 }
 
 bool ProcessFrontWaitForStream(SuperKernelGraph &graph, ScopeExtInfo &extInfo,
-                               const std::vector<ScopeStreamInfo> &scopeStreamInfos, std::vector<StreamPostPlan> &plans,
-                               uint32_t curStreamIdx, uint64_t lastNodeId, uint32_t &needFrontWaitCount,
-                               uint32_t &prevWaitStreamIdx) {
+                               const std::vector<ScopeStreamInfo> &scopeStreamInfos, uint32_t curStreamIdx,
+                               uint64_t lastNodeId,
+                               const std::unordered_map<uint32_t, uint64_t> &lastTaskByStreamAfterFilter,
+                               uint32_t &needFrontWaitCount, uint32_t &prevWaitStreamIdx) {
   auto &scopeStreamInfo = scopeStreamInfos[curStreamIdx];
+  const auto owner = lastTaskByStreamAfterFilter.find(scopeStreamInfo.streamIdx);
+  if (owner != lastTaskByStreamAfterFilter.end()) {
+    lastNodeId = owner->second;
+  }
   SK_LOGI("front-wait process begin: streamId=%u, prevWaitStreamIdx=%u, remainFrontWait=%u", scopeStreamInfo.streamIdx,
           prevWaitStreamIdx, needFrontWaitCount);
   needFrontWaitCount--;
@@ -231,9 +237,14 @@ bool ProcessFrontWaitForStream(SuperKernelGraph &graph, ScopeExtInfo &extInfo,
 }
 
 bool ProcessBackBlockForStream(SuperKernelGraph &graph, ScopeExtInfo &extInfo,
-                               const std::vector<ScopeStreamInfo> &scopeStreamInfos, std::vector<StreamPostPlan> &plans,
-                               uint32_t curStreamIdx, uint64_t lastNodeId) {
+                               const std::vector<ScopeStreamInfo> &scopeStreamInfos, uint32_t curStreamIdx,
+                               uint64_t lastNodeId,
+                               const std::unordered_map<uint32_t, uint64_t> &lastTaskByStreamAfterFilter) {
   auto &scopeStreamInfo = scopeStreamInfos[curStreamIdx];
+  const auto owner = lastTaskByStreamAfterFilter.find(scopeStreamInfo.streamIdx);
+  if (owner != lastTaskByStreamAfterFilter.end()) {
+    lastNodeId = owner->second;
+  }
   SK_LOGI("back-block process begin: streamId=%u", scopeStreamInfo.streamIdx);
 
   const uint64_t syntheticNodeId = graph.AllocateSyntheticNodeId();
@@ -509,9 +520,11 @@ bool ApplyEventMemoryResource(SuperKernelGraph &graph, SuperKernelBaseNode *even
   return addr != nullptr;
 }
 
-uint32_t GetKernelNodeCount(const std::vector<SuperKernelBaseNode *> &nodes) {
+uint32_t CollectFilteredTaskInfo(const std::vector<SuperKernelBaseNode *> &nodes,
+                                 std::unordered_map<uint32_t, uint64_t> &lastTaskByStreamAfterFilter) {
   uint32_t kernelCnt = 0;
   for (auto &node : nodes) {
+    lastTaskByStreamAfterFilter[node->GetStreamIdxInGraph()] = node->GetNodeId();
     if (node->GetNodeType() == SkNodeType::NODE_KERNEL) {
       kernelCnt++;
     }
@@ -618,16 +631,17 @@ bool SuperKernelScopePostProcessor::CollectStreamBoundaryPlans(const std::vector
 
 bool SuperKernelScopePostProcessor::ProcessSubStreamSyncEvents(
     SuperKernelScopeInfo &scopeInfo, ScopeExtInfo &tempExtInfo, std::vector<StreamPostPlan> &plans,
-    uint32_t mainStreamIdx, const std::vector<uint32_t> &subStreamOrder, uint32_t needFrontWaitCount) {
+    uint32_t mainStreamIdx, const std::vector<uint32_t> &subStreamOrder, uint32_t needFrontWaitCount,
+    const std::unordered_map<uint32_t, uint64_t> &lastTaskByStreamAfterFilter) {
   uint32_t prevWaitStreamIdx = mainStreamIdx;
   uint64_t lastNodeId = tempExtInfo.filteredNodes.back()->GetNodeId();
   SK_LOGI("scope processing front-wait and back-block begin: lastNodeId=%lu", lastNodeId);
 
-  auto &scopeStreamInfos = scopeInfo.GetScopeStreamInfos();
+  const auto &scopeStreamInfos = scopeInfo.GetScopeStreamInfos();
   for (uint32_t curStreamIdx : subStreamOrder) {
     if (plans[curStreamIdx].needFrontWait &&
-        !ProcessFrontWaitForStream(graph, tempExtInfo, scopeStreamInfos, plans, curStreamIdx, lastNodeId,
-                                   needFrontWaitCount, prevWaitStreamIdx)) {
+        !ProcessFrontWaitForStream(graph, tempExtInfo, scopeStreamInfos, curStreamIdx, lastNodeId,
+                                   lastTaskByStreamAfterFilter, needFrontWaitCount, prevWaitStreamIdx)) {
       SK_LOGE("process front-wait failed streamId=%u, nodeSize=%lu, FrontWait=%u",
               scopeStreamInfos[curStreamIdx].streamIdx, scopeStreamInfos[curStreamIdx].nodeSize,
               plans[curStreamIdx].needFrontWait);
@@ -638,7 +652,8 @@ bool SuperKernelScopePostProcessor::ProcessSubStreamSyncEvents(
     }
 
     if (plans[curStreamIdx].needBackBlock &&
-        !ProcessBackBlockForStream(graph, tempExtInfo, scopeStreamInfos, plans, curStreamIdx, lastNodeId)) {
+        !ProcessBackBlockForStream(graph, tempExtInfo, scopeStreamInfos, curStreamIdx, lastNodeId,
+                                   lastTaskByStreamAfterFilter)) {
       SK_LOGE("process back-block failed streamId=%u, nodeSize=%lu, BackBlock=%u",
               scopeStreamInfos[curStreamIdx].streamIdx, scopeStreamInfos[curStreamIdx].nodeSize,
               plans[curStreamIdx].needBackBlock);
@@ -689,8 +704,9 @@ bool SuperKernelScopePostProcessor::PostProcess(SuperKernelScopeInfo &scopeInfo)
     return false;
   }
 
-  // Step 3: Skip scope when no kernel remains after filtering
-  if (GetKernelNodeCount(filteredNodes) == 0) {
+  // Step 3: Collect stream tails and skip scope when no kernel remains after filtering
+  std::unordered_map<uint32_t, uint64_t> lastTaskByStreamAfterFilter;
+  if (CollectFilteredTaskInfo(filteredNodes, lastTaskByStreamAfterFilter) == 0) {
     SK_LOGI("scope unprocessable: no kernel node remains after filtering");
     scopeInfo.MutableExtInfo().processStatus = ScopeProcessStatus::NO_TARGET_NODE;
     return false;
@@ -724,7 +740,8 @@ bool SuperKernelScopePostProcessor::PostProcess(SuperKernelScopeInfo &scopeInfo)
   SK_LOGI("select main stream and sub stream done.");
 
   // Step 7: Process sync events for sub streams
-  if (!ProcessSubStreamSyncEvents(scopeInfo, tempExtInfo, plans, mainStreamIdx, subStreamOrder, needFrontWaitCount)) {
+  if (!ProcessSubStreamSyncEvents(scopeInfo, tempExtInfo, plans, mainStreamIdx, subStreamOrder, needFrontWaitCount,
+                                  lastTaskByStreamAfterFilter)) {
     scopeInfo.MutableExtInfo().processStatus = tempExtInfo.processStatus;
     return false;
   }
