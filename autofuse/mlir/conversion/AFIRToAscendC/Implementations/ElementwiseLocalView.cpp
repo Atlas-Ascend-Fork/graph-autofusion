@@ -1,11 +1,11 @@
 /**
  * Copyright (c) 2026 Huawei Technologies Co., Ltd.
- * This program is free software: you can redistribute it and/or modify it under the terms and conditions of
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
  * CANN Open Software License Agreement Version 2.0 (the "License").
- * You may refer to the License for details on how to use this file.
- * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, EITHER EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE.
- * See the License for the specific language governing permissions and limitations under the License.
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
  */
 
 #include "conversion/AFIRToAscendC/Implementations/ElementwiseLocalView.h"
@@ -584,35 +584,51 @@ LocalViewCompatibility checkWholeTensorShapes(Operation *op, const OperandPartit
 LocalViewCompatibility collectCompatibleLocalTensors(Operation *op, const OperandPartition &partition,
                                                      const ElementwiseLocalView &view,
                                                      SmallVectorImpl<TensorDescAttr> &descriptors,
-                                                     SmallVectorImpl<Value> &values) {
+                                                     SmallVectorImpl<Value> &values, bool broadcastInline) {
+  bool hasBroadcast = false;
   const auto destinationDesc = view.vectorPlan->tensors.back().descriptor;
   for (const auto &tensor : view.vectorPlan->tensors) {
     auto desc = tensor.descriptor;
     Value value = tensor.side == VectorTensor::Side::Destination ? partition.destinations(op)[tensor.index]
                                                                  : partition.inputs(op)[tensor.index];
-    // Continuous elementwise APIs do not repeat lanes inside their API window.
-    for (int64_t axis : destinationDesc.getVectorizedAxis()) {
+    // RegBased inline broadcast repeats outer rows through zero strides; the
+    // innermost vector axis must still be a common continuous API window.
+    for (auto [lane, axis] : llvm::enumerate(destinationDesc.getVectorizedAxis())) {
       auto a = axisPosition(desc, axis);
       auto b = axisPosition(destinationDesc, axis);
       if (!provablyEqual(desc.getRepeats()[*a], destinationDesc.getRepeats()[*b])) {
-        return LocalViewCompatibility::UnsupportedShape;
+        if (!broadcastInline || tensor.side == VectorTensor::Side::Destination ||
+            lane + 1 == destinationDesc.getVectorizedAxis().size() || !provablyOne(desc.getRepeats()[*a]) ||
+            !isProvenEqualToLiteral(desc.getVectorizedStrides()[lane], "0")) {
+          return LocalViewCompatibility::UnsupportedShape;
+        }
+        hasBroadcast = true;
       }
     }
     // Match the full logical domain by axis identity, not by LocalTensor shape positions.
     bool sameDomain = desc.getAxis().size() == destinationDesc.getAxis().size();
+    bool broadcastDomain = sameDomain && desc.getStrides().size() == desc.getAxis().size();
     for (int64_t axis : destinationDesc.getAxis()) {
       auto a = axisPosition(desc, axis);
       auto b = axisPosition(destinationDesc, axis);
-      sameDomain &= succeeded(a) && provablyEqual(desc.getRepeats()[*a], destinationDesc.getRepeats()[*b]);
+      const bool equal = succeeded(a) && provablyEqual(desc.getRepeats()[*a], destinationDesc.getRepeats()[*b]);
+      sameDomain &= equal;
+      broadcastDomain &=
+          equal || (succeeded(a) && *a < desc.getStrides().size() && provablyOne(desc.getRepeats()[*a]) &&
+                    isProvenEqualToLiteral(desc.getStrides()[*a], "0"));
     }
     if (!sameDomain && (tensor.side == VectorTensor::Side::Destination ||
-                        !afir::elementwise::sourceBroadcastsToDestination(op, value, partition.destinations(op)[0]))) {
+                        !(broadcastInline ? broadcastDomain
+                                          : afir::elementwise::sourceBroadcastsToDestination(
+                                                op, value, partition.destinations(op)[0])))) {
       return LocalViewCompatibility::UnsupportedShape;
     }
     descriptors.push_back(desc);
     values.push_back(value);
   }
-  return LocalViewCompatibility::Compatible;
+  // Keep the broadcast registrations disjoint from ordinary tensor implementations.
+  return broadcastInline && !hasBroadcast ? LocalViewCompatibility::UnsupportedShape
+                                          : LocalViewCompatibility::Compatible;
 }
 
 FailureOr<int64_t> localShapeCapacityBytes(Value value) {
@@ -714,6 +730,10 @@ LocalViewCompatibility checkLocalTensorAlignment(const ElementwiseLocalView &vie
   // introduce new API starts and therefore need no separate alignment test.
   for (size_t i = 0; i + view.apiWindowSize < view.vectorPlan->segments.size(); ++i) {
     auto stride = view.vectorPlan->segments[i].strides[tensorIndex];
+    // A broadcast row keeps the same aligned base on every iteration.
+    if (isProvenEqualToLiteral(stride, "0")) {
+      continue;
+    }
     const auto bits = type.getElementType().getIntOrFloatBitWidth();
     if (bits == 0 || kDataBlockBits % bits != 0 ||
         !afir::ProveExpressionMultipleOf(stride.getValue().getValue(), kDataBlockBits / bits)) {
@@ -794,7 +814,8 @@ LocalViewCompatibility checkLocalTensorAccesses(ArrayRef<TensorDescAttr> descrip
 }  // namespace
 
 LocalViewCompatibility prepareElementwiseLocalView(Operation *op, ArrayRef<unsigned> scalarInputs, bool compactTail,
-                                                   ElementwiseLocalView &view, bool allowStridedElements) {
+                                                   ElementwiseLocalView &view, bool allowStridedElements,
+                                                   bool broadcastInline) {
   auto result = analyzeElementwiseLocalView(op, scalarInputs, compactTail, view);
   if (result != LocalViewCompatibility::Compatible) {
     return result;
@@ -803,9 +824,10 @@ LocalViewCompatibility prepareElementwiseLocalView(Operation *op, ArrayRef<unsig
   SmallVector<TensorDescAttr> descriptors;
   SmallVector<Value> values;
   if (!view.vectorPlan) {
-    return checkWholeTensorShapes(op, *partition, scalarInputs);
+    return broadcastInline ? LocalViewCompatibility::UnsupportedShape
+                           : checkWholeTensorShapes(op, *partition, scalarInputs);
   }
-  result = collectCompatibleLocalTensors(op, *partition, view, descriptors, values);
+  result = collectCompatibleLocalTensors(op, *partition, view, descriptors, values, broadcastInline);
   if (result != LocalViewCompatibility::Compatible) {
     return result;
   }

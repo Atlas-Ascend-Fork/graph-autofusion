@@ -248,3 +248,5 @@ add_custom_target(check-e2e-cpu-nonreduce-addressing DEPENDS
     check-e2e-cpu-load_broadcast_chain_store_1x1x8)
 
 add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/elementwise_local_view" cases/elementwise_local_view)
+
+add_subdirectory("${MLIR_CODE_ROOT_DIR}/test/e2e/cpu/cases/binary_brc_inline_reg_base" cases/binary_brc_inline_reg_base)

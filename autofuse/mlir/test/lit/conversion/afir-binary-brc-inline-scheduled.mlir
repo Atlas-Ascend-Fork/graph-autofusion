@@ -87,7 +87,77 @@ module @plan0 attributes {
       afir.result_descs = [#other_tile],
       afir.sched = #afir.sched<axis = [0, 1], loop_axis = 1>
     } : (memref<1x128xf32>, memref<128x128xf32>), memref<128x128xf32> -> memref<128x128xf32>
-    afir.store %computed outs(%output) {
+    // Minimum must use the same row-broadcast implementation in either direction.
+    %minimum_lhs = afir.minimum %loaded0, %loaded1 outs(%dst) {
+      afir.destination_descs = [#other_tile], afir.operand_descs = [#brc_tile, #other_tile],
+      afir.result_descs = [#other_tile],
+      afir.sched = #afir.sched<axis = [0, 1], loop_axis = 1>
+    } : (memref<1x128xf32>, memref<128x128xf32>), memref<128x128xf32> -> memref<128x128xf32>
+    %minimum_rhs = afir.minimum %loaded1, %loaded0 outs(%dst) {
+      afir.destination_descs = [#other_tile], afir.operand_descs = [#other_tile, #brc_tile],
+      afir.result_descs = [#other_tile],
+      afir.sched = #afir.sched<axis = [0, 1], loop_axis = 1>
+    } : (memref<128x128xf32>, memref<1x128xf32>), memref<128x128xf32> -> memref<128x128xf32>
+    // Equal shapes must keep selecting the ordinary tensor-tensor implementation.
+    %minimum_same = afir.minimum %loaded1, %minimum_rhs outs(%dst) {
+      afir.destination_descs = [#other_tile], afir.operand_descs = [#other_tile, #other_tile],
+      afir.result_descs = [#other_tile],
+      afir.sched = #afir.sched<axis = [0, 1], loop_axis = 1>
+    } : (memref<128x128xf32>, memref<128x128xf32>), memref<128x128xf32> -> memref<128x128xf32>
+    // Maximum must use the same row-broadcast implementation in either direction.
+    %maximum_lhs = afir.maximum %loaded0, %loaded1 outs(%dst) {
+      afir.destination_descs = [#other_tile], afir.operand_descs = [#brc_tile, #other_tile],
+      afir.result_descs = [#other_tile],
+      afir.sched = #afir.sched<axis = [0, 1], loop_axis = 1>
+    } : (memref<1x128xf32>, memref<128x128xf32>), memref<128x128xf32> -> memref<128x128xf32>
+    %maximum_rhs = afir.maximum %loaded1, %loaded0 outs(%dst) {
+      afir.destination_descs = [#other_tile], afir.operand_descs = [#other_tile, #brc_tile],
+      afir.result_descs = [#other_tile],
+      afir.sched = #afir.sched<axis = [0, 1], loop_axis = 1>
+    } : (memref<128x128xf32>, memref<1x128xf32>), memref<128x128xf32> -> memref<128x128xf32>
+    // Equal shapes must keep selecting the ordinary tensor-tensor implementation.
+    %maximum_same = afir.maximum %loaded1, %maximum_rhs outs(%dst) {
+      afir.destination_descs = [#other_tile], afir.operand_descs = [#other_tile, #other_tile],
+      afir.result_descs = [#other_tile],
+      afir.sched = #afir.sched<axis = [0, 1], loop_axis = 1>
+    } : (memref<128x128xf32>, memref<128x128xf32>), memref<128x128xf32> -> memref<128x128xf32>
+    %tmp = memref.alloc() {afir.buffer_desc = #afir.buffer_desc<space = <ub>, buffer_id = 3,
+        size_bytes_expr = <"32">, alignment_bytes = 32, life_time_axis_id = -1>} : memref<32xui8>
+    // Sub must use the same row-broadcast implementation in either direction.
+    %sub_lhs = afir.sub %loaded0, %loaded1 outs(%dst) tmp(%tmp) {
+      afir.destination_descs = [#other_tile], afir.operand_descs = [#brc_tile, #other_tile],
+      afir.result_descs = [#other_tile],
+      afir.sched = #afir.sched<axis = [0, 1], loop_axis = 1>
+    } : (memref<1x128xf32>, memref<128x128xf32>), memref<128x128xf32>, memref<32xui8> -> memref<128x128xf32>
+    %sub_rhs = afir.sub %loaded1, %loaded0 outs(%dst) tmp(%tmp) {
+      afir.destination_descs = [#other_tile], afir.operand_descs = [#other_tile, #brc_tile],
+      afir.result_descs = [#other_tile],
+      afir.sched = #afir.sched<axis = [0, 1], loop_axis = 1>
+    } : (memref<128x128xf32>, memref<1x128xf32>), memref<128x128xf32>, memref<32xui8> -> memref<128x128xf32>
+    // Equal shapes must keep selecting the ordinary tensor-tensor implementation.
+    %sub_same = afir.sub %loaded1, %sub_rhs outs(%dst) tmp(%tmp) {
+      afir.destination_descs = [#other_tile], afir.operand_descs = [#other_tile, #other_tile],
+      afir.result_descs = [#other_tile],
+      afir.sched = #afir.sched<axis = [0, 1], loop_axis = 1>
+    } : (memref<128x128xf32>, memref<128x128xf32>), memref<128x128xf32>, memref<32xui8> -> memref<128x128xf32>
+    // Div must use the same row-broadcast implementation in either direction.
+    %div_lhs = afir.div %loaded0, %loaded1 outs(%dst) tmp(%tmp) {
+      afir.destination_descs = [#other_tile], afir.operand_descs = [#brc_tile, #other_tile],
+      afir.result_descs = [#other_tile],
+      afir.sched = #afir.sched<axis = [0, 1], loop_axis = 1>
+    } : (memref<1x128xf32>, memref<128x128xf32>), memref<128x128xf32>, memref<32xui8> -> memref<128x128xf32>
+    %div_rhs = afir.div %loaded1, %loaded0 outs(%dst) tmp(%tmp) {
+      afir.destination_descs = [#other_tile], afir.operand_descs = [#other_tile, #brc_tile],
+      afir.result_descs = [#other_tile],
+      afir.sched = #afir.sched<axis = [0, 1], loop_axis = 1>
+    } : (memref<128x128xf32>, memref<1x128xf32>), memref<128x128xf32>, memref<32xui8> -> memref<128x128xf32>
+    // Equal shapes must keep selecting the ordinary tensor-tensor implementation.
+    %div_same = afir.div %loaded1, %div_rhs outs(%dst) tmp(%tmp) {
+      afir.destination_descs = [#other_tile], afir.operand_descs = [#other_tile, #other_tile],
+      afir.result_descs = [#other_tile],
+      afir.sched = #afir.sched<axis = [0, 1], loop_axis = 1>
+    } : (memref<128x128xf32>, memref<128x128xf32>), memref<128x128xf32>, memref<32xui8> -> memref<128x128xf32>
+    afir.store %div_same outs(%output) {
       afir.destination_descs = [#gm_out], afir.operand_descs = [#other_tile],
       afir.sched = #afir.sched<axis = [0, 1], loop_axis = 1>,
       indexing_maps = [affine_map<(d0, d1) -> (d0, d1)>, affine_map<(d0, d1) -> (d0, d1)>]
@@ -99,3 +169,42 @@ module @plan0 attributes {
 // CHECK: ascendc.binary_brc_inline
 // CHECK-SAME: wrappedApiName = "Add"
 // CHECK-NOT: ascendc.add_l2
+// CHECK: ascendc.binary_brc_inline
+// CHECK-SAME: wrappedApiName = "Min"
+// CHECK: ascendc.binary_brc_inline
+// CHECK-SAME: wrappedApiName = "Min"
+// CHECK: ascendc.min_l2
+
+// CHECK: ascendc.binary_brc_inline
+// CHECK-SAME: wrappedApiName = "Max"
+// CHECK: ascendc.binary_brc_inline
+// CHECK-SAME: wrappedApiName = "Max"
+// CHECK: ascendc.max_l2
+
+// CHECK: %[[SUB_L0:.*]] = arith.constant 0 : i8
+// CHECK: %[[SUB_L1:.*]] = arith.constant 1 : i8
+// CHECK: ascendc.binary_brc_inline
+// CHECK-SAME: %[[SUB_L0]], %[[SUB_L1]],
+// CHECK-SAME: wrappedApiName = "Sub"
+// CHECK-SAME: : !ascendc.local_tensor<128x128xf32>, !ascendc.local_tensor<1x128xf32>, !ascendc.local_tensor<128x128xf32>
+// CHECK: %[[SUB_R1:.*]] = arith.constant 1 : i8
+// CHECK: %[[SUB_R0:.*]] = arith.constant 0 : i8
+// CHECK: ascendc.binary_brc_inline
+// CHECK-SAME: %[[SUB_R1]], %[[SUB_R0]],
+// CHECK-SAME: wrappedApiName = "Sub"
+// CHECK-SAME: : !ascendc.local_tensor<128x128xf32>, !ascendc.local_tensor<128x128xf32>, !ascendc.local_tensor<1x128xf32>
+// CHECK: ascendc.sub_l2
+
+// CHECK: %[[DIV_L0:.*]] = arith.constant 0 : i8
+// CHECK: %[[DIV_L1:.*]] = arith.constant 1 : i8
+// CHECK: ascendc.binary_brc_inline
+// CHECK-SAME: %[[DIV_L0]], %[[DIV_L1]],
+// CHECK-SAME: wrappedApiName = "Div"
+// CHECK-SAME: : !ascendc.local_tensor<128x128xf32>, !ascendc.local_tensor<1x128xf32>, !ascendc.local_tensor<128x128xf32>
+// CHECK: %[[DIV_R1:.*]] = arith.constant 1 : i8
+// CHECK: %[[DIV_R0:.*]] = arith.constant 0 : i8
+// CHECK: ascendc.binary_brc_inline
+// CHECK-SAME: %[[DIV_R1]], %[[DIV_R0]],
+// CHECK-SAME: wrappedApiName = "Div"
+// CHECK-SAME: : !ascendc.local_tensor<128x128xf32>, !ascendc.local_tensor<128x128xf32>, !ascendc.local_tensor<1x128xf32>
+// CHECK: ascendc.div_l2

@@ -14,9 +14,12 @@
 // 因此直接下降 Autofuse 算子集，上游代码仅作结构参考。
 
 #include "conversion/AFIRToAscendC/AFIRToAscendCPasses.h"
+#include "conversion/AFIRToAscendC/Implementations/ElementwiseLocalView.h"
+#include "conversion/AFIRToAscendC/VectorizedLoops.h"
 
 #include <memory>
 #include <optional>
+#include <utility>
 
 #include "dialect/AFIR/IR/AFIR.h"
 #include "support/AfirElementTypes.h"
@@ -32,6 +35,7 @@
 #include "mlir/Dialect/Index/IR/IndexOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/Pass/Pass.h"
 
@@ -159,6 +163,12 @@ llvm::ArrayRef<RegOpMapping> regOpMappings() {
   static const RegOpMapping mappings[] = {
       {afir::AddOp::getOperationName(), RegOpArity::kBinary, RegOpElementTypes::kUniform, RegOpResult::kValue,
        kNoPredicateOperand, kRegOpAllElementTypes, buildBinaryRegOp<ascendc::AddRegOp>},
+      {afir::SubOp::getOperationName(), RegOpArity::kBinary, RegOpElementTypes::kUniform, RegOpResult::kValue,
+       kNoPredicateOperand, kRegOpAllElementTypes, buildBinaryRegOp<ascendc::SubRegOp>},
+      {afir::MinimumOp::getOperationName(), RegOpArity::kBinary, RegOpElementTypes::kUniform, RegOpResult::kValue,
+       kNoPredicateOperand, kRegOpAllElementTypes, buildBinaryRegOp<ascendc::MinRegOp>},
+      {afir::MaximumOp::getOperationName(), RegOpArity::kBinary, RegOpElementTypes::kUniform, RegOpResult::kValue,
+       kNoPredicateOperand, kRegOpAllElementTypes, buildBinaryRegOp<ascendc::MaxRegOp>},
       {afir::DivOp::getOperationName(), RegOpArity::kBinary, RegOpElementTypes::kUniform, RegOpResult::kValue,
        kNoPredicateOperand, kRegOpFloatElementTypes, buildBinaryRegOp<ascendc::DivRegOp>},
       // reg 侧 truediv 与 div 均使用 DivExtend，与 legacy reg_api_name 一致。
@@ -550,39 +560,85 @@ FailureOr<Value> makeUbufAddress(OpBuilder &builder, Location loc, Value tensor,
   return builder.create<ascendc::LocalTensorGetPhyAddrV2Op>(loc, addressType, tensor).getResult();
 }
 
-LogicalResult lowerVectorFunc(afir::VectorFuncOp op) {
-  if (failed(checkSupported(op))) {
-    return failure();
-  }
-  OpBuilder builder(op);
-  const Location loc = op.getLoc();
-  MLIRContext *ctx = builder.getContext();
-  Value destination = op.getDsts().front();
-  const Type destinationType = cast<ShapedType>(destination.getType()).getElementType();
-  // lane 的宽度由 VF 里最宽的元素类型定，不由 destination 定——跨 dtype 的 VF 里
-  // destination 可能是窄的那一侧（`cast_abs` 那一类：half 进、half 出，中间走 float）。
-  const Type widest = widestElementType(op);
+struct VectorWindow {
+  SmallVector<Value> sources;
+  Value destination;
+  Value windowCount;
+};
 
+// Leaves the builder inside the materialized segment loops, if any.
+FailureOr<VectorWindow> prepareVectorWindow(afir::VectorFuncOp op, OpBuilder &builder) {
+  const Location loc = op.getLoc();
+  VectorWindow window{SmallVector<Value>(op.getSrcs()), op.getDsts().front(), {}};
+  // Scheduled VF boundaries carry the same local views as standalone operations.
+  // Segment before loading registers so a broadcast source keeps its zero stride
+  // and padded rows do not become a single flat register loop.
+  if (succeeded(elementwise::getDestinationDescriptor(op))) {
+    elementwise::ElementwiseLocalView view;
+    auto compatible = elementwise::prepareElementwiseLocalView(op, {}, true, view);
+    if (compatible != elementwise::LocalViewCompatibility::Compatible) {
+      compatible = elementwise::prepareElementwiseLocalView(op, {}, true, view, false, true);
+    }
+    if (compatible != elementwise::LocalViewCompatibility::Compatible) {
+      return afir::emitCapabilityShortfall(loc) << "UnsupportedOperation: incompatible vector function local views";
+    }
+    if (view.vectorPlan) {
+      auto ordered = orderTilesForPlan(*view.vectorPlan, window.sources, window.destination);
+      if (failed(ordered)) {
+        return failure();
+      }
+      auto segments = materializeVectorizedSegments(op, builder, *view.vectorPlan, view.extentSource, *ordered,
+                                                    view.apiWindowSize, view.physicalSpan);
+      if (failed(segments) || segments->extents.size() != 1) {
+        return failure();
+      }
+      window.windowCount = segments->extents.front();
+      for (auto [tensor, tile] : llvm::zip(view.vectorPlan->tensors, segments->tiles)) {
+        if (tensor.side == afir::VectorTensor::Side::Destination) {
+          window.destination = tile;
+        } else {
+          window.sources[tensor.index] = tile;
+        }
+      }
+    }
+  }
+  return window;
+}
+
+struct VectorLoopState {
+  SmallVector<Value> sourceAddresses;
+  Value destinationAddress;
+  Value elementsPerVector;
+  Value loopCount;
+  Value counter;
+};
+
+FailureOr<VectorLoopState> prepareVectorLoop(OpBuilder &builder, Location loc, const VectorWindow &window,
+                                             Type widest) {
+  const Type destinationType = cast<ShapedType>(window.destination.getType()).getElementType();
   // 作用域外：首地址、lane 一段多少个元素、循环次数、以及给 `UpdateMask` 用的那个计数器。
   //
   // 首地址按各自的边界 dtype 取，不按 lane 的宽度：`LoadAlign<T>` 的 `T` 就是 UB 里
   // 那块的元素类型，撑不撑进宽槽位是 `dist` 的事。
   SmallVector<Value> sourceAddresses;
-  sourceAddresses.reserve(op.getSrcs().size());
-  for (Value src : op.getSrcs()) {
+  sourceAddresses.reserve(window.sources.size());
+  for (Value src : window.sources) {
     FailureOr<Value> address = makeUbufAddress(builder, loc, src, cast<ShapedType>(src.getType()).getElementType());
     if (failed(address)) {
       return failure();
     }
     sourceAddresses.push_back(*address);
   }
-  FailureOr<Value> destinationAddress = makeUbufAddress(builder, loc, destination, destinationType);
+  FailureOr<Value> destinationAddress = makeUbufAddress(builder, loc, window.destination, destinationType);
   if (failed(destinationAddress)) {
     return failure();
   }
 
   const Type indexType = builder.getIndexType();
-  Value elementCount = builder.create<ascendc::LocalTensorGetSizeOp>(loc, indexType, destination).getResult();
+  Value elementCount =
+      window.windowCount
+          ? window.windowCount
+          : builder.create<ascendc::LocalTensorGetSizeOp>(loc, indexType, window.destination).getResult();
   Value vectorLength = builder.create<ascendc::GetVecLenOp>(loc, indexType).getResult();
   Value elementBytes = builder.create<arith::ConstantIndexOp>(loc, ascendc::getTypeSize(widest)).getResult();
   // 一段 lane 装多少个元素 = GetVecLen() / sizeof(最宽的那个)。与 legacy 的
@@ -607,12 +663,19 @@ LogicalResult lowerVectorFunc(afir::VectorFuncOp op) {
   // 不插 `arith.index_castui`：那个算子的结果必须是 signless，给不出 `ui32`。
   auto counterType = MemRefType::get({1}, builder.getIntegerType(32U, false));
   Value counter = builder.create<emitasc::VariableOp>(loc, counterType, TypedAttr{}, elementCount).getResult();
+  return VectorLoopState{std::move(sourceAddresses), *destinationAddress, elementsPerVector, loopCount, counter};
+}
 
-  auto vecScope = builder.create<emitasc::VecScopeOp>(loc);
-  Region &scopeRegion = vecScope.getRegion();
-  Block *scopeBlock = scopeRegion.empty() ? builder.createBlock(&scopeRegion) : &scopeRegion.front();
-  builder.setInsertionPointToEnd(scopeBlock);
+struct VectorRegisters {
+  llvm::DenseMap<Value, Value> regForValue;
+  SmallVector<Value> sourceRegs;
+  SmallVector<Operation *> bodyOps;
+};
 
+VectorRegisters declareVectorRegisters(afir::VectorFuncOp op, OpBuilder &builder) {
+  const Location loc = op.getLoc();
+  MLIRContext *ctx = builder.getContext();
+  VectorRegisters registers;
   // 寄存器声明放在 `__VEC_SCOPE__` 里、循环外——与 legacy 的产物同形（循环里重复声明同一个
   // 寄存器在 C++ 上也合法，但那样每趟都多一条声明，产物与 legacy 对不起来）。
   //
@@ -620,16 +683,13 @@ LogicalResult lowerVectorFunc(afir::VectorFuncOp op) {
   // `RegTensor<float>` 是同一个物理寄存器的两种读法，而 `Reg::Cast<OutT, InT, ...>` 要的正是
   // 两个类型各自对得上的那两个引用。
   const auto regTensorFor = [&](Type elementType) { return ascendc::RegTensorType::get(ctx, elementType); };
-  llvm::DenseMap<Value, Value> regForValue;
-  SmallVector<Value> sourceRegs;
-  sourceRegs.reserve(op.getSrcs().size());
+  registers.sourceRegs.reserve(op.getSrcs().size());
   for (BlockArgument argument : op.getBodyBlock().getArguments()) {
     Value reg =
         builder.create<ascendc::RegTensorOp>(loc, regTensorFor(getElementTypeOrSelf(argument.getType()))).getResult();
-    sourceRegs.push_back(reg);
-    regForValue[argument] = reg;
+    registers.sourceRegs.push_back(reg);
+    registers.regForValue[argument] = reg;
   }
-  SmallVector<Operation *> bodyOps;
   for (Operation &inner : op.getBodyBlock().without_terminator()) {
     // 产谓词的那一行声明的是 `MaskReg` 而不是 `RegTensor<T>`——与 legacy 的
     // `MicroApiTensor::Define()` 按 `init_as_mask_reg_` 分两种声明同一回事
@@ -642,22 +702,51 @@ LogicalResult lowerVectorFunc(afir::VectorFuncOp op) {
       reg = builder.create<ascendc::RegTensorOp>(loc, regTensorFor(getElementTypeOrSelf(inner.getResult(0).getType())))
                 .getResult();
     }
-    regForValue[inner.getResult(0)] = reg;
-    bodyOps.push_back(&inner);
+    registers.regForValue[inner.getResult(0)] = reg;
+    registers.bodyOps.push_back(&inner);
   }
+  return registers;
+}
 
-  auto loop = builder.create<emitasc::VFForOp>(loc, loopCount);
-  builder.setInsertionPointToStart(loop.getBody());
+LogicalResult emitVectorComputations(OpBuilder &builder, Location loc, VectorRegisters &registers, Value mask) {
+  for (Operation *inner : registers.bodyOps) {
+    const RegOpMapping *mapping = findRegOpMapping(inner);
+    SmallVector<Value> operandRegs;
+    operandRegs.reserve(inner->getNumOperands());
+    for (Value operand : inner->getOperands()) {
+      auto reg = registers.regForValue.find(operand);
+      if (reg == registers.regForValue.end()) {
+        return inner->emitOpError() << "operand is not produced inside the vector function";
+      }
+      operandRegs.push_back(reg->second);
+    }
+    RegOpOperands operands{registers.regForValue[inner->getResult(0)], operandRegs, mask, {}};
+    if (mapping->elementTypes == RegOpElementTypes::kConverting) {
+      // 能力层已经核过这一对有 trait。
+      operands.castTrait = *castTraitFor(getElementTypeOrSelf(inner->getOperand(0).getType()),
+                                         getElementTypeOrSelf(inner->getResult(0).getType()));
+    }
+    mapping->build(builder, loc, operands);
+  }
+  return success();
+}
 
+LogicalResult emitVectorLoopBody(afir::VectorFuncOp op, OpBuilder &builder, emitasc::VFForOp loop,
+                                 const VectorWindow &window, const VectorLoopState &loopState,
+                                 VectorRegisters &registers, Type widest) {
+  const Location loc = op.getLoc();
+  MLIRContext *ctx = builder.getContext();
+  const Type destinationType = cast<ShapedType>(window.destination.getType()).getElementType();
   // `UpdateMask` 按 lane 的宽度算，而不是按 destination 的 dtype：一趟活着的 lane 数是
   // `VL/sizeof(最宽的那个)`。与 legacy 的 `UpdateMask<max_dtype_size_>` 同一条
   // （`vf_loop.cpp:397`）。
   Value mask =
-      builder.create<ascendc::UpdateMaskOp>(loc, ascendc::MaskRegType::get(ctx), counter, TypeAttr::get(widest))
+      builder
+          .create<ascendc::UpdateMaskOp>(loc, ascendc::MaskRegType::get(ctx), loopState.counter, TypeAttr::get(widest))
           .getResult();
-  Value offset = builder.create<arith::MulIOp>(loc, loop.getInductionVar(), elementsPerVector).getResult();
+  Value offset = builder.create<arith::MulIOp>(loc, loop.getInductionVar(), loopState.elementsPerVector).getResult();
 
-  for (auto [src, address, reg] : llvm::zip(op.getSrcs(), sourceAddresses, sourceRegs)) {
+  for (auto [src, address, reg] : llvm::zip(window.sources, loopState.sourceAddresses, registers.sourceRegs)) {
     Value sourcePointer =
         builder.create<emitasc::PtrOffsetOp>(loc, address.getType(), address, IntegerAttr{}, offset).getResult();
     // `dist` 由（边界 dtype, lane 宽度）定；等宽时不带（缺席即 `DIST_NORM`，与 M1 的产物
@@ -671,35 +760,19 @@ LogicalResult lowerVectorFunc(afir::VectorFuncOp op) {
                                             *dist ? ascendc::LoadDistAttr::get(ctx, **dist) : ascendc::LoadDistAttr{});
   }
 
-  for (Operation *inner : bodyOps) {
-    const RegOpMapping *mapping = findRegOpMapping(inner);
-    SmallVector<Value> operandRegs;
-    operandRegs.reserve(inner->getNumOperands());
-    for (Value operand : inner->getOperands()) {
-      auto reg = regForValue.find(operand);
-      if (reg == regForValue.end()) {
-        return inner->emitOpError() << "operand is not produced inside the vector function";
-      }
-      operandRegs.push_back(reg->second);
-    }
-    RegOpOperands operands{regForValue[inner->getResult(0)], operandRegs, mask, {}};
-    if (mapping->elementTypes == RegOpElementTypes::kConverting) {
-      // 能力层已经核过这一对有 trait。
-      operands.castTrait = *castTraitFor(getElementTypeOrSelf(inner->getOperand(0).getType()),
-                                         getElementTypeOrSelf(inner->getResult(0).getType()));
-    }
-    mapping->build(builder, loc, operands);
+  if (failed(emitVectorComputations(builder, loc, registers, mask))) {
+    return failure();
   }
 
   Value yielded = op.getYield().getResults().front();
-  auto resultReg = regForValue.find(yielded);
-  if (resultReg == regForValue.end()) {
+  auto resultReg = registers.regForValue.find(yielded);
+  if (resultReg == registers.regForValue.end()) {
     return op.emitOpError() << "yielded value is not produced inside the vector function";
   }
-  Value destinationPointer =
-      builder
-          .create<emitasc::PtrOffsetOp>(loc, destinationAddress->getType(), *destinationAddress, IntegerAttr{}, offset)
-          .getResult();
+  Value destinationPointer = builder
+                                 .create<emitasc::PtrOffsetOp>(loc, loopState.destinationAddress.getType(),
+                                                               loopState.destinationAddress, IntegerAttr{}, offset)
+                                 .getResult();
   FailureOr<std::optional<ascendc::StoreDist>> storeDist = storeDistFor(destinationType, widest);
   if (failed(storeDist)) {
     return op.emitOpError() << "destination element type has no store distribution, which the capability layer "
@@ -708,6 +781,37 @@ LogicalResult lowerVectorFunc(afir::VectorFuncOp op) {
   builder.create<ascendc::StoreAlignRegOp>(
       loc, destinationPointer, resultReg->second, mask,
       *storeDist ? ascendc::StoreDistAttr::get(ctx, **storeDist) : ascendc::StoreDistAttr{});
+  return success();
+}
+
+LogicalResult lowerVectorFunc(afir::VectorFuncOp op) {
+  if (failed(checkSupported(op))) {
+    return failure();
+  }
+  OpBuilder builder(op);
+  const Location loc = op.getLoc();
+  auto window = prepareVectorWindow(op, builder);
+  if (failed(window)) {
+    return failure();
+  }
+  // lane 的宽度由 VF 里最宽的元素类型定，不由 destination 定——跨 dtype 的 VF 里
+  // destination 可能是窄的那一侧（`cast_abs` 那一类：half 进、half 出，中间走 float）。
+  const Type widest = widestElementType(op);
+  auto loopState = prepareVectorLoop(builder, loc, *window, widest);
+  if (failed(loopState)) {
+    return failure();
+  }
+
+  auto vecScope = builder.create<emitasc::VecScopeOp>(loc);
+  Region &scopeRegion = vecScope.getRegion();
+  Block *scopeBlock = scopeRegion.empty() ? builder.createBlock(&scopeRegion) : &scopeRegion.front();
+  builder.setInsertionPointToEnd(scopeBlock);
+  auto registers = declareVectorRegisters(op, builder);
+  auto loop = builder.create<emitasc::VFForOp>(loc, loopState->loopCount);
+  builder.setInsertionPointToStart(loop.getBody());
+  if (failed(emitVectorLoopBody(op, builder, loop, *window, *loopState, registers, widest))) {
+    return failure();
+  }
 
   // `emitasc.vf_for` 的终结算子由它自己的 builder 补（`VFForOp::build` 里的
   // `ensureTerminator`），所以这里只补 `vec_scope` 那一个——后者没有自定义 builder，
@@ -716,7 +820,7 @@ LogicalResult lowerVectorFunc(afir::VectorFuncOp op) {
   builder.create<emitasc::YieldOp>(loc);
 
   // 结果就是那块 destination：下游按结果值串依赖，而数据已经由上面的 store 写进去了。
-  op.getResult(0).replaceAllUsesWith(destination);
+  op.getResult(0).replaceAllUsesWith(op.getDsts().front());
   op.erase();
   return success();
 }
@@ -736,7 +840,7 @@ struct AFIRVectorFuncToRegBasePass : public PassWrapper<AFIRVectorFuncToRegBaseP
 
   void getDependentDialects(DialectRegistry &registry) const final {
     registry.insert<afir::AFIRDialect, arith::ArithDialect, ascendc::AscendCDialect, emitasc::EmitAscDialect,
-                    func::FuncDialect, index::IndexDialect, memref::MemRefDialect>();
+                    func::FuncDialect, index::IndexDialect, memref::MemRefDialect, scf::SCFDialect>();
   }
 
   void runOnOperation() final {

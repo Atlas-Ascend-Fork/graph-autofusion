@@ -66,9 +66,12 @@ LocalViewCompatibility analyzeElementwiseLocalView(Operation *op, ArrayRef<unsig
                                                    ElementwiseLocalView &view);
 // Continuous elementwise API contract: equal vector lane domains, independent
 // aligned addresses, known static bounds and conservative shared-storage checks.
+// broadcastInline instead requires an outer broadcast with zero source strides,
+// keeping the innermost axis equal; the vector plan loops over broadcast axes.
 // Dynamic storage sufficiency remains the allocation/caller contract.
 LocalViewCompatibility prepareElementwiseLocalView(Operation *op, ArrayRef<unsigned> scalarInputs, bool compactTail,
-                                                   ElementwiseLocalView &view, bool allowStridedElements = false);
+                                                   ElementwiseLocalView &view, bool allowStridedElements = false,
+                                                   bool broadcastInline = false);
 LocalViewCompatibility checkLocalViewCompatibility(Operation *op, ArrayRef<afir::TensorDescAttr> descriptors,
                                                    bool *wholeTensor = nullptr);
 bool isSingletonTensorInput(Operation *op, unsigned index);

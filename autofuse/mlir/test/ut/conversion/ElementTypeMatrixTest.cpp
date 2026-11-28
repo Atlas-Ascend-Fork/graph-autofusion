@@ -198,6 +198,21 @@ struct KnownNarrowerRow {
   llvm::StringRef reason;
 };
 constexpr KnownNarrowerRow kKnownNarrower[] = {
+    {"add.broadcast_inline.reg_base", kF16 | kF32 | kI16 | kI32 | kUI16 | kUI32 | kBF16,
+     kF16 | kF32 | kI16 | kI32 | kUI8 | kUI16 | kBF16 | kI64 | kI8 | kUI32 | kUI64,
+     "BrcInlineTemplateV2 requires RemovePad-supported types; 8/64-bit broadcasts are excluded by legacy"},
+    {"sub.broadcast_inline.reg_base", kF16 | kF32 | kI16 | kI32 | kUI16 | kUI32 | kBF16,
+     kF16 | kF32 | kI16 | kI32 | kUI8 | kUI16 | kBF16 | kI64 | kI8 | kUI32 | kUI64,
+     "BrcInlineTemplateV2 requires RemovePad-supported types; 8/64-bit broadcasts are excluded by legacy"},
+    {"minimum.broadcast_inline.reg_base", kF16 | kF32 | kI16 | kI32 | kUI16 | kUI32 | kBF16,
+     kF16 | kF32 | kI16 | kI32 | kUI8 | kUI16 | kBF16 | kI64 | kI8 | kUI32 | kUI64,
+     "BrcInlineTemplateV2 requires RemovePad-supported types; 8/64-bit broadcasts are excluded by legacy"},
+    {"maximum.broadcast_inline.reg_base", kF16 | kF32 | kI16 | kI32 | kUI16 | kUI32 | kBF16,
+     kF16 | kF32 | kI16 | kI32 | kUI8 | kUI16 | kBF16 | kI64 | kI8 | kUI32 | kUI64,
+     "BrcInlineTemplateV2 requires RemovePad-supported types; 8/64-bit broadcasts are excluded by legacy"},
+    {"mul.broadcast_inline.reg_base", kF16 | kF32 | kI16 | kI32 | kUI32 | kBF16,
+     kF16 | kF32 | kI16 | kI32 | kUI8 | kBF16 | kI64 | kI8 | kUI32 | kUI64,
+     "BrcInlineTemplateV2 requires RemovePad-supported types; 8/64-bit broadcasts are excluded by legacy"},
     {"axpy.tensor_tensor.reg_base", kBF16 | kI64 | kUI64, kF16 | kF32 | kBF16 | kI64 | kUI64,
      "f16/f32 由两侧共用行收，A5 专属行只注册扩展类型"},
     {"relu.tensor.reg_base", kI64, kF16 | kF32 | kI32 | kI64 | kUI8,
