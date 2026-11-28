@@ -1078,11 +1078,99 @@ struct TemplateBuildState {
   llvm::StringMap<Value> &valueMap;
 };
 
+// 浮点字面量：按目标语义解析后建 `arith.constant`。
+Value buildFloatConstant(OpBuilder &builder, Location loc, const NodeInfo &node, StringRef what, StringRef text,
+                         FloatType floatType) {
+  // legacy 的字面量里带 `f` 后缀是常见写法（`998.998f`），它拼进 C++ 就是合法的。
+  llvm::StringRef digits = text;
+  if (digits.ends_with("f") || digits.ends_with("F")) {
+    digits = digits.drop_back();
+  }
+  // 直接按目标语义解析，不经过 double：先转 double 再转 f16 是两次舍入，边界值
+  // 与一次到位的结果不同。
+  llvm::APFloat value(floatType.getFloatSemantics());
+  llvm::Expected<llvm::APFloat::opStatus> status = value.convertFromString(digits, llvm::APFloat::rmNearestTiesToEven);
+  if (!status) {
+    llvm::consumeError(status.takeError());
+    emitError(loc) << "UnsupportedOperation: " << what << " node '" << node.name << "' value '" << text
+                   << "' is not a floating-point literal";
+    return {};
+  }
+  // 溢出要报，不能悄悄变成 ±Inf——那是把一个具体的值换成了另一个值。舍入（Inexact）
+  // 是正常的，浮点字面量本来就大多不能精确表示。
+  if ((*status & llvm::APFloat::opOverflow) != 0) {
+    emitError(loc) << "UnsupportedOperation: " << what << " node '" << node.name << "' value '" << text
+                   << "' does not fit in " << node.output.tensor.dtype;
+    return {};
+  }
+  return builder.create<arith::ConstantOp>(loc, floatType, builder.getFloatAttr(floatType, value));
+}
+
+constexpr unsigned kUint16Width = 16U;
+constexpr unsigned kUint32Width = 32U;
+
+// bridge 建成 `afir.scalar` 的带符号性整数字面量只放开 ui16 / ui32：这两种宽度有消费它们的实现
+// （reg 侧 ui16 / ui32 的标量算术），也过了用例。ui8 / ui64 字面量在方言和下降那一侧都表达
+// 得了，但没有接过用例，不在放开范围里——判据写在这里，下面的报错按它说。
+bool isBuiltUnsignedLiteralWidth(unsigned width) {
+  return width == kUint16Width || width == kUint32Width;
+}
+
+// 调度器写下来的整数字面量是十进制。值先按 64 位无符号读进来，再按目标的位宽判装不装得下。
+constexpr unsigned kDecimalRadix = 10U;
+constexpr unsigned kParsedValueBits = 64U;
+
+// 整数字面量。带符号性的整数 `arith.constant` 建不出来（它只收 signless 整数），放开的那几种
+// 宽度建的是方言自己的 `afir.scalar`（结果为单个值）：AFIR 层只能出现 AFIR 与标准方言，后端
+// 常量留到下降那一步再选。
+Value buildIntegerConstant(OpBuilder &builder, Location loc, const NodeInfo &node, StringRef what, StringRef text,
+                           IntegerType integerType) {
+  if (integerType.isUnsigned() && isBuiltUnsignedLiteralWidth(integerType.getWidth())) {
+    uint64_t value = 0;
+    if (text.getAsInteger(kDecimalRadix, value) ||
+        !llvm::APInt(kParsedValueBits, value).isIntN(integerType.getWidth())) {
+      emitError(loc) << "UnsupportedOperation: " << what << " node '" << node.name << "' value '" << text
+                     << "' does not fit in " << node.output.tensor.dtype;
+      return {};
+    }
+    // 与 `buildBufferNodeOp` 同一种建法：`commonArgs` 的四个可选属性排在生成的 build 重载的
+    // 字面量与结果类型之间，按名字给属性更直白。
+    OperationState state(loc, afir::ScalarOp::getOperationName());
+    state.addTypes(integerType);
+    state.addAttribute("value", builder.getIntegerAttr(integerType, value));
+    return builder.create(state)->getResult(0);
+  }
+  // `arith.constant` 只收无符号性中立（signless）的整数。`parseDtype` 对 `uintN` 给的是
+  // `ui8` 这类带符号性的类型，到 `arith.constant` 那里会以一句与 Scalar 无关的
+  // verifier 报错收场——在这里说清楚是哪个节点。走到这里的只有没放开的 ui8 / ui64。
+  if (!integerType.isSignless()) {
+    emitError(loc) << "UnsupportedOperation: " << what << " node '" << node.name << "' dtype '"
+                   << node.output.tensor.dtype
+                   << "' unsigned scalar literal is not modeled by the bridge (only uint16 and uint32 are)";
+    return {};
+  }
+  int64_t value = 0;
+  if (text.getAsInteger(kDecimalRadix, value)) {
+    emitError(loc) << "UnsupportedOperation: " << what << " node '" << node.name << "' value '" << text
+                   << "' is not an integer literal";
+    return {};
+  }
+  const unsigned width = integerType.getWidth();
+  if (width < kParsedValueBits &&
+      !llvm::APInt(kParsedValueBits, static_cast<uint64_t>(value), /*isSigned=*/true).isSignedIntN(width)) {
+    emitError(loc) << "UnsupportedOperation: " << what << " node '" << node.name << "' value '" << text
+                   << "' does not fit in " << node.output.tensor.dtype;
+    return {};
+  }
+  return builder.create<arith::ConstantOp>(loc, integerType, builder.getIntegerAttr(integerType, value));
+}
+
 // 将 Scalar 或常量 IndexExpr 的十进制文本解析为指定 dtype 的 SSA 常量。
 // legacy 直接将文本拼入 C++，这里必须在构建 IR 时拒绝无效文本和目标类型无法表示的值，
 // 不能截断或溢出为 Inf。what 只用于区分诊断中的节点类型。
 // 不能直接依赖 getAsInteger(unsigned, APInt&) 的最小位宽：它将 "8" 解析为四位 0b1000，
 // 符号扩展到 i32 会成为 -8，并且不接受负号。解析须保留数值和符号，支持现有的 -1 写法。
+// 浮点和整数两条解析路径各在自己的 helper 里，这里只做入口检查和分派。
 Value buildTypedConstant(OpBuilder &builder, Location loc, const NodeInfo &node, StringRef what, StringRef valueText) {
   Type elementType = parseDtypeImpl(builder.getContext(), node.output.tensor.dtype);
   if (!elementType) {
@@ -1105,59 +1193,15 @@ Value buildTypedConstant(OpBuilder &builder, Location loc, const NodeInfo &node,
   text.consume_front("+");
 
   if (auto floatType = dyn_cast<FloatType>(elementType)) {
-    // legacy 的字面量里带 `f` 后缀是常见写法（`998.998f`），它拼进 C++ 就是合法的。
-    llvm::StringRef digits = text;
-    if (digits.ends_with("f") || digits.ends_with("F")) {
-      digits = digits.drop_back();
-    }
-    // 直接按目标语义解析，不经过 double：先转 double 再转 f16 是两次舍入，边界值
-    // 与一次到位的结果不同。
-    llvm::APFloat value(floatType.getFloatSemantics());
-    llvm::Expected<llvm::APFloat::opStatus> status =
-        value.convertFromString(digits, llvm::APFloat::rmNearestTiesToEven);
-    if (!status) {
-      llvm::consumeError(status.takeError());
-      emitError(loc) << "UnsupportedOperation: " << what << " node '" << node.name << "' value '" << text
-                     << "' is not a floating-point literal";
-      return {};
-    }
-    // 溢出要报，不能悄悄变成 ±Inf——那是把一个具体的值换成了另一个值。舍入（Inexact）
-    // 是正常的，浮点字面量本来就大多不能精确表示。
-    if ((*status & llvm::APFloat::opOverflow) != 0) {
-      emitError(loc) << "UnsupportedOperation: " << what << " node '" << node.name << "' value '" << text
-                     << "' does not fit in " << node.output.tensor.dtype;
-      return {};
-    }
-    return builder.create<arith::ConstantOp>(loc, floatType, builder.getFloatAttr(floatType, value));
+    return buildFloatConstant(builder, loc, node, what, text, floatType);
   }
-
   auto integerType = dyn_cast<IntegerType>(elementType);
   if (!integerType) {
     emitError(loc) << "UnsupportedOperation: " << what << " node '" << node.name << "' has non-numeric dtype '"
                    << node.output.tensor.dtype << "'";
     return {};
   }
-  // `arith.constant` 只收无符号性中立（signless）的整数。`parseDtype` 对 `uintN` 给的是
-  // `ui8` 这类带符号性的类型，到 `arith.constant` 那里会以一句与 Scalar 无关的
-  // verifier 报错收场——在这里说清楚是哪个节点。
-  if (!integerType.isSignless()) {
-    emitError(loc) << "UnsupportedOperation: " << what << " node '" << node.name << "' dtype '"
-                   << node.output.tensor.dtype << "' is not supported as a scalar operand";
-    return {};
-  }
-  int64_t value = 0;
-  if (text.getAsInteger(/*Radix=*/10, value)) {
-    emitError(loc) << "UnsupportedOperation: " << what << " node '" << node.name << "' value '" << text
-                   << "' is not an integer literal";
-    return {};
-  }
-  const unsigned width = integerType.getWidth();
-  if (width < 64U && !llvm::APInt(64, static_cast<uint64_t>(value), /*isSigned=*/true).isSignedIntN(width)) {
-    emitError(loc) << "UnsupportedOperation: " << what << " node '" << node.name << "' value '" << text
-                   << "' does not fit in " << node.output.tensor.dtype;
-    return {};
-  }
-  return builder.create<arith::ConstantOp>(loc, integerType, builder.getIntegerAttr(integerType, value));
+  return buildIntegerConstant(builder, loc, node, what, text, integerType);
 }
 
 // `IndexExpr` 的值。两条路，由表达式里有没有自由符号决定：

@@ -89,9 +89,9 @@ the accepted parts are in that PR's description. Criteria follow `ElementTypeMat
 | Combination | Reason | Path to closure |
 |---|---|---|
 | Mul i8/ui8 (tensor), i8/ui8/ui32 (scalar) | contiguous `Mul` / `Muls` lack the SupportType entries (`kernel_operator_vec_binary_*.h`) | add a `MulExtendRegBaseOp` wrapper (Sub precedent) or wait for CANN type widening |
-| Adds / Maxs / Mins ui16/ui32 (scalar) | the three static_assert tables in the same header | same, or route scalar forms through micro/SIMT (verify what legacy emits) |
+| ~~Adds / Maxs / Mins ui16/ui32 (scalar)~~ | the three static_assert tables in the same header | **Wired (2026-11-25)**: scalar forms go through the reg-based wrappers `AddsExtend` / `MaxsExtend` / `MinsExtend` (`api_regbase/scalar_add.h` and two siblings; the loop calls the register scalar APIs `MicroAPI::Adds` / `Maxs` / `Mins`), implementation ids `*.tensor_scalar.extend_reg_base` |
 | Fma i8/i16/ui8/bf16 | `AscendC::Fma` accepts half/float only; legacy casts via `GetConversionDtype` first | build an input-cast mechanism for elementwise |
-| FloorDiv i8/ui8/i64 | wrapper dispatch has no int8/uint8 branch; i64 SIMT lacks INT64_MIN/-1 handling | extend the wrapper / overflow handling (needs review) |
+| FloorDiv i8/ui8 | wrapper dispatch has no int8/uint8 branch | extend the wrapper. i64 is wired (2026-11-25): it emits the same `FloorDivExtend` call as legacy, so `INT64_MIN / -1` stays unguarded exactly as in legacy |
 | Broadcast duplicate tier i8 (both sides), mem ui64/i64 | duplicate.h 1-byte overload not wired; mem four-arg tail form not built | `DuplicateI8Op` (DuplicateU8Op precedent); new tmp-tail dialect form |
 | Transpose mem i32/ui32, reg i64 | v1 layout vs formula mismatch (legacy broken in production too); Gather lacks 8-byte | layout/formula alignment (standalone bug fix) |
 

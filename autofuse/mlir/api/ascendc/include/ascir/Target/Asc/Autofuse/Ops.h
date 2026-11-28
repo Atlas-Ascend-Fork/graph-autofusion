@@ -102,6 +102,7 @@ using PrintableOpTypes = std::tuple<
     ascendc::RsqrtExtendOp, ascendc::LogicalNotExtendOp,
     ascendc::LogicalNotExtendRegBaseOp,
     ascendc::BitwiseNotExtendRegBaseOp,
+    ascendc::AddsExtendRegBaseOp, ascendc::MaxsExtendRegBaseOp, ascendc::MinsExtendRegBaseOp,
     ascendc::SubsOp, ascendc::DivsOp, ascendc::TrueDivExtendsOp, ascendc::DivExtendsRegBaseOp,
     ascendc::CompareExtendContiguousOp, ascendc::CompareExtendContiguousRegBaseOp,
     ascendc::CompareScalarExtendContiguousOp, ascendc::CompareScalarExtendContiguousRegBaseOp,

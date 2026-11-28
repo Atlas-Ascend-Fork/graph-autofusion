@@ -12,6 +12,8 @@
 #include "test/Support/ReduceGraphBuilder.h"
 #include "dialect/AFIR/Transforms/AFIRPasses.h"
 #include <algorithm>
+#include <tuple>
+#include <utility>
 
 #include "bridge/ScheduleToAfir/ScheduleToAfir.h"
 
@@ -31,6 +33,7 @@
 #include "artifact/TilingSource/TilingFuncEmitter.h"
 #include "dialect/AFIR/IR/AFIR.h"
 #include "dialect/AFIR/Support/SymbolicExpression.h"
+#include "dialect/AFIR/Transforms/VerifyKernelComplete.h"
 #include "support/CapabilityShortfall.h"
 #include "common/tiling_schema/schedule_group_names.h"
 #include "dialect/AFPlan/IR/AFPlan.h"
@@ -1413,7 +1416,51 @@ std::optional<double> ScalarConstantValue(mlir::ModuleOp module) {
   });
   return found;
 }
+
+// 模块里那个 kernel 体要满足完备性判据 C3：函数体里只出现 AFIR 与它复用的标准方言。
+void ExpectKernelBodyExpressibleInAfir(mlir::ModuleOp module) {
+  mlir::afir::ImplementationQuery noImplementations{"Ascend", {}};
+  unsigned kernels = 0;
+  module->walk([&](mlir::func::FuncOp function) {
+    if (!mlir::afir::hasFunctionRole(function, mlir::afir::FunctionRole::KernelBody)) {
+      return;
+    }
+    ++kernels;
+    EXPECT_TRUE(succeeded(mlir::afir::verifyCompletenessCriterion(
+        function, mlir::afir::CompletenessCriterion::AfirOnlyRepresentation, noImplementations)));
+  });
+  EXPECT_EQ(kernels, 1U);
+}
 }  // namespace
+
+TEST(ScheduleToAfirTest, PreservesUnsignedScalarConstants) {
+  for (const auto &[literal, dtype, width, expected] :
+       {std::tuple{"65535", "uint16", 16U, uint64_t{65535}},
+        std::tuple{"4294967295", "uint32", 32U, uint64_t{4294967295}}}) {
+    mlir::MLIRContext context;
+    auto module = BuildScalarPlan(context, literal, dtype);
+    ASSERT_TRUE(module);
+    ASSERT_TRUE(succeeded(mlir::verify(*module)));
+    unsigned constants = 0;
+    module->walk([&](mlir::afir::ScalarOp constant) {
+      ++constants;
+      const auto value = mlir::cast<mlir::IntegerAttr>(constant.getValue());
+      // buffer 形态的结果是单个值而不是 tensor<1xT>，字面量与它同类型。
+      EXPECT_EQ(constant.getResult().getType(), value.getType());
+      EXPECT_TRUE(value.getType().isUnsignedInteger(width));
+      EXPECT_EQ(value.getValue().getZExtValue(), expected);
+      EXPECT_TRUE(constant->hasTrait<mlir::OpTrait::ConstantLike>());
+    });
+    EXPECT_EQ(constants, 1U);
+    ExpectKernelBodyExpressibleInAfir(*module);
+  }
+  for (const auto &[literal, dtype] :
+       {std::pair{"-1", "uint32"}, std::pair{"65536", "uint16"}, std::pair{"4294967296", "uint32"}}) {
+    mlir::MLIRContext context;
+    context.getDiagEngine().registerHandler([](mlir::Diagnostic &) { return mlir::success(); });
+    EXPECT_FALSE(BuildScalarPlan(context, literal, dtype));
+  }
+}
 
 TEST(ScheduleToAfirTest, ParsesScalarLiteralsAtTheirDeclaredType) {
   struct Accepted {

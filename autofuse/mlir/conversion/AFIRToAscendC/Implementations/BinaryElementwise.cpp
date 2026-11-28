@@ -1343,6 +1343,25 @@ LogicalResult registerArithmeticBinaryImplementations(ImplementationRegistry &re
   return success();
 }
 
+// ui16 / ui32 的 tensor-scalar 单独成族：连续 LocalTensor 接口 `Adds` / `Maxs` / `Mins`
+// 不收这两种类型（`kernel_operator_vec_binary_scalar_impl.h` 的三张 SupportType 表），改走 fork 的
+// reg 侧包装 `AddsExtend` / `MaxsExtend` / `MinsExtend`——包装里是一段寄存器标量接口
+// `MicroAPI::Adds` / `Maxs` / `Mins` 的循环，接法与 `floor_div.tensor.extend_reg_base` 相同。与
+// `registerArithmeticScalarImplementations` 里的 `*.tensor_scalar.reg_base` 三行按 dtype
+// 互斥，所以选择层不需要优先级。
+LogicalResult registerUnsignedScalarArithmeticImplementations(ImplementationRegistry &registry) {
+  constexpr uint32_t unsignedScalarTypes = kUI16 | kUI32;
+  if (failed(registerBinary<AddOp, ascendc::AddsExtendRegBaseOp, ScalarOperand::Any>(
+          registry, "add.tensor_scalar.extend_reg_base", ApiFamily::RegBased, unsignedScalarTypes)) ||
+      failed(registerBinary<MaximumOp, ascendc::MaxsExtendRegBaseOp, ScalarOperand::Any>(
+          registry, "maximum.tensor_scalar.extend_reg_base", ApiFamily::RegBased, unsignedScalarTypes)) ||
+      failed(registerBinary<MinimumOp, ascendc::MinsExtendRegBaseOp, ScalarOperand::Any>(
+          registry, "minimum.tensor_scalar.extend_reg_base", ApiFamily::RegBased, unsignedScalarTypes))) {
+    return failure();
+  }
+  return success();
+}
+
 LogicalResult registerBitwiseAndDivisionImplementations(ImplementationRegistry &registry) {
   // `bitwise_and`：二元一类里第一个两侧调用**不同名**的 op，形状与 `reciprocal` 那条
   // 一样——reg 侧是标准调用、不要 tmp，mem 侧走包装、要 tmp。于是两个 implementation，
@@ -1383,18 +1402,19 @@ LogicalResult registerBitwiseAndDivisionImplementations(ImplementationRegistry &
   //   - mem 侧要一块 tmp buffer（装 `Div` 的中间商再交给 `Floor`），reg 侧不要；
   //   - mem 侧的 legacy 注册只给了 f16 / f32，reg 侧连整数一起收。
   //
-  // i64 SIMT 包装对 INT64_MIN / -1 缺少溢出处理，暂不在 AFIR 接入。
-  // ui32 / ui64 走 `FloorDivUintImplVF` 的无符号除法分支，没有 INT_MIN / -1 这一格，
-  // 第二波扩表后接入。i8 与 ui8 同样不接：`FloorDivExtend` 的分派里既没有 int8_t 分支、
-  // 也没有 uint8_t 分支（int16 / int32 一支、uint16 / 32 / 64 一支、half / float 一支），
-  // 实例化后静默空算，比 i64 的溢出更隐蔽。ui8 是存量问题（此前注册集合一直含它），
-  // 本波第一次把这张分派表读进注释，顺带把它钉住；i8 / i64 / ui8 三位都由
-  // `kKnownNarrower` 钉住。
+  // i64 与 legacy 发同一个调用：reg 侧的 `FloorDivExtend` 对 i64 走 SIMT 逐元素实现，那份
+  // 实现对 INT64_MIN / -1 没有溢出保护，这里照收不误，这一格的行为与 legacy 相同；
+  // e2e `load_floor_div_i64_reg_base_store` 只钉除 0 输出 0 和向下取整，不碰这一格。
+  // ui32 / ui64 走 `FloorDivUintImplVF` 的无符号除法分支，没有 INT_MIN / -1 这一格。
+  // i8 与 ui8 不接：`FloorDivExtend` 的分派里既没有 int8_t 分支、也没有 uint8_t 分支
+  // （int16 / int32 一支、uint16 / 32 / 64 一支、half / float 一支），实例化后静默空算。
+  // ui8 是存量问题（此前注册集合一直含它），本波第一次把这张分派表读进注释，顺带把它
+  // 钉住；i8 / ui8 两位由 `kKnownNarrower` 钉住。
   if (failed(registerBinary<FloorDivOp, ascendc::FloorDivExtendOp, ScalarOperand::None, TmpBufferUse::Passed>(
           registry, "floor_div.tensor.extend", ApiFamily::MemBased, kF16 | kF32)) ||
       failed(registerBinary<FloorDivOp, ascendc::FloorDivExtendRegBaseOp>(
           registry, "floor_div.tensor.extend_reg_base", ApiFamily::RegBased,
-          kArithmeticElementTypes | kUI16 | kUI32 | kUI64))) {
+          kArithmeticElementTypes | kUI16 | kUI32 | kUI64 | kI64))) {
     return failure();
   }
 
@@ -1835,6 +1855,7 @@ LogicalResult registerBinaryElementwiseImplementations(ImplementationRegistry &r
   // 广播与同形 tensor 注册通过 local-view 门禁互斥；其余注册保持原有优先级。
   if (failed(registerRegBasedBroadcastInlineImplementations(registry)) ||
       failed(registerArithmeticBinaryImplementations(registry)) ||
+      failed(registerUnsignedScalarArithmeticImplementations(registry)) ||
       failed(registerBitwiseAndDivisionImplementations(registry)) || failed(registerSubDivImplementations(registry)) ||
       failed(registerLogicalBinaryImplementations(registry)) ||
       failed(registerRegOnlyBinaryImplementations(registry)) ||

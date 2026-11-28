@@ -59,6 +59,18 @@ auto printOperation(CodeEmitter& emitter, ApiExtensionOp op)
                                    /*extraScalar=*/Value(), /*sharedTmpBuffer=*/Value(), op.getCalCount());
 }
 
+// reg 侧 ui16 / ui32 的标量包装（`AddsExtend` / `MaxsExtend` / `MinsExtend`）：不收 tmp buffer，
+// 标量恒在第二个操作数的位置（三个算子都可交换），所以与 tensor-tensor 那条共用同一个 body，
+// 只是 `src1` 位上放的是标量。包装的模板实参从 `dst` / `src` 推得出来，不必写。
+template <typename ApiExtensionOp>
+auto printOperation(CodeEmitter& emitter, ApiExtensionOp op)
+    -> LogicalResultForT<ApiExtensionOp, ascendc::AddsExtendRegBaseOp, ascendc::MaxsExtendRegBaseOp,
+                         ascendc::MinsExtendRegBaseOp>
+{
+    return printApiExtensionBinary(emitter, op, op.getAPIName(), op.getDst(), op.getSrc(), op.getScalar(),
+                                   /*extraScalar=*/Value(), /*sharedTmpBuffer=*/Value(), op.getCalCount());
+}
+
 // 标量形态的二元包装。body 在 `VecBinary.cpp`，那里写了为什么模板实参必须写出来。
 // `templateResultTensor` 非空时多打一个 dtype（只有 `TrueDivExtends` 要）。
 LogicalResult printApiExtensionScalarBinary(CodeEmitter& emitter, Operation* op, StringRef apiName, Value dst,

@@ -11,13 +11,11 @@
 // RUN: af-opt --afir-select-implementation --target=Ascend950DT_950x %s | FileCheck %s --check-prefix=SELECT
 // RUN: not af-opt --afir-select-implementation --target=Ascend910B1 %s 2>&1 | FileCheck %s --check-prefix=WRONGTARGET
 
-// The i64 SIMT wrapper needs an overflow guard before AFIR can select it.
-// The rejection lands at implementation selection, not the op verifier: the
-// buffer-form element-type list is not a parse-time operand constraint, so the
-// op builds and then fails to select — the intended clean-fallback behavior.
+// i64 与其余整数走同一条 reg 侧实现，发同一个 `FloorDivExtend` 调用（i64 那一支是包装里的
+// SIMT 实现）。包装对 INT64_MIN / -1 没有溢出保护，这里照收不误，行为与 legacy 相同。
 // RUN: sed 's/xi32/xi64/g' %s > %t.i64.mlir
-// RUN: not af-opt --afir-select-implementation --target=Ascend950DT_950x %t.i64.mlir 2>&1 | FileCheck %s --check-prefix=NO-I64
-// NO-I64: 'afir.floor_div' op has no supported Ascend implementation
+// RUN: af-opt --afir-to-ascendc-pipeline --target=Ascend950DT_950x %t.i64.mlir | FileCheck %s --check-prefix=I64
+// RUN: af-opt --afir-to-ascendc-pipeline --target=Ascend950DT_950x %t.i64.mlir | ascir-translate -mlir-to-ascendc | FileCheck %s --check-prefix=I64-CPP
 
 // 检查 reg-based floor_div_reg_base.h 包装，不接收 tmp buffer，
 // 因为 Div 和 Truncate 在寄存器中完成。整数支持仅在 reg 侧；mem 侧只注册 f16 / f32。
@@ -60,6 +58,15 @@ module {
 
 // IR-LABEL: func.func @floor_div_reg_base_i32
 // IR: ascendc.floor_div_extend_reg_base
+
+// i64 那份由 sed 生成：只换了类型拼写，函数名仍是 `_i32`，所以标签里带上操作数类型。
+// I64-LABEL: func.func @floor_div_reg_base_i32(%arg0: !ascendc.local_tensor<?xi64>
+// I64: ascendc.floor_div_extend_reg_base
+// I64-NOT: afir.floor_div
+
+// i64 发的也是 `FloorDivExtend`，由包装按元素类型分派到 SIMT 那一支。
+// I64-CPP-LABEL: void floor_div_reg_base_i32(
+// I64-CPP: {{^ *}}FloorDivExtend({{[^,]*}}, {{[^,]*}}, {{[^,]*}}, static_cast<uint32_t>(
 
 // 两侧包装函数名相同，差异在参数和扩展头。
 // CPP-LABEL: void floor_div_reg_base_f32(

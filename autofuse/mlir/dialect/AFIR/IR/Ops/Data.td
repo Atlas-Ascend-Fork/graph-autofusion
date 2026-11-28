@@ -18,13 +18,28 @@ include "AFIROpBase.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 include "mlir/IR/CommonTypeConstraints.td"
 
-def AFIR_ScalarOp : AFIR_NullaryOpBase<"scalar", [Pure], [I8, UI8, I16, UI16, I32, UI32, I64, UI64, F16, F32, BF16], 1> {
+// 标量字面量。结果有两种形态，与 AFIR 算子的两种形态对应：
+//   - tensor 形态 `tensor<...xT>`：逻辑形态算子的标量操作数；
+//   - 单个值 `T`：buffer 形态算子的标量操作数。bridge 为带符号性的整数字面量（ui16 / ui32）
+//     建的是这一种——`arith.constant` 只收 signless 整数，表达不了它们。
+//
+// 带 `ConstantLike`：下游凡是判断「这段计算是不是当前 tile 的函数」的地方（归约缓存依赖
+// 分析）按特征认字面量，不按 op 名字列名单。MLIR 对带这个特征的 op 有一条约定：必须能折叠成
+// 自己的常量属性（`fold`）。
+defvar AFIR_ScalarElementTypes = [I8, UI8, I16, UI16, I32, UI32, I64, UI64, F16, F32, BF16];
+
+def AFIR_ScalarOp : AFIR_NaryOp<"scalar", [Pure, ConstantLike], 0, 1, 1>, AFIR_CommonAttrs {
   let arguments = !con(
     (ins
       AnyAttrOf<[I8Attr, UI8Attr, I16Attr, UI16Attr, I32Attr, UI32Attr, I64Attr, UI64Attr, F16Attr, F32Attr]>:$value
     ),
     commonArgs
   );
+  let results = (outs AnyTypeOf<[TensorOf<AFIR_ScalarElementTypes>] # AFIR_ScalarElementTypes>:$result);
+  let hasFolder = 1;
+  let assemblyFormat = [{
+    attr-dict `:` type($result)
+  }];
 }
 def AFIR_IndexExprOp : AFIR_NullaryOpBase<"index_expr", [Pure], [I8, UI8, I16, UI16, I32, UI32, I64, UI64, F16, F32, BF16], 1>;
 

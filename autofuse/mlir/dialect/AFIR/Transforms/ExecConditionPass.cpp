@@ -92,10 +92,12 @@ LogicalResult collectCacheSourceAxes(Operation *op, llvm::SetVector<int64_t> &ax
     return failure();
   }
   for (Value input : partition->inputs(op)) {
-    if (isa_and_nonnull<arith::ConstantOp>(input.getDefiningOp())) {
+    // Literals carry no source axes. ConstantLike covers both arith.constant and
+    // the afir.scalar literals that the bridge creates for ui16/ui32.
+    Operation *producer = input.getDefiningOp();
+    if (producer && producer->hasTrait<mlir::OpTrait::ConstantLike>()) {
       continue;
     }
-    Operation *producer = input.getDefiningOp();
     if (!producer || failed(collectCacheSourceAxes(producer, axes, visited))) {
       return failure();
     }
