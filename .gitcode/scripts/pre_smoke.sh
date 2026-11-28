@@ -15,6 +15,8 @@ echo "start run test case, please wait ..."
 cd ${WORKSPACE}
 : "${NPU_ARCH:?NPU_ARCH is required}"
 
+probe() { bash "${WORKSPACE}/.gitcode/scripts/drv_probe.sh" "pre_smoke/${1:-unknown}" || true; }
+
 export ASCEND_GLOBAL_LOG_LEVEL=2
 export ASCEND_SLOG_PRINT_TO_STDOUT=0
 source /usr/local/Ascend/cann/set_env.sh
@@ -73,11 +75,16 @@ chmod 777 "${arm_package}"
 /opt/conda/envs/python39/bin/python3 -m pip install pyyaml numpy decorator sympy scipy attrs psutil
 chmod +x ${arm_package}
 echo 'y' | bash ${arm_package} --full --quiet --pylocal
+probe after-pkg-install
 echo "bash super_kernel/examples/run_example.sh --npu-arch=${NPU_ARCH}"
 source /opt/conda/bin/activate python39
 pip3 install build
+probe before-run_example
+rc=0
 source /usr/local/Ascend/cann/set_env.sh && \
-  bash super_kernel/examples/run_example.sh --npu-arch="${NPU_ARCH}" 2>&1 | tee -a ./run_test.log
+  bash super_kernel/examples/run_example.sh --npu-arch="${NPU_ARCH}" 2>&1 | tee -a ./run_test.log || rc=$?
+probe after-run_example
+[ "$rc" -eq 0 ] || exit "$rc"
 source /opt/conda/bin/deactivate
 
 # ==============================

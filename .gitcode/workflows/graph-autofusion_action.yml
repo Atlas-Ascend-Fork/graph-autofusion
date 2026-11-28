@@ -561,7 +561,11 @@ stages:
               export pr_id=${{ env.MERGE_ID }}
               export WORKSPACE=${{ steps.process_checkout.outputs.path }}
               export NPU_ARCH=dav-2201
-              bash ${{ steps.process_checkout.outputs.path }}/pre_smoke.sh
+              bash ${{ steps.process_checkout.outputs.path }}/.gitcode/scripts/drv_probe.sh "A2/step-start" || true
+              rc=0
+              bash ${{ steps.process_checkout.outputs.path }}/.gitcode/scripts/pre_smoke.sh || rc=$?
+              bash ${{ steps.process_checkout.outputs.path }}/.gitcode/scripts/drv_probe.sh "A2/step-end" || true
+              exit $rc
           - name: upload
             uses: obs-upload
             if: ${{ always() }}
@@ -622,7 +626,11 @@ stages:
               # A5 冒烟镜像(pre_mindspore_A5_conda)缺少运行期所需 python 依赖, 参照 ge/metadef 冒烟先补齐;
               # 安装失败视为环境异常正常拦截(不加 || 兜底), 以重试降低瞬时故障误杀
               pip3 install --retries 3 --timeout 60 numpy decorator sympy scipy attrs psutil
-              bash ${{ steps.process_checkout.outputs.path }}/pre_smoke.sh
+              bash ${{ steps.process_checkout.outputs.path }}/.gitcode/scripts/drv_probe.sh "A5/step-start" || true
+              rc=0
+              bash ${{ steps.process_checkout.outputs.path }}/.gitcode/scripts/pre_smoke.sh || rc=$?
+              bash ${{ steps.process_checkout.outputs.path }}/.gitcode/scripts/drv_probe.sh "A5/step-end" || true
+              exit $rc
           - name: upload
             uses: obs-upload
             if: ${{ always() }}
