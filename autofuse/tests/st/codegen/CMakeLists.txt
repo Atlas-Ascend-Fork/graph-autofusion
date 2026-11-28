@@ -15,6 +15,9 @@ add_executable(codegen_st
         test_codegen_graph_check.cpp
         test_codegen_extend_conv2d.cpp
         test_codegen_tbuf_merge.cpp
+        # SIMT 融合组（hoist 点 primary 选择 / fused 调用形态）codegen 用例由 UT 维护，
+        # ST 复用同一组用例，保证 ST 增量覆盖率覆盖 codegen_kernel_loop.cpp 的 hoist 路径。
+        ${CODE_ROOT_DIR}/tests/ut/codegen/test_codegen_indirect_load_fused_group.cpp
 )
 target_compile_definitions(codegen_st PRIVATE
         CMAKE_BINARY_DIR="${CMAKE_BINARY_DIR}"

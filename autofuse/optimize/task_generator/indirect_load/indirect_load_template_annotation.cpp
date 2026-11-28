@@ -133,7 +133,14 @@ af::Status AnnotateSimdTemplateRoles(const RewrittenGraphAnalysis &analysis) {
 
 af::Status ValidateSimtTemplateRegion(const RewrittenGraphAnalysis &analysis, bool &is_candidate_legal) {
   is_candidate_legal = false;
-  if (!af::ops::IsOps<af::ascir_op::Load>(analysis.input_boundary) || analysis.index_region.empty()) {
+  if (!af::ops::IsOps<af::ascir_op::Load>(analysis.input_boundary)) {
+    GELOGI("[IndirectLoad] Reject SIMT: input boundary[%s(%s)] is not a Load node",
+           analysis.input_boundary == nullptr ? "null" : analysis.input_boundary->GetNamePtr(),
+           analysis.input_boundary == nullptr ? "-" : analysis.input_boundary->GetTypePtr());
+    return af::SUCCESS;
+  }
+  if (analysis.index_region.empty()) {
+    GELOGI("[IndirectLoad] Reject SIMT: index region is empty (size=%zu)", analysis.index_region.size());
     return af::SUCCESS;
   }
   for (const af::AscNodePtr &node : analysis.index_region) {
@@ -143,6 +150,8 @@ af::Status ValidateSimtTemplateRegion(const RewrittenGraphAnalysis &analysis, bo
     // Compile-time Scalar values are emitted as local constants by the SIMT evaluator.
     // ScalarData is runtime input and still requires an explicit context/GM binding.
     if (af::ops::IsOps<af::ascir_op::ScalarData>(node) || HasControlEdge(node)) {
+      GELOGI("[IndirectLoad] Reject SIMT: node[%s(%s)] has ScalarData or control edge", node->GetNamePtr(),
+             node->GetTypePtr());
       return af::SUCCESS;
     }
     const bool is_gm_boundary = af::ops::IsOps<af::ascir_op::Load>(node) || af::ops::IsOps<af::ascir_op::Store>(node);
