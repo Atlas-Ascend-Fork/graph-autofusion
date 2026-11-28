@@ -67,6 +67,10 @@ class VFLoop {
   void CollectMaskRegTempTensors(const TPipe &tpipe, const TensorManager &tensor_mgr,
                                  std::vector<std::string> &temp_tensors) const;
   void CollectArangeParams(const TPipe &tpipe, std::vector<ArangeParam> &params) const;
+  // 生成函数定义前调用：按 {边快照 id → 根图侧解析 id} 校正子图内 boundary Load 的 UB 输入 id；
+  // matched_ids 回填实际命中的边快照 id。
+  Status RewriteBoundaryLoadInputs(const std::map<ascir::TensorId, ascir::TensorId> &rewrite_map,
+                                   std::set<ascir::TensorId> &matched_ids) const;
 
  private:
   ascir::AxisId axis_id_;

@@ -570,6 +570,31 @@ void VFLoop::CollectArangeParams(const TPipe &tpipe, std::vector<ArangeParam> &p
   }
 }
 
+Status VFLoop::RewriteBoundaryLoadInputs(const std::map<ascir::TensorId, ascir::TensorId> &rewrite_map,
+                                         std::set<ascir::TensorId> &matched_ids) const {
+  if (rewrite_map.empty()) {
+    return af::SUCCESS;
+  }
+  for (const auto &body : bodys_) {
+    if (body.type_ == LoopType::CALL) {
+      if (body.call_->GetMicroApiName() != "Load") {
+        continue;
+      }
+      for (uint32_t index = 0UL; index < body.call_->GetInputSize(); index++) {
+        const auto rewrite_iter = rewrite_map.find(body.call_->GetInputTensorIdByIndex(index));
+        if (rewrite_iter != rewrite_map.end()) {
+          body.call_->RewriteUbInputTensorId(index, rewrite_iter->second);
+          matched_ids.insert(rewrite_iter->first);
+        }
+      }
+    } else if (body.loop_ != nullptr) {
+      GE_CHK_STATUS_RET(body.loop_->RewriteBoundaryLoadInputs(rewrite_map, matched_ids),
+                        "Rewrite boundary Load UB input id failed for nested loop");
+    }
+  }
+  return af::SUCCESS;
+}
+
 Status VFLoop::GenerateCvUbFuseBody(const TPipe &tpipe, const TensorManager &tensor_mgr,
                                     std::vector<ascir::AxisId> &current_axis, std::stringstream &ss) const {
   for (const auto &body : this->bodys_) {
